@@ -58,36 +58,15 @@ As an implementation detail, those API functions use the `aic_model` ROS node
 to publish data to the `aic_controller`, which is implemented using the
 [`ros2_control`](https://control.ros.org/rolling/index.html) framework.
 
-## Example
+## Baseline Policies
 
-To make this concrete, a [minimal example](https://github.com/intrinsic-dev/aic/blob/main/aic_example_policies/aic_example_policies/ros/WaveArm.py), `WaveArm`, shows how to implement the `insert_cable()` callback and issue motion commands to the arm.
+We provide several baseline policy implementations in the [`aic_example_policies`](../aic_example_policies/) package that demonstrate different approaches to the cable insertion task:
 
-The class name is provided when starting the `aic_model` ROS node.
-For interactive development, you can pass this via the command line—usually without a rebuild—thanks to colcon's `--symlink-install` feature.
-```
-ros2 run aic_model aic_model --ros-args -p policy:=aic_example_policies.ros.WaveArm
-```
+- **WaveArm** - A minimal example showing the basic Policy API structure
+- **CheatCode** - A "cheating" policy that uses ground truth data for training and debugging
+- **RunACT** - An ACT (Action Chunking with Transformers) policy implementation
 
-## Example 2: a "Cheating" policy
-
-For a more complex example, a "cheating" solution is provided in [CheatCode.py](https://github.com/intrinsic-dev/aic/blob/main/aic_example_policies/aic_example_policies/ros/CheatCode.py).
-This solution uses the TF transformation tree provided by the simulation when `ground_truth:=true` is set at launch time.
-The ground truth data will not be available at the competition's evaluation time, but it can be useful for training and debugging.
-`CheatCode.py` uses the poses of the plug and port to calculate target poses to send to `aic_controller`.
-To launch the simulation with ground truth enabled, and the port, plug, and cable present:
-```
-ros2 launch aic_bringup aic_gz_bringup.launch.py nic_card_mount_0_present:=true sc_port_0_present:=true ground_truth:=true spawn_task_board:=true spawn_cable:=true attach_cable_to_gripper:=true sfp_mount_rail_0_present:=true
-```
-
-Then, the `CheatCode.py` example policy can be started:
-```
-ros2 run aic_model aic_model --ros-args -p policy:=aic_example_policies.ros.CheatCode
-```
-
-To give `CheatCode.py` a goal so that it starts moving:
-```
-src/aic/aic_model/test/create_and_cancel_task.py
-```
+For detailed descriptions, usage instructions, and source code, see the [Example Policies README](../aic_example_policies/README.md).
 
 ## Tutorial: Creating a new policy node
 
@@ -167,9 +146,9 @@ It should look like this
 ros-kilted-my-policy-node = { path = "my_policy_node" }
 ```
 
-### Implement `Policy`
+### Implement `PolicyRos`
 
-For brevity, we will reuse the code from `aic_example_policies`. See the [ROS Policy API](#policy-api) section above for implementation details.
+For brevity, we will reuse the code from `aic_example_policies`. See the [ROS Policy API](#ros-policy-api) section above for implementation details.
 
 ```bash
 (aic) $ cp aic_example_policies/aic_example_policies/ros/WaveArm.py my_policy_node/my_policy_node/WaveArm.py
@@ -254,7 +233,58 @@ $ pixi reinstall <package>
 > [!Tip]
 > You may enter the pixi environment with `pixi shell` and force an "editable" install with `pip install -e`. But note that this circumvents pixi and may cause unintended side effects.
 
+### Preparing for Submission
 
+After you are satisfied with your policy, you will need to prepare a Docker image for submission.
+
+```bash
+$ mkdir -p docker/my_policy_node
+$ cp docker/aic_model/Dockerfile docker/my_policy_node/
+```
+
+Open the Dockerfile and add your policy node to the build instructions:
+
+```dockerfile
+# Add other local dependencies
+COPY my_policy_node /ws_aic/src/aic/my_policy_node # <-- Add this line
+```
+
+Open `docker/docker-compose.yaml` and update the model service configuration to use your Dockerfile and policy:
+
+`docker/docker-compose.yaml`:
+
+```yaml
+	model:
+		image: localhost/aic/aic_model
+		build:
+			dockerfile: docker/my_policy_node/Dockerfile # <-- replace this line
+			context: ..
+		command: --ros-args -p policy:=my_policy_node.WaveArm # <-- and this line
+```
+
+Build the image:
+
+```bash
+$ docker compose build model
+```
+
+Test that everything works:
+
+```bash
+$ docker compose up
+```
+
+This will run your model and the evaluator in an environment that replicates the submission portal:
+
+- External network access is restricted.
+- Zenoh ACLs will be employed to restrict what the policy node can interact with.
+- Shared memory is disabled.
+
+Make sure that your policy works, then export a tarball of your image.
+
+```bash
+$ docker save localhost/aic/my_policy_node | gzip > my_policy_node.tar.gz
+```
 
 ### Conclusion
 
@@ -264,5 +294,6 @@ In this tutorial, you have learned how to:
 - Create and set up a new ROS 2 package for a policy node.
 - Manage Python and ROS dependencies within a `pixi` workspace.
 - Understand the build, run, and debug cycle for developing your policy.
+- Prepare a Docker image for your policy for submission.
 
-You are now equipped with the fundamental skills to develop and test your own policies for the AI for Industry Challenge. Next, lets prepare a docker for [policy submission](./submission.md).
+You are now equipped with the fundamental skills to develop, test, and submit your own policies for the AI for Industry Challenge. Feel free to explore the provided example policies and other documentation for more advanced concepts and inspiration.
