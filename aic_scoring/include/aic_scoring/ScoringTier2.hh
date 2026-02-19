@@ -367,6 +367,7 @@ namespace aic_scoring
 
     private: int jt = 0;
     private: int js = 0;
+    private: double spdavg = 0;
   };
 
   // The Tier2 class as a node.

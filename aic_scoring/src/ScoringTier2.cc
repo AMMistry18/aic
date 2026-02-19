@@ -517,6 +517,7 @@ Tier2Score::CategoryScore ScoringTier2::GetTrajectoryJerkScore() const {
       kMaxJerkScore, kMinJerkScore, kMaxJerkValue, kMinJerkValue, jerk);
   std::cerr << " =================== JERK " << score << ": " << sstream.str() << std::endl;
   std::cerr << " =================== js and jt " << js << ": " << jt << std::endl;
+  std::cerr << " =================== avg speed " << spdavg / (jt + js) << std::endl;
 
   return CategoryScore(score, sstream.str());
 }
@@ -700,9 +701,10 @@ void ScoringTier2::JerkCallback(const TransformStampedMsg &_tf) {
   double v2y = (py[2] - py[1]) / (t2 - t1);
   double v2z = (pz[2] - pz[1]) / (t2 - t1);
   double speed = std::sqrt(v2x * v2x + v2y * v2y + v2z * v2z);
+  spdavg += speed;
 
   // std::cerr << " v " << v1 << ", " << v2 << ", " << v3 << std::endl;
-  std::cerr << " speed " << speed << std::endl;
+  // std::cerr << " speed " << speed << std::endl;
 
   constexpr double kVelocityThreshold = 0.01;  // m/s
   if (speed > kVelocityThreshold) {
