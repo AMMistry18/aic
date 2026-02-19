@@ -32,6 +32,9 @@
   <xacro:arg name="simulation_controllers" default="" />
   <xacro:arg name="ros_namespace" default="" />
 
+  <!-- Path to ros2_control configuration file -->
+  <xacro:arg name="ros2_control_config" default="$(find aic_description)/config/gazebo_ros2_control.xacro" />
+
   <xacro:arg name="ati_tf_prefix" default="ati/" />
   <xacro:arg name="cam_mount_tf_prefix" default="cam_mount/" />
   <xacro:arg name="left_camera_tf_prefix" default="left_camera/"/>
@@ -222,31 +225,6 @@
   </joint>
 
   <!-- ros2 control instance -->
-  <ros2_control name="GazeboSystem" type="system">
-    <hardware>
-      <plugin>gz_ros2_control/GazeboSimSystem</plugin>
-    </hardware>
-
-    <sensor name="AtiForceTorqueSensor" type="force_torque">
-      <state_interface name="force.x"/>
-      <state_interface name="force.y"/>
-      <state_interface name="force.z"/>
-      <state_interface name="torque.x"/>
-      <state_interface name="torque.y"/>
-      <state_interface name="torque.z"/>
-    </sensor>
-
-    <xacro:ur_joint_control_description
-      tf_prefix="$(arg tf_prefix)"
-      initial_positions="${dict(
-        shoulder_pan_joint=-0.1597,
-        shoulder_lift_joint=-1.3542,
-        elbow_joint=-1.6648,
-        wrist_1_joint=-1.6933,
-        wrist_2_joint=1.5710,
-        wrist_3_joint=1.4110)}"
-    />
-
-  </ros2_control>
+  <xacro:include filename="$(arg ros2_control_config)" />
 
 </robot>

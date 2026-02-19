@@ -12,6 +12,28 @@ This package provides documentation, scripts, and utilities for training policie
 - Control the UR5e robot using the same `aic_controller` interface
 - Leverage domain randomization across multiple simulators (Gazebo, MuJoCo, IsaacLab)
 
+## Quick Start (ros2_control Integration)
+
+If you've already built the workspace with MuJoCo dependencies, you can quickly launch the robot in MuJoCo:
+
+```bash
+source ~/ws_aic/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+
+# Launch MuJoCo with ros2_control (using your existing scene file)
+ros2 launch aic_mujoco aic_mujoco_bringup.launch.py \
+  mujoco_scene_file:=~/ws_aic/aic_world/scene.xml
+```
+
+This provides the **same control interface** as Gazebo, meaning you can:
+- Send commands to `/aic_controller` topic
+- Read joint states from `/joint_states`
+- Control the gripper via `/gripper_action_controller`
+- Access FT sensor data from `/fts_broadcaster`
+- Use your training code unchanged between Gazebo and MuJoCo
+
+See [Controlling the Robot with ROS 2 Control](#controlling-the-robot-with-ros-2-control) for full details.
+
 ## Workflow Summary
 
 1. **Export from Gazebo**: Launch `aic_gz_bringup` with desired domain randomization parameters
@@ -69,7 +91,7 @@ With the package dependencies properly configured, building should work automati
 ```bash
 source /opt/ros/kilted/setup.bash
 
-# Build all packages
+# Build all packages (including aic_mujoco)
 colcon build
 
 # Source the workspace
@@ -79,7 +101,8 @@ source install/setup.bash
 The build order is automatically handled by `colcon` through package dependencies:
 1. `mujoco_vendor` builds first and exports `MUJOCO_DIR` via environment hooks
 2. `mujoco_ros2_control` and `gz-mujoco` build next, finding MuJoCo automatically
-3. Other packages build as needed
+3. `aic_mujoco` package builds with the launch files and URDF
+4. Other packages build as needed
 
 > **Note:** The forked repositories include fixes to ensure `mujoco_vendor` exports `MUJOCO_DIR` and `mujoco_ros2_control` properly depends on `mujoco_vendor`.
 
@@ -264,7 +287,9 @@ The AIC robot's ros2_control configuration in `aic_description` already supports
 
 ### Launching MuJoCo with ros2_control
 
-#### Example Launch Flow
+The `aic_mujoco_bringup.launch.py` launch file starts MuJoCo simulation with ros2_control, loading the same controllers as the Gazebo simulation.
+
+#### Basic Launch Example
 
 ```bash
 source ~/ws_aic/install/setup.bash
@@ -272,13 +297,42 @@ export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 
 # Launch MuJoCo simulation with ros2_control
-ros2 launch aic_bringup aic_mujoco_bringup.launch.py \
-  scene_file:=~/aic_mujoco_world/scene.xml \
-  spawn_task_board:=true \
-  spawn_cable:=true
+ros2 launch aic_mujoco aic_mujoco_bringup.launch.py \
+  mujoco_scene_file:=~/ws_aic/aic_world/scene.xml
 ```
 
-> **Note:** The exact launch file may vary depending on your configuration. The key requirement is that the robot's URDF specifies the MuJoCo hardware interface plugin.
+This will:
+1. Start `mujoco_ros2_control` with your scene
+2. Load the `robot_state_publisher` for TF transforms
+3. Spawn all controllers:
+   - `joint_state_broadcaster`
+   - `aic_controller` (the main joint trajectory controller)
+   - `gripper_action_controller`
+   - `fts_broadcaster` (force-torque sensor)
+4. Optionally launch RViz for visualization
+
+#### Advanced Launch Options
+
+```bash
+# Disable RViz
+ros2 launch aic_mujoco aic_mujoco_bringup.launch.py \
+  mujoco_scene_file:=~/ws_aic/aic_world/scene.xml \
+  launch_rviz:=false
+
+# Use different joint controller (e.g., for testing)
+ros2 launch aic_mujoco aic_mujoco_bringup.launch.py \
+  mujoco_scene_file:=~/ws_aic/aic_world/scene.xml \
+  initial_joint_controller:=joint_trajectory_controller
+
+# Spawn with admittance controller for compliant behavior
+ros2 launch aic_mujoco aic_mujoco_bringup.launch.py \
+  mujoco_scene_file:=~/ws_aic/aic_world/scene.xml \
+  spawn_admittance_controller:=true
+```
+
+> **Note:** The URDF ([ur_gz.urdf.xacro](../../../aic_description/urdf/ur_gz.urdf.xacro)) is shared between Gazebo and MuJoCo. The ros2_control hardware interface is selected by passing a `ros2_control_config` argument:
+> - Gazebo uses [gazebo_ros2_control.xacro](../../../aic_description/config/gazebo_ros2_control.xacro) (default)
+> - MuJoCo uses [mujoco_ros2_control.xacro](config/mujoco_ros2_control.xacro)
 
 #### Using aic_controller
 
@@ -345,10 +399,17 @@ If the robot doesn't respond to commands:
 
 ```
 aic_mujoco/
+├── CMakeLists.txt         # ament_cmake build configuration
+├── package.xml            # ROS 2 package manifest
 ├── README.md              # This file
 ├── mujoco.repos          # VCS repositories for MuJoCo dependencies
-├── scripts/              # Utility scripts (to be added)
-├── examples/             # Example training setups (to be added)
+├── launch/               # Launch files
+│   └── aic_mujoco_bringup.launch.py  # Main launch file for MuJoCo with ros2_control
+├── config/               # Configuration files
+│   └── mujoco_ros2_control.xacro  # MuJoCo-specific ros2_control configuration
+├── scripts/              # Utility scripts
+│   ├── view_scene.py     # Python script to view MuJoCo scene (paused mode)
+│   └── load_aic_world.py # (Future) Script to load and configure AIC world
 └── docs/                 # Additional documentation (to be added)
 ```
 
