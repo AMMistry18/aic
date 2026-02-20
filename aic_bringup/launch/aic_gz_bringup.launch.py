@@ -54,7 +54,6 @@ def launch_setup(context, *args, **kwargs):
     ur_tf_prefix = LaunchConfiguration("ur_tf_prefix")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
-    spawn_admittance_controller = LaunchConfiguration("spawn_admittance_controller")
     description_file = LaunchConfiguration("description_file")
     launch_rviz = LaunchConfiguration("launch_rviz")
     rviz_config_file = LaunchConfiguration("rviz_config_file")
@@ -185,16 +184,12 @@ def launch_setup(context, *args, **kwargs):
         condition=IfCondition(launch_rviz),
     )
 
-    initial_joint_controllers = [initial_joint_controller]
-    if IfCondition(spawn_admittance_controller).evaluate(context):
-        initial_joint_controllers.append("admittance_controller")
-
     # There may be other controllers of the joints, but this is the initially-started one
     initial_joint_controller_spawner_started = Node(
         package="controller_manager",
         executable="spawner",
         arguments=[
-            *initial_joint_controllers,
+            initial_joint_controller,
             "--activate-as-group",
             "-c",
             "/controller_manager",
@@ -206,22 +201,12 @@ def launch_setup(context, *args, **kwargs):
         package="controller_manager",
         executable="spawner",
         arguments=[
-            *initial_joint_controllers,
+            initial_joint_controller,
             "-c",
             "/controller_manager",
             "--inactive",
         ],
         condition=UnlessCondition(activate_joint_controller),
-    )
-
-    gripper_action_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=[
-            "gripper_action_controller",
-            "--controller-manager",
-            "/controller_manager",
-        ],
     )
 
     fts_broadcaster_spawner = Node(
@@ -361,6 +346,14 @@ def launch_setup(context, *args, **kwargs):
         container_name="ros_gz_container",
         create_own_container="False",
         use_composition="True",
+        bridge_params=[
+            {
+                "qos_overrides./scoring/tf_static.publisher.durability": "transient_local",
+                "qos_overrides./scoring/tf_static.publisher.reliability": "reliable",
+                "qos_overrides./scoring/tf_static.publisher.history": "keep_last",
+                "qos_overrides./scoring/tf_static.publisher.depth": 1,
+            }
+        ],
     )
 
     ground_truth_tf_relay = Node(
@@ -369,9 +362,11 @@ def launch_setup(context, *args, **kwargs):
         name="tf_relay",
         output="screen",
         parameters=[
-            {"input_topic": "/scoring/tf"},
-            {"output_topic": "/tf"},
-            {"lazy": True},
+            {
+                "input_topic": "/scoring/tf",
+                "output_topic": "/tf",
+                "lazy": True,
+            }
         ],
         condition=IfCondition(ground_truth),
     )
@@ -382,9 +377,11 @@ def launch_setup(context, *args, **kwargs):
         name="tf_static_relay",
         output="screen",
         parameters=[
-            {"input_topic": "/scoring/tf_static"},
-            {"output_topic": "/tf_static"},
-            {"lazy": True},
+            {
+                "input_topic": "/scoring/tf_static",
+                "output_topic": "/tf_static",
+                "lazy": True,
+            }
         ],
         condition=IfCondition(ground_truth),
     )
@@ -411,7 +408,6 @@ def launch_setup(context, *args, **kwargs):
         initial_joint_controller_spawner_started,
         fts_broadcaster_spawner,
         aic_adapter,
-        gripper_action_controller_spawner,
         gz_ip_env,
         gzserver,
         gzgui,
@@ -506,13 +502,6 @@ def generate_launch_description():
             "initial_joint_controller",
             default_value="aic_controller",
             description="Robot controller to start.",
-        )
-    )
-    declared_arguments.append(
-        DeclareLaunchArgument(
-            "spawn_admittance_controller",
-            default_value="false",
-            description="If true, then the admittance controller is spawned alongside the initial_joint_controller. Else, only the initial_joint_controller is spawned.",
         )
     )
     declared_arguments.append(

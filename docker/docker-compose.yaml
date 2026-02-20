@@ -16,7 +16,7 @@ services:
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       AIC_MODEL_ROUTER_PASSWD: CHANGE_IN_PROD
   model:
-    image: localhost/aic/aic_model
+    image: my-solution:v1
     build:
       dockerfile: docker/aic_model/Dockerfile
       context: ..

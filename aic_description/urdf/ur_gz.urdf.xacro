@@ -121,6 +121,7 @@
       <topic>/aic/gazebo/contacts/off_limit</topic>
       <off_limit_models>
         <model>enclosure</model>
+        <model>enclosure walls</model>
         <model>task_board</model>
       </off_limit_models>
     </plugin>
