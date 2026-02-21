@@ -59,19 +59,20 @@ class WaveArm(Policy):
             )
             self.get_logger().info(f"observation time: {t}")
 
-            # Move the arm along a line, while looking down at the task board.
-            loop_seconds = 5.0  # seconds
+            loop_seconds = 5.0
             loop_fraction = (t % loop_seconds) / loop_seconds
             y_scale = 2 * loop_fraction
             if y_scale > 1.0:
                 y_scale = 2.0 - y_scale
-            y_scale -= 1.0  # y_scale will move linearly between [-1..1] and back
+            y_scale -= 1.0  # y_scale will move linearly between [-1..1] and back.
 
-            # move to a series of target poses over the task board
-            self.move_to_pose(move_robot, Pose(
+            # Move the arm along a line, while looking down at the task board.
+            self.move_to_pose(
+                move_robot=move_robot,
+                pose=Pose(
                     position=Point(x=-0.4, y=0.45 + 0.3 * y_scale, z=0.25),
                     orientation=Quaternion(x=1.0, y=0.0, z=0.0, w=0.0),
-                )
+                ),
             )
 
         self.get_logger().info("WaveArm.insert_cable() exiting...")
