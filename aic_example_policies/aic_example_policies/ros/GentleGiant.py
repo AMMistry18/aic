@@ -20,8 +20,6 @@ from rclpy.duration import Duration
 
 from aic_control_interfaces.msg import JointMotionUpdate
 from aic_control_interfaces.msg import TrajectoryGenerationMode
-from aic_control_interfaces.msg import TargetMode
-from aic_control_interfaces.srv import ChangeTargetMode
 from aic_model.policy import (
     Policy,
     GetObservationCallback,
@@ -49,9 +47,6 @@ class GentleGiant(Policy):
         self.get_logger().info("GentleGiant.insert_cable() enter")
         send_feedback("moving slowly and smoothly")
 
-        home = [-0.16, -1.35, -1.66, -1.69, 1.57, 1.41]
-        target = [0.6, -1.3, -1.9, -1.57, 1.57, 0.6]
-
         # Low stiffness + high damping = slow, smooth motion (low jerk)
         joint_motion_update = JointMotionUpdate(
             target_stiffness=[50.0, 50.0, 50.0, 20.0, 20.0, 20.0],
@@ -60,6 +55,9 @@ class GentleGiant(Policy):
                 mode=TrajectoryGenerationMode.MODE_POSITION
             ),
         )
+
+        home = [-0.16, -1.35, -1.66, -1.69, 1.57, 1.41]
+        target = [0.6, -1.3, -1.9, -1.57, 1.57, 0.6]
 
         for cycle in range(3):
             self.get_logger().info(f"Cycle {cycle + 1}: moving to target")
