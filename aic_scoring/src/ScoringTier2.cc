@@ -244,6 +244,7 @@ std::pair<Tier2Score, Tier3Score> ScoringTier2::ComputeScore() {
   }
   RCLCPP_INFO(this->node->get_logger(), "Finished reading messages");
 
+  auto start = std::chrono::steady_clock::now();
   // Complete the TF tree by linking world and aic_world
   // The aic_gz_bringup launch file uses a static tf broadcaster to do this
   // when ground truth is enabled. Here we manually add the fixed transform to
@@ -265,6 +266,12 @@ std::pair<Tier2Score, Tier3Score> ScoringTier2::ComputeScore() {
     }
   }
   RCLCPP_INFO(this->node->get_logger(), "Finished calculating jerk and efficiency callbacks");
+  auto end = std::chrono::steady_clock::now();
+  std::chrono::duration<double> elapsed = end - start;
+  // Log time taken to calculate jerk/efficiency
+  RCLCPP_INFO(this->node->get_logger(),
+              "Time taken to calculate jerk and efficiency: %.2f seconds",
+              elapsed.count());
 
   this->state = State::Idle;
   tier2_score.add_category_score("trajectory jerk",
