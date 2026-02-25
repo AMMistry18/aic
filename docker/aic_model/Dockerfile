@@ -15,7 +15,7 @@ COPY pixi.toml pixi.lock /ws_aic/src/aic/
 
 SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
-    cd /ws_aic/src/aic && pixi install --frozen
+    cd /ws_aic/src/aic && pixi install --locked
 
 COPY pixi_env_setup.sh /ws_aic/src/aic/
 
