@@ -28,6 +28,17 @@ services:
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
+  converter:
+    container_name: aic_converter
+    image: ghcr.io/intrinsic-dev/aic/aic_converter
+    build:
+      dockerfile: docker/aic_converter/Dockerfile
+      context: ..
+    gpus: all
+    tty: true
+    networks:
+      - default
+
 networks:
   default:
     internal: true
