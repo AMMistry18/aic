@@ -48,7 +48,7 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 2
-   :caption: Participant Utilities
+   :caption: Utilities
    
    Participant Utilities <participant_utilities>
    Example Policies <aic_example_policies>
