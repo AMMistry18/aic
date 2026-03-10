@@ -361,7 +361,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "mujoco_controller_overrides",
             default_value=PathJoinSubstitution(
-                [FindPackageShare("aic_mujoco"), "config", "aic_mujoco_controller_overrides.yaml"]
+                [
+                    FindPackageShare("aic_mujoco"),
+                    "config",
+                    "aic_mujoco_controller_overrides.yaml",
+                ]
             ),
             description="MuJoCo-specific controller parameter overrides for Gazebo behavioral matching.",
         )

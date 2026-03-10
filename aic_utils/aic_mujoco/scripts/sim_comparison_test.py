@@ -186,7 +186,9 @@ class SimComparisonNode(Node):
 
     def run_test(self):
         """Execute the full test sequence."""
-        self.get_logger().info(f"=== Starting comparison test for [{self.sim_name}] ===")
+        self.get_logger().info(
+            f"=== Starting comparison test for [{self.sim_name}] ==="
+        )
 
         # Wait for joint states to be available
         self.get_logger().info("Waiting for /joint_states...")
@@ -198,10 +200,14 @@ class SimComparisonNode(Node):
         self.trajectory_data.clear()
 
         if self.joint_order is None:
-            self.get_logger().error("No joint states received! Is the simulator running?")
+            self.get_logger().error(
+                "No joint states received! Is the simulator running?"
+            )
             return False
 
-        self.get_logger().info(f"Joint states available: {list(self.joint_order.keys())}")
+        self.get_logger().info(
+            f"Joint states available: {list(self.joint_order.keys())}"
+        )
 
         # Switch to joint mode
         if not self.switch_to_joint_mode():
@@ -233,7 +239,9 @@ class SimComparisonNode(Node):
             rclpy.spin_once(self, timeout_sec=0.01)
 
         self.recording = False
-        self.get_logger().info(f"Recording complete: {len(self.trajectory_data)} samples")
+        self.get_logger().info(
+            f"Recording complete: {len(self.trajectory_data)} samples"
+        )
 
         # Save to CSV
         self._save_csv()
@@ -291,11 +299,15 @@ def compare_trajectories(file1: str, file2: str):
     dt = 0.002
     t_common = np.arange(t_start, t_end, dt)
 
-    print(f"Comparison window: {t_start:.2f}s to {t_end:.2f}s ({len(t_common)} samples)\n")
+    print(
+        f"Comparison window: {t_start:.2f}s to {t_end:.2f}s ({len(t_common)} samples)\n"
+    )
 
     # Per-joint analysis
-    print(f"{'Joint':<25} {'Pos RMSE (rad)':<18} {'Pos Max Err':<15} "
-          f"{'Vel RMSE':<15} {'Vel Max Err':<15}")
+    print(
+        f"{'Joint':<25} {'Pos RMSE (rad)':<18} {'Pos Max Err':<15} "
+        f"{'Vel RMSE':<15} {'Vel Max Err':<15}"
+    )
     print("-" * 90)
 
     total_pos_rmse = 0.0
@@ -318,15 +330,16 @@ def compare_trajectories(file1: str, file2: str):
         total_pos_rmse += pos_rmse**2
         total_vel_rmse += vel_rmse**2
 
-        print(f"{jname:<25} {pos_rmse:<18.6f} {pos_max:<15.6f} "
-              f"{vel_rmse:<15.6f} {vel_max:<15.6f}")
+        print(
+            f"{jname:<25} {pos_rmse:<18.6f} {pos_max:<15.6f} "
+            f"{vel_rmse:<15.6f} {vel_max:<15.6f}"
+        )
 
     total_pos_rmse = np.sqrt(total_pos_rmse / len(JOINT_NAMES))
     total_vel_rmse = np.sqrt(total_vel_rmse / len(JOINT_NAMES))
 
     print("-" * 90)
-    print(f"{'MEAN':<25} {total_pos_rmse:<18.6f} {'':15s} "
-          f"{total_vel_rmse:<15.6f}")
+    print(f"{'MEAN':<25} {total_pos_rmse:<18.6f} {'':15s} " f"{total_vel_rmse:<15.6f}")
 
     # Assessment
     print(f"\n{'='*80}")
@@ -336,7 +349,9 @@ def compare_trajectories(file1: str, file2: str):
         print("RESULT: GOOD match - position RMSE < 0.01 rad")
     elif total_pos_rmse < 0.05:
         print("RESULT: MODERATE match - position RMSE < 0.05 rad")
-        print("  → Consider tuning MuJoCo solver parameters or adding small joint damping")
+        print(
+            "  → Consider tuning MuJoCo solver parameters or adding small joint damping"
+        )
     else:
         print("RESULT: POOR match - position RMSE >= 0.05 rad")
         print("  → Significant divergence detected. Tuning recommendations:")
@@ -366,7 +381,9 @@ def compare_trajectories(file1: str, file2: str):
             step_rmse += np.mean((pos1 - pos2) ** 2)
         step_rmse = np.sqrt(step_rmse / len(JOINT_NAMES))
 
-        print(f"{step_idx+1:<8} {f'{step_start_t:.1f}s-{step_end_t:.1f}s':<20} {step_rmse:<25.6f}")
+        print(
+            f"{step_idx+1:<8} {f'{step_start_t:.1f}s-{step_end_t:.1f}s':<20} {step_rmse:<25.6f}"
+        )
 
 
 def _load_csv(filepath: str) -> dict:
@@ -433,7 +450,9 @@ def main():
             print(f"\nTrajectory recorded to: {output}")
             print(f"Run with the other simulator, then compare with:")
             other = "mujoco" if args.sim == "gazebo" else "gazebo"
-            print(f"  python3 {sys.argv[0]} --compare {output} /tmp/{other}_trajectory.csv")
+            print(
+                f"  python3 {sys.argv[0]} --compare {output} /tmp/{other}_trajectory.csv"
+            )
         else:
             print("\nTest failed! Check that the simulator and controller are running.")
     except KeyboardInterrupt:
