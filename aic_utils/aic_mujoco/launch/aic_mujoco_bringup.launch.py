@@ -45,6 +45,7 @@ def launch_setup(context, *args, **kwargs):
     safety_k_position = LaunchConfiguration("safety_k_position")
     # General arguments
     controllers_file = LaunchConfiguration("controllers_file")
+    mujoco_controller_overrides = LaunchConfiguration("mujoco_controller_overrides")
     ur_tf_prefix = LaunchConfiguration("ur_tf_prefix")
     activate_joint_controller = LaunchConfiguration("activate_joint_controller")
     initial_joint_controller = LaunchConfiguration("initial_joint_controller")
@@ -141,6 +142,7 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
         parameters=[
             controllers_file,
+            mujoco_controller_overrides,
             {
                 "use_sim_time": True,
                 "mujoco_model_path": mujoco_model_path,
@@ -353,6 +355,15 @@ def generate_launch_description():
                 [FindPackageShare("aic_bringup"), "config", "aic_ros2_controllers.yaml"]
             ),
             description="Absolute path to YAML file with the controllers configuration.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "mujoco_controller_overrides",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("aic_mujoco"), "config", "aic_mujoco_controller_overrides.yaml"]
+            ),
+            description="MuJoCo-specific controller parameter overrides for Gazebo behavioral matching.",
         )
     )
     declared_arguments.append(

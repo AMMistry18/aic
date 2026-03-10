@@ -1,0 +1,45 @@
+# MuJoCo-specific controller overrides for Gazebo behavioral matching.
+#
+# This file overrides only the parameters that need to differ from
+# the base aic_ros2_controllers.yaml to compensate for physics engine
+# differences between MuJoCo and Gazebo (Bullet-Featherstone).
+#
+# Key differences that may require compensation:
+#   1. MuJoCo's generalized force application (qfrc_applied) vs
+#      Gazebo's JointForceCmd - both are direct torque commands,
+#      but the underlying dynamics solvers differ.
+#   2. MuJoCo's Euler integrator vs Bullet's semi-implicit Euler
+#      produce slightly different trajectories even with identical inputs.
+#   3. MuJoCo clamps effort to URDF limits (±150/±28 Nm), Gazebo does not.
+#
+# TUNING GUIDE:
+# Run the comparison test to measure divergence, then adjust these gains:
+#   python3 sim_comparison_test.py --sim gazebo --output /tmp/gz_traj.csv
+#   python3 sim_comparison_test.py --sim mujoco --output /tmp/mj_traj.csv
+#   python3 sim_comparison_test.py --compare /tmp/gz_traj.csv /tmp/mj_traj.csv
+#
+# If MuJoCo is MORE damped than Gazebo (slower response):
+#   → Increase stiffness slightly or decrease damping
+# If MuJoCo is LESS damped (overshoots more):
+#   → Increase damping slightly or decrease stiffness
+# If steady-state position differs:
+#   → Likely gravity compensation difference; adjust offset_wrench
+
+aic_controller:
+  ros__parameters:
+    impedance:
+      default_values:
+        # These values start identical to the base config.
+        # Adjust based on comparison test results.
+        # Typical adjustment range: ±10% of base values.
+        control_stiffness: [75.0, 75.0, 75.0, 75.0, 75.0, 75.0]
+        control_damping: [35.0, 35.0, 35.0, 35.0, 35.0, 35.0]
+        # Gravity compensation offset wrench to compensate for
+        # residual gravity model differences between MuJoCo and Gazebo.
+        # If the robot sags more in MuJoCo, add positive Z force here.
+        offset_wrench: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    joint_impedance:
+      default_values:
+        control_stiffness: [100., 100., 100., 50., 50., 50.]
+        control_damping: [40.0, 40.0, 40.0, 15.0, 15.0, 15.0]
