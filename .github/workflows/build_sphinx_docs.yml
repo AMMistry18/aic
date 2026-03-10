@@ -4,8 +4,12 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'docs/**'
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/**'
 
 jobs:
   build-docs:
