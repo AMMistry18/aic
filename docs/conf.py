@@ -128,25 +128,25 @@ html_theme_options = {
     "use_sidenotes": True,
     "logo": {"text": "AI for Industry Challenge"},
     "icon_links": [
-            {
-                "name": "GitHub",
-                "url": "https://github.com/intrinsic-dev/aic",
-                "icon": "fa-brands fa-square-github",
-                "type": "fontawesome",
-            },
-            {
-                "name": "Stars",
-                "url": "https://img.shields.io/github/stars/intrinsic-dev/aic?color=fedcba",
-                "icon": "https://img.shields.io/github/stars/intrinsic-dev/aic?color=fedcba",
-                "type": "url",
-            },
-            {
-                "name": "Forks",
-                "url": "https://img.shields.io/github/forks/intrinsic-dev/aic?color=fedcba",
-                "icon": "https://img.shields.io/github/forks/intrinsic-dev/aic?color=fedcba",
-                "type": "url",
-            },
-        ],
+        {
+            "name": "GitHub",
+            "url": "https://github.com/intrinsic-dev/aic",
+            "icon": "fa-brands fa-square-github",
+            "type": "fontawesome",
+        },
+        {
+            "name": "Stars",
+            "url": "https://img.shields.io/github/stars/intrinsic-dev/aic?color=fedcba",
+            "icon": "https://img.shields.io/github/stars/intrinsic-dev/aic?color=fedcba",
+            "type": "url",
+        },
+        {
+            "name": "Forks",
+            "url": "https://img.shields.io/github/forks/intrinsic-dev/aic?color=fedcba",
+            "icon": "https://img.shields.io/github/forks/intrinsic-dev/aic?color=fedcba",
+            "type": "url",
+        },
+    ],
     "icon_links_label": "Quick Links",
 }
 
