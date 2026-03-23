@@ -122,16 +122,17 @@ def postprocess_robot_xml(xml_str):
         r'\n\s*<general name="gripper/right_finger_joint_motor"[^>]*/>', "", xml_str
     )
 
-    # 8. Add joint damping to arm joints to match Gazebo's implicit viscous friction.
-    #    Bullet-Featherstone introduces numerical dissipation that MuJoCo's
-    #    explicit articulated body dynamics lacks; these damping values compensate.
+    # 8. Add small joint damping to approximate Bullet-Featherstone's implicit
+    #    numerical dissipation.  Values are ~7-8 % of the full sim-matching set
+    #    (which was too aggressive for teleop), deliberately kept low so the
+    #    impedance controller retains authority over the robot's motion.
     arm_joint_damping = {
-        "shoulder_pan_joint": "75.0",
-        "shoulder_lift_joint": "128.0",
-        "elbow_joint": "88.0",
-        "wrist_1_joint": "55.0",
-        "wrist_2_joint": "38.0",
-        "wrist_3_joint": "50.0",
+        "shoulder_pan_joint": "5.0",
+        "shoulder_lift_joint": "4.0",
+        "elbow_joint": "4.0",
+        "wrist_1_joint": "4.0",
+        "wrist_2_joint": "3.0",
+        "wrist_3_joint": "3.0",
     }
     for joint_name, damp_val in arm_joint_damping.items():
         xml_str = re.sub(
@@ -140,25 +141,7 @@ def postprocess_robot_xml(xml_str):
             xml_str,
         )
 
-    # 9. Add armature (rotor inertia) to arm joints.
-    #    Armature adds to the mass-matrix diagonal, slowing joint acceleration
-    #    to match Gazebo's Bullet-Featherstone effective inertia.
-    arm_joint_armature = {
-        "shoulder_pan_joint": "7.5",
-        "shoulder_lift_joint": "12.8",
-        "elbow_joint": "8.8",
-        "wrist_1_joint": "5.0",
-        "wrist_2_joint": "3.5",
-        "wrist_3_joint": "4.8",
-    }
-    for joint_name, arm_val in arm_joint_armature.items():
-        xml_str = re.sub(
-            rf'(<joint name="{joint_name}"[^/]*?)(/\s*>)',
-            rf'\1 armature="{arm_val}"\2',
-            xml_str,
-        )
-
-    # 10. Add equality constraint (mimic joint) and sensor sections
+    # 9. Add equality constraint (mimic joint) and sensor sections
     # Note: </mujoco> has 2 leading spaces in the raw XML, so content
     # placed before it inherits that indent; first line needs no indent.
     equality_and_sensor = (
