@@ -43,6 +43,7 @@ lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros"
 mujoco = "==3.5.0"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
+ultralytics = ">=8.4.37, <9"
 
 [activation]
 scripts = ["pixi_env_setup.sh"]
