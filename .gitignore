@@ -16,3 +16,8 @@ aic_utils/aic_mujoco/mjcf/*.png
 # Ignore aic_isaac usd assets
 aic_utils/aic_isaac/aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/aic_task/Intrinsic_assets/
 
+*.pdf
+*.gv
+
+# Ignore my-testing folder in testing folder
+testing/my-testing/*
