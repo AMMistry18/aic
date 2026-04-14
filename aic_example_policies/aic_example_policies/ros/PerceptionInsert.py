@@ -37,6 +37,13 @@ from .perception_core import PerceptionCore
 
 CAMERA_NAMES = ["left_camera", "center_camera", "right_camera"]
 DEBUG_DIR = "/tmp/perception_debug"
+
+# Insertion depths measured from port entrance to full insertion
+INSERTION_DEPTH = {
+    "sfp": 0.046,
+    "sc": 0.016,
+}
+
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 
@@ -82,19 +89,67 @@ class PerceptionInsert(Policy):
         self._pc = PerceptionCore(nic_weights=str(weights))
         self._tf_broadcaster = TransformBroadcaster(self._parent_node)
 
-    def _publish_tip_tf(self, tip_xyz, label="predicted_tip"):
+    def _publish_tip_tf(self, gripper_xyz, q_gripper_wxyz, port_type):
+        tip = self._plug_tip_world(gripper_xyz, q_gripper_wxyz, port_type)
+
+        # Compute predicted tip orientation in world frame
+        if port_type == "sc":
+            qx, qy, qz, qw = -0.161, 0.167, -0.694, -0.682
+        else:
+            qx, qy, qz, qw = -0.180, -0.006, 0.027, -0.983
+
+        R_plug_in_gripper = np.array([
+            [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz),   2*(qx*qz+qw*qy)],
+            [2*(qx*qy+qw*qz),   1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
+            [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
+        ])
+        qw_g, qx_g, qy_g, qz_g = q_gripper_wxyz
+        R_gripper = np.array([
+            [1-2*(qy_g*qy_g+qz_g*qz_g), 2*(qx_g*qy_g-qw_g*qz_g),   2*(qx_g*qz_g+qw_g*qy_g)],
+            [2*(qx_g*qy_g+qw_g*qz_g),   1-2*(qx_g*qx_g+qz_g*qz_g), 2*(qy_g*qz_g-qw_g*qx_g)],
+            [2*(qx_g*qz_g-qw_g*qy_g),   2*(qy_g*qz_g+qw_g*qx_g),   1-2*(qx_g*qx_g+qy_g*qy_g)],
+        ])
+
+        R_tip_world = R_gripper @ R_plug_in_gripper
+
+        # Convert rotation matrix to quaternion
+        trace = R_tip_world[0,0] + R_tip_world[1,1] + R_tip_world[2,2]
+        if trace > 0:
+            s = 0.5 / np.sqrt(trace + 1.0)
+            w = 0.25 / s
+            x = (R_tip_world[2,1] - R_tip_world[1,2]) * s
+            y = (R_tip_world[0,2] - R_tip_world[2,0]) * s
+            z = (R_tip_world[1,0] - R_tip_world[0,1]) * s
+        elif R_tip_world[0,0] > R_tip_world[1,1] and R_tip_world[0,0] > R_tip_world[2,2]:
+            s = 2.0 * np.sqrt(1.0 + R_tip_world[0,0] - R_tip_world[1,1] - R_tip_world[2,2])
+            w = (R_tip_world[2,1] - R_tip_world[1,2]) / s
+            x = 0.25 * s
+            y = (R_tip_world[0,1] + R_tip_world[1,0]) / s
+            z = (R_tip_world[0,2] + R_tip_world[2,0]) / s
+        elif R_tip_world[1,1] > R_tip_world[2,2]:
+            s = 2.0 * np.sqrt(1.0 + R_tip_world[1,1] - R_tip_world[0,0] - R_tip_world[2,2])
+            w = (R_tip_world[0,2] - R_tip_world[2,0]) / s
+            x = (R_tip_world[0,1] + R_tip_world[1,0]) / s
+            y = 0.25 * s
+            z = (R_tip_world[1,2] + R_tip_world[2,1]) / s
+        else:
+            s = 2.0 * np.sqrt(1.0 + R_tip_world[2,2] - R_tip_world[0,0] - R_tip_world[1,1])
+            w = (R_tip_world[1,0] - R_tip_world[0,1]) / s
+            x = (R_tip_world[0,2] + R_tip_world[2,0]) / s
+            y = (R_tip_world[1,2] + R_tip_world[2,1]) / s
+            z = 0.25 * s
+
         t = TransformStamped()
         t.header.stamp = self._parent_node.get_clock().now().to_msg()
         t.header.frame_id = "base_link"
-        t.child_frame_id = label
-        t.transform.translation.x = float(tip_xyz[0])
-        t.transform.translation.y = float(tip_xyz[1])
-        t.transform.translation.z = float(tip_xyz[2])
-        # No rotation needed, just showing position
-        t.transform.rotation.w = 1.0
-        t.transform.rotation.x = 0.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
+        t.child_frame_id = "predicted_plug_tip"
+        t.transform.translation.x = float(tip[0])
+        t.transform.translation.y = float(tip[1])
+        t.transform.translation.z = float(tip[2])
+        t.transform.rotation.x = float(x)
+        t.transform.rotation.y = float(y)
+        t.transform.rotation.z = float(z)
+        t.transform.rotation.w = float(w)
         self._tf_broadcaster.sendTransform(t)
 
     # ── Observation helpers ────────────────────────────────────────────────
@@ -412,6 +467,10 @@ class PerceptionInsert(Policy):
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         self.get_logger().info(f"PerceptionInsert start | {task.port_type} {task.target_module_name}")
         self._task = task
+        # Reset integrator at the start of every new insertion attempt
+        self._tip_x_error_integrator = 0.0
+        self._tip_y_error_integrator = 0.0
+        self._pose_log_counter = 0
         self.sleep_for(2.0)
 
         obs = get_observation()
@@ -544,40 +603,89 @@ class PerceptionInsert(Policy):
         # Descent — extended to -0.025 (25mm below port entrance)
         fts_stop = False
         step = 0
-        while z_offset >= -0.025:
+        # Replace the while condition with actual tip position
+        while True:
             z_offset -= 0.0005
             step += 1
             try:
-                self.set_pose_target(move_robot=move_robot,
-                                     pose=self.calc_gripper_pose(port_transform, z_offset=z_offset))
+                pose = self.calc_gripper_pose(port_transform, z_offset=z_offset)
+                if pose is not None:
+                    self.set_pose_target(move_robot=move_robot, pose=pose)
             except TransformException as ex:
                 self.get_logger().warn(f"TF fail descent: {ex}")
             self.sleep_for(0.05)
 
-            # Log every 10 steps (~5mm)
             if step % 10 == 0:
-                self.get_logger().info(
-                    f"Integrator at descent middle: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
-                )
                 obs = get_observation()
                 fts = self._fts_z(obs)
                 g, q_wxyz = self._gripper_pose_from_tf()
-                gz = g[2] if g is not None else float("nan")
                 if g is not None:
                     tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
-                    # self._publish_tip_tf(tip_world, "predicted_plug_tip") #DEBUGGING TF
                     tip_z = tip_world[2]
+                    gz = g[2]
+                    self._publish_tip_tf(g, q_wxyz, task.port_type)
                 else:
                     tip_z = float("nan")
+                    gz = float("nan")
+
                 delta = fts - fts_baseline
                 csv_writer.writerow([f"{z_offset:.4f}", f"{gz:.4f}", f"{tip_z:.4f}",
-                                     f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
-                # Stop if force delta exceeds 18N (20N is the penalty line, give margin)
-                if abs(delta) > 18.0:
+                                    f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
+
+                # Stop if tip is deep enough below port entrance (full insertion depth)
+                insertion_depth = X[2] - tip_z
+                self.get_logger().info(f"Insertion depth: {insertion_depth*1000:.1f}mm")
+                if insertion_depth >= INSERTION_DEPTH[task.port_type]:
+                    self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
+                    break
+
+                # Safety stop on excessive force
+                if delta > 15.0:
                     self.get_logger().warn(
-                        f"FTS {abs(delta):.1f}N > 18N limit at z_offset={z_offset:.4f}, stopping")
+                        f"FTS {delta:.1f}N > 15N limit at z_offset={z_offset:.4f}, stopping")
                     fts_stop = True
                     break
+
+                # Safety stop if z_offset goes too far (something is wrong)
+                if z_offset < -0.100:
+                    self.get_logger().warn("z_offset safety limit reached, stopping")
+                    break
+
+
+        # while z_offset >= -0.06:
+        #     z_offset -= 0.0005
+        #     step += 1
+        #     try:
+        #         self.set_pose_target(move_robot=move_robot,
+        #                              pose=self.calc_gripper_pose(port_transform, z_offset=z_offset))
+        #     except TransformException as ex:
+        #         self.get_logger().warn(f"TF fail descent: {ex}")
+        #     self.sleep_for(0.05)
+
+        #     # Log every 10 steps (~5mm)
+        #     if step % 10 == 0:
+        #         # self.get_logger().info(
+        #         #     f"Integrator at descent middle: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
+        #         # )
+        #         obs = get_observation()
+        #         fts = self._fts_z(obs)
+        #         g, q_wxyz = self._gripper_pose_from_tf()
+        #         gz = g[2] if g is not None else float("nan")
+        #         if g is not None:
+        #             tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
+        #             self._publish_tip_tf(g, q_wxyz, task.port_type) #DEBUGGING TF
+        #             tip_z = tip_world[2]
+        #         else:
+        #             tip_z = float("nan")
+        #         delta = fts - fts_baseline
+        #         csv_writer.writerow([f"{z_offset:.4f}", f"{gz:.4f}", f"{tip_z:.4f}",
+        #                              f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
+        #         # Stop if force delta exceeds 18N (20N is the penalty line, give margin)
+        #         if abs(delta) > 18.0:
+        #             self.get_logger().warn(
+        #                 f"FTS {abs(delta):.1f}N > 18N limit at z_offset={z_offset:.4f}, stopping")
+        #             fts_stop = True
+        #             break
 
         csv_file.close()
         self.get_logger().info(f"Descent CSV: {csv_path}")
