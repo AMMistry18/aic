@@ -152,6 +152,21 @@ class PerceptionInsert(Policy):
         t.transform.rotation.w = float(w)
         self._tf_broadcaster.sendTransform(t)
 
+    def _publish_port_tf(self, X, port_transform):
+        t = TransformStamped()
+        t.header.stamp = self._parent_node.get_clock().now().to_msg()
+        t.header.frame_id = "base_link"
+        t.child_frame_id = "predicted_port"
+        t.transform.translation.x = float(X[0])
+        t.transform.translation.y = float(X[1])
+        t.transform.translation.z = float(X[2])
+        # Use the port_transform rotation
+        t.transform.rotation.x = float(port_transform.rotation.x)
+        t.transform.rotation.y = float(port_transform.rotation.y)
+        t.transform.rotation.z = float(port_transform.rotation.z)
+        t.transform.rotation.w = float(port_transform.rotation.w)
+        self._tf_broadcaster.sendTransform(t)
+
     # ── Observation helpers ────────────────────────────────────────────────
 
     def _get_cam_data(self, obs, cam_name):
@@ -366,8 +381,8 @@ class PerceptionInsert(Policy):
         if port_type == "sc":
             tip += np.array([-0.0104, 0.0033, -0.003])
         else:
-            # tip += np.array([-0.0054, -0.0127, 0.0])
             tip += np.array([0.0006, -0.0157, -0.010])
+            tip += np.array([0.000, -0.001, 0.000])  # TEST: add a few mm in Y to fix remaining offset, I have no idea why this offset is here but it seems constant
 
         return tip
 
@@ -440,6 +455,10 @@ class PerceptionInsert(Policy):
             self._tip_x_error_integrator = 0.0
             self._tip_y_error_integrator = 0.0
         else:
+            if self._tip_x_error_integrator * tip_x_error < 0:  # sign changed
+                self._tip_x_error_integrator = 0.0
+            if self._tip_y_error_integrator * tip_y_error < 0:  # sign changed
+                self._tip_y_error_integrator = 0.0
             self._tip_x_error_integrator = np.clip(
                 self._tip_x_error_integrator + tip_x_error,
                 -self._max_integrator_windup, self._max_integrator_windup)
@@ -527,6 +546,7 @@ class PerceptionInsert(Policy):
 
         port_transform = self.build_port_transform(X)
 
+        self._publish_port_tf(X, port_transform) #DEBUGGING TF
         # Compare perceived port position vs actual TF port position
         try:
             if task.port_type == "sc":
@@ -552,6 +572,7 @@ class PerceptionInsert(Policy):
                 self.set_pose_target(move_robot=move_robot, pose=self.calc_gripper_pose(
                     port_transform, slerp_fraction=f, position_fraction=f,
                     z_offset=z_offset, reset_xy_integrator=True))
+                self._publish_port_tf(X, port_transform) #DEBUGGING TF
             except TransformException as ex:
                 self.get_logger().warn(f"TF fail interp: {ex}")
             self.sleep_for(0.05)
@@ -605,7 +626,7 @@ class PerceptionInsert(Policy):
         step = 0
         # Replace the while condition with actual tip position
         while True:
-            z_offset -= 0.0005
+            z_offset -= 0.001
             step += 1
             try:
                 pose = self.calc_gripper_pose(port_transform, z_offset=z_offset)
@@ -623,7 +644,8 @@ class PerceptionInsert(Policy):
                     tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
                     tip_z = tip_world[2]
                     gz = g[2]
-                    self._publish_tip_tf(g, q_wxyz, task.port_type)
+                    self._publish_tip_tf(g, q_wxyz, task.port_type) #DEBUGGING TF
+                    self._publish_port_tf(X, port_transform) #DEBUGGING TF
                 else:
                     tip_z = float("nan")
                     gz = float("nan")
@@ -635,7 +657,7 @@ class PerceptionInsert(Policy):
                 # Stop if tip is deep enough below port entrance (full insertion depth)
                 insertion_depth = X[2] - tip_z
                 self.get_logger().info(f"Insertion depth: {insertion_depth*1000:.1f}mm")
-                if insertion_depth >= INSERTION_DEPTH[task.port_type]:
+                if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015: # give margin for noise
                     self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
                     break
 
@@ -647,45 +669,9 @@ class PerceptionInsert(Policy):
                     break
 
                 # Safety stop if z_offset goes too far (something is wrong)
-                if z_offset < -0.100:
+                if z_offset < -0.080:
                     self.get_logger().warn("z_offset safety limit reached, stopping")
                     break
-
-
-        # while z_offset >= -0.06:
-        #     z_offset -= 0.0005
-        #     step += 1
-        #     try:
-        #         self.set_pose_target(move_robot=move_robot,
-        #                              pose=self.calc_gripper_pose(port_transform, z_offset=z_offset))
-        #     except TransformException as ex:
-        #         self.get_logger().warn(f"TF fail descent: {ex}")
-        #     self.sleep_for(0.05)
-
-        #     # Log every 10 steps (~5mm)
-        #     if step % 10 == 0:
-        #         # self.get_logger().info(
-        #         #     f"Integrator at descent middle: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
-        #         # )
-        #         obs = get_observation()
-        #         fts = self._fts_z(obs)
-        #         g, q_wxyz = self._gripper_pose_from_tf()
-        #         gz = g[2] if g is not None else float("nan")
-        #         if g is not None:
-        #             tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
-        #             self._publish_tip_tf(g, q_wxyz, task.port_type) #DEBUGGING TF
-        #             tip_z = tip_world[2]
-        #         else:
-        #             tip_z = float("nan")
-        #         delta = fts - fts_baseline
-        #         csv_writer.writerow([f"{z_offset:.4f}", f"{gz:.4f}", f"{tip_z:.4f}",
-        #                              f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
-        #         # Stop if force delta exceeds 18N (20N is the penalty line, give margin)
-        #         if abs(delta) > 18.0:
-        #             self.get_logger().warn(
-        #                 f"FTS {abs(delta):.1f}N > 18N limit at z_offset={z_offset:.4f}, stopping")
-        #             fts_stop = True
-        #             break
 
         csv_file.close()
         self.get_logger().info(f"Descent CSV: {csv_path}")
