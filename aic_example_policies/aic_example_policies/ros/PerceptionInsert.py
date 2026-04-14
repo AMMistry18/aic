@@ -64,6 +64,10 @@ def tf_to_4x4(tf_msg):
     return T
 
 
+from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import TransformStamped
+
+
 class PerceptionInsert(Policy):
     def __init__(self, parent_node):
         super().__init__(parent_node)
@@ -72,9 +76,26 @@ class PerceptionInsert(Policy):
         self._max_integrator_windup = 0.05
         self._task = None
         self._debug_counter = 0
+        self._pose_log_counter = 0
         weights = (Path(__file__).parent / "weights" / "best.pt").resolve()
         self.get_logger().info(f"Loading NIC weights from {weights}")
         self._pc = PerceptionCore(nic_weights=str(weights))
+        self._tf_broadcaster = TransformBroadcaster(self._parent_node)
+
+    def _publish_tip_tf(self, tip_xyz, label="predicted_tip"):
+        t = TransformStamped()
+        t.header.stamp = self._parent_node.get_clock().now().to_msg()
+        t.header.frame_id = "base_link"
+        t.child_frame_id = label
+        t.transform.translation.x = float(tip_xyz[0])
+        t.transform.translation.y = float(tip_xyz[1])
+        t.transform.translation.z = float(tip_xyz[2])
+        # No rotation needed, just showing position
+        t.transform.rotation.w = 1.0
+        t.transform.rotation.x = 0.0
+        t.transform.rotation.y = 0.0
+        t.transform.rotation.z = 0.0
+        self._tf_broadcaster.sendTransform(t)
 
     # ── Observation helpers ────────────────────────────────────────────────
 
@@ -116,13 +137,15 @@ class PerceptionInsert(Policy):
             views[cam] = (bgr, K, T)
         return views
 
-    def _gripper_xyz_from_tf(self):
+    def _gripper_pose_from_tf(self):
+        """Returns (xyz np.array, q_wxyz tuple) or (None, None)."""
         try:
             tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
             t = tf.transform.translation
-            return np.array([t.x, t.y, t.z])
+            q = tf.transform.rotation
+            return np.array([t.x, t.y, t.z]), (q.w, q.x, q.y, q.z)
         except TransformException:
-            return None
+            return None, None
 
     def _fts_z(self, obs):
         w = getattr(obs, "wrist_wrench", None)
@@ -192,16 +215,15 @@ class PerceptionInsert(Policy):
 
     # ── Debug viz ──────────────────────────────────────────────────────────
 
-    def _save_viz(self, views, X, task, label, gripper_xyz=None):
+    def _save_viz(self, views, X, task, label, gripper_xyz=None, q_wxyz=None):
         """
         RED   = reprojected triangulated port position
         GREEN = reprojected current gripper TCP
-        CYAN  = reprojected estimated plug tip (gripper - plug_z in Z)
+        CYAN  = estimated plug tip from _plug_tip_world when q_wxyz given
         Overlaid text shows XY error and tip-above-port in mm.
         """
         self._debug_counter += 1
         tid = self._debug_counter
-        plug_z = 0.04 if task.port_type == "sc" else 0.042
 
         for cam, (bgr, K, T) in views.items():
             viz = bgr.copy()
@@ -223,16 +245,19 @@ class PerceptionInsert(Policy):
                     cv2.putText(viz, "TCP", (gu+12, gv), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                 # Cyan: plug tip
-                plug_tip = gripper_xyz.copy()
-                plug_tip[2] -= plug_z
-                tproj = P @ np.append(plug_tip, 1.0)
-                if tproj[2] > 0:
-                    tu, tv = int(tproj[0]/tproj[2]), int(tproj[1]/tproj[2])
-                    cv2.circle(viz, (tu, tv), 8, (255, 255, 0), 3)
-                    cv2.putText(viz, "TIP", (tu+10, tv), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                if q_wxyz is not None:
+                    plug_tip = self._plug_tip_world(gripper_xyz, q_wxyz, task.port_type)
+                    tproj = P @ np.append(plug_tip, 1.0)
+                    if tproj[2] > 0:
+                        tu, tv = int(tproj[0]/tproj[2]), int(tproj[1]/tproj[2])
+                        cv2.circle(viz, (tu, tv), 8, (255, 255, 0), 3)
+                        cv2.putText(viz, "TIP", (tu+10, tv), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    xy_err_mm = np.linalg.norm(plug_tip[:2] - X[:2]) * 1000
+                    tip_above_mm = (plug_tip[2] - X[2]) * 1000
+                else:
+                    xy_err_mm = float("nan")
+                    tip_above_mm = float("nan")
 
-                xy_err_mm = np.linalg.norm(gripper_xyz[:2] - X[:2]) * 1000
-                tip_above_mm = (plug_tip[2] - X[2]) * 1000
                 cv2.putText(viz, f"XY_err={xy_err_mm:.1f}mm  tip_above_port={tip_above_mm:.1f}mm",
                             (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
@@ -257,22 +282,102 @@ class PerceptionInsert(Policy):
 
     # ── calc_gripper_pose — Z formula fixed ────────────────────────────────
 
+    def _plug_tip_world(self, gripper_xyz, q_gripper_wxyz, port_type):
+        if port_type == "sc":
+            offset = np.array([-0.001, -0.010, 0.018])
+            qx, qy, qz, qw = -0.161, 0.167, -0.694, -0.682
+        else:  # sfp
+            offset = np.array([0.0, -0.018, 0.048])
+            qx, qy, qz, qw = -0.180, -0.006, 0.027, -0.983
+
+        R_plug_in_gripper = np.array([
+            [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz),   2*(qx*qz+qw*qy)],
+            [2*(qx*qy+qw*qz),   1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
+            [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
+        ])
+
+        qw_g, qx_g, qy_g, qz_g = q_gripper_wxyz
+        R_gripper = np.array([
+            [1-2*(qy_g*qy_g+qz_g*qz_g), 2*(qx_g*qy_g-qw_g*qz_g),   2*(qx_g*qz_g+qw_g*qy_g)],
+            [2*(qx_g*qy_g+qw_g*qz_g),   1-2*(qx_g*qx_g+qz_g*qz_g), 2*(qy_g*qz_g-qw_g*qx_g)],
+            [2*(qx_g*qz_g-qw_g*qy_g),   2*(qy_g*qz_g+qw_g*qx_g),   1-2*(qx_g*qx_g+qy_g*qy_g)],
+        ])
+
+        # In _plug_tip_world, after computing tip, add the measured world-frame bias correction
+        tip = gripper_xyz + R_gripper @ (R_plug_in_gripper @ offset)
+
+        # Measured bias from DIAG: tip was off by [5.4mm, 12.7mm] in XY
+        # so subtract that from tip to correct it
+        if port_type == "sc":
+            tip += np.array([-0.0104, 0.0033, -0.003])
+        else:
+            # tip += np.array([-0.0054, -0.0127, 0.0])
+            tip += np.array([0.0006, -0.0157, -0.010])
+
+        return tip
+
     def calc_gripper_pose(self, port_transform, slerp_fraction=1.0, position_fraction=1.0,
-                          z_offset=0.1, reset_xy_integrator=False):
-        q_diff = (1.0, 0.0, 0.0, 0.0)
+                      z_offset=0.1, reset_xy_integrator=False):
         gripper_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
-        q_gripper = (gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
-                     gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z)
-        q_gripper_target = quaternion_multiply(q_diff, q_gripper)
-        q_gripper_slerp = quaternion_slerp(q_gripper, q_gripper_target, slerp_fraction)
+        q_gripper_wxyz = (gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
+                        gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z)
+        gripper_xyz_arr = np.array([gripper_tf.transform.translation.x,
+                                    gripper_tf.transform.translation.y,
+                                    gripper_tf.transform.translation.z])
+        
+        qw_g, qx_g, qy_g, qz_g = q_gripper_wxyz
+        R_gripper = np.array([
+            [1-2*(qy_g*qy_g+qz_g*qz_g), 2*(qx_g*qy_g-qw_g*qz_g),   2*(qx_g*qz_g+qw_g*qy_g)],
+            [2*(qx_g*qy_g+qw_g*qz_g),   1-2*(qx_g*qx_g+qz_g*qz_g), 2*(qy_g*qz_g-qw_g*qx_g)],
+            [2*(qx_g*qz_g-qw_g*qy_g),   2*(qy_g*qz_g+qw_g*qx_g),   1-2*(qx_g*qx_g+qy_g*qy_g)],
+        ])
 
-        gripper_xyz = (gripper_tf.transform.translation.x,
-                       gripper_tf.transform.translation.y,
-                       gripper_tf.transform.translation.z)
+        # Real plug orientation in gripper frame from tf2
+        if self._task.port_type == "sc":
+            qx, qy, qz, qw = -0.161, 0.167, -0.694, -0.682
+        else:
+            qx, qy, qz, qw = -0.180, -0.006, 0.027, -0.983
+
+        R_plug_in_gripper = np.array([
+            [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz),   2*(qx*qz+qw*qy)],
+            [2*(qx*qy+qw*qz),   1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
+            [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
+        ])
+
+        plug_insertion_axis_world = R_gripper @ R_plug_in_gripper @ np.array([0.0, 0.0, 1.0])
+        plug_insertion_axis_world /= np.linalg.norm(plug_insertion_axis_world)
+
+        # Port insertion requires plug to go straight DOWN, i.e. world -Z into the port
+        target_axis = np.array([0.0, 0.0, -1.0])
+
+        # We want plug_insertion_axis_world to equal target_axis.
+        # Find rotation that takes plug_insertion_axis_world → target_axis
+        cross = np.cross(plug_insertion_axis_world, target_axis)
+        cross_norm = np.linalg.norm(cross)
+        dot = float(np.dot(plug_insertion_axis_world, target_axis))
+
+        if cross_norm < 1e-6:
+            if dot > 0:
+                q_correction_wxyz = (1.0, 0.0, 0.0, 0.0)
+            else:
+                # 180° — pick an arbitrary perpendicular axis
+                perp = np.array([1.0, 0.0, 0.0]) if abs(plug_insertion_axis_world[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+                q_correction_wxyz = (0.0, perp[0], perp[1], perp[2])
+        else:
+            axis = cross / cross_norm
+            angle = np.arctan2(cross_norm, dot)
+            s = np.sin(angle / 2.0)
+            q_correction_wxyz = (float(np.cos(angle / 2.0)),
+                                float(axis[0]*s), float(axis[1]*s), float(axis[2]*s))
+
+        # q_correction is in world frame, so pre-multiply: q_target = q_correction * q_gripper
+        q_target = quaternion_multiply(q_correction_wxyz, q_gripper_wxyz)
+        q_slerp = quaternion_slerp(q_gripper_wxyz, q_target, slerp_fraction)
+
+        # Position
+        plug_tip_xyz = self._plug_tip_world(gripper_xyz_arr, q_target, self._task.port_type)
         port_xy = (port_transform.translation.x, port_transform.translation.y)
-        plug_z = 0.04 if self._task.port_type == "sc" else 0.042
 
-        plug_tip_xyz = (gripper_xyz[0], gripper_xyz[1], gripper_xyz[2] - plug_z)
         tip_x_error = port_xy[0] - plug_tip_xyz[0]
         tip_y_error = port_xy[1] - plug_tip_xyz[1]
 
@@ -290,22 +395,18 @@ class PerceptionInsert(Policy):
         i_gain = 0.15
         target_x = port_xy[0] + i_gain * self._tip_x_error_integrator
         target_y = port_xy[1] + i_gain * self._tip_y_error_integrator
-
-        # FIXED: plug tip target = port_z + z_offset
-        # gripper TCP = plug tip + plug_z = port_z + z_offset + plug_z
-        target_z = port_transform.translation.z + z_offset + plug_z
+        target_z = port_transform.translation.z + z_offset + (gripper_xyz_arr[2] - plug_tip_xyz[2])
 
         blend = (
-            position_fraction*target_x + (1.0-position_fraction)*gripper_xyz[0],
-            position_fraction*target_y + (1.0-position_fraction)*gripper_xyz[1],
-            position_fraction*target_z + (1.0-position_fraction)*gripper_xyz[2],
+            position_fraction*target_x + (1.0-position_fraction)*gripper_xyz_arr[0],
+            position_fraction*target_y + (1.0-position_fraction)*gripper_xyz_arr[1],
+            position_fraction*target_z + (1.0-position_fraction)*gripper_xyz_arr[2],
         )
         return Pose(
             position=Point(x=blend[0], y=blend[1], z=blend[2]),
-            orientation=Quaternion(w=q_gripper_slerp[0], x=q_gripper_slerp[1],
-                                   y=q_gripper_slerp[2], z=q_gripper_slerp[3]),
+            orientation=Quaternion(w=q_slerp[0], x=q_slerp[1], y=q_slerp[2], z=q_slerp[3]),
         )
-
+    
     # ── Main ───────────────────────────────────────────────────────────────
 
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
@@ -352,21 +453,37 @@ class PerceptionInsert(Policy):
             self.get_logger().error("Perception failed")
             return False
 
-        plug_z = 0.04 if task.port_type == "sc" else 0.042
-
         # Screenshot 1: at perception time
-        g0 = self._gripper_xyz_from_tf()
-        self._save_viz(views, X, task, "01_perception", gripper_xyz=g0)
+        g0, q0 = self._gripper_pose_from_tf()
+        self._save_viz(views, X, task, "01_perception", gripper_xyz=g0, q_wxyz=q0)
         send_feedback(f"Port at ({X[0]:.3f},{X[1]:.3f},{X[2]:.3f})")
 
-        # Log the Z formula result so we can verify it's correct
-        self.get_logger().info(
-            f"Z formula check: port_z={X[2]:.4f} plug_z={plug_z:.3f} "
-            f"gripper_target@z_offset=0 = {X[2]+0+plug_z:.4f} "
-            f"(plug tip will land exactly at port_z)"
-        )
+        if g0 is not None and q0 is not None:
+            tip0 = self._plug_tip_world(g0, q0, task.port_type)
+            dz0 = float(g0[2] - tip0[2])
+            self.get_logger().info(
+                f"Z check: tcp_z - est_plug_z={dz0:.4f} m "
+                f"=> tcp_z target @ z_offset=0 for plug@port_z = {X[2] + dz0:.4f}"
+            )
 
         port_transform = self.build_port_transform(X)
+
+        # Compare perceived port position vs actual TF port position
+        try:
+            if task.port_type == "sc":
+                real_port_tf = self._parent_node._tf_buffer.lookup_transform(
+                    "base_link", "task_board/sc_port_0/sc_port_base_link_entrance", Time())
+            else:
+                real_port_tf = self._parent_node._tf_buffer.lookup_transform(
+                    "base_link", "task_board/nic_card_mount_0/sfp_port_0_link_entrance", Time())
+            rp = real_port_tf.transform.translation
+            real_port = np.array([rp.x, rp.y, rp.z])
+            self.get_logger().info(
+                f"PORT DIAG | perceived={X.tolist()} | actual={real_port.tolist()} | "
+                f"error_mm={((X - real_port)*1000).tolist()}"
+            )
+        except TransformException as e:
+            self.get_logger().warn(f"PORT DIAG TF failed: {e}")
 
         # Interpolate to above port
         z_offset = 0.2
@@ -383,13 +500,14 @@ class PerceptionInsert(Policy):
         # Screenshot 2: at start of descent
         obs = get_observation()
         views2 = self._build_views(obs)
-        g1 = self._gripper_xyz_from_tf()
-        self._save_viz(views2, X, task, "02_descent_start", gripper_xyz=g1)
-        if g1 is not None:
+        g1, q1 = self._gripper_pose_from_tf()
+        self._save_viz(views2, X, task, "02_descent_start", gripper_xyz=g1, q_wxyz=q1)
+        if g1 is not None and q1 is not None:
+            tip1 = self._plug_tip_world(g1, q1, task.port_type)
             self.get_logger().info(
-                f"Descent start: gripper_z={g1[2]:.4f} plug_tip_z={g1[2]-plug_z:.4f} "
-                f"port_z={X[2]:.4f} tip_above={( g1[2]-plug_z-X[2])*1000:.1f}mm "
-                f"XY_err={np.linalg.norm(g1[:2]-X[:2])*1000:.1f}mm"
+                f"Descent start: gripper_z={g1[2]:.4f} est_plug_z={tip1[2]:.4f} "
+                f"port_z={X[2]:.4f} tip_above={(tip1[2] - X[2]) * 1000:.1f}mm "
+                f"XY_err={np.linalg.norm(tip1[:2] - X[:2]) * 1000:.1f}mm"
             )
 
         # CSV log: z_offset, gripper_z, plug_tip_z, port_z, fts, fts_delta
@@ -397,6 +515,31 @@ class PerceptionInsert(Policy):
         csv_file = open(csv_path, "w", newline="")
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(["z_offset", "gripper_z", "plug_tip_z", "port_z", "fts_z", "fts_delta"])
+
+        # Temporary diagnostic — add right before the descent while loop
+        g_diag, q_diag = self._gripper_pose_from_tf()
+        if g_diag is not None:
+            tip_diag = self._plug_tip_world(g_diag, q_diag, task.port_type)
+            try:
+                if task.port_type == "sc":
+                    port_tf = self._parent_node._tf_buffer.lookup_transform(
+                        "base_link", "task_board/sc_port_0/sc_port_base_link_entrance", Time())
+                else:
+                    port_tf = self._parent_node._tf_buffer.lookup_transform(
+                        "base_link", "task_board/nic_card_mount_0/sfp_port_0_link_entrance", Time())
+                pt = port_tf.transform.translation
+                port_world = np.array([pt.x, pt.y, pt.z])
+                self.get_logger().info(
+                    f"DIAG | tip_xyz={tip_diag.tolist()} | port_xyz={port_world.tolist()} | "
+                    f"error_xyz={(tip_diag - port_world).tolist()} | "
+                    f"error_mm={((tip_diag - port_world)*1000).tolist()}"
+                )
+            except TransformException as e:
+                self.get_logger().warn(f"DIAG TF failed: {e}")
+        
+        self.get_logger().info(
+            f"Integrator at descent start: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
+        )
 
         # Descent — extended to -0.025 (25mm below port entrance)
         fts_stop = False
@@ -413,11 +556,19 @@ class PerceptionInsert(Policy):
 
             # Log every 10 steps (~5mm)
             if step % 10 == 0:
+                self.get_logger().info(
+                    f"Integrator at descent middle: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
+                )
                 obs = get_observation()
                 fts = self._fts_z(obs)
-                g = self._gripper_xyz_from_tf()
+                g, q_wxyz = self._gripper_pose_from_tf()
                 gz = g[2] if g is not None else float("nan")
-                tip_z = gz - plug_z
+                if g is not None:
+                    tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
+                    # self._publish_tip_tf(tip_world, "predicted_plug_tip") #DEBUGGING TF
+                    tip_z = tip_world[2]
+                else:
+                    tip_z = float("nan")
                 delta = fts - fts_baseline
                 csv_writer.writerow([f"{z_offset:.4f}", f"{gz:.4f}", f"{tip_z:.4f}",
                                      f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
@@ -434,13 +585,14 @@ class PerceptionInsert(Policy):
         # Screenshot 3: at end of descent
         obs = get_observation()
         views3 = self._build_views(obs)
-        g2 = self._gripper_xyz_from_tf()
-        self._save_viz(views3, X, task, "03_descent_end", gripper_xyz=g2)
-        if g2 is not None:
+        g2, q2 = self._gripper_pose_from_tf()
+        self._save_viz(views3, X, task, "03_descent_end", gripper_xyz=g2, q_wxyz=q2)
+        if g2 is not None and q2 is not None:
+            tip2 = self._plug_tip_world(g2, q2, task.port_type)
             self.get_logger().info(
-                f"Descent end: gripper_z={g2[2]:.4f} plug_tip_z={g2[2]-plug_z:.4f} "
-                f"port_z={X[2]:.4f} tip_above={( g2[2]-plug_z-X[2])*1000:.1f}mm "
-                f"XY_err={np.linalg.norm(g2[:2]-X[:2])*1000:.1f}mm fts_stop={fts_stop}"
+                f"Descent end: gripper_z={g2[2]:.4f} est_plug_z={tip2[2]:.4f} "
+                f"port_z={X[2]:.4f} tip_above={(tip2[2] - X[2]) * 1000:.1f}mm "
+                f"XY_err={np.linalg.norm(tip2[:2] - X[:2]) * 1000:.1f}mm fts_stop={fts_stop}"
             )
 
         self.sleep_for(3.0)
