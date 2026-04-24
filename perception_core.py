@@ -104,6 +104,76 @@ class PerceptionCore:
         out.sort(key=lambda d: -d["conf"])
         return out
 
+    @staticmethod
+    def nic_sfp_yaw_delta_world_z_from_triangulated_kps_board_invariant(
+        kp_3d_8: np.ndarray,
+        sfp_port_0: bool,
+        min_edge_xy_m: float = 2e-4,
+        min_port_sep_xy_m: float = 2e-3,
+    ) -> float | None:
+        """
+        Yaw-only (about +base_link Z) from triangulated YOLO keypoints only — no TF.
+
+        Reference axis is perpendicular (in XY) to the line between triangulated
+        port-0 and port-1 centers on the same NIC. That rotates with the task board,
+        so pure board yaw does not inject a false correction (unlike a fixed world-XY ref).
+
+        Top edge in label order: port0 → (KP1−KP0); port1 → (KP5−KP4) (DataCollectorPose2).
+        """
+        if kp_3d_8.shape != (8, 3):
+            raise ValueError("kp_3d_8 must be (8, 3)")
+        if not np.all(np.isfinite(kp_3d_8)):
+            return None
+        c0 = kp_3d_8[0:4].mean(axis=0)
+        c1 = kp_3d_8[4:8].mean(axis=0)
+        v_lat = (c1 - c0)[:2].astype(np.float64)
+        nlat = float(np.linalg.norm(v_lat))
+        if nlat < min_port_sep_xy_m:
+            return None
+        v_lat /= nlat
+        ref = np.array([-v_lat[1], v_lat[0]], dtype=np.float64)
+        ref /= max(float(np.linalg.norm(ref)), 1e-9)
+        if sfp_port_0:
+            d = kp_3d_8[1] - kp_3d_8[0]
+        else:
+            d = kp_3d_8[5] - kp_3d_8[4]
+        d_xy = np.asarray(d[:2], dtype=np.float64).reshape(2)
+        nd = float(np.linalg.norm(d_xy))
+        if nd < min_edge_xy_m:
+            return None
+        d_xy /= nd
+        return float(np.arctan2(
+            ref[0] * d_xy[1] - ref[1] * d_xy[0],
+            ref[0] * d_xy[0] + ref[1] * d_xy[1],
+        ))
+
+    @staticmethod
+    def nic_sfp_yaw_world_z_from_triangulated_kps_absolute(
+        kp_3d_8: np.ndarray,
+        sfp_port_0: bool,
+        min_edge_xy_m: float = 2e-4,
+    ) -> float | None:
+        """
+        Absolute world yaw (about +base_link Z) from triangulated YOLO keypoints only.
+
+        Uses top-edge direction in label order:
+          - port0: KP1 - KP0
+          - port1: KP5 - KP4
+
+        Returns atan2(dy, dx) in radians, wrapped by caller as needed.
+        """
+        if kp_3d_8.shape != (8, 3):
+            raise ValueError("kp_3d_8 must be (8, 3)")
+        if not np.all(np.isfinite(kp_3d_8)):
+            return None
+        d = (kp_3d_8[1] - kp_3d_8[0]) if sfp_port_0 else (kp_3d_8[5] - kp_3d_8[4])
+        d_xy = np.asarray(d[:2], dtype=np.float64).reshape(2)
+        nd = float(np.linalg.norm(d_xy))
+        if nd < min_edge_xy_m:
+            return None
+        d_xy /= nd
+        return float(np.arctan2(d_xy[1], d_xy[0]))
+
     # ─── Linear DLT triangulation ──────────────────────────────────────────
 
     @staticmethod

@@ -44,7 +44,29 @@ INSERTION_DEPTH = {
     "sc": 0.016,
 }
 
+# Calibration: detected SFP yaw bias (degrees). If "true 0°" trials report
+# about -90°, set this to +90. If they report ~180° off, use +/-180.
+SFP_YAW_BIAS_DEG = 180.0
+SFP_YAW_BIAS_RAD = np.deg2rad(SFP_YAW_BIAS_DEG)
+
 os.makedirs(DEBUG_DIR, exist_ok=True)
+
+
+def _quat_wxyz_yaw_about_world_z(delta_rad: float) -> tuple[float, float, float, float]:
+    """Unit quaternion (w,x,y,z) for rotation of delta_rad about +base_link Z."""
+    half = 0.5 * float(delta_rad)
+    return (float(np.cos(half)), 0.0, 0.0, float(np.sin(half)))
+
+
+def _wrap_to_pi(rad: float) -> float:
+    """Wrap angle to [-pi, pi]."""
+    return float((rad + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def _yaw_from_quat_wxyz(q_wxyz: tuple[float, float, float, float]) -> float:
+    """World yaw (about +Z) from quaternion (w,x,y,z)."""
+    w, x, y, z = q_wxyz
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
 
 
 def ros_image_to_cv2(img_msg):
@@ -88,6 +110,9 @@ class PerceptionInsert(Policy):
         self.get_logger().info(f"Loading NIC weights from {weights}")
         self._pc = PerceptionCore(nic_weights=str(weights))
         self._tf_broadcaster = TransformBroadcaster(self._parent_node)
+        self._sfp_yaw_delta_rad = None
+        self._sfp_yaw_goal_world_rad = None
+        self._last_detected_sfp_yaw_rad = None
 
     def _publish_tip_tf(self, gripper_xyz, q_gripper_wxyz, port_type):
         tip = self._plug_tip_world(gripper_xyz, q_gripper_wxyz, port_type)
@@ -256,9 +281,9 @@ class PerceptionInsert(Policy):
             if len(pts) < 2:
                 return None
             X = self._pc.triangulate(pts, projs)
+            return X, views
 
-        elif task.port_type == "sfp":
-            kp_slice = slice(0, 4) if task.port_name == "sfp_port_0" else slice(4, 8)
+        if task.port_type == "sfp":
             per_cam = {}
             for cam, (bgr, K, T) in views.items():
                 nics = self._pc.detect_nic(bgr)
@@ -266,22 +291,44 @@ class PerceptionInsert(Policy):
                 if picked is None:
                     self.get_logger().warn(f"{cam}: no NIC")
                     continue
-                per_cam[cam] = (picked["kps"][kp_slice], self._pc.build_projection_matrix(K, T))
+                per_cam[cam] = (picked["kps"], self._pc.build_projection_matrix(K, T))
                 self.get_logger().info(f"{cam}: NIC conf={picked['conf']:.2f}")
             if len(per_cam) < 2:
                 return None
             cams = list(per_cam.keys())
-            kp_3d = []
-            for i in range(4):
+            kp_3d_8 = []
+            for i in range(8):
                 pts_2d = [tuple(per_cam[c][0][i]) for c in cams]
                 Ps = [per_cam[c][1] for c in cams]
-                kp_3d.append(self._pc.triangulate(pts_2d, Ps))
-            X = np.array(kp_3d).mean(axis=0)
-        else:
-            self.get_logger().error(f"Unknown port_type {task.port_type}")
-            return None
+                kp_3d_8.append(self._pc.triangulate(pts_2d, Ps))
+            kp_3d_8 = np.array(kp_3d_8)
+            p0 = task.port_name == "sfp_port_0"
+            sl = slice(0, 4) if p0 else slice(4, 8)
+            X = kp_3d_8[sl].mean(axis=0)
+            yaw_d = self._pc.nic_sfp_yaw_world_z_from_triangulated_kps_absolute(
+                kp_3d_8, p0)
+            if yaw_d is not None:
+                yaw_raw = float(yaw_d)
+                yaw_d = _wrap_to_pi(yaw_raw + SFP_YAW_BIAS_RAD)
+                yaw_wrapped = _wrap_to_pi(yaw_d)
+                if self._last_detected_sfp_yaw_rad is None:
+                    yaw_step = 0.0
+                else:
+                    yaw_step = _wrap_to_pi(yaw_wrapped - self._last_detected_sfp_yaw_rad)
+                self._last_detected_sfp_yaw_rad = yaw_wrapped
+                self.get_logger().info(
+                    "SFP yaw detected | "
+                    f"raw={yaw_raw:.4f} rad ({np.degrees(yaw_raw):.2f} deg) | "
+                    f"bias={SFP_YAW_BIAS_RAD:.4f} rad ({SFP_YAW_BIAS_DEG:.2f} deg) | "
+                    f"wrapped={yaw_wrapped:.4f} rad ({np.degrees(yaw_wrapped):.2f} deg) | "
+                    f"step={yaw_step:.4f} rad ({np.degrees(yaw_step):.2f} deg)"
+                )
+            else:
+                self.get_logger().warn("SFP yaw correction skipped (degenerate geometry)")
+            return X, views, yaw_d
 
-        return X, views
+        self.get_logger().error(f"Unknown port_type {task.port_type}")
+        return None
 
     # ── Debug viz ──────────────────────────────────────────────────────────
 
@@ -348,6 +395,23 @@ class PerceptionInsert(Policy):
         return Transform(
             translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
             rotation=Quaternion(x=q.x, y=q.y, z=q.z, w=q.w),
+        )
+
+    def build_sfp_port_transform(self, X, yaw_delta_rad):
+        """SFP only: same translation as SC path; gripper quat pre-multiplied by world +Z yaw."""
+        gripper_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
+        q = gripper_tf.transform.rotation
+        if yaw_delta_rad is None or abs(float(yaw_delta_rad)) < 1e-9:
+            return Transform(
+                translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
+                rotation=Quaternion(x=q.x, y=q.y, z=q.z, w=q.w),
+            )
+        qz = _quat_wxyz_yaw_about_world_z(float(yaw_delta_rad))
+        qg = (q.w, q.x, q.y, q.z)
+        qw, qx, qy, qz_out = quaternion_multiply(qz, qg)
+        return Transform(
+            translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
+            rotation=Quaternion(x=qx, y=qy, z=qz_out, w=qw),
         )
 
     # ── calc_gripper_pose — Z formula fixed ────────────────────────────────
@@ -441,11 +505,27 @@ class PerceptionInsert(Policy):
                                 float(axis[0]*s), float(axis[1]*s), float(axis[2]*s))
 
         # q_correction is in world frame, so pre-multiply: q_target = q_correction * q_gripper
-        q_target = quaternion_multiply(q_correction_wxyz, q_gripper_wxyz)
+        # Keep a "position model" target that is identical to legacy behavior.
+        q_target_nominal = quaternion_multiply(q_correction_wxyz, q_gripper_wxyz)
+        q_target = q_target_nominal
         q_slerp = quaternion_slerp(q_gripper_wxyz, q_target, slerp_fraction)
 
-        # Position
-        plug_tip_xyz = self._plug_tip_world(gripper_xyz_arr, q_target, self._task.port_type)
+        # SFP: apply yaw as an absolute world-yaw goal (set once from perception),
+        # not as an incremental offset each control tick, to prevent runaway spinning.
+        task = getattr(self, "_task", None)
+        if (
+            task is not None
+            and task.port_type == "sfp"
+            and self._sfp_yaw_goal_world_rad is not None
+        ):
+            yaw_curr = _yaw_from_quat_wxyz(q_slerp)
+            yaw_err = _wrap_to_pi(self._sfp_yaw_goal_world_rad - yaw_curr)
+            qz = _quat_wxyz_yaw_about_world_z(yaw_err)
+            q_slerp = quaternion_multiply(qz, q_slerp)
+
+        # Position: intentionally use the nominal (pre-yaw) target so yaw correction
+        # only changes orientation of the held SFP plug and does not pull XY/Z away.
+        plug_tip_xyz = self._plug_tip_world(gripper_xyz_arr, q_target_nominal, self._task.port_type)
         port_xy = (port_transform.translation.x, port_transform.translation.y)
 
         tip_x_error = port_xy[0] - plug_tip_xyz[0]
@@ -486,6 +566,9 @@ class PerceptionInsert(Policy):
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         self.get_logger().info(f"PerceptionInsert start | {task.port_type} {task.target_module_name}")
         self._task = task
+        self._sfp_yaw_delta_rad = None
+        self._sfp_yaw_goal_world_rad = None
+        self._last_detected_sfp_yaw_rad = None
         # Reset integrator at the start of every new insertion attempt
         self._tip_x_error_integrator = 0.0
         self._tip_y_error_integrator = 0.0
@@ -522,7 +605,23 @@ class PerceptionInsert(Policy):
 
             result = self.perceive_port_position(task, obs)
             if result is not None:
-                X, views = result
+                if task.port_type == "sfp":
+                    X, views, yaw_d = result
+                    self._sfp_yaw_delta_rad = yaw_d
+                    if yaw_d is not None:
+                        g_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
+                        qg = g_tf.transform.rotation
+                        yaw_now = _yaw_from_quat_wxyz((qg.w, qg.x, qg.y, qg.z))
+                        self._sfp_yaw_goal_world_rad = _wrap_to_pi(yaw_now + yaw_d)
+                        self.get_logger().info(
+                            "SFP yaw goal (absolute world yaw) | "
+                            f"now={yaw_now:.4f} rad ({np.degrees(yaw_now):.2f} deg) | "
+                            f"delta={yaw_d:.4f} rad ({np.degrees(yaw_d):.2f} deg) | "
+                            f"goal={self._sfp_yaw_goal_world_rad:.4f} rad "
+                            f"({np.degrees(self._sfp_yaw_goal_world_rad):.2f} deg)"
+                        )
+                else:
+                    X, views = result
                 self.get_logger().info(f"Port found at scan offset ({dx},{dy}): {X.tolist()}")
                 break
             self.get_logger().warn(f"Scan {i+1}/{len(scan_offsets)}: no detection at ({dx},{dy})")
@@ -544,7 +643,21 @@ class PerceptionInsert(Policy):
                 f"=> tcp_z target @ z_offset=0 for plug@port_z = {X[2] + dz0:.4f}"
             )
 
-        port_transform = self.build_port_transform(X)
+        if task.port_type == "sfp":
+            port_transform = self.build_sfp_port_transform(X, self._sfp_yaw_delta_rad)
+            if self._sfp_yaw_delta_rad is not None:
+                self.get_logger().info(
+                    "SFP yaw applied to orientation only | "
+                    f"{self._sfp_yaw_delta_rad:.4f} rad ({np.degrees(self._sfp_yaw_delta_rad):.2f} deg)"
+                )
+            if self._sfp_yaw_goal_world_rad is not None:
+                self.get_logger().info(
+                    "SFP yaw absolute goal used in controller | "
+                    f"{self._sfp_yaw_goal_world_rad:.4f} rad "
+                    f"({np.degrees(self._sfp_yaw_goal_world_rad):.2f} deg)"
+                )
+        else:
+            port_transform = self.build_port_transform(X)
 
         self._publish_port_tf(X, port_transform) #DEBUGGING TF
         # Compare perceived port position vs actual TF port position

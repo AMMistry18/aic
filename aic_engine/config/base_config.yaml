@@ -157,7 +157,7 @@ trials:
             z: 1.14
             roll: 0.0
             pitch: 0.0
-            yaw: 3.1415
+            yaw: 2.672
           nic_rail_0:
             entity_present: False
           nic_rail_1:
