@@ -362,10 +362,13 @@ def launch_setup(context, *args, **kwargs):
         use_composition="True",
     )
 
-    ground_truth_tf_relay = Node(
+    # Merge simulation board/cable poses into /tf. ros_gz_bridge publishes them on
+    # /scoring/tf only; policies and Zenoh-connected hosts need them on /tf even
+    # when ground_truth:=false (relay was previously gated on ground_truth).
+    scoring_tf_relay = Node(
         package="topic_tools",
         executable="relay",
-        name="tf_relay",
+        name="scoring_tf_relay",
         output="screen",
         parameters=[
             {
@@ -374,7 +377,6 @@ def launch_setup(context, *args, **kwargs):
                 "lazy": True,
             }
         ],
-        condition=IfCondition(ground_truth),
     )
 
     ground_truth_static_tf_publisher = Node(
@@ -438,7 +440,7 @@ def launch_setup(context, *args, **kwargs):
         gz_spawn_entity,
         spawn_task_board_launch,
         spawn_cable_launch,
-        ground_truth_tf_relay,
+        scoring_tf_relay,
         ground_truth_static_tf_publisher,
         aic_engine,
         shutdown_on_aic_engine_exit_handler,

@@ -1,20 +1,24 @@
 """
-PerceptionInsert.py
+Perception-guided cable insertion (example policy).
 
-Perception-guided insertion. Debug build: saves camera screenshots at
-perception time, start of descent, and end of descent so we can diagnose
-the 3cm miss. Also fixes the Z formula and extends descent depth.
+Uses ``PerceptionCore`` for vision: YOLO keypoints on SFP ports (weights next
+to this file: ``weights/best.pt``), and optional YOLO pose on SC ports via
+``AIC_SC_POSE_WEIGHTS`` or bundled ``weights/best_sc_pose.pt`` if present;
+otherwise SC uses HSV color segmentation with multiview geometry.
 
-Z formula fix:
-  Original: target_z = port_z + z_offset - plug_z
-    → plug tip = gripper_z - plug_z = port_z + z_offset - 2*plug_z  (WRONG)
-  Fixed:    target_z = port_z + z_offset + plug_z
-    → plug tip = gripper_z - plug_z = port_z + z_offset  (CORRECT)
+Motion planning aligns the plug with the port frame, applies XY tip tracking
+with optional integral correction, and sets gripper Z so the plug tip reaches
+the port entrance using ``target_z = port_z + z_offset + (gripper_z - plug_tip_z)``.
+Insertion depths are defined in ``INSERTION_DEPTH`` per port type (``sfp`` /
+``sc``).
 
-Descent extended to z_offset = -0.025 (25mm below port entrance).
+See ``docs/getting_started.md`` (PerceptionInsert) and
+``outputs/sc_pose_pipeline/README.md`` for eval and SC weight workflows.
 """
 import csv
+import itertools
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -40,33 +44,44 @@ DEBUG_DIR = "/tmp/perception_debug"
 
 # Insertion depths measured from port entrance to full insertion
 INSERTION_DEPTH = {
-    "sfp": 0.046,
+    # SFP: slightly above nominal plug travel so scoring consistently sees full seat
+    # when perception biases the entrance a few mm high.
+    "sfp": 0.051,
     "sc": 0.016,
 }
 
-# Calibration: detected SFP yaw bias (degrees). If "true 0°" trials report
-# about -90°, set this to +90. If they report ~180° off, use +/-180.
-SFP_YAW_BIAS_DEG = 180.0
-SFP_YAW_BIAS_RAD = np.deg2rad(SFP_YAW_BIAS_DEG)
+# Guard against swapping to a nearby wrong SFP port during close-range
+# re-perception. Larger jumps usually indicate a different module match.
+SFP_REFINEMENT_MAX_XY_SHIFT_M = 0.015
+SFP_REFINEMENT_MAX_Z_SHIFT_M = 0.030
+SC_REFINEMENT_MAX_XY_SHIFT_M = float(os.environ.get("AIC_SC_REFINEMENT_MAX_XY_SHIFT_M", "0.012"))
+SC_REFINEMENT_MAX_Z_SHIFT_M = float(os.environ.get("AIC_SC_REFINEMENT_MAX_Z_SHIFT_M", "0.035"))
+SC_REFINEMENT_SLOT_SHIFT_MIN_M = float(os.environ.get("AIC_SC_REFINEMENT_SLOT_SHIFT_MIN_M", "0.030"))
+SC_REFINEMENT_SLOT_SHIFT_MAX_M = float(os.environ.get("AIC_SC_REFINEMENT_SLOT_SHIFT_MAX_M", "0.052"))
+SC_SEATING_SUCCESS_XY_M = float(os.environ.get("AIC_SC_SEATING_SUCCESS_XY_M", "0.006"))
+FINAL_INSERT_OBS_LEN = 69
+FINAL_INSERT_ACTION_MODE = "bounded_tip_pose_delta"
+FINAL_INSERT_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)
+FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
+
+# Reject only truly tiny SC color blobs. Target selection below uses multiview
+# reprojection and the requested task identity, so a high color-area gate is
+# more harmful than helpful when the port is partially occluded or close up.
+SC_MIN_POSE_AREA = 80
+
+SFP_RAIL_LOCAL_Y = np.array([-0.1745 + 0.04 * i for i in range(5)], dtype=np.float64)
+SC_PORT_LOCAL_Y = np.array([0.0295, 0.0705], dtype=np.float64)
+
+# SFP corner keypoints in the port entrance frame. This matches
+# DataCollectorPose2.LOCAL_PORT_KPS and the YOLO-pose keypoint order.
+LOCAL_SFP_PORT_KPS = np.array([
+    [0.00685, 0.0043, 0.0],    # KP0: top-left
+    [-0.00685, 0.0043, 0.0],   # KP1: top-right
+    [-0.00685, -0.0043, 0.0],  # KP2: bottom-right
+    [0.00685, -0.0043, 0.0],   # KP3: bottom-left
+], dtype=np.float64)
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
-
-
-def _quat_wxyz_yaw_about_world_z(delta_rad: float) -> tuple[float, float, float, float]:
-    """Unit quaternion (w,x,y,z) for rotation of delta_rad about +base_link Z."""
-    half = 0.5 * float(delta_rad)
-    return (float(np.cos(half)), 0.0, 0.0, float(np.sin(half)))
-
-
-def _wrap_to_pi(rad: float) -> float:
-    """Wrap angle to [-pi, pi]."""
-    return float((rad + np.pi) % (2.0 * np.pi) - np.pi)
-
-
-def _yaw_from_quat_wxyz(q_wxyz: tuple[float, float, float, float]) -> float:
-    """World yaw (about +Z) from quaternion (w,x,y,z)."""
-    w, x, y, z = q_wxyz
-    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
 
 
 def ros_image_to_cv2(img_msg):
@@ -93,6 +108,71 @@ def tf_to_4x4(tf_msg):
     return T
 
 
+def normalize(v, eps=1e-9):
+    n = np.linalg.norm(v)
+    if n < eps:
+        return None
+    return v / n
+
+
+def quat_inverse_wxyz(q):
+    w, x, y, z = q
+    return (w, -x, -y, -z)
+
+
+def quat_normalize_wxyz(q):
+    q_arr = np.array(q, dtype=np.float64)
+    n = np.linalg.norm(q_arr)
+    if n < 1e-9:
+        return None
+    q_arr /= n
+    return tuple(q_arr.tolist())
+
+
+def quat_to_rotmat_wxyz(q):
+    qw, qx, qy, qz = q
+    return np.array([
+        [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz),   2*(qx*qz+qw*qy)],
+        [2*(qx*qy+qw*qz),   1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
+        [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
+    ])
+
+
+def rotmat_to_quat_wxyz(R):
+    trace = R[0, 0] + R[1, 1] + R[2, 2]
+    if trace > 0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (R[2, 1] - R[1, 2]) * s
+        y = (R[0, 2] - R[2, 0]) * s
+        z = (R[1, 0] - R[0, 1]) * s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        w = (R[2, 1] - R[1, 2]) / s
+        x = 0.25 * s
+        y = (R[0, 1] + R[1, 0]) / s
+        z = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        w = (R[0, 2] - R[2, 0]) / s
+        x = (R[0, 1] + R[1, 0]) / s
+        y = 0.25 * s
+        z = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        w = (R[1, 0] - R[0, 1]) / s
+        x = (R[0, 2] + R[2, 0]) / s
+        y = (R[1, 2] + R[2, 1]) / s
+        z = 0.25 * s
+    q = np.array([w, x, y, z], dtype=np.float64)
+    q /= np.linalg.norm(q)
+    return tuple(q.tolist())
+
+
+def yaw_from_rotmat(R):
+    return float(np.arctan2(R[1, 0], R[0, 0]))
+
+
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped
 
@@ -106,13 +186,188 @@ class PerceptionInsert(Policy):
         self._task = None
         self._debug_counter = 0
         self._pose_log_counter = 0
-        weights = (Path(__file__).parent / "weights" / "best.pt").resolve()
-        self.get_logger().info(f"Loading NIC weights from {weights}")
-        self._pc = PerceptionCore(nic_weights=str(weights))
+        self._last_port_quat_wxyz = None
+        self._last_port_yaw = None
+        self._sc_slot_axis_xy = None
+        self._last_sc_slot_selected_from_multi = False
+        self._final_insert_policy = None
+        self._final_insert_policy_kind = None
+        self._final_insert_device = None
+        self._last_final_insert_action = np.zeros(6, dtype=np.float32)
+        self._final_insert_target_tip_xyz = None
+        self._final_insert_target_tip_quat = None
+        self._final_insert_handoff_tip_xyz = None
+        self._final_insert_handoff_tip_quat = None
+        self._final_insert_warned = False
+        nic_weights = (Path(__file__).parent / "weights" / "best.pt").resolve()
+        sc_weights_env = os.environ.get("AIC_SC_POSE_WEIGHTS")
+        sc_weights = (
+            Path(sc_weights_env).expanduser().resolve()
+            if sc_weights_env
+            else (Path(__file__).parent / "weights" / "best_sc_pose.pt").resolve()
+        )
+        sc_weights_opt = str(sc_weights) if sc_weights.exists() else None
+        self.get_logger().info(f"Loading NIC weights from {nic_weights}")
+        if sc_weights_opt is None:
+            self.get_logger().warn(
+                f"SC pose weights not found at {sc_weights}; using HSV fallback for SC perception"
+            )
+        else:
+            self.get_logger().info(f"Loading SC pose weights from {sc_weights}")
+        self._pc = PerceptionCore(nic_weights=str(nic_weights), sc_weights=sc_weights_opt)
         self._tf_broadcaster = TransformBroadcaster(self._parent_node)
-        self._sfp_yaw_delta_rad = None
-        self._sfp_yaw_goal_world_rad = None
-        self._last_detected_sfp_yaw_rad = None
+        self._load_final_insert_policy()
+
+    def _wait_for_stable_clock(self, timeout_sec=8.0, samples=4):
+        """Wait for sim time to be nonzero and monotonic after Gazebo resets."""
+        deadline = time.monotonic() + timeout_sec
+        last_ns = None
+        stable_samples = 0
+        warned_jump = False
+        while time.monotonic() < deadline:
+            now_ns = self._parent_node.get_clock().now().nanoseconds
+            if now_ns <= 0:
+                stable_samples = 0
+            elif last_ns is None or now_ns >= last_ns:
+                stable_samples += 1
+                if stable_samples >= samples:
+                    return True
+            else:
+                stable_samples = 0
+                if not warned_jump:
+                    self.get_logger().warn(
+                        "ROS time jumped backwards during startup; waiting for TF buffers to refill"
+                    )
+                    warned_jump = True
+                tf_buffer = getattr(self._parent_node, "_tf_buffer", None)
+                if tf_buffer is not None and hasattr(tf_buffer, "clear"):
+                    tf_buffer.clear()
+            last_ns = now_ns
+            time.sleep(0.1)
+        self.get_logger().warn("Timed out waiting for stable sim time; continuing anyway")
+        return False
+
+    def _lookup_transform(self, target_frame, source_frame, timeout_sec=0.2):
+        return self._parent_node._tf_buffer.lookup_transform(
+            target_frame, source_frame, Time(), Duration(seconds=timeout_sec)
+        )
+
+    def _load_final_insert_policy(self):
+        policy_path = os.environ.get("AIC_FINAL_INSERT_POLICY")
+        if not policy_path:
+            bundled_policy = Path(__file__).parent / "weights" / "final_insert_sc_model73.ts"
+            if bundled_policy.exists():
+                policy_path = str(bundled_policy)
+            else:
+                return
+        policy_path = str(Path(policy_path).expanduser().resolve())
+        if not os.path.exists(policy_path):
+            self.get_logger().warn(
+                f"AIC_FINAL_INSERT_POLICY={policy_path} does not exist; using hand-coded seating fallback"
+            )
+            return
+
+        suffix = Path(policy_path).suffix.lower()
+        try:
+            if suffix == ".onnx":
+                import onnxruntime as ort
+
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                self._final_insert_policy = ort.InferenceSession(policy_path, providers=providers)
+                self._final_insert_policy_kind = "onnx"
+                self.get_logger().info(f"Loaded ONNX final-insertion policy: {policy_path}")
+            else:
+                import torch
+
+                device_name = os.environ.get(
+                    "AIC_FINAL_INSERT_DEVICE",
+                    "cuda" if torch.cuda.is_available() else "cpu",
+                )
+                self._final_insert_device = torch.device(device_name)
+                self._final_insert_policy = torch.jit.load(
+                    policy_path, map_location=self._final_insert_device
+                )
+                self._final_insert_policy.eval()
+                self._final_insert_policy_kind = "torchscript"
+                self.get_logger().info(
+                    f"Loaded TorchScript final-insertion policy on {self._final_insert_device}: {policy_path}"
+                )
+            if not self._validate_final_insert_policy_contract():
+                self._final_insert_policy = None
+                self._final_insert_policy_kind = None
+                self.get_logger().warn(
+                    "Final-insertion policy disabled because observation/action contract validation failed"
+                )
+        except Exception as exc:
+            self._final_insert_policy = None
+            self._final_insert_policy_kind = None
+            self.get_logger().warn(
+                f"Failed to load AIC_FINAL_INSERT_POLICY={policy_path}: {exc}; "
+                "using hand-coded seating fallback"
+            )
+
+    def _final_insert_pos_scale(self):
+        pos_scale = np.fromstring(
+            os.environ.get("AIC_FINAL_INSERT_POS_SCALE", "0.0015,0.0015,0.0035"),
+            sep=",",
+            dtype=np.float64,
+        )
+        if pos_scale.size != 3:
+            pos_scale = FINAL_INSERT_POS_SCALE.copy()
+        return np.minimum(np.abs(pos_scale), FINAL_INSERT_POS_SCALE)
+
+    def _final_insert_rot_scale(self):
+        rot_scale = np.fromstring(
+            os.environ.get("AIC_FINAL_INSERT_ROT_SCALE", "0.08,0.08,0.12"),
+            sep=",",
+            dtype=np.float64,
+        )
+        if rot_scale.size != 3:
+            rot_scale = FINAL_INSERT_ROT_SCALE.copy()
+        return np.abs(rot_scale)
+
+    def _validate_final_insert_policy_contract(self):
+        obs_len = int(os.environ.get("AIC_FINAL_INSERT_OBS_LEN", str(FINAL_INSERT_OBS_LEN)))
+        pos_scale = self._final_insert_pos_scale()
+        rot_scale = self._final_insert_rot_scale()
+        deployment_mode = os.environ.get("AIC_FINAL_INSERT_MODE", "assisted").strip().lower()
+        self.get_logger().info(
+            "Final-insertion policy contract | "
+            f"obs_len={obs_len} action_mode={FINAL_INSERT_ACTION_MODE} "
+            f"deployment_mode={deployment_mode} "
+            f"pos_scale_m={pos_scale.tolist()} rot_scale_rad={rot_scale.tolist()}"
+        )
+        try:
+            if self._final_insert_policy_kind == "onnx":
+                model_input = self._final_insert_policy.get_inputs()[0]
+                shape = list(getattr(model_input, "shape", []) or [])
+                if len(shape) >= 2 and isinstance(shape[1], int) and shape[1] != obs_len:
+                    raise ValueError(f"ONNX input length {shape[1]} != deployment obs length {obs_len}")
+            dummy_obs = np.zeros(obs_len, dtype=np.float32)
+            action = self._infer_final_insert_action(dummy_obs)
+            if action is None or action.size != 6:
+                raise ValueError("policy did not return a 6D action for the deployment observation")
+            self.get_logger().info(
+                "Final-insertion policy contract check passed "
+                f"(dummy_action={np.round(action, 4).tolist()})"
+            )
+            return True
+        except Exception as exc:
+            self.get_logger().warn(f"Final-insertion policy contract check failed: {exc}")
+            return False
+
+    def _wait_for_transform(self, target_frame, source_frame, timeout_sec=8.0):
+        deadline = time.monotonic() + timeout_sec
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                return self._lookup_transform(target_frame, source_frame, timeout_sec=0.2)
+            except TransformException as e:
+                last_error = e
+                time.sleep(0.1)
+        if last_error is not None:
+            raise last_error
+        raise TransformException(f"Timed out waiting for transform {target_frame} <- {source_frame}")
 
     def _publish_tip_tf(self, gripper_xyz, q_gripper_wxyz, port_type):
         tip = self._plug_tip_world(gripper_xyz, q_gripper_wxyz, port_type)
@@ -136,33 +391,7 @@ class PerceptionInsert(Policy):
         ])
 
         R_tip_world = R_gripper @ R_plug_in_gripper
-
-        # Convert rotation matrix to quaternion
-        trace = R_tip_world[0,0] + R_tip_world[1,1] + R_tip_world[2,2]
-        if trace > 0:
-            s = 0.5 / np.sqrt(trace + 1.0)
-            w = 0.25 / s
-            x = (R_tip_world[2,1] - R_tip_world[1,2]) * s
-            y = (R_tip_world[0,2] - R_tip_world[2,0]) * s
-            z = (R_tip_world[1,0] - R_tip_world[0,1]) * s
-        elif R_tip_world[0,0] > R_tip_world[1,1] and R_tip_world[0,0] > R_tip_world[2,2]:
-            s = 2.0 * np.sqrt(1.0 + R_tip_world[0,0] - R_tip_world[1,1] - R_tip_world[2,2])
-            w = (R_tip_world[2,1] - R_tip_world[1,2]) / s
-            x = 0.25 * s
-            y = (R_tip_world[0,1] + R_tip_world[1,0]) / s
-            z = (R_tip_world[0,2] + R_tip_world[2,0]) / s
-        elif R_tip_world[1,1] > R_tip_world[2,2]:
-            s = 2.0 * np.sqrt(1.0 + R_tip_world[1,1] - R_tip_world[0,0] - R_tip_world[2,2])
-            w = (R_tip_world[0,2] - R_tip_world[2,0]) / s
-            x = (R_tip_world[0,1] + R_tip_world[1,0]) / s
-            y = 0.25 * s
-            z = (R_tip_world[1,2] + R_tip_world[2,1]) / s
-        else:
-            s = 2.0 * np.sqrt(1.0 + R_tip_world[2,2] - R_tip_world[0,0] - R_tip_world[1,1])
-            w = (R_tip_world[1,0] - R_tip_world[0,1]) / s
-            x = (R_tip_world[0,2] + R_tip_world[2,0]) / s
-            y = (R_tip_world[1,2] + R_tip_world[2,1]) / s
-            z = 0.25 * s
+        w, x, y, z = rotmat_to_quat_wxyz(R_tip_world)
 
         t = TransformStamped()
         t.header.stamp = self._parent_node.get_clock().now().to_msg()
@@ -211,9 +440,7 @@ class PerceptionInsert(Policy):
 
     def _lookup_cam_from_base(self, cam_name):
         try:
-            tf = self._parent_node._tf_buffer.lookup_transform(
-                f"{cam_name}/optical", "base_link", Time(), Duration(seconds=0.2)
-            )
+            tf = self._lookup_transform(f"{cam_name}/optical", "base_link")
         except TransformException as e:
             self.get_logger().warn(f"{cam_name}: TF lookup failed: {e}")
             return None
@@ -235,7 +462,7 @@ class PerceptionInsert(Policy):
     def _gripper_pose_from_tf(self):
         """Returns (xyz np.array, q_wxyz tuple) or (None, None)."""
         try:
-            tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
+            tf = self._lookup_transform("base_link", "gripper/tcp")
             t = tf.transform.translation
             q = tf.transform.rotation
             return np.array([t.x, t.y, t.z]), (q.w, q.x, q.y, q.z)
@@ -248,6 +475,94 @@ class PerceptionInsert(Policy):
             return 0.0
         return w.wrench.force.z
 
+    def _port_tf_frame_candidates(self, task):
+        """Frame IDs to try for the physical port (sim /scoring/tf tree)."""
+        tm = task.target_module_name
+        pn = task.port_name
+        roots = (f"task_board/{tm}", tm)
+        port_frames = []
+        for root in roots:
+            port_frames.append(f"{root}/{pn}_link_entrance")
+            if task.port_type == "sc":
+                port_frames.extend(
+                    [
+                        f"{root}/sc_port_base/sc_port_base_link_entrance",
+                        f"{root}/sc_port_base_link_entrance",
+                        f"{root}/sc_port_base_link",
+                        f"{root}/sc_port_link",
+                        f"{root}/sc_port_base/sc_port_link",
+                        f"{root}/sc_port_base",
+                    ]
+                )
+        # De-dupe while preserving order
+        seen = set()
+        out = []
+        for f in port_frames:
+            if f not in seen:
+                seen.add(f)
+                out.append(f)
+        return out
+
+    def _lookup_actual_port_xyz(self, task):
+        port_frames = self._port_tf_frame_candidates(task)
+        last_error = None
+        for attempt in range(2):
+            for port_frame in port_frames:
+                try:
+                    port_tf = self._lookup_transform("base_link", port_frame)
+                    pt = port_tf.transform.translation
+                    return np.array([pt.x, pt.y, pt.z]), port_tf
+                except TransformException as e:
+                    last_error = e
+            if attempt == 0:
+                time.sleep(0.35)
+        if last_error is not None:
+            raise last_error
+        raise TransformException(f"No candidate port frames for task {task}")
+
+    def _lookup_scoring_plug_xyz(self, task):
+        cable_name = getattr(task, "cable_name", "cable_0")
+        plug_name = getattr(task, "plug_name", None)
+        if not plug_name:
+            plug_name = "sfp_tip" if task.port_type == "sfp" else "sc_tip"
+        plug_frame = f"{cable_name}/{plug_name}_link"
+        plug_tf = self._lookup_transform("base_link", plug_frame)
+        pt = plug_tf.transform.translation
+        return np.array([pt.x, pt.y, pt.z]), plug_tf
+
+    def _log_tip_to_actual_port(self, task, label, gripper_xyz, q_wxyz):
+        if gripper_xyz is None or q_wxyz is None:
+            return
+        try:
+            port_world, _ = self._lookup_actual_port_xyz(task)
+        except TransformException as e:
+            self.get_logger().warn(f"{label} actual-port TF failed: {e}")
+            return
+
+        tip_world = self._plug_tip_world(gripper_xyz, q_wxyz, task.port_type)
+        err = tip_world - port_world
+        self.get_logger().info(
+            f"{label} actual-port DIAG | tip_xyz={tip_world.tolist()} | "
+            f"port_xyz={port_world.tolist()} | error_mm={(err * 1000.0).tolist()} | "
+            f"xy_err={np.linalg.norm(err[:2]) * 1000.0:.1f}mm "
+            f"tip_above={err[2] * 1000.0:.1f}mm"
+        )
+
+        try:
+            scoring_plug, _ = self._lookup_scoring_plug_xyz(task)
+        except TransformException as e:
+            self.get_logger().warn(f"{label} scoring-plug TF failed: {e}")
+            return
+        scoring_err = scoring_plug - port_world
+        model_err = tip_world - scoring_plug
+        self.get_logger().info(
+            f"{label} scoring-plug DIAG | plug_xyz={scoring_plug.tolist()} | "
+            f"error_mm={(scoring_err * 1000.0).tolist()} | "
+            f"xy_err={np.linalg.norm(scoring_err[:2]) * 1000.0:.1f}mm "
+            f"tip_above={scoring_err[2] * 1000.0:.1f}mm | "
+            f"model_minus_scoring_mm={(model_err * 1000.0).tolist()}"
+        )
+
     def _closest_to_center(self, dets, img_w, img_h, kind):
         if not dets:
             return None
@@ -259,76 +574,875 @@ class PerceptionInsert(Policy):
             return ((x1+x2)/2.0, (y1+y2)/2.0)
         return min(dets, key=lambda d: (pt(d)[0]-cx)**2 + (pt(d)[1]-cy)**2)
 
+    def _extract_trailing_index(self, name, prefix):
+        if not name or not name.startswith(prefix):
+            return None
+        try:
+            return int(name[len(prefix):].split("_")[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _dedupe_spatial_candidates(self, candidates, min_sep=0.018):
+        """Keep the best-scoring candidate for each physical port/module."""
+        unique = []
+        for cand in sorted(candidates, key=lambda c: c.get("score", 0.0)):
+            X = cand["X"]
+            if any(np.linalg.norm(X[:2] - u["X"][:2]) < min_sep for u in unique):
+                continue
+            unique.append(cand)
+        return unique
+
+    def _candidate_y_axis(self, candidates):
+        axes = []
+        for cand in candidates:
+            q = cand.get("q_wxyz")
+            if q is None:
+                continue
+            R = quat_to_rotmat_wxyz(q)
+            axis = np.array([R[0, 1], R[1, 1], 0.0], dtype=np.float64)
+            axis = normalize(axis)
+            if axis is None:
+                continue
+            if axes and float(np.dot(axes[0], axis)) < 0.0:
+                axis = -axis
+            axes.append(axis)
+        if axes:
+            axis = normalize(np.mean(np.array(axes), axis=0))
+            if axis is not None:
+                return axis
+        # Evaluation board yaw is near pi; this fallback preserves the old
+        # top-to-bottom ordering when orientation is unavailable.
+        return np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+    def _select_by_task_slot(self, candidates, target_idx, slot_local_y, label):
+        """Map perceived candidates to known task-board slots and pick target_idx.
+
+        The board can translate and yaw between trials, and not every rail slot
+        is populated. We therefore fit a 1D slot lattice along the perceived
+        board rail direction instead of assuming the target is the nth visible
+        detection.
+        """
+        if not candidates:
+            return None
+        unique = self._dedupe_spatial_candidates(candidates)
+        if target_idx is None or target_idx < 0 or target_idx >= len(slot_local_y):
+            chosen = min(unique, key=lambda c: c.get("score", 0.0))
+            self.get_logger().warn(
+                f"{label}: could not parse target slot; using best reprojection candidate"
+            )
+            return chosen
+        if len(unique) == 1:
+            self.get_logger().info(
+                f"{label}: only one candidate visible; assigning it to requested slot {target_idx}"
+            )
+            return unique[0]
+
+        if not any(c.get("q_wxyz") is not None for c in unique):
+            best_fit = None
+            y_world = np.array([c["X"][1] for c in unique], dtype=np.float64)
+            slots = np.asarray(slot_local_y, dtype=np.float64)
+            for sign in (-1.0, 1.0):
+                for y in y_world:
+                    for slot in slots:
+                        offset = y - sign * slot
+                        assigned = []
+                        residuals = []
+                        for yw in y_world:
+                            j = int(np.argmin(np.abs(yw - (offset + sign * slots))))
+                            r = abs(yw - (offset + sign * slots[j]))
+                            assigned.append(j)
+                            residuals.append(r)
+                        duplicate_penalty = (len(assigned) - len(set(assigned))) * 0.05
+                        score = float(np.mean(residuals) + np.max(residuals) + duplicate_penalty)
+                        if best_fit is None or score < best_fit["score"]:
+                            best_fit = {
+                                "score": score,
+                                "sign": sign,
+                                "offset": offset,
+                                "assigned": assigned,
+                                "residuals": residuals,
+                            }
+            assigned_summary = [
+                f"slot{j}:res={r*1000:.1f}mm:y={c['X'][1]:.3f}"
+                for c, j, r in zip(unique, best_fit["assigned"], best_fit["residuals"])
+            ]
+            self.get_logger().info(
+                f"{label}: target slot {target_idx}, world-y slot fit score="
+                f"{best_fit['score']*1000:.1f}mm, assignments={assigned_summary}"
+            )
+            target_candidates = [
+                (c, r)
+                for c, j, r in zip(unique, best_fit["assigned"], best_fit["residuals"])
+                if j == target_idx
+            ]
+            if target_candidates:
+                return min(target_candidates, key=lambda cr: (cr[1], cr[0].get("score", 0.0)))[0]
+            target_y = best_fit["offset"] + best_fit["sign"] * slots[target_idx]
+            self.get_logger().warn(
+                f"{label}: requested slot {target_idx} was not directly assigned; "
+                "using nearest perceived candidate to fitted world-y target"
+            )
+            return min(unique, key=lambda c: abs(c["X"][1] - target_y))
+
+        base_axis = self._candidate_y_axis(unique)
+        best_fit = None
+        slots = np.asarray(slot_local_y, dtype=np.float64)
+        # With the task board yaw used by evaluation, increasing board-local
+        # rail Y appears as decreasing world Y. Try that sign first so perfect
+        # two-candidate fits do not arbitrarily swap SC slot 0/1.
+        for sign in (-1.0, 1.0):
+            axis = sign * base_axis
+            proj = np.array([float(np.dot(c["X"], axis)) for c in unique], dtype=np.float64)
+            for p in proj:
+                for slot in slots:
+                    offset = p - slot
+                    assigned = []
+                    residuals = []
+                    for c, pc in zip(unique, proj):
+                        j = int(np.argmin(np.abs((pc - offset) - slots)))
+                        r = abs((pc - offset) - slots[j])
+                        assigned.append(j)
+                        residuals.append(r)
+                    duplicate_penalty = (len(assigned) - len(set(assigned))) * 0.05
+                    score = float(np.mean(residuals) + np.max(residuals) + duplicate_penalty)
+                    if best_fit is None or score < best_fit["score"]:
+                        best_fit = {
+                            "score": score,
+                            "axis": axis,
+                            "offset": offset,
+                            "assigned": assigned,
+                            "residuals": residuals,
+                            "proj": proj,
+                        }
+
+        assigned = best_fit["assigned"]
+        residuals = best_fit["residuals"]
+        assigned_summary = [
+            f"slot{j}:res={r*1000:.1f}mm:y={c['X'][1]:.3f}"
+            for c, j, r in zip(unique, assigned, residuals)
+        ]
+        self.get_logger().info(
+            f"{label}: target slot {target_idx}, slot fit score={best_fit['score']*1000:.1f}mm, "
+            f"assignments={assigned_summary}"
+        )
+
+        target_candidates = [
+            (c, r) for c, j, r in zip(unique, assigned, residuals) if j == target_idx
+        ]
+        if target_candidates:
+            return min(target_candidates, key=lambda cr: (cr[1], cr[0].get("score", 0.0)))[0]
+
+        target_proj = best_fit["offset"] + slots[target_idx]
+        self.get_logger().warn(
+            f"{label}: requested slot {target_idx} was not directly assigned; "
+            "using nearest perceived candidate to fitted target slot"
+        )
+        return min(
+            unique,
+            key=lambda c: abs(float(np.dot(c["X"], best_fit["axis"])) - target_proj)
+        )
+
+    def _pixel_to_world_on_z_plane(self, uv, K, T_cam_from_base, z_world):
+        """Back-project one pixel ray to world and intersect z=z_world plane."""
+        uv_h = np.array([uv[0], uv[1], 1.0], dtype=np.float64)
+        try:
+            ray_cam = np.linalg.inv(K) @ uv_h
+        except np.linalg.LinAlgError:
+            return None
+        ray_cam = normalize(ray_cam)
+        if ray_cam is None:
+            return None
+
+        T_base_from_cam = self._pc.invert_transform(T_cam_from_base)
+        R_base_from_cam = T_base_from_cam[:3, :3]
+        cam_origin_world = T_base_from_cam[:3, 3]
+        ray_world = R_base_from_cam @ ray_cam
+        if abs(ray_world[2]) < 1e-6:
+            return None
+
+        t = (z_world - cam_origin_world[2]) / ray_world[2]
+        if t <= 0.0:
+            return None
+        return cam_origin_world + t * ray_world
+
+    def _estimate_sc_port_orientation_from_edges(self, detections_by_cam, X):
+        """Estimate SC entrance-frame yaw from color-mask long edges."""
+        axis_candidates = []
+        for cam, det in detections_by_cam.items():
+            axis = det.get("major_axis")
+            K = det.get("K")
+            T = det.get("T")
+            if axis is None or K is None or T is None:
+                continue
+            p0 = self._pixel_to_world_on_z_plane(axis[0], K, T, X[2])
+            p1 = self._pixel_to_world_on_z_plane(axis[1], K, T, X[2])
+            if p0 is None or p1 is None:
+                continue
+            d = p1 - p0
+            d[2] = 0.0
+            d = normalize(d)
+            if d is None:
+                continue
+            axis_candidates.append(d)
+            self.get_logger().info(
+                f"{cam}: SC edge-axis world_xy=({d[0]:.3f},{d[1]:.3f})"
+            )
+
+        if not axis_candidates:
+            return None, None
+
+        # Reject large angular outliers before averaging (common when one
+        # camera latches onto an ambiguous side edge).
+        candidate_angles = np.array([np.arctan2(v[1], v[0]) for v in axis_candidates], dtype=np.float64)
+        sin_mean = float(np.mean(np.sin(candidate_angles)))
+        cos_mean = float(np.mean(np.cos(candidate_angles)))
+        mean_angle = float(np.arctan2(sin_mean, cos_mean))
+        kept = []
+        for v in axis_candidates:
+            a = float(np.arctan2(v[1], v[0]))
+            dtheta = float(np.arctan2(np.sin(a - mean_angle), np.cos(a - mean_angle)))
+            if abs(dtheta) <= np.deg2rad(30.0):
+                kept.append(v)
+        if len(kept) >= 2:
+            axis_candidates = kept
+
+        # Align signs before averaging so opposing views do not cancel.
+        ref = axis_candidates[0].copy()
+        for i in range(1, len(axis_candidates)):
+            if float(np.dot(ref[:2], axis_candidates[i][:2])) < 0.0:
+                axis_candidates[i] = -axis_candidates[i]
+
+        x_axis = normalize(np.mean(np.array(axis_candidates), axis=0))
+        if x_axis is None:
+            return None, None
+        x_axis[2] = 0.0
+        x_axis = normalize(x_axis)
+        if x_axis is None:
+            return None, None
+
+        # Resolve the 180deg ambiguity.  When both SC ports are visible, the
+        # candidate positions give the board-local +Y direction directly
+        # (slot_0 -> slot_1), which keeps the wrist/camera cluster on the
+        # clear side of the board instead of the NIC-card side.
+        slot_axis = getattr(self, "_sc_slot_axis_xy", None)
+        if slot_axis is not None:
+            y_axis_guess = normalize(np.cross(np.array([0.0, 0.0, -1.0]), x_axis))
+            if y_axis_guess is not None and float(np.dot(y_axis_guess[:2], slot_axis[:2])) < 0.0:
+                x_axis = -x_axis
+                self.get_logger().info("SC yaw sign resolved from observed slot ordering")
+        else:
+            # Fallback for one visible SC port: prefer continuity with current
+            # gripper yaw projected on the board plane.
+            gripper_xyz, q_wxyz = self._gripper_pose_from_tf()
+            if gripper_xyz is not None and q_wxyz is not None:
+                Rg = quat_to_rotmat_wxyz(q_wxyz)
+                x_ref = np.array([Rg[0, 0], Rg[1, 0], 0.0], dtype=np.float64)
+                x_ref = normalize(x_ref)
+                if x_ref is not None and float(np.dot(x_axis[:2], x_ref[:2])) < 0.0:
+                    x_axis = -x_axis
+
+        z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        y_axis = normalize(np.cross(z_axis, x_axis))
+        if y_axis is None:
+            return None, None
+        x_axis = normalize(np.cross(y_axis, z_axis))
+        if x_axis is None:
+            return None, None
+        R_tip_desired = np.column_stack([x_axis, y_axis, z_axis])
+        return rotmat_to_quat_wxyz(R_tip_desired), yaw_from_rotmat(R_tip_desired)
+
+    def _predict_tip_xy_error_for_port_quat(self, X, q_port_wxyz, port_type):
+        """Estimate XY miss if we align to a candidate port orientation."""
+        gripper_xyz, _ = self._gripper_pose_from_tf()
+        if gripper_xyz is None or q_port_wxyz is None:
+            return None
+        if port_type == "sc":
+            qx, qy, qz, qw = -0.161, 0.167, -0.694, -0.682
+        else:
+            qx, qy, qz, qw = -0.180, -0.006, 0.027, -0.983
+        q_plug_in_gripper_wxyz = (qw, qx, qy, qz)
+        q_target = quaternion_multiply(
+            q_port_wxyz,
+            quat_inverse_wxyz(q_plug_in_gripper_wxyz),
+        )
+        # calc_gripper_pose(..., compensate_tip_xy=False) commands the TCP XY
+        # to the perceived port XY.  Score the yaw ambiguity at that commanded
+        # pose, not at the current scan pose, so the choice reflects insertion.
+        commanded_gripper_xyz = np.array(
+            [float(X[0]), float(X[1]), float(gripper_xyz[2])],
+            dtype=np.float64,
+        )
+        tip_world = self._plug_tip_world(commanded_gripper_xyz, q_target, port_type)
+        return float(np.linalg.norm(tip_world[:2] - X[:2]))
+
+    def _flip_port_quat_180_about_insertion_axis(self, q_port_wxyz):
+        """Flip the in-plane SC port orientation while preserving vertical insertion."""
+        if q_port_wxyz is None:
+            return None
+        # q_port describes the desired plug-tip frame.  Right-multiplying by a
+        # local pi rotation around Z negates the in-plane X/Y axes and leaves
+        # the insertion axis unchanged.
+        return quat_normalize_wxyz(
+            quaternion_multiply(q_port_wxyz, (0.0, 0.0, 0.0, 1.0))
+        )
+
+    def _choose_sc_yaw_by_tip_error(self, X, label, margin=0.0015):
+        """Resolve the SC pose model's 180deg ambiguity using plug-tip geometry."""
+        if self._last_port_quat_wxyz is None:
+            return False
+        q_current = self._last_port_quat_wxyz
+        q_flipped = self._flip_port_quat_180_about_insertion_axis(q_current)
+        if q_flipped is None:
+            return False
+
+        err_current = self._predict_tip_xy_error_for_port_quat(X, q_current, "sc")
+        err_flipped = self._predict_tip_xy_error_for_port_quat(X, q_flipped, "sc")
+        if err_current is None or err_flipped is None:
+            return False
+
+        self.get_logger().info(
+            f"{label}: SC yaw 180 candidates current={err_current*1000:.1f}mm "
+            f"flipped={err_flipped*1000:.1f}mm"
+        )
+        if err_flipped + margin < err_current:
+            self._last_port_quat_wxyz = q_flipped
+            if self._last_port_yaw is not None:
+                self._last_port_yaw = float(
+                    np.arctan2(
+                        np.sin(self._last_port_yaw + np.pi),
+                        np.cos(self._last_port_yaw + np.pi),
+                    )
+                )
+            self.get_logger().info(f"{label}: selected 180deg-flipped SC yaw")
+            return True
+        return False
+
+    def _reproject_error_px(self, X, K, T_cam_from_base, uv):
+        P = self._pc.build_projection_matrix(K, T_cam_from_base)
+        x = P @ np.array([X[0], X[1], X[2], 1.0], dtype=np.float64)
+        if x[2] <= 1e-6:
+            return None
+        uv_hat = np.array([x[0] / x[2], x[1] / x[2]], dtype=np.float64)
+        return float(np.linalg.norm(uv_hat - np.array(uv, dtype=np.float64)))
+
+    def _make_sc_multiview_candidates(self, per_cam_candidates):
+        """Build plausible SC blob matches across cameras."""
+        cams = [c for c, cand in per_cam_candidates.items() if cand]
+        if len(cams) < 2:
+            return []
+        # Keep combinatorics bounded.
+        for c in cams:
+            per_cam_candidates[c] = per_cam_candidates[c][:5]
+
+        candidates = []
+        for picks in itertools.product(*[per_cam_candidates[c] for c in cams]):
+            pts = [p["centroid"] for p in picks]
+            Ps = [p["P"] for p in picks]
+            try:
+                X = self._pc.triangulate(pts, Ps)
+            except Exception:
+                continue
+
+            # Prefer plausible board-plane depths to avoid accidental matches.
+            if X[2] < -0.05 or X[2] > 0.25:
+                continue
+
+            errors = []
+            for p in picks:
+                err = self._reproject_error_px(X, p["K"], p["T"], p["centroid"])
+                if err is None:
+                    errors = []
+                    break
+                errors.append(err)
+            if not errors:
+                continue
+
+            mean_area = float(np.mean([p.get("area", 0.0) for p in picks]))
+            score = float(np.mean(errors) + 0.15 * np.max(errors) - 0.0002 * min(mean_area, 5000.0))
+            candidates.append({
+                "X": X,
+                "picked_by_cam": {cam: pick for cam, pick in zip(cams, picks)},
+                "score": score,
+                "reproj_px": float(np.mean(errors)),
+                "area": mean_area,
+            })
+
+        candidates.sort(key=lambda c: c["score"])
+        return candidates
+
+    def _select_sc_multiview_match(self, per_cam_candidates, task):
+        candidates = self._make_sc_multiview_candidates(per_cam_candidates)
+        if not candidates:
+            return None, None
+        # Add an orientation estimate to the best few candidates before slot
+        # selection. This also gives _select_by_task_slot a rail axis when the
+        # edge fit is reliable.
+        for cand in candidates[:12]:
+            det_by_cam = {
+                cam: {"major_axis": d.get("major_axis"), "K": d["K"], "T": d["T"]}
+                for cam, d in cand["picked_by_cam"].items()
+            }
+            q_wxyz, yaw = self._estimate_sc_port_orientation_from_edges(det_by_cam, cand["X"])
+            cand["q_wxyz"] = q_wxyz
+            cand["yaw"] = yaw
+
+        target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
+        unique = self._dedupe_spatial_candidates(candidates[:12], min_sep=0.018)
+        if target_idx in (0, 1):
+            if len(unique) == 1:
+                self._last_sc_slot_selected_from_multi = False
+                self.get_logger().info(
+                    f"SC target: only one candidate visible; assigning it to requested slot {target_idx}"
+                )
+                chosen = unique[0]
+            else:
+                # The two SC target rails are ordered along base-frame Y in the
+                # qualification layouts. This avoids the sign ambiguity of
+                # fitting two equally spaced slots from noisy close-range edge
+                # orientations.
+                ordered = sorted(unique, key=lambda c: float(c["X"][1]))
+                slot_axis = ordered[-1]["X"] - ordered[0]["X"]
+                slot_axis[2] = 0.0
+                self._sc_slot_axis_xy = normalize(slot_axis)
+                chosen = ordered[0] if target_idx == 0 else ordered[-1]
+                summary = [
+                    f"slot{i}:y={c['X'][1]:.3f}:score={c.get('score', 0.0):.2f}"
+                    for i, c in ((0, ordered[0]), (1, ordered[-1]))
+                ]
+                self.get_logger().info(
+                    f"SC target: selected slot {target_idx} by base-frame Y ordering; "
+                    f"candidates={summary}"
+                )
+                self._last_sc_slot_selected_from_multi = True
+            return chosen["X"], chosen["picked_by_cam"]
+
+        chosen = self._select_by_task_slot(candidates[:12], target_idx, SC_PORT_LOCAL_Y, "SC target")
+        if chosen is None:
+            return None, None
+        return chosen["X"], chosen["picked_by_cam"]
+
+    def _select_sc_pose_candidate(self, candidates, task, label):
+        target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
+        unique = self._dedupe_spatial_candidates(candidates, min_sep=0.018)
+        if target_idx in (0, 1):
+            if len(unique) == 1:
+                self._last_sc_slot_selected_from_multi = False
+                self.get_logger().info(
+                    f"{label}: only one candidate visible; assigning it to requested slot {target_idx}"
+                )
+                return unique[0]
+            ordered = sorted(unique, key=lambda c: float(c["X"][1]))
+            chosen = ordered[0] if target_idx == 0 else ordered[-1]
+            self._last_sc_slot_selected_from_multi = True
+            summary = [
+                f"slot{i}:y={c['X'][1]:.3f}:reproj={c.get('reproj_px', 0.0):.1f}px"
+                for i, c in ((0, ordered[0]), (1, ordered[-1]))
+            ]
+            self.get_logger().info(
+                f"{label}: selected slot {target_idx} by base-frame Y ordering; "
+                f"candidates={summary}"
+            )
+            return chosen
+        return self._select_by_task_slot(candidates, target_idx, SC_PORT_LOCAL_Y, label)
+
+    def _make_sc_pose_multiview_candidates(self, per_cam):
+        """Build SC candidates from YOLO-pose keypoints, mirroring SFP flow."""
+        cams = [c for c, cand in per_cam.items() if cand]
+        if len(cams) < 2:
+            return []
+        for c in cams:
+            per_cam[c] = per_cam[c][:5]
+
+        candidates = []
+        for picks in itertools.product(*[per_cam[c] for c in cams]):
+            kp_3d = []
+            try:
+                for i in range(4):
+                    pts_2d = [tuple(p["kps"][i]) for p in picks]
+                    Ps = [p["P"] for p in picks]
+                    kp_3d.append(self._pc.triangulate(pts_2d, Ps))
+            except Exception:
+                continue
+
+            kp_3d = np.array(kp_3d, dtype=np.float64)
+            X = kp_3d.mean(axis=0)
+            if X[2] < -0.05 or X[2] > 0.25:
+                continue
+
+            q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+            if q_wxyz is None:
+                continue
+
+            width = np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5))
+            height = np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5))
+            if not (0.003 <= width <= 0.035 and 0.003 <= height <= 0.035):
+                continue
+
+            errors = []
+            for p in picks:
+                for i in range(4):
+                    err = self._reproject_error_px(kp_3d[i], p["K"], p["T"], p["kps"][i])
+                    if err is not None:
+                        errors.append(err)
+            if not errors:
+                continue
+
+            reproj = float(np.mean(errors))
+            conf_bonus = float(np.mean([p.get("conf", 0.0) for p in picks]))
+            score = reproj - 0.05 * conf_bonus
+            candidates.append({
+                "X": X,
+                "kp_3d": kp_3d,
+                "q_wxyz": q_wxyz,
+                "yaw": yaw,
+                "score": float(score),
+                "reproj_px": reproj,
+                "width": float(width),
+                "height": float(height),
+                "picked_by_cam": {cam: pick for cam, pick in zip(cams, picks)},
+            })
+
+        candidates.sort(key=lambda c: c["score"])
+        return candidates
+
+    def _make_sfp_multiview_candidates(self, per_cam):
+        cams = [c for c, cand in per_cam.items() if cand]
+        if len(cams) < 2:
+            return []
+        for c in cams:
+            per_cam[c] = per_cam[c][:5]
+
+        candidates = []
+        for picks in itertools.product(*[per_cam[c] for c in cams]):
+            kp_3d = []
+            try:
+                for i in range(4):
+                    pts_2d = [tuple(p["kps"][i]) for p in picks]
+                    Ps = [p["P"] for p in picks]
+                    kp_3d.append(self._pc.triangulate(pts_2d, Ps))
+            except Exception:
+                continue
+            kp_3d = np.array(kp_3d, dtype=np.float64)
+            X = kp_3d.mean(axis=0)
+            if X[2] < -0.05 or X[2] > 0.25:
+                continue
+
+            q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+            if q_wxyz is None:
+                continue
+
+            width = np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5))
+            height = np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5))
+            if not (0.006 <= width <= 0.030 and 0.004 <= height <= 0.025):
+                continue
+
+            errors = []
+            for p in picks:
+                for i in range(4):
+                    err = self._reproject_error_px(kp_3d[i], p["K"], p["T"], p["kps"][i])
+                    if err is not None:
+                        errors.append(err)
+            if not errors:
+                continue
+            reproj = float(np.mean(errors))
+            shape_penalty = abs(width - 0.0137) * 250.0 + abs(height - 0.0086) * 250.0
+            score = reproj + shape_penalty - 0.02 * float(np.mean([p.get("conf", 0.0) for p in picks]))
+            candidates.append({
+                "X": X,
+                "kp_3d": kp_3d,
+                "q_wxyz": q_wxyz,
+                "yaw": yaw,
+                "score": float(score),
+                "reproj_px": reproj,
+                "width": float(width),
+                "height": float(height),
+                "picks": picks,
+            })
+
+        candidates.sort(key=lambda c: c["score"])
+        return candidates
+
     # ── Perception ─────────────────────────────────────────────────────────
 
     def perceive_port_position(self, task, obs):
+        self._last_port_quat_wxyz = None
+        self._last_port_yaw = None
+        self._sc_slot_axis_xy = None
+        self._last_sc_slot_selected_from_multi = False
         views = self._build_views(obs)
         if len(views) < 2:
             self.get_logger().error(f"Only {len(views)} cam views usable")
             return None
 
         if task.port_type == "sc":
-            pts, projs = [], []
+            # First try the same keypoint-based multiview candidate flow used
+            # for SFP, but with the SC pose model and SC slot mapping.
+            per_cam_pose = {}
             for cam, (bgr, K, T) in views.items():
-                blobs = self._pc.detect_sc(bgr)
-                picked = self._closest_to_center(blobs, bgr.shape[1], bgr.shape[0], "sc")
-                if picked is None:
-                    self.get_logger().warn(f"{cam}: no SC blob")
-                    continue
-                pts.append(picked["centroid"])
-                projs.append(self._pc.build_projection_matrix(K, T))
-                self.get_logger().info(f"{cam}: SC centroid={picked['centroid']} area={picked['area']}")
-            if len(pts) < 2:
-                return None
-            X = self._pc.triangulate(pts, projs)
-            return X, views
+                sc_pose_dets = []
+                try:
+                    sc_pose_dets = self._pc.detect_sc_pose(bgr, conf_thresh=0.2)
+                except Exception:
+                    sc_pose_dets = []
+                pose_cands = []
+                for det in sc_pose_dets[:5]:
+                    if "kps" not in det or det["kps"].shape[0] < 4:
+                        continue
+                    x, y, w, h = det["bbox"]
+                    area = float(max(0, w) * max(0, h))
+                    if area < SC_MIN_POSE_AREA:
+                        continue
+                    pose_cands.append({
+                        "kps": np.asarray(det["kps"][:4], dtype=np.float64),
+                        "conf": float(det.get("conf", 0.0)),
+                        "P": self._pc.build_projection_matrix(K, T),
+                        "K": K,
+                        "T": T,
+                    })
+                if pose_cands:
+                    per_cam_pose[cam] = pose_cands
+                    self.get_logger().info(
+                        f"{cam}: SC pose dets={len(pose_cands)} top_conf={pose_cands[0]['conf']:.2f}"
+                    )
 
-        if task.port_type == "sfp":
-            per_cam = {}
-            for cam, (bgr, K, T) in views.items():
-                nics = self._pc.detect_nic(bgr)
-                picked = self._closest_to_center(nics, bgr.shape[1], bgr.shape[0], "nic")
-                if picked is None:
-                    self.get_logger().warn(f"{cam}: no NIC")
-                    continue
-                per_cam[cam] = (picked["kps"], self._pc.build_projection_matrix(K, T))
-                self.get_logger().info(f"{cam}: NIC conf={picked['conf']:.2f}")
-            if len(per_cam) < 2:
-                return None
-            cams = list(per_cam.keys())
-            kp_3d_8 = []
-            for i in range(8):
-                pts_2d = [tuple(per_cam[c][0][i]) for c in cams]
-                Ps = [per_cam[c][1] for c in cams]
-                kp_3d_8.append(self._pc.triangulate(pts_2d, Ps))
-            kp_3d_8 = np.array(kp_3d_8)
-            p0 = task.port_name == "sfp_port_0"
-            sl = slice(0, 4) if p0 else slice(4, 8)
-            X = kp_3d_8[sl].mean(axis=0)
-            yaw_d = self._pc.nic_sfp_yaw_world_z_from_triangulated_kps_absolute(
-                kp_3d_8, p0)
-            if yaw_d is not None:
-                yaw_raw = float(yaw_d)
-                yaw_d = _wrap_to_pi(yaw_raw + SFP_YAW_BIAS_RAD)
-                yaw_wrapped = _wrap_to_pi(yaw_d)
-                if self._last_detected_sfp_yaw_rad is None:
-                    yaw_step = 0.0
-                else:
-                    yaw_step = _wrap_to_pi(yaw_wrapped - self._last_detected_sfp_yaw_rad)
-                self._last_detected_sfp_yaw_rad = yaw_wrapped
+            pose_candidates = self._make_sc_pose_multiview_candidates(per_cam_pose)
+            if pose_candidates:
+                chosen = self._select_sc_pose_candidate(
+                    pose_candidates[:12], task, "SC pose target"
+                )
+                if chosen is None:
+                    return None
+                X = chosen["X"]
+                self._last_port_quat_wxyz = chosen["q_wxyz"]
+                self._last_port_yaw = chosen["yaw"]
+                self._choose_sc_yaw_by_tip_error(X, "SC pose target")
                 self.get_logger().info(
-                    "SFP yaw detected | "
-                    f"raw={yaw_raw:.4f} rad ({np.degrees(yaw_raw):.2f} deg) | "
-                    f"bias={SFP_YAW_BIAS_RAD:.4f} rad ({SFP_YAW_BIAS_DEG:.2f} deg) | "
-                    f"wrapped={yaw_wrapped:.4f} rad ({np.degrees(yaw_wrapped):.2f} deg) | "
-                    f"step={yaw_step:.4f} rad ({np.degrees(yaw_step):.2f} deg)"
+                    f"SC selected {task.target_module_name}/{task.port_name}: "
+                    f"yaw={np.degrees(self._last_port_yaw):.1f}deg reproj={chosen['reproj_px']:.1f}px "
+                    f"size=({chosen['width']*1000:.1f},{chosen['height']*1000:.1f})mm"
                 )
             else:
-                self.get_logger().warn("SFP yaw correction skipped (degenerate geometry)")
-            return X, views, yaw_d
+                # Fallback: existing HSV + edge-axis pipeline when SC pose is
+                # missing in too many views.
+                per_cam_candidates = {}
+                for cam, (bgr, K, T) in views.items():
+                    blobs = self._pc.detect_sc(bgr)
+                    if not blobs:
+                        self.get_logger().warn(f"{cam}: no SC blob")
+                        continue
+                    candidates = []
+                    for b in blobs[:3]:
+                        if b.get("area", 0) < SC_MIN_POSE_AREA:
+                            continue
+                        candidates.append(
+                            {
+                                "centroid": b["centroid"],
+                                "major_axis": b.get("major_axis"),
+                                "area": b.get("area"),
+                                "source": "hsv",
+                                "K": K,
+                                "T": T,
+                                "P": self._pc.build_projection_matrix(K, T),
+                            }
+                        )
+                    if not candidates:
+                        self.get_logger().warn(
+                            f"{cam}: SC blobs present but none above area threshold {SC_MIN_POSE_AREA}"
+                        )
+                        continue
+                    per_cam_candidates[cam] = candidates
+                    self.get_logger().info(
+                        f"{cam}: SC candidates={len(candidates)} src={candidates[0]['source']} "
+                        f"top_centroid={candidates[0]['centroid']} top_area={candidates[0]['area']:.1f}"
+                    )
 
-        self.get_logger().error(f"Unknown port_type {task.port_type}")
-        return None
+                X, picked_by_cam = self._select_sc_multiview_match(per_cam_candidates, task)
+                if X is None or picked_by_cam is None:
+                    return None
+
+                det_by_cam = {
+                    cam: {"major_axis": d.get("major_axis"), "K": d["K"], "T": d["T"]}
+                    for cam, d in picked_by_cam.items()
+                }
+                q_wxyz, yaw = self._estimate_sc_port_orientation_from_edges(det_by_cam, X)
+                if q_wxyz is not None:
+                    self._last_port_quat_wxyz = q_wxyz
+                    self._last_port_yaw = yaw
+                    self._choose_sc_yaw_by_tip_error(X, "SC edge-fallback target")
+                    self.get_logger().info(
+                        f"SC edge-fallback yaw estimate: {np.degrees(self._last_port_yaw):.1f}deg "
+                        f"from {len(det_by_cam)} camera fits"
+                    )
+                else:
+                    self.get_logger().warn(
+                        "SC fallback yaw estimate unavailable; using current gripper orientation"
+                    )
+
+        elif task.port_type == "sfp":
+            kp_slice = slice(0, 4) if task.port_name == "sfp_port_0" else slice(4, 8)
+            per_cam = {}
+            for cam, (bgr, K, T) in views.items():
+                nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
+                if not nics:
+                    self.get_logger().warn(f"{cam}: no NIC")
+                    continue
+                per_cam[cam] = [{
+                    "kps": det["kps"][kp_slice],
+                    "bbox": det["bbox"],
+                    "conf": det["conf"],
+                    "cls": det.get("cls", "unknown"),
+                    "P": self._pc.build_projection_matrix(K, T),
+                    "K": K,
+                    "T": T,
+                } for det in nics[:5]]
+                self.get_logger().info(
+                    f"{cam}: NIC dets={len(nics)} top_cls={nics[0].get('cls', 'unknown')} "
+                    f"top_conf={nics[0]['conf']:.2f}"
+                )
+            if len(per_cam) < 2:
+                if len(per_cam) == 1:
+                    cam, candidates_2d = next(iter(per_cam.items()))
+                    pnp_candidates = []
+                    for det in candidates_2d:
+                        pnp_result = self._estimate_sfp_port_pose_single_view(
+                            det["kps"], det["K"], det["T"], cam)
+                        if pnp_result is None:
+                            continue
+                        X, kp_3d, q_wxyz, yaw, reproj_error = pnp_result
+                        pnp_candidates.append({
+                            "X": X,
+                            "kp_3d": kp_3d,
+                            "q_wxyz": q_wxyz,
+                            "yaw": yaw,
+                            "score": reproj_error,
+                            "reproj_px": reproj_error,
+                        })
+                    if not pnp_candidates:
+                        return None
+                    target_idx = self._extract_trailing_index(
+                        task.target_module_name, "nic_card_mount_")
+                    chosen = self._select_by_task_slot(
+                        pnp_candidates, target_idx, SFP_RAIL_LOCAL_Y, "SFP single-view target")
+                    X = chosen["X"]
+                    kp_3d = chosen["kp_3d"]
+                    q_wxyz = chosen["q_wxyz"]
+                    yaw = chosen["yaw"]
+                    reproj_error = chosen["reproj_px"]
+                    if q_wxyz is not None:
+                        self._last_port_quat_wxyz = q_wxyz
+                        self._last_port_yaw = yaw
+                        self.get_logger().info(
+                            f"SFP single-view PnP from {cam}: yaw={np.degrees(yaw):.1f}deg "
+                            f"reproj_error={reproj_error:.1f}px "
+                            f"corners_mm={(kp_3d * 1000.0).round(1).tolist()}"
+                        )
+                    return X, views
+                return None
+            candidates = self._make_sfp_multiview_candidates(per_cam)
+            if not candidates:
+                self.get_logger().warn("SFP multiview matching found no plausible port candidates")
+                return None
+            target_idx = self._extract_trailing_index(task.target_module_name, "nic_card_mount_")
+            chosen = self._select_by_task_slot(candidates, target_idx, SFP_RAIL_LOCAL_Y, "SFP target")
+            if chosen is None:
+                return None
+            X = chosen["X"]
+            kp_3d = chosen["kp_3d"]
+            q_wxyz = chosen["q_wxyz"]
+            yaw = chosen["yaw"]
+            if q_wxyz is not None:
+                self._last_port_quat_wxyz = q_wxyz
+                self._last_port_yaw = yaw
+                self.get_logger().info(
+                    f"SFP selected {task.target_module_name}/{task.port_name}: "
+                    f"yaw={np.degrees(yaw):.1f}deg reproj={chosen['reproj_px']:.1f}px "
+                    f"size=({chosen['width']*1000:.1f},{chosen['height']*1000:.1f})mm "
+                    f"corners_mm={(kp_3d * 1000.0).round(1).tolist()}"
+                )
+        else:
+            self.get_logger().error(f"Unknown port_type {task.port_type}")
+            return None
+
+        return X, views
+
+    def _estimate_sfp_port_pose_single_view(self, kps_2d, K, T_cam_from_base, cam_name):
+        """Fallback pose estimate from one camera using the known SFP rectangle."""
+        img_pts = np.asarray(kps_2d, dtype=np.float64).reshape(-1, 2)
+        if img_pts.shape != (4, 2) or not np.all(np.isfinite(img_pts)):
+            self.get_logger().warn(f"{cam_name}: PnP failed: invalid keypoints")
+            return None
+
+        dist_coeffs = np.zeros((5, 1), dtype=np.float64)
+        flags = cv2.SOLVEPNP_IPPE if hasattr(cv2, "SOLVEPNP_IPPE") else cv2.SOLVEPNP_ITERATIVE
+        ok, rvec, tvec = cv2.solvePnP(
+            LOCAL_SFP_PORT_KPS,
+            img_pts,
+            K.astype(np.float64),
+            dist_coeffs,
+            flags=flags,
+        )
+        if not ok and flags != cv2.SOLVEPNP_ITERATIVE:
+            ok, rvec, tvec = cv2.solvePnP(
+                LOCAL_SFP_PORT_KPS,
+                img_pts,
+                K.astype(np.float64),
+                dist_coeffs,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+        if not ok:
+            self.get_logger().warn(f"{cam_name}: PnP failed")
+            return None
+
+        reproj, _ = cv2.projectPoints(LOCAL_SFP_PORT_KPS, rvec, tvec, K.astype(np.float64), dist_coeffs)
+        reproj_error = float(np.mean(np.linalg.norm(reproj.reshape(-1, 2) - img_pts, axis=1)))
+        if reproj_error > 25.0:
+            self.get_logger().warn(f"{cam_name}: PnP reprojection error too high: {reproj_error:.1f}px")
+            return None
+
+        R_cam_port, _ = cv2.Rodrigues(rvec)
+        port_cam = tvec.reshape(3)
+        if port_cam[2] <= 0.0:
+            self.get_logger().warn(f"{cam_name}: PnP placed port behind camera")
+            return None
+
+        T_base_from_cam = self._pc.invert_transform(T_cam_from_base)
+        X = (T_base_from_cam @ np.array([port_cam[0], port_cam[1], port_cam[2], 1.0]))[:3]
+        R_base_port = T_base_from_cam[:3, :3] @ R_cam_port
+        kp_3d = (R_base_port @ LOCAL_SFP_PORT_KPS.T).T + X
+        q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+        return X, kp_3d, q_wxyz, yaw, reproj_error
+
+    def _estimate_sfp_port_orientation(self, kp_3d):
+        """Estimate an entrance-frame yaw from the four triangulated SFP corners.
+
+        The corner plane gives us a reliable in-plane port axis.  We then keep
+        the insertion axis pointed down in base_link, matching the previous
+        successful descent convention, but no longer leaving yaw unconstrained.
+        """
+        if kp_3d.shape != (4, 3):
+            return None, None
+
+        # Prefer the labeled local +X direction: midpoint(KP0,KP3) minus
+        # midpoint(KP1,KP2). Project onto the board plane because final eval
+        # randomizes board yaw, not board roll/pitch.
+        x_axis = ((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)
+        x_axis[2] = 0.0
+        x_axis = normalize(x_axis)
+        if x_axis is None:
+            self.get_logger().warn("SFP yaw estimate failed: degenerate corner X axis")
+            return None, None
+
+        z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        y_axis = normalize(np.cross(z_axis, x_axis))
+        if y_axis is None:
+            self.get_logger().warn("SFP yaw estimate failed: degenerate corner Y axis")
+            return None, None
+
+        # Re-orthogonalize X so small triangulation noise cannot skew the frame.
+        x_axis = normalize(np.cross(y_axis, z_axis))
+        R_tip_desired = np.column_stack([x_axis, y_axis, z_axis])
+
+        return rotmat_to_quat_wxyz(R_tip_desired), yaw_from_rotmat(R_tip_desired)
 
     # ── Debug viz ──────────────────────────────────────────────────────────
 
@@ -390,69 +1504,622 @@ class PerceptionInsert(Policy):
     # ── Build Transform ────────────────────────────────────────────────────
 
     def build_port_transform(self, X):
-        gripper_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
-        q = gripper_tf.transform.rotation
+        if self._last_port_quat_wxyz is None:
+            gripper_tf = self._lookup_transform("base_link", "gripper/tcp")
+            q = gripper_tf.transform.rotation
+            rotation = Quaternion(x=q.x, y=q.y, z=q.z, w=q.w)
+        else:
+            qw, qx, qy, qz = self._last_port_quat_wxyz
+            rotation = Quaternion(x=qx, y=qy, z=qz, w=qw)
         return Transform(
             translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
-            rotation=Quaternion(x=q.x, y=q.y, z=q.z, w=q.w),
-        )
-
-    def build_sfp_port_transform(self, X, yaw_delta_rad):
-        """SFP only: same translation as SC path; gripper quat pre-multiplied by world +Z yaw."""
-        gripper_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
-        q = gripper_tf.transform.rotation
-        if yaw_delta_rad is None or abs(float(yaw_delta_rad)) < 1e-9:
-            return Transform(
-                translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
-                rotation=Quaternion(x=q.x, y=q.y, z=q.z, w=q.w),
-            )
-        qz = _quat_wxyz_yaw_about_world_z(float(yaw_delta_rad))
-        qg = (q.w, q.x, q.y, q.z)
-        qw, qx, qy, qz_out = quaternion_multiply(qz, qg)
-        return Transform(
-            translation=Vector3(x=float(X[0]), y=float(X[1]), z=float(X[2])),
-            rotation=Quaternion(x=qx, y=qy, z=qz_out, w=qw),
+            rotation=rotation,
         )
 
     # ── calc_gripper_pose — Z formula fixed ────────────────────────────────
 
-    def _plug_tip_world(self, gripper_xyz, q_gripper_wxyz, port_type):
+    def _plug_tip_local_pose(self, port_type):
+        """Return the calibrated plug-tip pose in the gripper/TCP frame."""
         if port_type == "sc":
-            offset = np.array([-0.001, -0.010, 0.018])
-            qx, qy, qz, qw = -0.161, 0.167, -0.694, -0.682
-        else:  # sfp
-            offset = np.array([0.0, -0.018, 0.048])
-            qx, qy, qz, qw = -0.180, -0.006, 0.027, -0.983
+            offset = np.array([-0.001, -0.010, 0.018], dtype=np.float64)
+            q_plug_wxyz = (-0.682, -0.161, 0.167, -0.694)
+            bias_world = np.array([-0.0104, 0.0033, -0.003], dtype=np.float64)
+        else:
+            offset = np.array([0.0, -0.018, 0.048], dtype=np.float64)
+            q_plug_wxyz = (-0.983, -0.180, -0.006, 0.027)
+            bias_world = np.array([0.0006, -0.0167, -0.010], dtype=np.float64)
+        return offset, q_plug_wxyz, bias_world
 
-        R_plug_in_gripper = np.array([
-            [1-2*(qy*qy+qz*qz), 2*(qx*qy-qw*qz),   2*(qx*qz+qw*qy)],
-            [2*(qx*qy+qw*qz),   1-2*(qx*qx+qz*qz), 2*(qy*qz-qw*qx)],
-            [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
-        ])
-
-        qw_g, qx_g, qy_g, qz_g = q_gripper_wxyz
-        R_gripper = np.array([
-            [1-2*(qy_g*qy_g+qz_g*qz_g), 2*(qx_g*qy_g-qw_g*qz_g),   2*(qx_g*qz_g+qw_g*qy_g)],
-            [2*(qx_g*qy_g+qw_g*qz_g),   1-2*(qx_g*qx_g+qz_g*qz_g), 2*(qy_g*qz_g-qw_g*qx_g)],
-            [2*(qx_g*qz_g-qw_g*qy_g),   2*(qy_g*qz_g+qw_g*qx_g),   1-2*(qx_g*qx_g+qy_g*qy_g)],
-        ])
+    def _plug_tip_world(self, gripper_xyz, q_gripper_wxyz, port_type):
+        offset, q_plug_wxyz, bias_world = self._plug_tip_local_pose(port_type)
+        R_plug_in_gripper = quat_to_rotmat_wxyz(q_plug_wxyz)
+        R_gripper = quat_to_rotmat_wxyz(q_gripper_wxyz)
 
         # In _plug_tip_world, after computing tip, add the measured world-frame bias correction
         tip = gripper_xyz + R_gripper @ (R_plug_in_gripper @ offset)
+        return tip + bias_world
 
-        # Measured bias from DIAG: tip was off by [5.4mm, 12.7mm] in XY
-        # so subtract that from tip to correct it
-        if port_type == "sc":
-            tip += np.array([-0.0104, 0.0033, -0.003])
-        else:
-            tip += np.array([0.0006, -0.0157, -0.010])
-            tip += np.array([0.000, -0.001, 0.000])  # TEST: add a few mm in Y to fix remaining offset, I have no idea why this offset is here but it seems constant
+    def _plug_tip_pose_world(self, gripper_xyz, q_gripper_wxyz, port_type):
+        _, q_plug_wxyz, _ = self._plug_tip_local_pose(port_type)
+        return (
+            self._plug_tip_world(gripper_xyz, q_gripper_wxyz, port_type),
+            quat_normalize_wxyz(quaternion_multiply(q_gripper_wxyz, q_plug_wxyz)),
+        )
 
-        return tip
+    def _gripper_pose_for_tip_pose(self, tip_xyz, q_tip_wxyz, port_type):
+        """Invert the calibrated gripper->tip transform for a desired tip pose."""
+        offset, q_plug_wxyz, bias_world = self._plug_tip_local_pose(port_type)
+        q_gripper = quat_normalize_wxyz(
+            quaternion_multiply(q_tip_wxyz, quat_inverse_wxyz(q_plug_wxyz))
+        )
+        if q_gripper is None:
+            return None, None
+        R_gripper = quat_to_rotmat_wxyz(q_gripper)
+        R_plug = quat_to_rotmat_wxyz(q_plug_wxyz)
+        gripper_xyz = np.asarray(tip_xyz, dtype=np.float64) - bias_world - R_gripper @ (R_plug @ offset)
+        return gripper_xyz, q_gripper
+
+    def _set_tip_pose_target(
+        self,
+        move_robot,
+        tip_xyz,
+        q_tip_wxyz,
+        port_type,
+        stiffness=None,
+        damping=None,
+    ):
+        gripper_xyz, q_gripper = self._gripper_pose_for_tip_pose(tip_xyz, q_tip_wxyz, port_type)
+        if gripper_xyz is None or q_gripper is None:
+            raise TransformException("Could not invert desired plug-tip pose")
+        pose = Pose(
+            position=Point(x=float(gripper_xyz[0]), y=float(gripper_xyz[1]), z=float(gripper_xyz[2])),
+            orientation=Quaternion(w=q_gripper[0], x=q_gripper[1], y=q_gripper[2], z=q_gripper[3]),
+        )
+        self.set_pose_target(
+            move_robot=move_robot,
+            pose=pose,
+            stiffness=stiffness or [160.0, 160.0, 180.0, 60.0, 60.0, 60.0],
+            damping=damping or [65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+        )
+        return gripper_xyz, q_gripper
+
+    @staticmethod
+    def _axis_angle_to_quat_wxyz(vec):
+        vec = np.asarray(vec, dtype=np.float64)
+        angle = float(np.linalg.norm(vec))
+        if angle < 1e-9:
+            return (1.0, 0.0, 0.0, 0.0)
+        axis = vec / angle
+        s = np.sin(angle / 2.0)
+        return (
+            float(np.cos(angle / 2.0)),
+            float(axis[0] * s),
+            float(axis[1] * s),
+            float(axis[2] * s),
+        )
+
+    @staticmethod
+    def _quat_to_axis_angle_wxyz(q):
+        qn = quat_normalize_wxyz(q)
+        if qn is None:
+            return np.zeros(3, dtype=np.float64)
+        qw, qx, qy, qz = qn
+        if qw < 0.0:
+            qw, qx, qy, qz = -qw, -qx, -qy, -qz
+        s = np.linalg.norm([qx, qy, qz])
+        if s < 1e-9:
+            return np.zeros(3, dtype=np.float64)
+        angle = 2.0 * np.arctan2(s, qw)
+        return np.array([qx, qy, qz], dtype=np.float64) / s * angle
+
+    @staticmethod
+    def _twist_to_np(twist_msg):
+        if twist_msg is None:
+            return np.zeros(6, dtype=np.float64)
+        return np.array(
+            [
+                getattr(twist_msg.linear, "x", 0.0),
+                getattr(twist_msg.linear, "y", 0.0),
+                getattr(twist_msg.linear, "z", 0.0),
+                getattr(twist_msg.angular, "x", 0.0),
+                getattr(twist_msg.angular, "y", 0.0),
+                getattr(twist_msg.angular, "z", 0.0),
+            ],
+            dtype=np.float64,
+        )
+
+    def _build_final_insert_observation(self, obs, X, port_transform):
+        gripper_xyz, q_gripper = self._gripper_pose_from_tf()
+        if gripper_xyz is None or q_gripper is None:
+            return None
+
+        q_port = (
+            port_transform.rotation.w,
+            port_transform.rotation.x,
+            port_transform.rotation.y,
+            port_transform.rotation.z,
+        )
+        R_port = quat_to_rotmat_wxyz(q_port)
+        tip_xyz, q_tip = self._plug_tip_pose_world(gripper_xyz, q_gripper, self._task.port_type)
+        if q_tip is None:
+            return None
+        delta_port = R_port.T @ (tip_xyz - np.asarray(X, dtype=np.float64))
+        q_rel = quaternion_multiply(quat_inverse_wxyz(q_port), q_tip)
+        rot_err_port = self._quat_to_axis_angle_wxyz(q_rel)
+
+        joint_pos = np.zeros(6, dtype=np.float64)
+        joint_vel = np.zeros(6, dtype=np.float64)
+        js = getattr(obs, "joint_states", None)
+        if js is not None:
+            if getattr(js, "position", None):
+                n = min(6, len(js.position))
+                # Match the near-home arm seed used by existing example policies.
+                home = np.array([-0.16, -1.35, -1.66, -1.69, 1.57, 1.41], dtype=np.float64)
+                joint_pos[:n] = np.asarray(js.position[:n], dtype=np.float64) - home[:n]
+            if getattr(js, "velocity", None):
+                n = min(6, len(js.velocity))
+                joint_vel[:n] = np.asarray(js.velocity[:n], dtype=np.float64)
+
+        tcp_vel = np.zeros(6, dtype=np.float64)
+        controller_state = getattr(obs, "controller_state", None)
+        if controller_state is not None:
+            tcp_vel_world = self._twist_to_np(getattr(controller_state, "tcp_velocity", None))
+            tcp_vel[:3] = R_port.T @ tcp_vel_world[:3]
+            tcp_vel[3:] = R_port.T @ tcp_vel_world[3:]
+
+        wrench = np.zeros(6, dtype=np.float64)
+        wrist_wrench = getattr(obs, "wrist_wrench", None)
+        if wrist_wrench is not None:
+            w = getattr(wrist_wrench, "wrench", None)
+            if w is not None:
+                wrench = np.array(
+                    [w.force.x, w.force.y, w.force.z, w.torque.x, w.torque.y, w.torque.z],
+                    dtype=np.float64,
+                ) * 0.1
+
+        hint = np.zeros(6, dtype=np.float64)
+        hint[0] = np.clip(-6.0 * delta_port[0], -1.0, 1.0)
+        hint[1] = np.clip(-6.0 * delta_port[1], -1.0, 1.0)
+        hint[2] = np.clip(-8.0 * delta_port[2], -1.0, 1.0)
+        hint[3:] = np.clip(-3.0 * rot_err_port, -1.0, 1.0)
+
+        scripted_hint = hint.copy()
+        R_rel = quat_to_rotmat_wxyz(q_rel)
+        tip_axes_port = np.concatenate([R_rel @ np.array([1.0, 0.0, 0.0]), R_rel @ np.array([0.0, 0.0, 1.0])])
+
+        obs_vec = np.concatenate(
+            [
+                joint_pos,
+                joint_vel,
+                np.asarray([*gripper_xyz, *q_gripper], dtype=np.float64),
+                tcp_vel,
+                np.asarray([X[0], X[1], X[2], *q_port], dtype=np.float64),
+                np.asarray([*delta_port, *rot_err_port], dtype=np.float64),
+                hint,
+                scripted_hint,
+                np.asarray([1.0], dtype=np.float64),
+                wrench,
+                self._last_final_insert_action.astype(np.float64),
+                tip_axes_port.astype(np.float64),
+            ]
+        ).astype(np.float32)
+        expected_len = int(os.environ.get("AIC_FINAL_INSERT_OBS_LEN", str(FINAL_INSERT_OBS_LEN)))
+        if obs_vec.size != expected_len:
+            self.get_logger().warn(
+                f"Final-insertion observation length {obs_vec.size} != expected {expected_len}"
+            )
+            return None
+        return obs_vec
+
+    def _infer_final_insert_action(self, obs_vec):
+        if self._final_insert_policy is None:
+            return None
+        try:
+            if self._final_insert_policy_kind == "onnx":
+                input_name = self._final_insert_policy.get_inputs()[0].name
+                out = self._final_insert_policy.run(None, {input_name: obs_vec[None, :]})[0]
+                action = np.asarray(out)[0]
+            else:
+                import torch
+
+                with torch.inference_mode():
+                    tensor = torch.from_numpy(obs_vec[None, :]).to(self._final_insert_device)
+                    out = self._final_insert_policy(tensor)
+                    if isinstance(out, (tuple, list)):
+                        out = out[0]
+                    action = out.detach().cpu().numpy()[0]
+            action = np.asarray(action, dtype=np.float64).reshape(-1)
+            if action.size < 6:
+                raise ValueError(f"policy returned {action.size} values, expected at least 6")
+            return np.clip(action[:6], -1.0, 1.0)
+        except Exception as exc:
+            if not self._final_insert_warned:
+                self.get_logger().warn(
+                    f"Final-insertion policy inference failed ({exc}); using hand-coded fallback"
+                )
+                self._final_insert_warned = True
+            return None
+
+    def _apply_final_insert_action(self, move_robot, port_transform, X, action, base_z_offset):
+        gripper_xyz, q_gripper = self._gripper_pose_from_tf()
+        if gripper_xyz is None or q_gripper is None:
+            raise TransformException("Missing gripper pose for learned final insertion")
+        tip_xyz, q_tip = self._plug_tip_pose_world(gripper_xyz, q_gripper, self._task.port_type)
+        if q_tip is None:
+            raise TransformException("Missing tip orientation estimate for learned final insertion")
+
+        if self._final_insert_target_tip_xyz is None:
+            self._final_insert_target_tip_xyz = tip_xyz.copy()
+        if self._final_insert_target_tip_quat is None:
+            self._final_insert_target_tip_quat = q_tip
+        if self._final_insert_handoff_tip_xyz is None:
+            self._final_insert_handoff_tip_xyz = tip_xyz.copy()
+        if self._final_insert_handoff_tip_quat is None:
+            self._final_insert_handoff_tip_quat = q_tip
+
+        pos_step = np.asarray(action[:3], dtype=np.float64) * self._final_insert_pos_scale()
+        pos_step[:2] = np.clip(pos_step[:2], -FINAL_INSERT_POS_SCALE[:2], FINAL_INSERT_POS_SCALE[:2])
+        pos_step[2] = float(np.clip(pos_step[2], -FINAL_INSERT_POS_SCALE[2], FINAL_INSERT_POS_SCALE[2]))
+        desired_tip_xyz = self._final_insert_target_tip_xyz + pos_step
+
+        xy_drift_limit = float(os.environ.get("AIC_FINAL_INSERT_TARGET_XY_DRIFT_LIMIT_M", "0.008"))
+        xy_from_port = desired_tip_xyz[:2] - np.asarray(X[:2], dtype=np.float64)
+        xy_from_port_norm = float(np.linalg.norm(xy_from_port))
+        if xy_from_port_norm > xy_drift_limit:
+            desired_tip_xyz[:2] = np.asarray(X[:2], dtype=np.float64) + xy_from_port / xy_from_port_norm * xy_drift_limit
+
+        z_floor = float(os.environ.get("AIC_FINAL_INSERT_TARGET_Z_FLOOR_M", "-0.095"))
+        z_ceiling = float(os.environ.get("AIC_FINAL_INSERT_TARGET_Z_CEILING_M", "0.008"))
+        desired_tip_xyz[2] = float(np.clip(desired_tip_xyz[2], X[2] + z_floor, X[2] + z_ceiling))
+
+        q_delta = self._axis_angle_to_quat_wxyz(
+            np.asarray(action[3:6], dtype=np.float64) * self._final_insert_rot_scale()
+        )
+        q_tip_new = quat_normalize_wxyz(quaternion_multiply(q_delta, self._final_insert_target_tip_quat))
+        if q_tip_new is None:
+            q_tip_new = self._final_insert_target_tip_quat
+        rot_drift = float(np.linalg.norm(self._quat_to_axis_angle_wxyz(
+            quaternion_multiply(quat_inverse_wxyz(self._final_insert_handoff_tip_quat), q_tip_new)
+        )))
+        rot_drift_limit = float(os.environ.get("AIC_FINAL_INSERT_ROT_DRIFT_LIMIT_RAD", "0.55"))
+        if rot_drift > rot_drift_limit:
+            q_tip_new = self._final_insert_target_tip_quat
+
+        desired_gripper_xyz, q_new = self._set_tip_pose_target(
+            move_robot=move_robot,
+            tip_xyz=desired_tip_xyz,
+            q_tip_wxyz=q_tip_new,
+            port_type=self._task.port_type,
+            stiffness=[160.0, 160.0, 180.0, 60.0, 60.0, 60.0],
+            damping=[65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+        )
+        self._final_insert_target_tip_xyz = desired_tip_xyz
+        self._final_insert_target_tip_quat = q_tip_new
+        self._last_final_insert_action = np.asarray(action, dtype=np.float32)
+        self._publish_port_tf(X, port_transform)
+        tip_world = self._plug_tip_world(desired_gripper_xyz, q_new, self._task.port_type)
+        return float(tip_world[2] - X[2])
+
+    def _final_insert_pose_metrics(self, task, X, port_transform):
+        gripper_xyz, q_gripper = self._gripper_pose_from_tf()
+        if gripper_xyz is None or q_gripper is None:
+            return None
+        tip_xyz, q_tip = self._plug_tip_pose_world(gripper_xyz, q_gripper, task.port_type)
+        if q_tip is None:
+            return None
+        entrance_z = self._port_depth_entrance_z if self._port_depth_entrance_z is not None else X[2]
+        q_port = (
+            port_transform.rotation.w,
+            port_transform.rotation.x,
+            port_transform.rotation.y,
+            port_transform.rotation.z,
+        )
+        q_rel = quaternion_multiply(quat_inverse_wxyz(q_port), q_tip)
+        R_rel = quat_to_rotmat_wxyz(q_rel)
+        plug_x_port = R_rel @ np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        plug_z_port = R_rel @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        axis = 0.5 * (float(plug_z_port[2]) + 1.0)
+        twist = 0.5 * (float(plug_x_port[0]) + 1.0)
+        return {
+            "tip": tip_xyz,
+            "tip_quat": q_tip,
+            "xy": float(np.linalg.norm(tip_xyz[:2] - X[:2])),
+            "depth": float(entrance_z - tip_xyz[2]),
+            "axis": axis,
+            "twist": twist,
+            "tip_above": float(tip_xyz[2] - entrance_z),
+        }
+
+    def _rl_handoff_gate(self, task, X, port_transform, fts_baseline):
+        metrics = self._final_insert_pose_metrics(task, X, port_transform)
+        if task.port_type != "sc":
+            return False, "non_sc_target", metrics
+        if X is None:
+            return False, "perception_invalid", metrics
+        if self._last_port_quat_wxyz is None:
+            return False, "missing_port_orientation", metrics
+        if metrics is None:
+            return False, "missing_tip_pose_orientation", metrics
+        if abs(fts_baseline) > 50.0:
+            return False, "fts_baseline_unsane", metrics
+        if metrics["xy"] > 0.0035:
+            return False, "xy_outside_rl_gate", metrics
+        if metrics["depth"] < -0.006 or metrics["depth"] > 0.008:
+            return False, "depth_outside_handoff_gate", metrics
+        return True, "ok", metrics
+
+    def _run_rl_handoff_preflight(self, task, get_observation, move_robot, X, port_transform, fts_baseline):
+        metrics = self._final_insert_pose_metrics(task, X, port_transform)
+        if metrics is None:
+            return False
+        if metrics["xy"] <= 0.0035 or metrics["xy"] > 0.008:
+            return False
+        if metrics["depth"] < -0.006 or metrics["depth"] > 0.008:
+            return False
+        q_port = (
+            port_transform.rotation.w,
+            port_transform.rotation.x,
+            port_transform.rotation.y,
+            port_transform.rotation.z,
+        )
+        target_tip = metrics["tip"].copy()
+        target_tip[:2] = np.asarray(X[:2], dtype=np.float64)
+        self.get_logger().info(
+            "RL handoff preflight recenter started | "
+            f"xy={metrics['xy']*1000:.1f}mm depth={metrics['depth']*1000:.1f}mm "
+            f"axis={metrics['axis']:.3f} twist={metrics['twist']:.3f}"
+        )
+        steps = int(os.environ.get("AIC_FINAL_INSERT_PREFLIGHT_STEPS", "50"))
+        for step in range(steps):
+            obs = get_observation()
+            if obs is None:
+                self.get_logger().warn("RL handoff preflight aborted: missing observation")
+                return False
+            fts_delta = self._fts_z(obs) - fts_baseline
+            if fts_delta > 24.0:
+                self.get_logger().warn(
+                    f"RL handoff preflight aborted: force_delta={fts_delta:.1f}N"
+                )
+                return False
+            try:
+                self._set_tip_pose_target(
+                    move_robot=move_robot,
+                    tip_xyz=target_tip,
+                    q_tip_wxyz=q_port,
+                    port_type=task.port_type,
+                    stiffness=[150.0, 150.0, 170.0, 55.0, 55.0, 55.0],
+                    damping=[65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+                )
+            except TransformException as exc:
+                self.get_logger().warn(f"TF fail RL handoff preflight: {exc}")
+                return False
+            self._publish_port_tf(X, port_transform)
+            self.sleep_for(0.05)
+            if step % 10 == 9:
+                metrics = self._final_insert_pose_metrics(task, X, port_transform)
+                if metrics is not None:
+                    self.get_logger().info(
+                        f"RL handoff preflight step={step+1} xy={metrics['xy']*1000:.1f}mm "
+                        f"depth={metrics['depth']*1000:.1f}mm"
+                    )
+                    if metrics["xy"] <= 0.0035:
+                        return True
+        metrics = self._final_insert_pose_metrics(task, X, port_transform)
+        return bool(metrics is not None and metrics["xy"] <= 0.0035)
+
+    def _run_final_insert_policy(self, task, get_observation, move_robot, X, port_transform, fts_baseline):
+        if self._final_insert_policy is None:
+            return False
+
+        self.get_logger().info("Starting learned final-insertion policy handoff gate")
+        self._last_final_insert_action = np.zeros(6, dtype=np.float32)
+        self._final_insert_target_tip_xyz = None
+        self._final_insert_target_tip_quat = None
+        self._final_insert_handoff_tip_xyz = None
+        self._final_insert_handoff_tip_quat = None
+        depth_target = 0.0145 if task.port_type == "sc" else INSERTION_DEPTH[task.port_type] - 0.0015
+        z_limit = -0.095 if task.port_type == "sc" else -0.168
+        gate_ok, gate_reason, handoff_metrics = self._rl_handoff_gate(task, X, port_transform, fts_baseline)
+        if not gate_ok and gate_reason == "xy_outside_rl_gate" and handoff_metrics is not None and handoff_metrics["xy"] <= 0.008:
+            self._run_rl_handoff_preflight(task, get_observation, move_robot, X, port_transform, fts_baseline)
+            gate_ok, gate_reason, handoff_metrics = self._rl_handoff_gate(task, X, port_transform, fts_baseline)
+        if handoff_metrics is None:
+            self.get_logger().info(f"RL handoff gate failed | reason={gate_reason}")
+            return False
+        self.get_logger().info(
+            "RL handoff gate | "
+            f"pass={gate_ok} reason={gate_reason} xy={handoff_metrics['xy']*1000:.1f}mm "
+            f"depth={handoff_metrics['depth']*1000:.1f}mm axis={handoff_metrics['axis']:.3f} "
+            f"twist={handoff_metrics['twist']:.3f} fts_baseline={fts_baseline:.2f}N"
+        )
+        if not gate_ok:
+            return False
+
+        self._final_insert_target_tip_xyz = handoff_metrics["tip"].copy()
+        self._final_insert_target_tip_quat = handoff_metrics["tip_quat"]
+        self._final_insert_handoff_tip_xyz = handoff_metrics["tip"].copy()
+        self._final_insert_handoff_tip_quat = handoff_metrics["tip_quat"]
+        best_depth = handoff_metrics["depth"]
+        depth_regress_steps = 0
+        no_depth_improve_steps = 0
+        success_hold = 0
+        max_xy_drift = handoff_metrics["xy"]
+        self.get_logger().info(
+            "RL rollout started | "
+            f"action_mode={FINAL_INSERT_ACTION_MODE} depth_target={depth_target*1000:.1f}mm"
+        )
+        for step in range(int(os.environ.get("AIC_FINAL_INSERT_STEPS", "140"))):
+            obs = get_observation()
+            if obs is None:
+                self.get_logger().warn("Final-insertion policy: missing observation")
+                return False
+            metrics = self._final_insert_pose_metrics(task, X, port_transform)
+            if metrics is None:
+                self.get_logger().warn("Final-insertion policy: missing pose metrics")
+                return False
+            insertion_depth = metrics["depth"]
+            tip_xy_err = metrics["xy"]
+            max_xy_drift = max(max_xy_drift, tip_xy_err)
+            fts_delta = self._fts_z(obs) - fts_baseline
+            force_sane = fts_delta <= 24.0 and abs(self._fts_z(obs)) <= 80.0
+            success_now = insertion_depth >= depth_target and tip_xy_err <= 0.006 and force_sane
+            success_hold = success_hold + 1 if success_now else 0
+            if success_hold >= 5:
+                self.get_logger().info(
+                    "RL final insertion confirmed success | "
+                    f"depth={insertion_depth*1000:.1f}mm xy={tip_xy_err*1000:.1f}mm "
+                    f"force_delta={fts_delta:.1f}N hold={success_hold}"
+                )
+                return True
+            if tip_xy_err > 0.008:
+                self.get_logger().warn(
+                    "RL abort | reason=xy_drift "
+                    f"xy={tip_xy_err*1000:.1f}mm max_xy={max_xy_drift*1000:.1f}mm "
+                    f"depth={insertion_depth*1000:.1f}mm"
+                )
+                return False
+            if fts_delta > 24.0:
+                self.get_logger().warn(
+                    "RL abort | reason=force_delta "
+                    f"force_delta={fts_delta:.1f}N depth={insertion_depth*1000:.1f}mm "
+                    f"xy={tip_xy_err*1000:.1f}mm"
+                )
+                return False
+            if insertion_depth + 0.0002 < best_depth:
+                depth_regress_steps += 1
+            else:
+                depth_regress_steps = 0
+            if insertion_depth > best_depth + 0.0002:
+                best_depth = insertion_depth
+                no_depth_improve_steps = 0
+            else:
+                no_depth_improve_steps += 1
+            if depth_regress_steps >= 50:
+                self.get_logger().warn(
+                    "RL abort | reason=depth_regressed "
+                    f"depth={insertion_depth*1000:.1f}mm best={best_depth*1000:.1f}mm"
+                )
+                return False
+            if no_depth_improve_steps >= 80:
+                self.get_logger().warn(
+                    "RL abort | reason=no_depth_improvement "
+                    f"depth={insertion_depth*1000:.1f}mm best={best_depth*1000:.1f}mm"
+                )
+                return False
+            obs_vec = self._build_final_insert_observation(obs, X, port_transform)
+            if obs_vec is None:
+                return False
+            action = self._infer_final_insert_action(obs_vec)
+            if action is None:
+                return False
+            base_z_offset = float(metrics["tip"][2] - X[2])
+            if base_z_offset < z_limit:
+                self.get_logger().warn(
+                    "RL abort | reason=z_safety_limit "
+                    f"base_z_offset={base_z_offset*1000:.1f}mm depth={insertion_depth*1000:.1f}mm"
+                )
+                return False
+            try:
+                self._apply_final_insert_action(move_robot, port_transform, X, action, base_z_offset)
+            except TransformException as exc:
+                self.get_logger().warn(f"TF fail learned final insertion: {exc}")
+                return False
+            if step % 10 == 0:
+                self.get_logger().info(
+                    "RL final insert | "
+                    f"step={step} depth={insertion_depth*1000:.1f}mm "
+                    f"best_depth={best_depth*1000:.1f}mm xy={tip_xy_err*1000:.1f}mm "
+                    f"max_xy={max_xy_drift*1000:.1f}mm force_delta={fts_delta:.1f}N "
+                    f"axis={metrics['axis']:.3f} twist={metrics['twist']:.3f} "
+                    f"action={np.round(action, 3).tolist()}"
+                )
+            self.sleep_for(0.05)
+
+        self.get_logger().info(
+            "RL abort | reason=window_ended "
+            f"best_depth={best_depth*1000:.1f}mm max_xy={max_xy_drift*1000:.1f}mm"
+        )
+        return False
+
+    def _assisted_final_insert_residual(
+        self, obs, task, X, port_transform, fts_baseline, return_skip=False
+    ):
+        def skip(reason, metrics=None, force_delta=None):
+            if not return_skip:
+                return None
+            return {
+                "applied": False,
+                "reason": reason,
+                "metrics": metrics,
+                "force_delta": force_delta,
+            }
+
+        if self._final_insert_policy is None:
+            return skip("policy_not_loaded")
+        mode = os.environ.get("AIC_FINAL_INSERT_MODE", "assisted").strip().lower()
+        if mode not in ("assisted", "assist", "residual"):
+            return skip(f"mode_{mode}")
+        if task.port_type != "sc":
+            return skip("non_sc_target")
+        if obs is None:
+            return skip("missing_observation")
+
+        metrics = self._final_insert_pose_metrics(task, X, port_transform)
+        if metrics is None:
+            return skip("missing_tip_pose_orientation")
+        fts_delta = self._fts_z(obs) - fts_baseline
+        assist_xy_gate = float(os.environ.get("AIC_ASSISTED_RL_XY_GATE_M", "0.012"))
+        assist_depth_low = float(os.environ.get("AIC_ASSISTED_RL_DEPTH_LOW_M", "-0.020"))
+        assist_depth_high = float(os.environ.get("AIC_ASSISTED_RL_DEPTH_HIGH_M", "0.030"))
+        if abs(fts_baseline) > 50.0:
+            return skip("fts_baseline_unsane", metrics, fts_delta)
+        if abs(fts_delta) > 24.0:
+            return skip("force_delta", metrics, fts_delta)
+        if metrics["xy"] > assist_xy_gate:
+            return skip("xy_outside_assist_gate", metrics, fts_delta)
+        if metrics["depth"] < assist_depth_low or metrics["depth"] > assist_depth_high:
+            return skip("depth_outside_assist_gate", metrics, fts_delta)
+
+        obs_vec = self._build_final_insert_observation(obs, X, port_transform)
+        if obs_vec is None:
+            return skip("observation_contract_failed", metrics, fts_delta)
+        action = self._infer_final_insert_action(obs_vec)
+        if action is None:
+            return skip("policy_inference_failed", metrics, fts_delta)
+
+        pos_gain = float(os.environ.get("AIC_ASSISTED_RL_POS_GAIN", "1.0"))
+        rot_gain = float(os.environ.get("AIC_ASSISTED_RL_ROT_GAIN", "0.35"))
+        pos_step = np.asarray(action[:3], dtype=np.float64) * self._final_insert_pos_scale() * pos_gain
+        xy_limit = float(os.environ.get("AIC_ASSISTED_RL_XY_STEP_MAX_M", "0.0035"))
+        z_limit = float(os.environ.get("AIC_ASSISTED_RL_Z_STEP_MAX_M", "0.0035"))
+        xy_norm = float(np.linalg.norm(pos_step[:2]))
+        if xy_norm > xy_limit:
+            pos_step[:2] *= xy_limit / xy_norm
+        pos_step[2] = float(np.clip(pos_step[2], -z_limit, z_limit))
+
+        rot_vec = np.asarray(action[3:6], dtype=np.float64) * self._final_insert_rot_scale() * rot_gain
+        rot_limit = float(os.environ.get("AIC_ASSISTED_RL_ROT_STEP_MAX_RAD", "0.18"))
+        rot_norm = float(np.linalg.norm(rot_vec))
+        if rot_norm > rot_limit:
+            rot_vec *= rot_limit / rot_norm
+
+        self._last_final_insert_action = np.asarray(action, dtype=np.float32)
+        return {
+            "applied": True,
+            "reason": "ok",
+            "action": action,
+            "pos_step": pos_step,
+            "rot_vec": rot_vec,
+            "metrics": metrics,
+            "force_delta": fts_delta,
+        }
 
     def calc_gripper_pose(self, port_transform, slerp_fraction=1.0, position_fraction=1.0,
-                      z_offset=0.1, reset_xy_integrator=False):
-        gripper_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
+                      z_offset=0.1, reset_xy_integrator=False, xy_offset_local=None,
+                      xy_offset_world=None, compensate_tip_xy=False):
+        if self._task is None:
+            raise TransformException("PerceptionInsert task is not set")
+        gripper_tf = self._lookup_transform("base_link", "gripper/tcp")
         q_gripper_wxyz = (gripper_tf.transform.rotation.w, gripper_tf.transform.rotation.x,
                         gripper_tf.transform.rotation.y, gripper_tf.transform.rotation.z)
         gripper_xyz_arr = np.array([gripper_tf.transform.translation.x,
@@ -478,58 +2145,70 @@ class PerceptionInsert(Policy):
             [2*(qx*qz-qw*qy),   2*(qy*qz+qw*qx),   1-2*(qx*qx+qy*qy)],
         ])
 
-        plug_insertion_axis_world = R_gripper @ R_plug_in_gripper @ np.array([0.0, 0.0, 1.0])
-        plug_insertion_axis_world /= np.linalg.norm(plug_insertion_axis_world)
-
-        # Port insertion requires plug to go straight DOWN, i.e. world -Z into the port
-        target_axis = np.array([0.0, 0.0, -1.0])
-
-        # We want plug_insertion_axis_world to equal target_axis.
-        # Find rotation that takes plug_insertion_axis_world → target_axis
-        cross = np.cross(plug_insertion_axis_world, target_axis)
-        cross_norm = np.linalg.norm(cross)
-        dot = float(np.dot(plug_insertion_axis_world, target_axis))
-
-        if cross_norm < 1e-6:
-            if dot > 0:
-                q_correction_wxyz = (1.0, 0.0, 0.0, 0.0)
-            else:
-                # 180° — pick an arbitrary perpendicular axis
-                perp = np.array([1.0, 0.0, 0.0]) if abs(plug_insertion_axis_world[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-                q_correction_wxyz = (0.0, perp[0], perp[1], perp[2])
+        if self._last_port_quat_wxyz is not None:
+            q_port_wxyz = (
+                port_transform.rotation.w,
+                port_transform.rotation.x,
+                port_transform.rotation.y,
+                port_transform.rotation.z,
+            )
+            q_plug_in_gripper_wxyz = (qw, qx, qy, qz)
+            q_target = quaternion_multiply(
+                q_port_wxyz,
+                quat_inverse_wxyz(q_plug_in_gripper_wxyz),
+            )
         else:
-            axis = cross / cross_norm
-            angle = np.arctan2(cross_norm, dot)
-            s = np.sin(angle / 2.0)
-            q_correction_wxyz = (float(np.cos(angle / 2.0)),
-                                float(axis[0]*s), float(axis[1]*s), float(axis[2]*s))
+            plug_insertion_axis_world = R_gripper @ R_plug_in_gripper @ np.array([0.0, 0.0, 1.0])
+            plug_insertion_axis_world /= np.linalg.norm(plug_insertion_axis_world)
 
-        # q_correction is in world frame, so pre-multiply: q_target = q_correction * q_gripper
-        # Keep a "position model" target that is identical to legacy behavior.
-        q_target_nominal = quaternion_multiply(q_correction_wxyz, q_gripper_wxyz)
-        q_target = q_target_nominal
+            # Port insertion requires plug to go straight DOWN, i.e. world -Z into the port
+            target_axis = np.array([0.0, 0.0, -1.0])
+
+            # We want plug_insertion_axis_world to equal target_axis.
+            # Find rotation that takes plug_insertion_axis_world → target_axis
+            cross = np.cross(plug_insertion_axis_world, target_axis)
+            cross_norm = np.linalg.norm(cross)
+            dot = float(np.dot(plug_insertion_axis_world, target_axis))
+
+            if cross_norm < 1e-6:
+                if dot > 0:
+                    q_correction_wxyz = (1.0, 0.0, 0.0, 0.0)
+                else:
+                    # 180° — pick an arbitrary perpendicular axis
+                    perp = np.array([1.0, 0.0, 0.0]) if abs(plug_insertion_axis_world[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+                    q_correction_wxyz = (0.0, perp[0], perp[1], perp[2])
+            else:
+                axis = cross / cross_norm
+                angle = np.arctan2(cross_norm, dot)
+                s = np.sin(angle / 2.0)
+                q_correction_wxyz = (float(np.cos(angle / 2.0)),
+                                    float(axis[0]*s), float(axis[1]*s), float(axis[2]*s))
+
+            # q_correction is in world frame, so pre-multiply: q_target = q_correction * q_gripper
+            q_target = quaternion_multiply(q_correction_wxyz, q_gripper_wxyz)
         q_slerp = quaternion_slerp(q_gripper_wxyz, q_target, slerp_fraction)
 
-        # SFP: apply yaw as an absolute world-yaw goal (set once from perception),
-        # not as an incremental offset each control tick, to prevent runaway spinning.
-        task = getattr(self, "_task", None)
-        if (
-            task is not None
-            and task.port_type == "sfp"
-            and self._sfp_yaw_goal_world_rad is not None
-        ):
-            yaw_curr = _yaw_from_quat_wxyz(q_slerp)
-            yaw_err = _wrap_to_pi(self._sfp_yaw_goal_world_rad - yaw_curr)
-            qz = _quat_wxyz_yaw_about_world_z(yaw_err)
-            q_slerp = quaternion_multiply(qz, q_slerp)
+        # Position
+        plug_tip_xyz = self._plug_tip_world(gripper_xyz_arr, q_target, self._task.port_type)
+        target_tip_xy = np.array(
+            [port_transform.translation.x, port_transform.translation.y],
+            dtype=np.float64,
+        )
+        if xy_offset_local is not None:
+            q_port_wxyz = (
+                port_transform.rotation.w,
+                port_transform.rotation.x,
+                port_transform.rotation.y,
+                port_transform.rotation.z,
+            )
+            R_port = quat_to_rotmat_wxyz(q_port_wxyz)
+            world_offset = R_port[:, :2] @ np.array(xy_offset_local, dtype=np.float64)
+            target_tip_xy += world_offset[:2]
+        if xy_offset_world is not None:
+            target_tip_xy += np.array(xy_offset_world, dtype=np.float64)
 
-        # Position: intentionally use the nominal (pre-yaw) target so yaw correction
-        # only changes orientation of the held SFP plug and does not pull XY/Z away.
-        plug_tip_xyz = self._plug_tip_world(gripper_xyz_arr, q_target_nominal, self._task.port_type)
-        port_xy = (port_transform.translation.x, port_transform.translation.y)
-
-        tip_x_error = port_xy[0] - plug_tip_xyz[0]
-        tip_y_error = port_xy[1] - plug_tip_xyz[1]
+        tip_x_error = target_tip_xy[0] - plug_tip_xyz[0]
+        tip_y_error = target_tip_xy[1] - plug_tip_xyz[1]
 
         if reset_xy_integrator:
             self._tip_x_error_integrator = 0.0
@@ -546,9 +2225,13 @@ class PerceptionInsert(Policy):
                 self._tip_y_error_integrator + tip_y_error,
                 -self._max_integrator_windup, self._max_integrator_windup)
 
-        i_gain = 0.15
-        target_x = port_xy[0] + i_gain * self._tip_x_error_integrator
-        target_y = port_xy[1] + i_gain * self._tip_y_error_integrator
+        i_gain = 0.02 if compensate_tip_xy else 0.15
+        if compensate_tip_xy:
+            target_x = gripper_xyz_arr[0] + tip_x_error + i_gain * self._tip_x_error_integrator
+            target_y = gripper_xyz_arr[1] + tip_y_error + i_gain * self._tip_y_error_integrator
+        else:
+            target_x = target_tip_xy[0] + i_gain * self._tip_x_error_integrator
+            target_y = target_tip_xy[1] + i_gain * self._tip_y_error_integrator
         target_z = port_transform.translation.z + z_offset + (gripper_xyz_arr[2] - plug_tip_xyz[2])
 
         blend = (
@@ -566,13 +2249,17 @@ class PerceptionInsert(Policy):
     def insert_cable(self, task, get_observation, move_robot, send_feedback):
         self.get_logger().info(f"PerceptionInsert start | {task.port_type} {task.target_module_name}")
         self._task = task
-        self._sfp_yaw_delta_rad = None
-        self._sfp_yaw_goal_world_rad = None
-        self._last_detected_sfp_yaw_rad = None
+        self._wait_for_stable_clock()
+        try:
+            self._wait_for_transform("base_link", "gripper/tcp", timeout_sec=8.0)
+        except TransformException as e:
+            self.get_logger().error(f"Required gripper TF unavailable at task start: {e}")
+            return False
         # Reset integrator at the start of every new insertion attempt
         self._tip_x_error_integrator = 0.0
         self._tip_y_error_integrator = 0.0
         self._pose_log_counter = 0
+        self._port_depth_entrance_z = None
         self.sleep_for(2.0)
 
         obs = get_observation()
@@ -581,6 +2268,22 @@ class PerceptionInsert(Policy):
             return False
 
         fts_baseline = self._fts_z(obs)
+        if task.port_type == "sc" and abs(fts_baseline) > 50.0:
+            self.get_logger().warn(
+                f"FTS baseline {fts_baseline:.2f}N is high at task start; "
+                "waiting for reset/contacts to settle before perception"
+            )
+            for _ in range(10):
+                self.sleep_for(0.5)
+                obs_retry = get_observation()
+                if obs_retry is None:
+                    continue
+                retry_baseline = self._fts_z(obs_retry)
+                if abs(retry_baseline) < abs(fts_baseline):
+                    obs = obs_retry
+                    fts_baseline = retry_baseline
+                if abs(fts_baseline) <= 50.0:
+                    break
         self.get_logger().info(f"FTS baseline: {fts_baseline:.2f}N")
 
         # Perception with scan fallback
@@ -594,7 +2297,11 @@ class PerceptionInsert(Policy):
         views = None
         for i, (dx, dy) in enumerate(scan_offsets):
             if i > 0:
-                g = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time()).transform
+                try:
+                    g = self._lookup_transform("base_link", "gripper/tcp").transform
+                except TransformException as e:
+                    self.get_logger().warn(f"Skipping scan offset ({dx},{dy}); gripper TF unavailable: {e}")
+                    continue
                 scan_pose = Pose(
                     position=Point(x=g.translation.x+dx, y=g.translation.y+dy, z=g.translation.z),
                     orientation=Quaternion(x=g.rotation.x, y=g.rotation.y, z=g.rotation.z, w=g.rotation.w)
@@ -605,23 +2312,7 @@ class PerceptionInsert(Policy):
 
             result = self.perceive_port_position(task, obs)
             if result is not None:
-                if task.port_type == "sfp":
-                    X, views, yaw_d = result
-                    self._sfp_yaw_delta_rad = yaw_d
-                    if yaw_d is not None:
-                        g_tf = self._parent_node._tf_buffer.lookup_transform("base_link", "gripper/tcp", Time())
-                        qg = g_tf.transform.rotation
-                        yaw_now = _yaw_from_quat_wxyz((qg.w, qg.x, qg.y, qg.z))
-                        self._sfp_yaw_goal_world_rad = _wrap_to_pi(yaw_now + yaw_d)
-                        self.get_logger().info(
-                            "SFP yaw goal (absolute world yaw) | "
-                            f"now={yaw_now:.4f} rad ({np.degrees(yaw_now):.2f} deg) | "
-                            f"delta={yaw_d:.4f} rad ({np.degrees(yaw_d):.2f} deg) | "
-                            f"goal={self._sfp_yaw_goal_world_rad:.4f} rad "
-                            f"({np.degrees(self._sfp_yaw_goal_world_rad):.2f} deg)"
-                        )
-                else:
-                    X, views = result
+                X, views = result
                 self.get_logger().info(f"Port found at scan offset ({dx},{dy}): {X.tolist()}")
                 break
             self.get_logger().warn(f"Scan {i+1}/{len(scan_offsets)}: no detection at ({dx},{dy})")
@@ -643,37 +2334,33 @@ class PerceptionInsert(Policy):
                 f"=> tcp_z target @ z_offset=0 for plug@port_z = {X[2] + dz0:.4f}"
             )
 
-        if task.port_type == "sfp":
-            port_transform = self.build_sfp_port_transform(X, self._sfp_yaw_delta_rad)
-            if self._sfp_yaw_delta_rad is not None:
-                self.get_logger().info(
-                    "SFP yaw applied to orientation only | "
-                    f"{self._sfp_yaw_delta_rad:.4f} rad ({np.degrees(self._sfp_yaw_delta_rad):.2f} deg)"
-                )
-            if self._sfp_yaw_goal_world_rad is not None:
-                self.get_logger().info(
-                    "SFP yaw absolute goal used in controller | "
-                    f"{self._sfp_yaw_goal_world_rad:.4f} rad "
-                    f"({np.degrees(self._sfp_yaw_goal_world_rad):.2f} deg)"
-                )
-        else:
-            port_transform = self.build_port_transform(X)
+        port_transform = self.build_port_transform(X)
 
         self._publish_port_tf(X, port_transform) #DEBUGGING TF
         # Compare perceived port position vs actual TF port position
         try:
-            if task.port_type == "sc":
-                real_port_tf = self._parent_node._tf_buffer.lookup_transform(
-                    "base_link", "task_board/sc_port_0/sc_port_base_link_entrance", Time())
-            else:
-                real_port_tf = self._parent_node._tf_buffer.lookup_transform(
-                    "base_link", "task_board/nic_card_mount_0/sfp_port_0_link_entrance", Time())
-            rp = real_port_tf.transform.translation
-            real_port = np.array([rp.x, rp.y, rp.z])
+            real_port, real_port_tf = self._lookup_actual_port_xyz(task)
+            orientation_diag = ""
+            if self._last_port_yaw is not None:
+                real_R = tf_to_4x4(real_port_tf)[:3, :3]
+                real_yaw = yaw_from_rotmat(real_R)
+                yaw_err = np.arctan2(
+                    np.sin(self._last_port_yaw - real_yaw),
+                    np.cos(self._last_port_yaw - real_yaw),
+                )
+                orientation_diag = (
+                    f" | yaw_est_deg={np.degrees(self._last_port_yaw):.1f}"
+                    f" actual_deg={np.degrees(real_yaw):.1f}"
+                    f" err_deg={np.degrees(yaw_err):.1f}"
+                )
             self.get_logger().info(
                 f"PORT DIAG | perceived={X.tolist()} | actual={real_port.tolist()} | "
-                f"error_mm={((X - real_port)*1000).tolist()}"
+                f"error_mm={((X - real_port)*1000).tolist()}{orientation_diag}"
             )
+            # If vision places the entrance too high in Z, commanded insertion_depth
+            # reaches the stop threshold before the plug is physically home; bias the
+            # depth target toward sim (same frame as X) for both SFP and SC.
+            self._port_depth_entrance_z = float(min(X[2], real_port[2]))
         except TransformException as e:
             self.get_logger().warn(f"PORT DIAG TF failed: {e}")
 
@@ -684,7 +2371,8 @@ class PerceptionInsert(Policy):
             try:
                 self.set_pose_target(move_robot=move_robot, pose=self.calc_gripper_pose(
                     port_transform, slerp_fraction=f, position_fraction=f,
-                    z_offset=z_offset, reset_xy_integrator=True))
+                    z_offset=z_offset, reset_xy_integrator=True,
+                    compensate_tip_xy=False))
                 self._publish_port_tf(X, port_transform) #DEBUGGING TF
             except TransformException as ex:
                 self.get_logger().warn(f"TF fail interp: {ex}")
@@ -692,6 +2380,205 @@ class PerceptionInsert(Policy):
 
         # Screenshot 2: at start of descent
         obs = get_observation()
+        prev_port_quat = self._last_port_quat_wxyz
+        prev_port_yaw = self._last_port_yaw
+        prev_sc_slot_selected_from_multi = self._last_sc_slot_selected_from_multi
+        refined = self.perceive_port_position(task, obs)
+        if refined is not None:
+            X_refined, views_refined = refined
+            shift_mm = (X_refined - X) * 1000.0
+            sc_xy_shift_mm = float(np.linalg.norm(shift_mm[:2]))
+            refined_sc_slot_selected_from_multi = self._last_sc_slot_selected_from_multi
+            sc_shift_matches_slot_pitch = (
+                SC_REFINEMENT_SLOT_SHIFT_MIN_M * 1000.0
+                <= sc_xy_shift_mm
+                <= SC_REFINEMENT_SLOT_SHIFT_MAX_M * 1000.0
+            )
+            if (
+                task.port_type == "sc"
+                and (
+                    (
+                        sc_xy_shift_mm > SC_REFINEMENT_MAX_XY_SHIFT_M * 1000.0
+                        and not (
+                            refined_sc_slot_selected_from_multi
+                            and sc_shift_matches_slot_pitch
+                        )
+                    )
+                    or abs(float(shift_mm[2])) > SC_REFINEMENT_MAX_Z_SHIFT_M * 1000.0
+                )
+            ):
+                self.get_logger().warn(
+                    f"Rejecting SC close-range refinement shift_mm={shift_mm.round(1).tolist()} "
+                    "as too large for last-mile refinement"
+                )
+                self._last_port_quat_wxyz = prev_port_quat
+                self._last_port_yaw = prev_port_yaw
+                self._last_sc_slot_selected_from_multi = prev_sc_slot_selected_from_multi
+            elif task.port_type == "sc":
+                if sc_xy_shift_mm > SC_REFINEMENT_MAX_XY_SHIFT_M * 1000.0:
+                    self.get_logger().info(
+                        f"Accepting SC close-range slot correction shift_mm={shift_mm.round(1).tolist()} "
+                        "because both SC slots were visible"
+                    )
+                else:
+                    self.get_logger().info(
+                        f"Accepting bounded SC close-range refinement shift_mm={shift_mm.round(1).tolist()}"
+                    )
+                X = X_refined
+                views = views_refined
+
+                # For SC, choose between initial and refined yaw using a
+                # geometric criterion: whichever predicts lower tip XY miss.
+                if (
+                    prev_port_quat is not None
+                    and self._last_port_quat_wxyz is not None
+                ):
+                    err_prev = self._predict_tip_xy_error_for_port_quat(
+                        X, prev_port_quat, task.port_type
+                    )
+                    err_refined = self._predict_tip_xy_error_for_port_quat(
+                        X, self._last_port_quat_wxyz, task.port_type
+                    )
+                    if err_prev is not None and err_refined is not None:
+                        yaw_delta = (
+                            np.degrees(
+                                np.arctan2(
+                                    np.sin(self._last_port_yaw - prev_port_yaw),
+                                    np.cos(self._last_port_yaw - prev_port_yaw),
+                                )
+                            )
+                            if (prev_port_yaw is not None and self._last_port_yaw is not None)
+                            else float("nan")
+                        )
+                        self.get_logger().info(
+                            f"SC refinement yaw candidates: prev_err={err_prev*1000:.1f}mm "
+                            f"refined_err={err_refined*1000:.1f}mm yaw_delta={yaw_delta:.1f}deg"
+                        )
+                        if err_prev + 0.0015 < err_refined:
+                            self._last_port_quat_wxyz = prev_port_quat
+                            self._last_port_yaw = prev_port_yaw
+                            self.get_logger().info("SC refinement selected previous yaw candidate")
+                        else:
+                            self.get_logger().info("SC refinement selected refined yaw candidate")
+                    else:
+                        self._last_port_quat_wxyz = prev_port_quat
+                        self._last_port_yaw = prev_port_yaw
+
+                self._choose_sc_yaw_by_tip_error(X, "SC close-range refinement")
+                port_transform = self.build_port_transform(X)
+                self.get_logger().info(
+                    f"Close-range port refinement shift_mm={shift_mm.round(1).tolist()} "
+                    f"refined={X.tolist()}"
+                )
+                self._publish_port_tf(X, port_transform)
+            else:
+                sfp_xy_shift_mm = float(np.linalg.norm(shift_mm[:2]))
+                sfp_z_shift_mm = abs(float(shift_mm[2]))
+                if (
+                    task.port_type == "sfp"
+                    and (
+                        sfp_xy_shift_mm > SFP_REFINEMENT_MAX_XY_SHIFT_M * 1000.0
+                        or sfp_z_shift_mm > SFP_REFINEMENT_MAX_Z_SHIFT_M * 1000.0
+                    )
+                ):
+                    self.get_logger().warn(
+                        f"Rejecting SFP close-range refinement shift_mm={shift_mm.round(1).tolist()} "
+                        "as likely wrong-port/module reassociation"
+                    )
+                    self._last_port_quat_wxyz = prev_port_quat
+                    self._last_port_yaw = prev_port_yaw
+                else:
+                    X = X_refined
+                    views = views_refined
+                    port_transform = self.build_port_transform(X)
+                    self.get_logger().info(
+                        f"Close-range port refinement shift_mm={shift_mm.round(1).tolist()} "
+                        f"refined={X.tolist()}"
+                    )
+                    self._publish_port_tf(X, port_transform)
+
+        if task.port_type == "sc":
+            g_recenter, q_recenter = self._gripper_pose_from_tf()
+            if g_recenter is not None and q_recenter is not None:
+                tip_recenter = self._plug_tip_world(g_recenter, q_recenter, task.port_type)
+                recenter_xy_err = np.linalg.norm(tip_recenter[:2] - X[:2])
+                if recenter_xy_err > 0.004:
+                    self.get_logger().info(
+                        f"SC refinement recenter: tip_xy_err={recenter_xy_err*1000:.1f}mm; "
+                        "moving above refined port before descent"
+                    )
+
+                    def run_sc_recenter(max_steps, label):
+                        final_err = float("inf")
+                        for step in range(max_steps):
+                            try:
+                                q_tip = (
+                                    port_transform.rotation.w,
+                                    port_transform.rotation.x,
+                                    port_transform.rotation.y,
+                                    port_transform.rotation.z,
+                                )
+                                self._set_tip_pose_target(
+                                    move_robot=move_robot,
+                                    tip_xyz=np.array(
+                                        [X[0], X[1], X[2] + 0.2],
+                                        dtype=np.float64,
+                                    ),
+                                    q_tip_wxyz=q_tip,
+                                    port_type=task.port_type,
+                                    stiffness=[150.0, 150.0, 170.0, 55.0, 55.0, 55.0],
+                                    damping=[65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+                                )
+                                self._publish_port_tf(X, port_transform)
+                                g_cur, q_cur = self._gripper_pose_from_tf()
+                                if g_cur is not None and q_cur is not None:
+                                    tip_cur = self._plug_tip_world(g_cur, q_cur, task.port_type)
+                                    final_err = float(np.linalg.norm(tip_cur[:2] - X[:2]))
+                                    if step % 20 == 19:
+                                        self.get_logger().info(
+                                            f"{label}: tip_xy_err={final_err*1000:.1f}mm"
+                                        )
+                                    if step >= 20 and final_err < 0.004:
+                                        break
+                            except TransformException as ex:
+                                self.get_logger().warn(f"TF fail SC recenter: {ex}")
+                            self.sleep_for(0.05)
+                        return final_err
+
+                    final_recenter_err = run_sc_recenter(100, "SC recenter progress")
+                    if final_recenter_err > 0.008 and self._last_port_quat_wxyz is not None:
+                        q_before_retry = self._last_port_quat_wxyz
+                        yaw_before_retry = self._last_port_yaw
+                        q_flipped = self._flip_port_quat_180_about_insertion_axis(q_before_retry)
+                        if q_flipped is not None:
+                            self._last_port_quat_wxyz = q_flipped
+                            if self._last_port_yaw is not None:
+                                self._last_port_yaw = float(
+                                    np.arctan2(
+                                        np.sin(self._last_port_yaw + np.pi),
+                                        np.cos(self._last_port_yaw + np.pi),
+                                    )
+                                )
+                            port_transform = self.build_port_transform(X)
+                            self.get_logger().info(
+                                "SC recenter still has large XY error; retrying with 180deg yaw flip"
+                            )
+                            retry_err = run_sc_recenter(80, "SC yaw-flip recenter progress")
+                            if retry_err < final_recenter_err:
+                                final_recenter_err = retry_err
+                            else:
+                                self._last_port_quat_wxyz = q_before_retry
+                                self._last_port_yaw = yaw_before_retry
+                                port_transform = self.build_port_transform(X)
+                                self.get_logger().info(
+                                    "SC yaw-flip recenter did not improve; restoring previous yaw"
+                                )
+                    self.get_logger().info(
+                        f"SC recenter finished: tip_xy_err={final_recenter_err*1000:.1f}mm"
+                    )
+                    self._tip_x_error_integrator = 0.0
+                    self._tip_y_error_integrator = 0.0
+
         views2 = self._build_views(obs)
         g1, q1 = self._gripper_pose_from_tf()
         self._save_viz(views2, X, task, "02_descent_start", gripper_xyz=g1, q_wxyz=q1)
@@ -702,6 +2589,7 @@ class PerceptionInsert(Policy):
                 f"port_z={X[2]:.4f} tip_above={(tip1[2] - X[2]) * 1000:.1f}mm "
                 f"XY_err={np.linalg.norm(tip1[:2] - X[:2]) * 1000:.1f}mm"
             )
+            self._log_tip_to_actual_port(task, "Descent start", g1, q1)
 
         # CSV log: z_offset, gripper_z, plug_tip_z, port_z, fts, fts_delta
         csv_path = f"{DEBUG_DIR}/t{self._debug_counter:02d}_descent.csv"
@@ -712,39 +2600,63 @@ class PerceptionInsert(Policy):
         # Temporary diagnostic — add right before the descent while loop
         g_diag, q_diag = self._gripper_pose_from_tf()
         if g_diag is not None:
-            tip_diag = self._plug_tip_world(g_diag, q_diag, task.port_type)
-            try:
-                if task.port_type == "sc":
-                    port_tf = self._parent_node._tf_buffer.lookup_transform(
-                        "base_link", "task_board/sc_port_0/sc_port_base_link_entrance", Time())
-                else:
-                    port_tf = self._parent_node._tf_buffer.lookup_transform(
-                        "base_link", "task_board/nic_card_mount_0/sfp_port_0_link_entrance", Time())
-                pt = port_tf.transform.translation
-                port_world = np.array([pt.x, pt.y, pt.z])
-                self.get_logger().info(
-                    f"DIAG | tip_xyz={tip_diag.tolist()} | port_xyz={port_world.tolist()} | "
-                    f"error_xyz={(tip_diag - port_world).tolist()} | "
-                    f"error_mm={((tip_diag - port_world)*1000).tolist()}"
-                )
-            except TransformException as e:
-                self.get_logger().warn(f"DIAG TF failed: {e}")
+            self._log_tip_to_actual_port(task, "Pre-descent", g_diag, q_diag)
         
         self.get_logger().info(
             f"Integrator at descent start: x={self._tip_x_error_integrator:.4f} y={self._tip_y_error_integrator:.4f}"
         )
 
+        entrance_z_for_depth = X[2]
+        if self._port_depth_entrance_z is not None:
+            entrance_z_for_depth = self._port_depth_entrance_z
+            self.get_logger().info(
+                f"Depth gate: using entrance_z={entrance_z_for_depth:.4f} "
+                f"(perception X[2]={X[2]:.4f}) for insertion_depth"
+            )
+
         # Descent — extended to -0.025 (25mm below port entrance)
         fts_stop = False
         step = 0
+        last_sfp_depth = None
+        sfp_depth_plateau_hits = 0
         # Replace the while condition with actual tip position
         while True:
-            z_offset -= 0.001
+            step_size = 0.001
+            if task.port_type == "sfp" and last_sfp_depth is not None and last_sfp_depth > -0.020:
+                # Approach the final engagement zone more gently to avoid
+                # skipping over seating opportunities.
+                step_size = 0.0005
+            z_offset -= step_size
             step += 1
+            z_limit = -0.152 if task.port_type == "sfp" else -0.088
+            if z_offset < z_limit:
+                self.get_logger().warn("z_offset safety limit reached, stopping")
+                break
             try:
-                pose = self.calc_gripper_pose(port_transform, z_offset=z_offset)
-                if pose is not None:
-                    self.set_pose_target(move_robot=move_robot, pose=pose)
+                if task.port_type == "sc" and self._last_port_quat_wxyz is not None:
+                    q_tip = (
+                        port_transform.rotation.w,
+                        port_transform.rotation.x,
+                        port_transform.rotation.y,
+                        port_transform.rotation.z,
+                    )
+                    self._set_tip_pose_target(
+                        move_robot=move_robot,
+                        tip_xyz=np.array(
+                            [X[0], X[1], X[2] + z_offset],
+                            dtype=np.float64,
+                        ),
+                        q_tip_wxyz=q_tip,
+                        port_type=task.port_type,
+                    )
+                else:
+                    pose = self.calc_gripper_pose(
+                        port_transform,
+                        z_offset=z_offset,
+                        compensate_tip_xy=(task.port_type == "sc"),
+                    )
+                    if pose is not None:
+                        self.set_pose_target(move_robot=move_robot, pose=pose)
             except TransformException as ex:
                 self.get_logger().warn(f"TF fail descent: {ex}")
             self.sleep_for(0.05)
@@ -765,29 +2677,482 @@ class PerceptionInsert(Policy):
 
                 delta = fts - fts_baseline
                 csv_writer.writerow([f"{z_offset:.4f}", f"{gz:.4f}", f"{tip_z:.4f}",
-                                    f"{X[2]:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
+                                    f"{entrance_z_for_depth:.4f}", f"{fts:.3f}", f"{delta:.3f}"])
 
                 # Stop if tip is deep enough below port entrance (full insertion depth)
-                insertion_depth = X[2] - tip_z
+                insertion_depth = entrance_z_for_depth - tip_z
                 self.get_logger().info(f"Insertion depth: {insertion_depth*1000:.1f}mm")
                 if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015: # give margin for noise
                     self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
                     break
 
+                if task.port_type == "sfp":
+                    # Only treat as a lip plateau when we are clearly in the port but
+                    # still short of the depth target — avoids bailing to seating while
+                    # the tip is still approaching or when slowly creeping the last mm.
+                    in_plateau_band = (
+                        insertion_depth > 0.008
+                        and insertion_depth
+                        < INSERTION_DEPTH["sfp"] - 0.009
+                    )
+                    if (
+                        in_plateau_band
+                        and last_sfp_depth is not None
+                        and abs(insertion_depth - last_sfp_depth) < 0.0008
+                    ):
+                        sfp_depth_plateau_hits += 1
+                        self.get_logger().info(
+                            f"SFP depth plateau near lip: depth={insertion_depth*1000:.1f}mm "
+                            f"stable_checks={sfp_depth_plateau_hits}"
+                        )
+                        if sfp_depth_plateau_hits >= 4:
+                            self.get_logger().info(
+                                "SFP depth plateau persisted; switching to seating search"
+                            )
+                            break
+                    else:
+                        sfp_depth_plateau_hits = 0
+                    last_sfp_depth = insertion_depth
+
                 # Safety stop on excessive force
                 if delta > 15.0:
-                    self.get_logger().warn(
-                        f"FTS {delta:.1f}N > 15N limit at z_offset={z_offset:.4f}, stopping")
-                    fts_stop = True
-                    break
+                    # SFP: ignore lip/casing spikes until a minimum insertion depth —
+                    # early contact often exceeds 15 N without meaning jammed.
+                    if task.port_type == "sfp" and insertion_depth < 0.022:
+                        self.get_logger().warn(
+                            f"SFP FTS transient {delta:.1f}N at depth={insertion_depth*1000:.1f}mm; "
+                            "continuing descent"
+                        )
+                    # SC runs can show transient force spikes while still far
+                    # from the port (e.g. cable dynamics). Only hard-stop SC
+                    # once we are close to the entrance plane.
+                    elif task.port_type == "sc" and insertion_depth < -0.04:
+                        self.get_logger().warn(
+                            f"FTS transient {delta:.1f}N at depth={insertion_depth*1000:.1f}mm; "
+                            "continuing SC descent"
+                        )
+                    else:
+                        self.get_logger().warn(
+                            f"FTS {delta:.1f}N > 15N limit at z_offset={z_offset:.4f}, stopping"
+                        )
+                        fts_stop = True
+                        break
 
                 # Safety stop if z_offset goes too far (something is wrong)
-                if z_offset < -0.080:
+                if z_offset < z_limit:
                     self.get_logger().warn("z_offset safety limit reached, stopping")
                     break
 
         csv_file.close()
         self.get_logger().info(f"Descent CSV: {csv_path}")
+
+        learned_seated = False
+        final_insert_mode = os.environ.get("AIC_FINAL_INSERT_MODE", "assisted").strip().lower()
+        if (
+            not fts_stop
+            and self._final_insert_policy is not None
+            and final_insert_mode in ("handoff", "handoff_owner", "owner")
+        ):
+            learned_seated = self._run_final_insert_policy(
+                task, get_observation, move_robot, X, port_transform, fts_baseline
+            )
+            if learned_seated:
+                self.get_logger().info("Learned final-insertion policy succeeded; skipping hand-coded seating search")
+            else:
+                self.get_logger().info("Learned final-insertion policy did not confirm success; falling back to hand-coded seating search")
+        elif not fts_stop and self._final_insert_policy is not None and task.port_type == "sc":
+            self.get_logger().info(
+                "Using assisted final-insertion mode: deterministic SC seating owns the motion, "
+                "RL supplies bounded residuals"
+            )
+
+        if task.port_type == "sfp" and not fts_stop and not learned_seated:
+            self.get_logger().info("Starting SFP seating search at port lip")
+            small_offsets = [
+                (0.0, 0.0),
+                # These two residuals have been the useful "key jiggle" in
+                # the sample SFP cases: one seats trial_1, the other corrects
+                # the single-view/refined trial_2 miss direction.
+                (0.0045, 0.0),
+                (0.0035, -0.0035),
+                (0.0035, 0.0035),
+                (0.0, 0.0045), (0.0, -0.0045),
+                (0.0015, 0.0), (-0.0015, 0.0),
+                (0.0, 0.0015), (0.0, -0.0015),
+                (0.0030, 0.0), (-0.0030, 0.0),
+                (0.0, 0.0030), (0.0, -0.0030),
+                (0.0020, 0.0020), (-0.0020, 0.0020),
+                (0.0020, -0.0020), (-0.0020, -0.0020),
+                (-0.0045, 0.0),
+                (-0.0035, 0.0035), (-0.0035, -0.0035),
+            ]
+            wide_offsets = []
+            for radius in (0.0065, 0.0090, 0.0120):
+                half = 0.5 * radius
+                wide_offsets.extend([
+                    (radius, 0.0), (-radius, 0.0),
+                    (0.0, radius), (0.0, -radius),
+                    (radius, radius), (radius, -radius),
+                    (-radius, radius), (-radius, -radius),
+                    (half, radius), (half, -radius),
+                    (-half, radius), (-half, -radius),
+                    (radius, half), (radius, -half),
+                    (-radius, half), (-radius, -half),
+                ])
+            # The descent often reaches the port lip but stalls there. During
+            # the residual search, command a little deeper with compliant
+            # gains so a good lateral residual can slide into the contact zone.
+            search_stages = [
+                ("fine", min(z_offset, -0.145), small_offsets, 1.10),
+                ("wide", min(z_offset, -0.155), wide_offsets, 1.15),
+                ("deep", min(z_offset, -0.168), small_offsets, 1.18),
+            ]
+            seated = False
+            best_offset = (0.0, 0.0)
+            best_tip_xy_err = float("inf")
+            best_force_offset = (0.0, 0.0)
+            best_force_delta = float("-inf")
+            search_z_offset = search_stages[0][1]
+            depth_seen = False
+            depth_threshold = INSERTION_DEPTH[task.port_type] - 0.004
+            confirmation_pattern = [
+                (0.0, 0.0),
+                (0.0015, 0.0), (-0.0015, 0.0),
+                (0.0, 0.0015), (0.0, -0.0015),
+            ]
+
+            def evaluate_sfp_offset(stage_name, xy_offset, stage_z_offset, hold_time):
+                nonlocal best_offset, best_tip_xy_err, best_force_offset, best_force_delta
+                nonlocal fts_stop
+
+                try:
+                    pose = self.calc_gripper_pose(
+                        port_transform,
+                        z_offset=stage_z_offset,
+                        xy_offset_local=xy_offset,
+                    )
+                    self.set_pose_target(
+                        move_robot=move_robot,
+                        pose=pose,
+                        stiffness=[150.0, 150.0, 150.0, 60.0, 60.0, 60.0],
+                        damping=[65.0, 65.0, 65.0, 25.0, 25.0, 25.0],
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f"TF fail seating search: {ex}")
+                    return None, None, None
+
+                # The SFP TouchPlugin requires sustained exclusive contact for
+                # one simulated second, so hold each candidate long enough to
+                # let a good residual register.
+                self.sleep_for(hold_time)
+
+                obs = get_observation()
+                fts = self._fts_z(obs)
+                delta = fts - fts_baseline
+                if delta > best_force_delta and delta < 22.0:
+                    best_force_delta = delta
+                    best_force_offset = xy_offset
+
+                g, q_wxyz = self._gripper_pose_from_tf()
+                if g is None or q_wxyz is None:
+                    return None, None, delta
+
+                tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
+                ref_z = (
+                    self._port_depth_entrance_z
+                    if self._port_depth_entrance_z is not None
+                    else X[2]
+                )
+                insertion_depth = ref_z - tip_world[2]
+                tip_xy_err = np.linalg.norm(tip_world[:2] - X[:2])
+                if tip_xy_err < best_tip_xy_err:
+                    best_tip_xy_err = tip_xy_err
+                    best_offset = xy_offset
+                self.get_logger().info(
+                    f"SFP seating {stage_name} offset=({xy_offset[0]*1000:.1f},"
+                    f"{xy_offset[1]*1000:.1f})mm "
+                    f"depth={insertion_depth*1000:.1f}mm "
+                    f"tip_xy_err={tip_xy_err * 1000:.1f}mm "
+                    f"fts_delta={delta:.1f}N"
+                )
+
+                if delta > 22.0:
+                    self.get_logger().warn(
+                        f"Seating search force delta {delta:.1f}N, ending search")
+                    fts_stop = True
+
+                return insertion_depth, tip_xy_err, delta
+
+            for stage_name, stage_z_offset, search_offsets, hold_time in search_stages:
+                search_z_offset = stage_z_offset
+                self.get_logger().info(
+                    f"SFP seating {stage_name} stage: {len(search_offsets)} offsets "
+                    f"at z_offset={search_z_offset:.3f}"
+                )
+                for xy_offset in search_offsets:
+                    insertion_depth, _, _ = evaluate_sfp_offset(
+                        stage_name, xy_offset, search_z_offset, hold_time)
+                    if fts_stop:
+                        break
+                    if insertion_depth is not None and insertion_depth >= depth_threshold:
+                        depth_seen = True
+                        confirm_z_offset = min(search_z_offset, -0.158)
+                        self.get_logger().info(
+                            f"SFP seating depth reached at {insertion_depth*1000:.1f}mm; "
+                            "running local contact confirmation ring"
+                        )
+
+                        seen_offsets = set()
+                        for dx, dy in confirmation_pattern:
+                            confirm_offset = (xy_offset[0] + dx, xy_offset[1] + dy)
+                            key = (round(confirm_offset[0], 4), round(confirm_offset[1], 4))
+                            if key in seen_offsets:
+                                continue
+                            seen_offsets.add(key)
+                            evaluate_sfp_offset("confirm", confirm_offset, confirm_z_offset, 1.25)
+                            if fts_stop:
+                                break
+                        seated = True
+                        break
+                if fts_stop or seated:
+                    break
+
+            if not fts_stop and not seated:
+                final_offset = best_force_offset if best_force_delta > 1.0 else best_offset
+                self.get_logger().info(
+                    "SFP seating did not confirm depth; returning to best residual/contact "
+                    f"({final_offset[0]*1000:.1f},{final_offset[1]*1000:.1f})mm "
+                    f"with tip_xy_err={best_tip_xy_err*1000:.1f}mm "
+                    f"best_force_delta={best_force_delta:.1f}N for final hold"
+                )
+                try:
+                    pose = self.calc_gripper_pose(
+                        port_transform,
+                        z_offset=search_z_offset,
+                        xy_offset_local=final_offset,
+                    )
+                    self.set_pose_target(
+                        move_robot=move_robot,
+                        pose=pose,
+                        stiffness=[150.0, 150.0, 150.0, 60.0, 60.0, 60.0],
+                        damping=[65.0, 65.0, 65.0, 25.0, 25.0, 25.0],
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f"TF fail final SFP settle: {ex}")
+                self.sleep_for(2.0)
+
+        if task.port_type == "sc" and not fts_stop and not learned_seated:
+            self.get_logger().info("Starting SC seating search near port lip")
+            fine_sc_offsets = [
+                (0.0, 0.0),
+                (0.0025, 0.0), (-0.0025, 0.0),
+                (0.0, 0.0025), (0.0, -0.0025),
+            ]
+            wide_sc_offsets = []
+            for radius in (0.0045, 0.0065):
+                wide_sc_offsets.extend([
+                    (radius, 0.0), (-radius, 0.0),
+                    (0.0, radius), (0.0, -radius),
+                    (radius, radius), (radius, -radius),
+                    (-radius, radius), (-radius, -radius),
+                ])
+            confirmation_pattern = [
+                (0.0, 0.0),
+                (0.0015, 0.0), (-0.0015, 0.0),
+                (0.0, 0.0015), (0.0, -0.0015),
+            ]
+            sc_search_stages = [
+                ("fine", max(z_offset, -0.035), fine_sc_offsets, 1.15),
+                ("engage", -0.055, fine_sc_offsets, 1.20),
+                ("wide", -0.070, wide_sc_offsets, 1.20),
+                ("deep", -0.090, fine_sc_offsets + wide_sc_offsets, 1.25),
+            ]
+            partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.006"))
+            partial_early_xy = float(os.environ.get("AIC_SC_PARTIAL_EARLY_XY_M", "0.010"))
+            stop_sc_search = False
+            seated_sc = False
+            best_sc_offset = (0.0, 0.0)
+            best_sc_depth = float("-inf")
+            best_sc_score = float("-inf")
+
+            def evaluate_sc_offset(stage_name, xy_offset, sc_stage_z, hold_time):
+                nonlocal best_sc_offset, best_sc_depth, best_sc_score, stop_sc_search
+                assist = None
+                assist_applied = False
+                obs_before = get_observation()
+                assist = self._assisted_final_insert_residual(
+                    obs_before, task, X, port_transform, fts_baseline, return_skip=True
+                )
+                assist_applied = bool(assist is not None and assist.get("applied", False))
+                try:
+                    q_tip = (
+                        port_transform.rotation.w,
+                        port_transform.rotation.x,
+                        port_transform.rotation.y,
+                        port_transform.rotation.z,
+                    )
+                    if assist_applied:
+                        q_delta = self._axis_angle_to_quat_wxyz(assist["rot_vec"])
+                        q_assisted = quat_normalize_wxyz(quaternion_multiply(q_delta, q_tip))
+                        if q_assisted is not None:
+                            q_tip = q_assisted
+                    R_port = quat_to_rotmat_wxyz(q_tip)
+                    world_offset = R_port[:, :2] @ np.array(xy_offset, dtype=np.float64)
+                    target_tip_xyz = np.array(
+                        [
+                            X[0] + world_offset[0],
+                            X[1] + world_offset[1],
+                            X[2] + sc_stage_z,
+                        ],
+                        dtype=np.float64,
+                    )
+                    if assist_applied:
+                        target_tip_xyz += assist["pos_step"]
+                        xy_from_port = target_tip_xyz[:2] - np.asarray(X[:2], dtype=np.float64)
+                        xy_from_port_norm = float(np.linalg.norm(xy_from_port))
+                        xy_drift_limit = float(
+                            os.environ.get("AIC_ASSISTED_RL_TARGET_XY_DRIFT_LIMIT_M", "0.008")
+                        )
+                        if xy_from_port_norm > xy_drift_limit:
+                            target_tip_xyz[:2] = (
+                                np.asarray(X[:2], dtype=np.float64)
+                                + xy_from_port / xy_from_port_norm * xy_drift_limit
+                            )
+                        z_floor = float(os.environ.get("AIC_ASSISTED_RL_TARGET_Z_FLOOR_M", "-0.100"))
+                        z_ceiling = float(os.environ.get("AIC_ASSISTED_RL_TARGET_Z_CEILING_M", "0.010"))
+                        target_tip_xyz[2] = float(
+                            np.clip(target_tip_xyz[2], X[2] + z_floor, X[2] + z_ceiling)
+                        )
+                    self._set_tip_pose_target(
+                        move_robot=move_robot,
+                        tip_xyz=target_tip_xyz,
+                        q_tip_wxyz=q_tip,
+                        port_type=task.port_type,
+                        stiffness=[160.0, 160.0, 180.0, 60.0, 60.0, 60.0],
+                        damping=[65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f"TF fail SC seating search: {ex}")
+                    return None, None, None
+
+                self.sleep_for(hold_time)
+                obs = get_observation()
+                fts = self._fts_z(obs)
+                delta = fts - fts_baseline
+                g, q_wxyz = self._gripper_pose_from_tf()
+                if g is None or q_wxyz is None:
+                    return None, None, delta
+                tip_world = self._plug_tip_world(g, q_wxyz, task.port_type)
+                insertion_depth = X[2] - tip_world[2]
+                tip_xy_err = np.linalg.norm(tip_world[:2] - X[:2])
+                candidate_score = insertion_depth - max(0.0, tip_xy_err - SC_SEATING_SUCCESS_XY_M)
+                if candidate_score > best_sc_score:
+                    best_sc_score = candidate_score
+                    best_sc_depth = insertion_depth
+                    best_sc_offset = xy_offset
+                if assist_applied:
+                    assist_log = (
+                        " assisted_rl=applied "
+                        f"pos_mm={np.round(assist['pos_step'] * 1000.0, 2).tolist()} "
+                        f"rot={np.round(assist['rot_vec'], 3).tolist()} "
+                        f"handoff_xy={assist['metrics']['xy']*1000:.1f}mm "
+                        f"handoff_depth={assist['metrics']['depth']*1000:.1f}mm "
+                        f"axis={assist['metrics']['axis']:.3f} "
+                        f"twist={assist['metrics']['twist']:.3f} "
+                        f"action={np.round(assist['action'], 3).tolist()}"
+                    )
+                else:
+                    assist_log = (
+                        " assisted_rl=skipped"
+                        f" reason={assist.get('reason', 'unknown') if assist is not None else 'unknown'}"
+                    )
+                    if assist is not None and assist.get("metrics") is not None:
+                        assist_log += (
+                            f" handoff_xy={assist['metrics']['xy']*1000:.1f}mm "
+                            f"handoff_depth={assist['metrics']['depth']*1000:.1f}mm "
+                            f"axis={assist['metrics']['axis']:.3f} "
+                            f"twist={assist['metrics']['twist']:.3f}"
+                        )
+                self.get_logger().info(
+                    f"SC seating {stage_name} offset=({xy_offset[0]*1000:.1f},"
+                    f"{xy_offset[1]*1000:.1f})mm "
+                    f"depth={insertion_depth*1000:.1f}mm "
+                    f"tip_xy_err={tip_xy_err*1000:.1f}mm "
+                    f"fts_delta={delta:.1f}N"
+                    + assist_log
+                )
+                if abs(delta) > 24.0:
+                    self.get_logger().warn(
+                        f"SC seating force delta {delta:.1f}N, ending SC search")
+                    stop_sc_search = True
+                return insertion_depth, tip_xy_err, delta
+
+            for stage_name, sc_stage_z, sc_offsets, hold_time in sc_search_stages:
+                if stop_sc_search:
+                    break
+                self.get_logger().info(
+                    f"SC seating {stage_name} stage: {len(sc_offsets)} offsets "
+                    f"at z_offset={sc_stage_z:.3f}"
+                )
+                for xy_offset in sc_offsets:
+                    insertion_depth, tip_xy_err, _ = evaluate_sc_offset(
+                        stage_name, xy_offset, sc_stage_z, hold_time)
+                    if stop_sc_search:
+                        break
+                    if (
+                        insertion_depth is not None
+                        and insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015
+                    ):
+                        if tip_xy_err is None or tip_xy_err > SC_SEATING_SUCCESS_XY_M:
+                            xy_text = (
+                                "unknown"
+                                if tip_xy_err is None
+                                else f"{tip_xy_err*1000:.1f}mm"
+                            )
+                            self.get_logger().info(
+                                "SC seating reached depth but XY is still outside success gate "
+                                f"({xy_text} > {SC_SEATING_SUCCESS_XY_M*1000:.1f}mm); continuing"
+                            )
+                            continue
+                        self.get_logger().info(
+                            "SC seating reached full insertion depth target with XY confirmation"
+                        )
+                        seen_offsets = set()
+                        for dx, dy in confirmation_pattern:
+                            confirm_offset = (xy_offset[0] + dx, xy_offset[1] + dy)
+                            key = (round(confirm_offset[0], 4), round(confirm_offset[1], 4))
+                            if key in seen_offsets:
+                                continue
+                            seen_offsets.add(key)
+                            evaluate_sc_offset("confirm", confirm_offset, sc_stage_z, 1.20)
+                            if stop_sc_search:
+                                break
+                        seated_sc = True
+                        stop_sc_search = True
+                        break
+                    if (
+                        insertion_depth is not None
+                        and tip_xy_err is not None
+                        and stage_name in ("engage", "wide", "deep")
+                        and insertion_depth >= partial_early_depth
+                        and tip_xy_err <= partial_early_xy
+                    ):
+                        self.get_logger().info(
+                            "SC seating reached practical partial-insertion target; "
+                            f"depth={insertion_depth*1000:.1f}mm "
+                            f"xy={tip_xy_err*1000:.1f}mm. Ending search early."
+                        )
+                        seated_sc = True
+                        stop_sc_search = True
+                        break
+
+            if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
+                self.get_logger().info(
+                    "SC seating did not confirm full depth; returning to best depth/XY residual "
+                    f"({best_sc_offset[0]*1000:.1f},{best_sc_offset[1]*1000:.1f})mm "
+                    f"at depth={best_sc_depth*1000:.1f}mm for final hold"
+                )
+                evaluate_sc_offset("final", best_sc_offset, -0.095, 2.0)
 
         # Screenshot 3: at end of descent
         obs = get_observation()
@@ -801,6 +3166,7 @@ class PerceptionInsert(Policy):
                 f"port_z={X[2]:.4f} tip_above={(tip2[2] - X[2]) * 1000:.1f}mm "
                 f"XY_err={np.linalg.norm(tip2[:2] - X[:2]) * 1000:.1f}mm fts_stop={fts_stop}"
             )
+            self._log_tip_to_actual_port(task, "Descent end", g2, q2)
 
         self.sleep_for(3.0)
         self.get_logger().info("PerceptionInsert done")

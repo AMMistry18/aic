@@ -109,3 +109,24 @@
   gz_type_name: "gz.msgs.StringMsg"
   direction: GZ_TO_ROS
   lazy: true
+
+- ros_topic_name: "/scoring/insertion_event"
+  gz_topic_name: "/cable_2/insertion_event"
+  ros_type_name: "std_msgs/msg/String"
+  gz_type_name: "gz.msgs.StringMsg"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/scoring/insertion_event"
+  gz_topic_name: "/cable_3/insertion_event"
+  ros_type_name: "std_msgs/msg/String"
+  gz_type_name: "gz.msgs.StringMsg"
+  direction: GZ_TO_ROS
+  lazy: true
+
+- ros_topic_name: "/scoring/insertion_event"
+  gz_topic_name: "/cable_4/insertion_event"
+  ros_type_name: "std_msgs/msg/String"
+  gz_type_name: "gz.msgs.StringMsg"
+  direction: GZ_TO_ROS
+  lazy: true

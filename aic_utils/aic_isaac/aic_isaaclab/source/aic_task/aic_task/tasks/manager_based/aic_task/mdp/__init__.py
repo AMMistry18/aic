@@ -1,20 +1,19 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
-# SPDX-License-Identifier: BSD-3-Clause
-
-"""This sub-module contains the functions that are specific to the environment."""
+# Replace the existing mdp/__init__.py at:
+#   aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/aic_task/mdp/__init__.py
 
 from isaaclab.envs.mdp import (
     UniformPoseCommandCfg,
     action_rate_l2,
+    body_incoming_wrench,
     body_pose_w,
     generated_commands,
     image,
+    image_features,
     joint_pos_rel,
     joint_vel_l2,
     joint_vel_rel,
     last_action,
+    reset_joints_by_offset,
     reset_joints_by_scale,
     time_out,
 )
@@ -32,4 +31,61 @@ from .rewards import (  # noqa: F401
     position_command_error,
     position_command_error_exp,
     position_command_error_tanh,
+)
+
+# Insertion-specific MDP functions
+from .mdp_insert import (  # noqa: F401
+    alive_bonus,
+    arm_joint_pos_rel,
+    arm_joint_vel_rel,
+    drift_failure,
+    force_failure,
+    adaptive_centered_depth_curriculum,
+    adaptive_depth_phase,
+    adaptive_xy_gate_ema,
+    centered_insertion_depth_reward,
+    insertion_depth_reward,
+    insertion_depth_progress,
+    insertion_depth_raw,
+    insertion_depth_gate,
+    insertion_xy_gate,
+    insertion_axis_gate,
+    insertion_twist_gate,
+    insertion_depth_xy_gate,
+    inserted_xy_alignment,
+    offcenter_depth_penalty,
+    offcenter_insert_failure,
+    insertion_success,
+    insertion_success_bonus,
+    crossed_port_plane,
+    plug_port_axis_alignment,
+    plug_port_axis_dot,
+    port_pose_obs,
+    port_pose_obs_perceived,
+    perception_action_hint,
+    perception_valid_flag,
+    tcp_velocity_port,
+    reset_to_preinsertion_pose,
+    scripted_action_error,
+    scripted_action_imitation_reward,
+    scripted_insert_action_hint,
+    tip_to_port_delta,
+    tip_to_port_delta_perceived,
+    tip_pose_error_port,
+    tip_axes_port,
+    tip_to_port_xy_exp,
+    tip_to_port_xy_inv,
+    tip_to_port_xy_l2,
+    tip_to_port_xy_progress,
+    tip_to_port_z,
+    tip_rotation_exp,
+    tip_rotation_l2,
+    tip_rotation_progress,
+    plug_port_twist_alignment,
+    plug_port_twist_progress,
+    tip_to_port_descend_reward,
+    tip_to_port_z_inv,
+    tip_to_port_z_exp,
+    tip_to_port_z_progress,
+    wrist_force_l2,
 )

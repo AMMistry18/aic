@@ -25,6 +25,10 @@ RUN cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/PerceptionI
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/ && \
     mkdir -p /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights && \
     cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best.pt \
+       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/ && \
+    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sc_pose.pt \
+       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/ && \
+    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/final_insert_sc_model73.ts \
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/
 
 WORKDIR /ws_aic/src/aic

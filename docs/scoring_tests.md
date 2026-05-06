@@ -305,3 +305,43 @@ ros2 launch aic_bringup aic_gz_bringup.launch.py \
 ```
 
 ---
+
+## Example 8: PerceptionInsert with `aic_eval` (Distrobox)
+
+**Goal:** Exercise the perception-guided example policy against the pre-built evaluation image, matching the [Getting Started](./getting_started.md#same-flow-perceptioninsert-example-policy) PerceptionInsert flow. Uses **two** shells inside `aic_eval` (or one shell in the container plus `pixi run` on the host for the policy).
+
+**Expected outcome:**
+- Trials run to completion; Tier 1 passes if the model connects and conforms.
+- Tier 3 depends on task config and perception quality; partial or full insertion scores are normal with the sample engine config.
+
+### Shell A -- evaluation in `aic_eval`
+
+Create the container once (from the host) if needed: follow [Getting Started — Step 2](./getting_started.md#step-2-start-the-evaluation-container) (`distrobox create` includes the flag that skips the rootful first-login `passwd` prompt). Then:
+
+```bash
+distrobox enter -r aic_eval
+/entrypoint.sh ground_truth:=false start_aic_engine:=true
+```
+
+### Shell B -- host `pixi run` (simplest) or second `distrobox enter` session
+
+From `~/ws_aic/src/aic`, with Zenoh pointing at the router started by `/entrypoint.sh` (port **7447**):
+
+```bash
+cd ~/ws_aic/src/aic
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_ROUTER_CHECK_ATTEMPTS=-1
+export ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false'
+
+# Optional SC YOLO weights (see outputs/sc_pose_pipeline/README.md)
+# export AIC_SC_POSE_WEIGHTS="$HOME/runs/aic_sc_pose_yolo/weights/best.pt"
+
+AIC_RESULTS_DIR=~/aic_results/perception_insert \
+  pixi run ros2 run aic_model aic_model --ros-args \
+  -p use_sim_time:=true \
+  -p policy:=aic_example_policies.ros.PerceptionInsert
+```
+
+If both shells use distrobox, add `export PATH="$HOME/.pixi/bin:$PATH"` before `pixi run` when `pixi` is not on the default `PATH`.
+
+---

@@ -27,7 +27,10 @@ services:
       ZENOH_ROUTER_CHECK_ATTEMPTS: -1
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
+      AIC_SC_POSE_OUTPUT_DIR: /aic_perception_data/pose_sc_gt_raw
       # AIC_ENABLE_ACL: true
+    volumes:
+      - /home/ubuntu/aic_perception_data:/aic_perception_data
 networks:
   default:
     internal: true

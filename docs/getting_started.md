@@ -131,8 +131,14 @@ export DBX_CONTAINER_MANAGER=docker
 
 # Create and enter the eval container
 docker pull ghcr.io/intrinsic-dev/aic/aic_eval:latest
-# If you do *not* have an NVIDIA GPU, remove the --nvidia flag for GPU support
-distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval
+# If you do *not* have an NVIDIA GPU, remove the --nvidia flag
+#
+# Rootful Distrobox (-r) normally forces a one-time interactive `passwd` on first
+# shell login. To skip that prompt (needed for scripts, CI, or non-TTY tools), add
+# Distrobox's opt-in flag below. Only use it for local throwaway eval containers.
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval \
+  --absolutely-disable-root-password-i-am-really-positively-sure
+
 distrobox enter -r aic_eval
 
 # Inside the container, start the environment
@@ -177,17 +183,68 @@ Once the `aic_model` node starts, the AIC engine spawns a task board and a gripp
 
 **Note:** The `WaveArm` policy is a dummy example that simply moves the robot arm back and forth in a waving motion. It does not attempt to solve the cable insertion task. The purpose of this example is to demonstrate how the [`aic_engine`](../aic_engine/README.md) orchestrates trials based on the [sample configuration](../aic_engine/config/sample_config.yaml) and scores the policy based on its performance (which will be poor in this case, as expected).
 
-**What you should see:**
-- **In Gazebo**: The task board and a cable attached to the gripper appear in the simulation
-- **In the robot**: The arm moves back and forth in a waving motion
-- **In the eval container terminal**:
-  - Log messages showing trial progression (Trial 1/3, Trial 2/3, Trial 3/3)
-  - Scoring information after each trial
-  - Final summary with total scores across all trials
-- The robot performing three successive trials automatically
-- **Results saved to**: `$HOME/aic_results/` (or `$AIC_RESULTS_DIR` if set)
+#### Same flow, `PerceptionInsert` example policy
 
-![Wave Arm Policy](../../media/wave_arm_policy.gif)
+To run the **same Step 2 + Step 3 workflow** but load the **`PerceptionInsert`** example (ROS-side policy in `aic_example_policies`), keep Step 2 as-is and change Step 3.
+
+The evaluation `/entrypoint.sh` starts a **Zenoh router** in the container (`rmw_zenohd` on TCP port **7447**). Any process running `aic_model` must use `rmw_zenoh_cpp` and connect to that router (shared memory is disabled in the container router config).
+
+**Optional — SC port YOLO pose weights:** For best SC-slot behavior, set `AIC_SC_POSE_WEIGHTS` to a trained weights file (see [`outputs/sc_pose_pipeline/README.md`](../outputs/sc_pose_pipeline/README.md)). If unset, the policy uses `weights/best_sc_pose.pt` when that file exists, otherwise HSV-based SC perception.
+
+##### Step 3 on the host (default)
+
+From a **second terminal on the host** (not inside distrobox), with Step 2 already running in `aic_eval`:
+
+```bash
+cd ~/ws_aic/src/aic
+export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+export ZENOH_ROUTER_CHECK_ATTEMPTS=-1
+export ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false'
+
+# Optional: custom SC YOLO weights
+# export AIC_SC_POSE_WEIGHTS="$HOME/runs/aic_sc_pose_yolo/weights/best.pt"
+
+pixi run ros2 run aic_model aic_model --ros-args \
+  -p use_sim_time:=true \
+  -p policy:=aic_example_policies.ros.PerceptionInsert
+```
+
+##### Step 3 inside the `aic_eval` distrobox (two shells)
+
+Useful when you want both sim and policy in the same container (e.g. CI-like machine). Open **two** terminals, each with `distrobox enter -r aic_eval` (or `distrobox enter aic_eval -- bash`).
+
+1. **Terminal A — evaluation:** same as Step 2.
+
+   ```bash
+   /entrypoint.sh ground_truth:=false start_aic_engine:=true
+   ```
+
+2. **Terminal B — policy:** ensure Pixi is on `PATH`, then connect to the router on localhost and run the model from your mounted workspace:
+
+   ```bash
+   export PATH="$HOME/.pixi/bin:$PATH"
+   cd ~/ws_aic/src/aic
+   export RMW_IMPLEMENTATION=rmw_zenoh_cpp
+   export ZENOH_ROUTER_CHECK_ATTEMPTS=-1
+   export ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false'
+
+   pixi run ros2 run aic_model aic_model --ros-args \
+     -p use_sim_time:=true \
+     -p policy:=aic_example_policies.ros.PerceptionInsert
+   ```
+
+Optional: run the evaluation **without** Gazebo/RViz GUIs (headless), still inside the distrobox:
+
+```bash
+/entrypoint.sh ground_truth:=false start_aic_engine:=true gazebo_gui:=false launch_rviz:=false
+```
+
+**What you should see (PerceptionInsert):**
+- **In Gazebo**: Task board and gripper-attached cable spawn; the arm moves toward the requested port, aligns using camera perception, and attempts insertion (behavior depends on trial type and scoring config).
+- **In the eval container / policy terminal**: `PerceptionInsert start | …` log lines, trial progression, and scoring after each trial.
+- **Results**: `$HOME/aic_results/` (or `$AIC_RESULTS_DIR` if set), including `scoring.yaml` when the engine writes scores.
+
+Reproducible scoring-focused commands are in [`scoring_tests.md`](./scoring_tests.md).
 
 If the robot doesn't move or you don't see the expected behavior, check the [Troubleshooting](./troubleshooting.md) section.
 
@@ -208,5 +265,5 @@ You've successfully completed the Quick Start guide! You now have:
 
 ## Next Steps
 
-Now that your environment is set up, run the same evluation container but with different [baseline solutions](../aic_example_policies/README.md).
+Now that your environment is set up, run the same evaluation container but with different [baseline solutions](../aic_example_policies/README.md).
 Then proceed with the **💻 Develop Your Policy** section in the [Toolkit Guide](../README.md#toolkit-guide).

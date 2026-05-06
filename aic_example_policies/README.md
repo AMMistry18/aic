@@ -82,6 +82,26 @@ pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy
 
 ---
 
+### 4. PerceptionInsert — Perception-Guided Insertion
+
+Example policy that uses onboard cameras and `PerceptionCore` (YOLO on SFP ports; optional YOLO SC pose via `AIC_SC_POSE_WEIGHTS` or bundled weights) to localize ports and command insertion. Requires **Zenoh** configured like the other containerized policies that talk to `aic_eval`.
+
+**Launch the evaluation environment** (distrobox or native; `ground_truth:=false` for realistic perception):
+
+```bash
+/entrypoint.sh ground_truth:=false start_aic_engine:=true
+```
+
+**Run the policy** from `~/ws_aic/src/aic` after exporting `RMW_IMPLEMENTATION` and `ZENOH_CONFIG_OVERRIDE` to reach the eval router (see [Getting Started — PerceptionInsert](../docs/getting_started.md#same-flow-perceptioninsert-example-policy)):
+
+```bash
+pixi run ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.PerceptionInsert
+```
+
+**Source:** [`PerceptionInsert.py`](./aic_example_policies/ros/PerceptionInsert.py)
+
+---
+
 ## Scoring Examples
 
 For expected scoring results and reproducible test commands for each policy, see the [Scoring Test & Evaluation Guide](../../docs/scoring_tests.md).

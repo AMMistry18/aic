@@ -6,7 +6,7 @@ No ROS dependencies — can be imported and tested from plain Python.
 Usage as library:
     from perception_core import PerceptionCore
     pc = PerceptionCore(nic_weights='path/to/best.pt')
-    nics = pc.detect_nic(bgr_image)       # list of {kps, bbox, conf}
+    nics = pc.detect_nic(bgr_image)       # list of {kps, bbox, conf, cls}
     scs = pc.detect_sc(bgr_image)         # list of {centroid, bbox, area}
     xyz = pc.triangulate([p1, p2, p3], [P1, P2, P3])  # 3D point
 
@@ -35,9 +35,11 @@ NIC_KPS_PORT1 = slice(4, 8)
 
 
 class PerceptionCore:
-    def __init__(self, nic_weights: str | None = None):
+    def __init__(self, nic_weights: str | None = None, sc_weights: str | None = None):
         self._yolo = None
+        self._sc_yolo = None
         self._nic_weights = nic_weights
+        self._sc_weights = sc_weights
 
     def _load_yolo(self):
         if self._yolo is None:
@@ -47,36 +49,149 @@ class PerceptionCore:
             self._yolo = YOLO(self._nic_weights)
         return self._yolo
 
+    def _load_sc_yolo(self):
+        if self._sc_yolo is None:
+            if self._sc_weights is None:
+                raise RuntimeError("SC weights path not provided")
+            from ultralytics import YOLO
+            self._sc_yolo = YOLO(self._sc_weights)
+        return self._sc_yolo
+
     # ─── SC port detection via HSV blob ────────────────────────────────────
+
+    @staticmethod
+    def _order_quad_points(pts: np.ndarray) -> np.ndarray:
+        """Return corners in [top-left, top-right, bottom-right, bottom-left]."""
+        if pts.shape != (4, 2):
+            raise ValueError("expected 4x2 corner array")
+        s = pts[:, 0] + pts[:, 1]
+        d = pts[:, 0] - pts[:, 1]
+        ordered = np.zeros((4, 2), dtype=np.float32)
+        ordered[0] = pts[np.argmin(s)]  # top-left
+        ordered[2] = pts[np.argmax(s)]  # bottom-right
+        ordered[1] = pts[np.argmin(d)]  # top-right
+        ordered[3] = pts[np.argmax(d)]  # bottom-left
+        return ordered
 
     def detect_sc(self, bgr: np.ndarray) -> list[dict]:
         """
         Detect SC ports via HSV blue blob. Returns list of:
-            {centroid: (cx, cy), bbox: (x, y, w, h), area: int}
+            {
+              centroid: (cx, cy),
+              bbox: (x, y, w, h),
+              area: int,
+              corners: [(x, y) * 4],  # ordered TL,TR,BR,BL from minAreaRect
+              major_axis: ((x0, y0), (x1, y1)),  # long-axis endpoints in pixels
+            }
         Sorted by area descending.
         """
         hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, SC_BLUE_LOWER, SC_BLUE_UPPER)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
-        n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
         out = []
-        for i in range(1, n):
-            area = int(stats[i, cv2.CC_STAT_AREA])
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = int(cv2.contourArea(cnt))
             if area < SC_MIN_AREA or area > SC_MAX_AREA:
                 continue
-            x = int(stats[i, cv2.CC_STAT_LEFT])
-            y = int(stats[i, cv2.CC_STAT_TOP])
-            w = int(stats[i, cv2.CC_STAT_WIDTH])
-            h = int(stats[i, cv2.CC_STAT_HEIGHT])
-            cx, cy = centroids[i]
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            moms = cv2.moments(cnt)
+            if abs(moms["m00"]) < 1e-6:
+                continue
+            cx = moms["m10"] / moms["m00"]
+            cy = moms["m01"] / moms["m00"]
+
+            rect = cv2.minAreaRect(cnt)
+            (_, _), (rw, rh), _ = rect
+            if rw < 1.0 or rh < 1.0:
+                continue
+            corners = self._order_quad_points(cv2.boxPoints(rect).astype(np.float32))
+            tl, tr, br, bl = corners
+            if rw >= rh:
+                major_axis = (
+                    ((tl + bl) * 0.5).tolist(),
+                    ((tr + br) * 0.5).tolist(),
+                )
+            else:
+                major_axis = (
+                    ((tl + tr) * 0.5).tolist(),
+                    ((bl + br) * 0.5).tolist(),
+                )
+
             out.append({
                 "centroid": (float(cx), float(cy)),
                 "bbox": (x, y, w, h),
                 "area": area,
+                "corners": [tuple(map(float, p)) for p in corners],
+                "major_axis": (
+                    (float(major_axis[0][0]), float(major_axis[0][1])),
+                    (float(major_axis[1][0]), float(major_axis[1][1])),
+                ),
             })
         out.sort(key=lambda d: -d["area"])
+        return out
+
+    def detect_sc_pose(self, bgr: np.ndarray, conf_thresh: float = 0.2) -> list[dict]:
+        """
+        Run YOLO pose model for SC ports.
+
+        Returns list of:
+            {
+              centroid: (cx, cy),
+              bbox: (x, y, w, h),
+              conf: float,
+              kps: np.ndarray[N,2],
+              corners: [(x, y) * 4] when 4+ keypoints are available,
+              major_axis: ((x0, y0), (x1, y1)) when 4+ keypoints are available
+            }
+        """
+        model = self._load_sc_yolo()
+        result = model(bgr, verbose=False, conf=conf_thresh)[0]
+        out = []
+        if result.boxes is None or len(result.boxes) == 0:
+            return out
+
+        boxes_xywh = result.boxes.xywh.cpu().numpy()
+        boxes_xyxy = result.boxes.xyxy.cpu().numpy()
+        confs = result.boxes.conf.cpu().numpy()
+        kps_all = result.keypoints.xy.cpu().numpy() if result.keypoints is not None else None
+
+        for i in range(len(boxes_xywh)):
+            cx, cy, w, h = [float(v) for v in boxes_xywh[i]]
+            x1, y1, x2, y2 = [float(v) for v in boxes_xyxy[i]]
+            det = {
+                "centroid": (cx, cy),
+                "bbox": (int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))),
+                "conf": float(confs[i]),
+            }
+            if kps_all is not None and i < len(kps_all):
+                kps = np.asarray(kps_all[i], dtype=np.float32)
+                det["kps"] = kps
+                if kps.shape[0] >= 4:
+                    corners = self._order_quad_points(kps[:4, :2])
+                    tl, tr, br, bl = corners
+                    if np.linalg.norm(tr - tl) >= np.linalg.norm(bl - tl):
+                        major_axis = (
+                            ((tl + bl) * 0.5).tolist(),
+                            ((tr + br) * 0.5).tolist(),
+                        )
+                    else:
+                        major_axis = (
+                            ((tl + tr) * 0.5).tolist(),
+                            ((bl + br) * 0.5).tolist(),
+                        )
+                    det["corners"] = [tuple(map(float, p)) for p in corners]
+                    det["major_axis"] = (
+                        (float(major_axis[0][0]), float(major_axis[0][1])),
+                        (float(major_axis[1][0]), float(major_axis[1][1])),
+                    )
+            out.append(det)
+
+        out.sort(key=lambda d: -d["conf"])
         return out
 
     # ─── NIC card detection via YOLO ───────────────────────────────────────
@@ -84,7 +199,7 @@ class PerceptionCore:
     def detect_nic(self, bgr: np.ndarray, conf_thresh: float = 0.3) -> list[dict]:
         """
         Run YOLO-pose on the image. Returns list of:
-            {kps: np.ndarray[8,2], bbox: (x1,y1,x2,y2), conf: float}
+            {kps: np.ndarray[8,2], bbox: (x1,y1,x2,y2), conf: float, cls: int}
         Sorted by confidence descending.
         """
         model = self._load_yolo()
@@ -94,12 +209,14 @@ class PerceptionCore:
             return out
         boxes = r.boxes.xyxy.cpu().numpy()
         confs = r.boxes.conf.cpu().numpy()
+        classes = r.boxes.cls.cpu().numpy().astype(int)
         kps_all = r.keypoints.xy.cpu().numpy()  # (N, 8, 2)
         for i in range(len(boxes)):
             out.append({
                 "kps": kps_all[i],
                 "bbox": tuple(boxes[i].tolist()),
                 "conf": float(confs[i]),
+                "cls": int(classes[i]),
             })
         out.sort(key=lambda d: -d["conf"])
         return out
@@ -237,6 +354,12 @@ def draw_sc(bgr, detections):
         x, y, w, h = d["bbox"]
         cv2.rectangle(out, (x, y), (x + w, y + h), (0, 255, 255), 2)
         cv2.circle(out, (int(cx), int(cy)), 4, (0, 0, 255), -1)
+        if "corners" in d:
+            pts = np.array(d["corners"], dtype=np.int32)
+            cv2.polylines(out, [pts], isClosed=True, color=(255, 255, 0), thickness=2)
+        if "major_axis" in d:
+            (x0, y0), (x1, y1) = d["major_axis"]
+            cv2.line(out, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 255), 2)
         cv2.putText(out, f"a={d['area']}", (x, y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     return out

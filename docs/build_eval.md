@@ -130,7 +130,7 @@ This launches Gazebo with the robot arm and end-of-arm tooling. The `TaskBoard` 
 ros2 run aic_model aic_model --ros-args -p use_sim_time:=true -p policy:=aic_example_policies.ros.WaveArm
 ```
 
-Replace `aic_example_policies.ros.WaveArm` with your policy implementation.
+Replace `aic_example_policies.ros.WaveArm` with your policy implementation. For `PerceptionInsert`, the three-terminal Zenoh setup above is sufficient when the simulator and `aic_model` share this native workspace. If you instead run the simulator in the `aic_eval` container and `aic_model` on the host, use the TCP Zenoh client exports from [Getting Started — PerceptionInsert](./getting_started.md#same-flow-perceptioninsert-example-policy).
 
 ---
 

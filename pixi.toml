@@ -9,6 +9,14 @@ preview = ["pixi-build"]
 
 [target.linux-64.dependencies]
 evdev = ">=1.9.2,<2"
+lttng-ust = ">=2.13.9,<3"
+yaml-cpp = ">=0.8.0,<0.9"
+sophus = ">=1!1.24.6,<1!2"
+eigen = ">=3.4.0,<4"
+cxx-compiler = ">=1.11.0,<2"
+compilers = ">=1.11.0,<2"
+gxx_linux-64 = ">=14.3.0,<15"
+gcc_linux-64 = ">=14.3.0,<15"
 
 [dependencies]
 isort = "==5.13.2"                                                                     # version bundled by the vscode extension
@@ -34,6 +42,32 @@ ros-kilted-std-msgs = "*"                                                       
 ros-kilted-std-srvs = "*"
 ros-kilted-tf2-ros-py = "*"
 setuptools = ">=71.0.0,<81.0.0"                                                        # required by lerobot==0.4.3
+ros-kilted-gz-cmake-vendor = ">=0.3.3,<0.4"
+ros-kilted-gz-plugin-vendor = ">=0.2.3,<0.3"
+ros-kilted-gz-common-vendor = ">=0.2.7,<0.3"
+ros-kilted-gz-msgs-vendor = ">=0.2.4,<0.3"
+ros-kilted-gz-sim-vendor = ">=0.2.3,<0.3"
+ros-kilted-ros-gz-sim = ">=2.1.15,<3"
+ros-kilted-ros-gz-bridge = ">=2.1.15,<3"
+ros-kilted-controller-manager = ">=5.12.0,<6"
+ros-kilted-robot-state-publisher = ">=3.4.3,<4"
+ros-kilted-rviz2 = ">=15.0.12,<16"
+ros-kilted-topic-tools = ">=1.4.2,<2"
+ros-kilted-xacro = ">=2.1.1,<3"
+ros-kilted-kinematics-interface-kdl = ">=2.4.0,<3"
+ros-kilted-rosbag2-cpp = ">=0.32.0,<0.33"
+ros-kilted-rosbag2-storage-default-plugins = ">=0.32.0,<0.33"
+ros-kilted-rosbag2-transport = ">=0.32.0,<0.33"
+ros-kilted-tf2-eigen = ">=0.41.6,<0.42"
+ros-kilted-tf2-geometry-msgs = ">=0.41.6,<0.42"
+ros-kilted-control-toolbox = ">=5.8.3,<6"
+ros-kilted-hardware-interface = ">=5.12.0,<6"
+ros-kilted-controller-interface = ">=5.12.0,<6"
+ros-kilted-realtime-tools = ">=4.7.1,<5"
+ros-kilted-ur-description = ">=4.3.0,<5"
+ros-kilted-ur-controllers = ">=4.5.0,<5"
+ros-kilted-ur-moveit-config = ">=4.5.0,<5"
+ros-kilted-ur-robot-driver = ">=4.5.0,<5"
 
 [pypi-dependencies]
 huggingface-hub = { version = "~=1.7" }

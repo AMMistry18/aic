@@ -92,3 +92,59 @@ By default, distrobox uses podman but we are using docker in our setup. Make sur
 ```bash
 export DBX_CONTAINER_MANAGER=docker
 ```
+
+## Distrobox: "First time user password setup" / `passwd` errors
+
+**What it is:** With **`distrobox create -r`** (rootful), Distrobox marks your user for a **one-time interactive `passwd`** on the first login shell. In a **non-interactive** session (automation, some IDE terminals, `distrobox enter ... -- command`), `passwd` cannot run and you may see:
+
+```text
+⚠️  First time user password setup ⚠️
+passwd: Authentication token manipulation error
+```
+
+or the shell appears to hang on `Current password:`.
+
+**Fix A — Create without the prompt (recommended for new boxes):** Stop/remove the old box if needed, then recreate using the same image and Distrobox’s documented skip flag (see [Getting Started — Step 2](./getting_started.md#step-2-start-the-evaluation-container)):
+
+```bash
+export DBX_CONTAINER_MANAGER=docker
+distrobox rm -f aic_eval   # only if you are OK removing the existing box
+distrobox create -r --nvidia -i ghcr.io/intrinsic-dev/aic/aic_eval:latest aic_eval \
+  --absolutely-disable-root-password-i-am-really-positively-sure
+```
+
+This mounts Distrobox’s `/run/.nopasswd` marker so init does **not** install the first-login `passwd` hook. It weakens the **container user** password policy; treat the box as a local sim environment only.
+
+**Fix B — One interactive login:** From a normal terminal (TTY), run `distrobox enter -r aic_eval`, set a password when `passwd` prompts, then exit. Later non-interactive `distrobox enter` runs will skip the prompt.
+
+**Fix C — Existing container, host has Docker:** Remove the first-login stamp as **root** in the container (username is usually the same as on the host, often `ubuntu`):
+
+```bash
+CID="$(docker ps -qf name=aic_eval)"
+docker exec -u 0 "$CID" rm -f "/var/tmp/.${USER}.passwd.initialize"
+```
+
+Then `distrobox enter -r aic_eval` (or `distrobox enter -r aic_eval -- your-command`) should proceed without the password banner.
+
+**Fix D — Sudo asking for a password** when Distrobox runs `docker`/`podman` as root: configure your sudo program to allow those commands without a password (narrow `NOPASSWD` rule), as described in the [Distrobox FAQ](https://github.com/89luca89/distrobox/blob/main/docs/posts/run_rootless.md) and related issues.
+
+## TF warnings: `Detected jump back in time` / `Moved backwards in time`
+
+You may see bursts of messages such as:
+
+```text
+[tf2_buffer]: Detected jump back in time. Clearing TF buffer.
+[robot_state_publisher]: Moved backwards in time, re-publishing joint transforms!
+```
+
+**What it means:** `tf2` tracks **ROS time** from `/clock` (simulation time when `use_sim_time` is true). If that time **decreases**, buffers are cleared so transforms stay consistent. That is **normal** when:
+
+- Gazebo is still starting or loading the world
+- The **aic_engine** resets or readies the simulator for a **trial** (world / clock can jump)
+- The machine is **CPU- or GPU-bound** and the sim **lags** (real-time factor &lt; 1), so `/clock` can look uneven
+
+**When to worry:** Short bursts at startup or at trial boundaries are expected. **Continuous** warnings with no progress (spawners stuck, RTF very low) usually mean overload or a bad state—try closing other heavy jobs, improving RTF (see [Low real-time factor](#low-real-time-factor-on-gazebo)), or restarting `/entrypoint.sh` once.
+
+**What not to do:** Do not run **two** `aic_model` nodes or mix middleware configs; duplicate nodes also confuse discovery and can coincide with odd timing.
+
+There is no separate product bug in `aic_adapter` for these lines—they are `tf2` reacting to **clock non-monotonicity** from the simulator clock.
