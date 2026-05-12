@@ -68,11 +68,14 @@ def build_sc_rails(active_rails, trial_idx):
 def choose_nic_spawn_rails(trial_idx, num_trials, mode: str):
     """
     mode:
+      - 'none': no NIC cards on any rail
       - 'one': always 1 NIC
       - 'mixed': exactly half the trials spawn 1 NIC, half spawn 2–5 NICs
         (parity on trial_idx). Multi-card count is weighted toward 2, then 3, 4, 5.
       - 'all': always 5 NICs
     """
+    if mode == "none":
+        return []
     if mode == "all":
         return list(range(5))
     if mode == "one":
@@ -178,7 +181,12 @@ def build_trial(trial_idx, plug_type, nic_spawn_rails, sc_spawn_rails, yaw_band)
 
     if plug_type == "sfp":
         cable_type = "sfp_sc_cable"
-        target_rail = random.choice(list(nic_spawn_rails))
+        # With nic_spawn_mode=none there are no cards; still pick a mount rail for the task target.
+        target_rail = (
+            random.choice(list(nic_spawn_rails))
+            if nic_spawn_rails
+            else random.randrange(5)
+        )
         target_port = random.choice(["sfp_port_0", "sfp_port_1"])
         task = {
             "cable_type": "sfp_sc",
@@ -305,9 +313,9 @@ def main():
     )
     parser.add_argument(
         "--nic-spawn-mode",
-        choices=["one", "mixed", "all"],
+        choices=["none", "one", "mixed", "all"],
         default="one",
-        help="How many NIC cards to spawn per trial.",
+        help="How many NIC cards to spawn per trial (none = zero cards).",
     )
     parser.add_argument(
         "--sc-spawn-mode",

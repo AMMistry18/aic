@@ -6,3 +6,10 @@ channels = [
   "robostack-kilted",
   "conda-forge",
 ]
+
+# Align with robostack-kilted + Gazebo (ros2-distro-mutex 0.14.x).
+[package.host-dependencies]
+ros2-distro-mutex = ">=0.14.0,<0.15.0a0"
+
+[package.build-dependencies]
+ros2-distro-mutex = ">=0.14.0,<0.15.0a0"

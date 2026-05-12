@@ -15,6 +15,12 @@ Insertion depths are defined in ``INSERTION_DEPTH`` per port type (``sfp`` /
 See ``docs/getting_started.md`` (PerceptionInsert) and
 ``outputs/sc_pose_pipeline/README.md`` for eval and SC weight workflows.
 """
+
+# Ideas to speed up time:
+# We could stop the SFP Seating search when we detect that we are telling it to move horizontally 
+#   but it isnt moving at all (we can assume it is in the hole).
+#   this is also a problem for SC ports. 
+
 import csv
 import itertools
 import os
@@ -63,6 +69,24 @@ FINAL_INSERT_OBS_LEN = 69
 FINAL_INSERT_ACTION_MODE = "bounded_tip_pose_delta"
 FINAL_INSERT_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)
 FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
+
+# SC last-mm seating compliance: low Z stiffness so the impedance controller
+# treats the commanded over-press as bounded force control (a few N at most),
+# and high XY stiffness so the spiral perturbation actually transmits lateral
+# force into the port lip — that combination is what lets the tip slide along
+# the lip until it drops into the keyway, instead of just sitting on the face.
+SC_SEAT_STIFFNESS = [500.0, 500.0, 60.0, 80.0, 80.0, 60.0]
+SC_SEAT_DAMPING = [100.0, 100.0, 40.0, 30.0, 30.0, 25.0]
+
+# Archimedean spiral parameters for the SC seating search. Defaults give a
+# 0.3mm→7mm spiral over 5 turns / 100 points, sized to the SC chamfer + the
+# typical perception XY bias. Tunable via env vars without code changes.
+SC_SPIRAL_R_MIN_M = float(os.environ.get("AIC_SC_SPIRAL_R_MIN_M", "0.0003"))
+SC_SPIRAL_R_MAX_M = float(os.environ.get("AIC_SC_SPIRAL_R_MAX_M", "0.01"))
+SC_SPIRAL_TURNS = float(os.environ.get("AIC_SC_SPIRAL_TURNS", "5.0"))
+SC_SPIRAL_STEPS = int(os.environ.get("AIC_SC_SPIRAL_STEPS", "100"))
+SC_SPIRAL_HOLD_S = float(os.environ.get("AIC_SC_SPIRAL_HOLD_S", "0.10"))
+SC_SPIRAL_Z_OFFSET_M = float(os.environ.get("AIC_SC_SPIRAL_Z_OFFSET_M", "-0.080"))
 
 # Reject only truly tiny SC color blobs. Target selection below uses multiview
 # reprojection and the requested task identity, so a high color-area gate is
@@ -253,6 +277,18 @@ class PerceptionInsert(Policy):
         )
 
     def _load_final_insert_policy(self):
+        # The learned final-insertion RL hook is disabled by default. The
+        # deterministic spiral seating (SC) and hand-coded SFP search own
+        # the last mm. To re-enable the RL residual / handoff, set
+        # AIC_FINAL_INSERT_DISABLE=0 (and optionally AIC_FINAL_INSERT_MODE).
+        if os.environ.get("AIC_FINAL_INSERT_DISABLE", "1").strip().lower() not in (
+            "0", "false", "no", "off", ""
+        ):
+            self.get_logger().info(
+                "Final-insertion RL hook disabled (AIC_FINAL_INSERT_DISABLE=1); "
+                "using hand-coded seating only"
+            )
+            return
         policy_path = os.environ.get("AIC_FINAL_INSERT_POLICY")
         if not policy_path:
             bundled_policy = Path(__file__).parent / "weights" / "final_insert_sc_model73.ts"
@@ -2681,7 +2717,11 @@ class PerceptionInsert(Policy):
 
                 # Stop if tip is deep enough below port entrance (full insertion depth)
                 insertion_depth = entrance_z_for_depth - tip_z
-                self.get_logger().info(f"Insertion depth: {insertion_depth*1000:.1f}mm")
+                self.get_logger().info(
+                    f"Insertion depth: {insertion_depth*1000:.1f}mm "
+                    f"integrator=(x={self._tip_x_error_integrator:.4f},"
+                    f"y={self._tip_y_error_integrator:.4f})"
+                )
                 if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015: # give margin for noise
                     self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
                     break
@@ -2948,14 +2988,22 @@ class PerceptionInsert(Policy):
                 (0.0025, 0.0), (-0.0025, 0.0),
                 (0.0, 0.0025), (0.0, -0.0025),
             ]
-            wide_sc_offsets = []
-            for radius in (0.0045, 0.0065):
-                wide_sc_offsets.extend([
-                    (radius, 0.0), (-radius, 0.0),
-                    (0.0, radius), (0.0, -radius),
-                    (radius, radius), (radius, -radius),
-                    (-radius, radius), (-radius, -radius),
-                ])
+            # Archimedean spiral of XY offsets in the port frame: r grows
+            # linearly with angle so neighboring points stay close enough for
+            # the impedance controller to follow without jumps. With the SC
+            # seating compliance (low Z stiffness, high XY stiffness), the
+            # bounded over-press at sc_stage_z presses the tip against the
+            # port face while the spiral slides it across the chamfer until
+            # the keyway captures and Z snaps down.
+            spiral_sc_offsets = []
+            n_steps = max(2, SC_SPIRAL_STEPS)
+            for i in range(n_steps):
+                t = i / float(n_steps - 1)
+                radius = SC_SPIRAL_R_MIN_M + (SC_SPIRAL_R_MAX_M - SC_SPIRAL_R_MIN_M) * t
+                theta = 2.0 * np.pi * SC_SPIRAL_TURNS * t
+                spiral_sc_offsets.append(
+                    (float(radius * np.cos(theta)), float(radius * np.sin(theta)))
+                )
             confirmation_pattern = [
                 (0.0, 0.0),
                 (0.0015, 0.0), (-0.0015, 0.0),
@@ -2963,9 +3011,7 @@ class PerceptionInsert(Policy):
             ]
             sc_search_stages = [
                 ("fine", max(z_offset, -0.035), fine_sc_offsets, 1.15),
-                ("engage", -0.055, fine_sc_offsets, 1.20),
-                ("wide", -0.070, wide_sc_offsets, 1.20),
-                ("deep", -0.090, fine_sc_offsets + wide_sc_offsets, 1.25),
+                ("spiral", SC_SPIRAL_Z_OFFSET_M, spiral_sc_offsets, SC_SPIRAL_HOLD_S),
             ]
             partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.006"))
             partial_early_xy = float(os.environ.get("AIC_SC_PARTIAL_EARLY_XY_M", "0.010"))
@@ -2975,15 +3021,27 @@ class PerceptionInsert(Policy):
             best_sc_depth = float("-inf")
             best_sc_score = float("-inf")
 
-            def evaluate_sc_offset(stage_name, xy_offset, sc_stage_z, hold_time):
+            def evaluate_sc_offset(
+                stage_name,
+                xy_offset,
+                sc_stage_z,
+                hold_time,
+                stiffness=None,
+                damping=None,
+            ):
                 nonlocal best_sc_offset, best_sc_depth, best_sc_score, stop_sc_search
+                if stiffness is None:
+                    stiffness = list(SC_SEAT_STIFFNESS)
+                if damping is None:
+                    damping = list(SC_SEAT_DAMPING)
                 assist = None
                 assist_applied = False
-                obs_before = get_observation()
-                assist = self._assisted_final_insert_residual(
-                    obs_before, task, X, port_transform, fts_baseline, return_skip=True
-                )
-                assist_applied = bool(assist is not None and assist.get("applied", False))
+                if self._final_insert_policy is not None:
+                    obs_before = get_observation()
+                    assist = self._assisted_final_insert_residual(
+                        obs_before, task, X, port_transform, fts_baseline, return_skip=True
+                    )
+                    assist_applied = bool(assist is not None and assist.get("applied", False))
                 try:
                     q_tip = (
                         port_transform.rotation.w,
@@ -3028,8 +3086,8 @@ class PerceptionInsert(Policy):
                         tip_xyz=target_tip_xyz,
                         q_tip_wxyz=q_tip,
                         port_type=task.port_type,
-                        stiffness=[160.0, 160.0, 180.0, 60.0, 60.0, 60.0],
-                        damping=[65.0, 65.0, 70.0, 25.0, 25.0, 25.0],
+                        stiffness=stiffness,
+                        damping=damping,
                     )
                 except TransformException as ex:
                     self.get_logger().warn(f"TF fail SC seating search: {ex}")
@@ -3061,12 +3119,14 @@ class PerceptionInsert(Policy):
                         f"twist={assist['metrics']['twist']:.3f} "
                         f"action={np.round(assist['action'], 3).tolist()}"
                     )
+                elif assist is None:
+                    assist_log = " assisted_rl=disabled"
                 else:
                     assist_log = (
                         " assisted_rl=skipped"
-                        f" reason={assist.get('reason', 'unknown') if assist is not None else 'unknown'}"
+                        f" reason={assist.get('reason', 'unknown')}"
                     )
-                    if assist is not None and assist.get("metrics") is not None:
+                    if assist.get("metrics") is not None:
                         assist_log += (
                             f" handoff_xy={assist['metrics']['xy']*1000:.1f}mm "
                             f"handoff_depth={assist['metrics']['depth']*1000:.1f}mm "
@@ -3133,7 +3193,7 @@ class PerceptionInsert(Policy):
                     if (
                         insertion_depth is not None
                         and tip_xy_err is not None
-                        and stage_name in ("engage", "wide", "deep")
+                        and stage_name == "spiral"
                         and insertion_depth >= partial_early_depth
                         and tip_xy_err <= partial_early_xy
                     ):
