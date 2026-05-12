@@ -70,13 +70,23 @@ FINAL_INSERT_ACTION_MODE = "bounded_tip_pose_delta"
 FINAL_INSERT_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)
 FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
 
-# SC last-mm seating compliance: low Z stiffness so the impedance controller
-# treats the commanded over-press as bounded force control (a few N at most),
-# and high XY stiffness so the spiral perturbation actually transmits lateral
-# force into the port lip — that combination is what lets the tip slide along
-# the lip until it drops into the keyway, instead of just sitting on the face.
-SC_SEAT_STIFFNESS = [500.0, 500.0, 60.0, 80.0, 80.0, 60.0]
-SC_SEAT_DAMPING = [100.0, 100.0, 40.0, 30.0, 30.0, 25.0]
+# SC descent compliance: high XY stiffness keeps the plug tip locked onto
+# the perceived port XY against cable tension, plug-boot weight, and side
+# friction. Default 160 N/m lets a 1 N side load drift the tip 6 mm — at
+# 500 N/m the same load drifts only 2 mm. Z and wrist match the original
+# descent default so the press dynamics don't change.
+SC_DESCENT_STIFFNESS = [500.0, 500.0, 180.0, 60.0, 60.0, 60.0]
+SC_DESCENT_DAMPING = [100.0, 100.0, 70.0, 25.0, 25.0, 25.0]
+
+# SC last-mm seating compliance: XY stiffness HIGH (~3x descent default) so the
+# spiral perturbation actually transmits lateral force into the port lip; Z
+# stiffness ~= descent (~180 N/m) so the over-press at SC_SPIRAL_Z_OFFSET_M
+# produces ~16 N of nominal press force — firm enough to push the chamfer
+# past stiction once the spiral aligns XY, well below the 24 N FTS abort.
+# Earlier values used Z=60-80 N/m, which gave 5-6 N at the lip — softer than
+# descent itself — and the spiral moved laterally without pressing down.
+SC_SEAT_STIFFNESS = [600.0, 600.0, 100.0, 80.0, 80.0, 60.0]
+SC_SEAT_DAMPING = [100.0, 100.0, 50.0, 30.0, 30.0, 25.0]
 
 # Archimedean spiral parameters for the SC seating search. Defaults give a
 # 0.3mm→7mm spiral over 5 turns / 100 points, sized to the SC chamfer + the
@@ -87,6 +97,14 @@ SC_SPIRAL_TURNS = float(os.environ.get("AIC_SC_SPIRAL_TURNS", "5.0"))
 SC_SPIRAL_STEPS = int(os.environ.get("AIC_SC_SPIRAL_STEPS", "100"))
 SC_SPIRAL_HOLD_S = float(os.environ.get("AIC_SC_SPIRAL_HOLD_S", "0.10"))
 SC_SPIRAL_Z_OFFSET_M = float(os.environ.get("AIC_SC_SPIRAL_Z_OFFSET_M", "-0.080"))
+
+# SFP partial-insertion early-exit gates: matches the SC spiral pattern —
+# once the plug is deep enough and XY-aligned enough during the wide/deep
+# seating stages, bail out instead of running the confirmation ring.
+# Default 40mm is ~78% of the full 51mm depth target; tune via env if you
+# want a stricter or looser early-exit criterion.
+SFP_PARTIAL_EARLY_DEPTH_M = float(os.environ.get("AIC_SFP_PARTIAL_EARLY_DEPTH_M", "0.040"))
+SFP_PARTIAL_EARLY_XY_M = float(os.environ.get("AIC_SFP_PARTIAL_EARLY_XY_M", "0.010"))
 
 # Reject only truly tiny SC color blobs. Target selection below uses multiview
 # reprojection and the requested task identity, so a high color-area gate is
@@ -2684,6 +2702,8 @@ class PerceptionInsert(Policy):
                         ),
                         q_tip_wxyz=q_tip,
                         port_type=task.port_type,
+                        stiffness=SC_DESCENT_STIFFNESS,
+                        damping=SC_DESCENT_DAMPING,
                     )
                 else:
                     pose = self.calc_gripper_pose(
@@ -2722,19 +2742,19 @@ class PerceptionInsert(Policy):
                     f"integrator=(x={self._tip_x_error_integrator:.4f},"
                     f"y={self._tip_y_error_integrator:.4f})"
                 )
-                if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015: # give margin for noise
+                if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.003: # give margin for noise / impedance lag
                     self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
                     break
 
                 if task.port_type == "sfp":
-                    # Only treat as a lip plateau when we are clearly in the port but
-                    # still short of the depth target — avoids bailing to seating while
-                    # the tip is still approaching or when slowly creeping the last mm.
-                    in_plateau_band = (
-                        insertion_depth > 0.008
-                        and insertion_depth
-                        < INSERTION_DEPTH["sfp"] - 0.009
-                    )
+                    # Detect a stall anywhere from "tip parked on the lip"
+                    # through "tip part-way in but not progressing" all the
+                    # way up to "tip near full depth but the impedance
+                    # controller can't squeeze the last fraction of a mm".
+                    # The normal descent moves >5mm per log step, so a
+                    # <0.8mm change across 3 consecutive checks (~1.5s) is
+                    # unambiguously stuck regardless of depth.
+                    in_plateau_band = insertion_depth > -0.020
                     if (
                         in_plateau_band
                         and last_sfp_depth is not None
@@ -2742,10 +2762,10 @@ class PerceptionInsert(Policy):
                     ):
                         sfp_depth_plateau_hits += 1
                         self.get_logger().info(
-                            f"SFP depth plateau near lip: depth={insertion_depth*1000:.1f}mm "
+                            f"SFP depth plateau: depth={insertion_depth*1000:.1f}mm "
                             f"stable_checks={sfp_depth_plateau_hits}"
                         )
-                        if sfp_depth_plateau_hits >= 4:
+                        if sfp_depth_plateau_hits >= 3:
                             self.get_logger().info(
                                 "SFP depth plateau persisted; switching to seating search"
                             )
@@ -2930,28 +2950,28 @@ class PerceptionInsert(Policy):
                     f"at z_offset={search_z_offset:.3f}"
                 )
                 for xy_offset in search_offsets:
-                    insertion_depth, _, _ = evaluate_sfp_offset(
+                    insertion_depth, tip_xy_err, _ = evaluate_sfp_offset(
                         stage_name, xy_offset, search_z_offset, hold_time)
                     if fts_stop:
                         break
                     if insertion_depth is not None and insertion_depth >= depth_threshold:
                         depth_seen = True
-                        confirm_z_offset = min(search_z_offset, -0.158)
                         self.get_logger().info(
-                            f"SFP seating depth reached at {insertion_depth*1000:.1f}mm; "
-                            "running local contact confirmation ring"
+                            f"SFP seating depth reached at {insertion_depth*1000:.1f}mm; stopping"
                         )
-
-                        seen_offsets = set()
-                        for dx, dy in confirmation_pattern:
-                            confirm_offset = (xy_offset[0] + dx, xy_offset[1] + dy)
-                            key = (round(confirm_offset[0], 4), round(confirm_offset[1], 4))
-                            if key in seen_offsets:
-                                continue
-                            seen_offsets.add(key)
-                            evaluate_sfp_offset("confirm", confirm_offset, confirm_z_offset, 1.25)
-                            if fts_stop:
-                                break
+                        seated = True
+                        break
+                    if (
+                        insertion_depth is not None
+                        and tip_xy_err is not None
+                        and insertion_depth >= SFP_PARTIAL_EARLY_DEPTH_M
+                        and tip_xy_err <= SFP_PARTIAL_EARLY_XY_M
+                    ):
+                        self.get_logger().info(
+                            f"SFP seating reached practical partial-insertion target in {stage_name} stage; "
+                            f"depth={insertion_depth*1000:.1f}mm "
+                            f"xy={tip_xy_err*1000:.1f}mm. Ending search early."
+                        )
                         seated = True
                         break
                 if fts_stop or seated:
@@ -3013,7 +3033,7 @@ class PerceptionInsert(Policy):
                 ("fine", max(z_offset, -0.035), fine_sc_offsets, 1.15),
                 ("spiral", SC_SPIRAL_Z_OFFSET_M, spiral_sc_offsets, SC_SPIRAL_HOLD_S),
             ]
-            partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.014"))
+            partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.0145"))
             partial_early_xy = float(os.environ.get("AIC_SC_PARTIAL_EARLY_XY_M", "0.010"))
             stop_sc_search = False
             seated_sc = False
@@ -3175,18 +3195,8 @@ class PerceptionInsert(Policy):
                             )
                             continue
                         self.get_logger().info(
-                            "SC seating reached full insertion depth target with XY confirmation"
+                            "SC seating reached full insertion depth target with XY confirmation; stopping"
                         )
-                        seen_offsets = set()
-                        for dx, dy in confirmation_pattern:
-                            confirm_offset = (xy_offset[0] + dx, xy_offset[1] + dy)
-                            key = (round(confirm_offset[0], 4), round(confirm_offset[1], 4))
-                            if key in seen_offsets:
-                                continue
-                            seen_offsets.add(key)
-                            evaluate_sc_offset("confirm", confirm_offset, sc_stage_z, 1.20)
-                            if stop_sc_search:
-                                break
                         seated_sc = True
                         stop_sc_search = True
                         break
