@@ -3013,7 +3013,7 @@ class PerceptionInsert(Policy):
                 ("fine", max(z_offset, -0.035), fine_sc_offsets, 1.15),
                 ("spiral", SC_SPIRAL_Z_OFFSET_M, spiral_sc_offsets, SC_SPIRAL_HOLD_S),
             ]
-            partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.006"))
+            partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.014"))
             partial_early_xy = float(os.environ.get("AIC_SC_PARTIAL_EARLY_XY_M", "0.010"))
             stop_sc_search = False
             seated_sc = False

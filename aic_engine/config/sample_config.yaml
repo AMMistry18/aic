@@ -141,7 +141,7 @@ trials:
       task_board:
         pose:
           x: 0.1819
-          y: -0.249
+          y: -0.049
           z: 1.14
           roll: 0.0
           pitch: 0.0
@@ -223,7 +223,7 @@ trials:
       task_board:
         pose:
           x: 0.1961
-          y: -0.1591
+          y: -0.0391
           z: 1.14
           roll: 0.0
           pitch: 0.0
