@@ -1024,6 +1024,23 @@ class PerceptionInsert(Policy):
         candidates.sort(key=lambda c: c["score"])
         return candidates
 
+    def _select_sc_by_task_slot(self, candidates, target_idx, label):
+        chosen = self._select_by_task_slot(candidates, target_idx, SC_PORT_LOCAL_Y, label)
+        unique = self._dedupe_spatial_candidates(candidates, min_sep=0.018)
+        self._last_sc_slot_selected_from_multi = chosen is not None and len(unique) > 1
+        self._sc_slot_axis_xy = None
+        if chosen is not None and target_idx in (0, 1) and len(unique) > 1:
+            other = min(
+                (c for c in unique if np.linalg.norm(c["X"][:2] - chosen["X"][:2]) > 1e-6),
+                key=lambda c: np.linalg.norm(c["X"][:2] - chosen["X"][:2]),
+                default=None,
+            )
+            if other is not None:
+                slot_axis = (other["X"] - chosen["X"]) if target_idx == 0 else (chosen["X"] - other["X"])
+                slot_axis[2] = 0.0
+                self._sc_slot_axis_xy = normalize(slot_axis)
+        return chosen
+
     def _select_sc_multiview_match(self, per_cam_candidates, task):
         candidates = self._make_sc_multiview_candidates(per_cam_candidates)
         if not candidates:
@@ -1041,63 +1058,14 @@ class PerceptionInsert(Policy):
             cand["yaw"] = yaw
 
         target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
-        unique = self._dedupe_spatial_candidates(candidates[:12], min_sep=0.018)
-        if target_idx in (0, 1):
-            if len(unique) == 1:
-                self._last_sc_slot_selected_from_multi = False
-                self.get_logger().info(
-                    f"SC target: only one candidate visible; assigning it to requested slot {target_idx}"
-                )
-                chosen = unique[0]
-            else:
-                # The two SC target rails are ordered along base-frame Y in the
-                # qualification layouts. This avoids the sign ambiguity of
-                # fitting two equally spaced slots from noisy close-range edge
-                # orientations.
-                ordered = sorted(unique, key=lambda c: float(c["X"][1]))
-                slot_axis = ordered[-1]["X"] - ordered[0]["X"]
-                slot_axis[2] = 0.0
-                self._sc_slot_axis_xy = normalize(slot_axis)
-                chosen = ordered[0] if target_idx == 0 else ordered[-1]
-                summary = [
-                    f"slot{i}:y={c['X'][1]:.3f}:score={c.get('score', 0.0):.2f}"
-                    for i, c in ((0, ordered[0]), (1, ordered[-1]))
-                ]
-                self.get_logger().info(
-                    f"SC target: selected slot {target_idx} by base-frame Y ordering; "
-                    f"candidates={summary}"
-                )
-                self._last_sc_slot_selected_from_multi = True
-            return chosen["X"], chosen["picked_by_cam"]
-
-        chosen = self._select_by_task_slot(candidates[:12], target_idx, SC_PORT_LOCAL_Y, "SC target")
+        chosen = self._select_sc_by_task_slot(candidates[:12], target_idx, "SC target")
         if chosen is None:
             return None, None
         return chosen["X"], chosen["picked_by_cam"]
 
     def _select_sc_pose_candidate(self, candidates, task, label):
         target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
-        unique = self._dedupe_spatial_candidates(candidates, min_sep=0.018)
-        if target_idx in (0, 1):
-            if len(unique) == 1:
-                self._last_sc_slot_selected_from_multi = False
-                self.get_logger().info(
-                    f"{label}: only one candidate visible; assigning it to requested slot {target_idx}"
-                )
-                return unique[0]
-            ordered = sorted(unique, key=lambda c: float(c["X"][1]))
-            chosen = ordered[0] if target_idx == 0 else ordered[-1]
-            self._last_sc_slot_selected_from_multi = True
-            summary = [
-                f"slot{i}:y={c['X'][1]:.3f}:reproj={c.get('reproj_px', 0.0):.1f}px"
-                for i, c in ((0, ordered[0]), (1, ordered[-1]))
-            ]
-            self.get_logger().info(
-                f"{label}: selected slot {target_idx} by base-frame Y ordering; "
-                f"candidates={summary}"
-            )
-            return chosen
-        return self._select_by_task_slot(candidates, target_idx, SC_PORT_LOCAL_Y, label)
+        return self._select_sc_by_task_slot(candidates, target_idx, label)
 
     def _make_sc_pose_multiview_candidates(self, per_cam):
         """Build SC candidates from YOLO-pose keypoints, mirroring SFP flow."""
