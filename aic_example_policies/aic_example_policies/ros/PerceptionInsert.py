@@ -75,7 +75,7 @@ FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
 # friction. Default 160 N/m lets a 1 N side load drift the tip 6 mm — at
 # 500 N/m the same load drifts only 2 mm. Z and wrist match the original
 # descent default so the press dynamics don't change.
-SC_DESCENT_STIFFNESS = [500.0, 500.0, 180.0, 60.0, 60.0, 60.0]
+SC_DESCENT_STIFFNESS = [500.0, 500.0, 80.0, 60.0, 60.0, 60.0]
 SC_DESCENT_DAMPING = [100.0, 100.0, 70.0, 25.0, 25.0, 25.0]
 
 # SC last-mm seating compliance: XY stiffness HIGH (~3x descent default) so the
@@ -2670,9 +2670,43 @@ class PerceptionInsert(Policy):
 
         # Descent — extended to -0.025 (25mm below port entrance)
         fts_stop = False
+        seated_in_descent = False
         step = 0
         last_sfp_depth = None
         sfp_depth_plateau_hits = 0
+        # SC cable-snag recovery state. Tracks plateau in tip Z during descent
+        # and triggers an in-place lift+twist if the signature looks like a
+        # snag (low FTS, tip still above port) rather than a press-bound
+        # stall at the lip.
+        last_sc_depth = None
+        sc_depth_plateau_hits = 0
+        sc_recovery_attempts = 0
+        sc_recovery_cooldown_steps = 0
+        sc_plateau_threshold_m = float(
+            os.environ.get("AIC_SC_DESCENT_PLATEAU_THRESHOLD_M", "0.0005")
+        )
+        sc_plateau_required_hits = int(
+            os.environ.get("AIC_SC_DESCENT_PLATEAU_HITS", "3")
+        )
+        sc_recovery_max_attempts = int(
+            os.environ.get("AIC_SC_DESCENT_MAX_RECOVERIES", "3")
+        )
+        sc_recovery_lift_m = float(
+            os.environ.get("AIC_SC_DESCENT_RECOVERY_LIFT_M", "0.008")
+        )
+        sc_recovery_yaw_deg = float(
+            os.environ.get("AIC_SC_DESCENT_RECOVERY_YAW_DEG", "8.0")
+        )
+        sc_recovery_hold_s = float(
+            os.environ.get("AIC_SC_DESCENT_RECOVERY_HOLD_S", "0.35")
+        )
+        sc_snag_fts_max_n = float(
+            os.environ.get("AIC_SC_DESCENT_SNAG_FTS_MAX_N", "6.0")
+        )
+        sc_snag_max_depth_m = float(
+            os.environ.get("AIC_SC_DESCENT_SNAG_MAX_DEPTH_M", "-0.005")
+        )
+        sc_recovery_cooldown_log_steps = 2  # skip 2 plateau checks (~1s) after recovery
         # Replace the while condition with actual tip position
         while True:
             step_size = 0.001
@@ -2743,7 +2777,14 @@ class PerceptionInsert(Policy):
                     f"y={self._tip_y_error_integrator:.4f})"
                 )
                 if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.003: # give margin for noise / impedance lag
-                    self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
+                    if task.port_type == "sc":
+                        seated_in_descent = True
+                        self.get_logger().info(
+                            f"Full insertion depth reached at {insertion_depth*1000:.1f}mm during SC descent; "
+                            "skipping SC seating search"
+                        )
+                    else:
+                        self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
                     break
 
                 if task.port_type == "sfp":
@@ -2773,6 +2814,132 @@ class PerceptionInsert(Policy):
                     else:
                         sfp_depth_plateau_hits = 0
                     last_sfp_depth = insertion_depth
+
+                if task.port_type == "sc":
+                    # During cooldown right after a recovery, skip plateau
+                    # detection so the resumed descent has time to clear the
+                    # old data point before we re-arm.
+                    if sc_recovery_cooldown_steps > 0:
+                        sc_recovery_cooldown_steps -= 1
+                        sc_depth_plateau_hits = 0
+                        last_sc_depth = insertion_depth
+                    else:
+                        if (
+                            last_sc_depth is not None
+                            and abs(insertion_depth - last_sc_depth) < sc_plateau_threshold_m
+                            and insertion_depth < INSERTION_DEPTH["sc"] - 0.003
+                        ):
+                            sc_depth_plateau_hits += 1
+                            tip_xy_err_diag = (
+                                float(np.linalg.norm(tip_world[:2] - X[:2]))
+                                if g is not None
+                                else float("nan")
+                            )
+                            self.get_logger().info(
+                                f"SC depth plateau: depth={insertion_depth*1000:.1f}mm "
+                                f"tip_xy_err={tip_xy_err_diag*1000:.1f}mm "
+                                f"fts_delta={delta:.1f}N "
+                                f"stable_checks={sc_depth_plateau_hits}"
+                            )
+                            if sc_depth_plateau_hits >= sc_plateau_required_hits:
+                                snag_like = (
+                                    abs(delta) < sc_snag_fts_max_n
+                                    and insertion_depth < sc_snag_max_depth_m
+                                )
+                                if (
+                                    snag_like
+                                    and sc_recovery_attempts < sc_recovery_max_attempts
+                                ):
+                                    sc_recovery_attempts += 1
+                                    self.get_logger().info(
+                                        f"SC descent snag detected at depth={insertion_depth*1000:.1f}mm "
+                                        f"(fts={delta:.1f}N, xy={tip_xy_err_diag*1000:.1f}mm); "
+                                        f"attempting lift+twist recovery #{sc_recovery_attempts} "
+                                        f"(lift={sc_recovery_lift_m*1000:.0f}mm, "
+                                        f"yaw=+/-{sc_recovery_yaw_deg:.0f}deg)"
+                                    )
+                                    try:
+                                        q_tip_base = (
+                                            port_transform.rotation.w,
+                                            port_transform.rotation.x,
+                                            port_transform.rotation.y,
+                                            port_transform.rotation.z,
+                                        )
+                                        R_port = quat_to_rotmat_wxyz(q_tip_base)
+                                        port_z_world = R_port[:, 2]
+                                        lifted_z = X[2] + z_offset + sc_recovery_lift_m
+                                        lifted_tip_xyz = np.array(
+                                            [X[0], X[1], lifted_z], dtype=np.float64
+                                        )
+                                        recovery_yaw_rad = float(
+                                            np.deg2rad(sc_recovery_yaw_deg)
+                                        )
+                                        # Step 1: lift only, neutral yaw — break stiction
+                                        self._set_tip_pose_target(
+                                            move_robot=move_robot,
+                                            tip_xyz=lifted_tip_xyz,
+                                            q_tip_wxyz=q_tip_base,
+                                            port_type=task.port_type,
+                                            stiffness=SC_DESCENT_STIFFNESS,
+                                            damping=SC_DESCENT_DAMPING,
+                                        )
+                                        self.sleep_for(sc_recovery_hold_s)
+                                        # Step 2: twist +/- about plug yaw axis at lifted Z
+                                        for yaw_sign in (+1.0, -1.0):
+                                            q_yaw_delta = self._axis_angle_to_quat_wxyz(
+                                                port_z_world * (recovery_yaw_rad * yaw_sign)
+                                            )
+                                            q_twisted = quat_normalize_wxyz(
+                                                quaternion_multiply(q_yaw_delta, q_tip_base)
+                                            )
+                                            if q_twisted is None:
+                                                continue
+                                            self._set_tip_pose_target(
+                                                move_robot=move_robot,
+                                                tip_xyz=lifted_tip_xyz,
+                                                q_tip_wxyz=q_twisted,
+                                                port_type=task.port_type,
+                                                stiffness=SC_DESCENT_STIFFNESS,
+                                                damping=SC_DESCENT_DAMPING,
+                                            )
+                                            self.sleep_for(sc_recovery_hold_s)
+                                        # Step 3: return to neutral yaw at lifted Z
+                                        self._set_tip_pose_target(
+                                            move_robot=move_robot,
+                                            tip_xyz=lifted_tip_xyz,
+                                            q_tip_wxyz=q_tip_base,
+                                            port_type=task.port_type,
+                                            stiffness=SC_DESCENT_STIFFNESS,
+                                            damping=SC_DESCENT_DAMPING,
+                                        )
+                                        self.sleep_for(0.2)
+                                        # Resume descent from the lifted Z so the
+                                        # next while-iteration's z_offset -= step_size
+                                        # picks up where the lift left off.
+                                        z_offset += sc_recovery_lift_m
+                                    except TransformException as ex:
+                                        self.get_logger().warn(
+                                            f"TF fail SC descent recovery: {ex}"
+                                        )
+                                    sc_depth_plateau_hits = 0
+                                    sc_recovery_cooldown_steps = sc_recovery_cooldown_log_steps
+                                    last_sc_depth = insertion_depth
+                                else:
+                                    if not snag_like:
+                                        self.get_logger().info(
+                                            f"SC plateau looks press-bound "
+                                            f"(fts_delta={delta:.1f}N, depth={insertion_depth*1000:.1f}mm); "
+                                            "ending descent for seating handoff"
+                                        )
+                                    else:
+                                        self.get_logger().info(
+                                            f"SC plateau persisted after {sc_recovery_attempts} recoveries; "
+                                            "ending descent for seating handoff"
+                                        )
+                                    break
+                        else:
+                            sc_depth_plateau_hits = 0
+                        last_sc_depth = insertion_depth
 
                 # Safety stop on excessive force
                 if delta > 15.0:
@@ -3001,7 +3168,12 @@ class PerceptionInsert(Policy):
                     self.get_logger().warn(f"TF fail final SFP settle: {ex}")
                 self.sleep_for(2.0)
 
-        if task.port_type == "sc" and not fts_stop and not learned_seated:
+        if (
+            task.port_type == "sc"
+            and not fts_stop
+            and not learned_seated
+            and not seated_in_descent
+        ):
             self.get_logger().info("Starting SC seating search near port lip")
             fine_sc_offsets = [
                 (0.0, 0.0),
@@ -3048,6 +3220,7 @@ class PerceptionInsert(Policy):
                 hold_time,
                 stiffness=None,
                 damping=None,
+                yaw_offset_rad=0.0,
             ):
                 nonlocal best_sc_offset, best_sc_depth, best_sc_score, stop_sc_search
                 if stiffness is None:
@@ -3075,6 +3248,19 @@ class PerceptionInsert(Policy):
                         if q_assisted is not None:
                             q_tip = q_assisted
                     R_port = quat_to_rotmat_wxyz(q_tip)
+                    # Apply optional yaw twist about the plug's insertion axis
+                    # (port Z in world). Keep the tip target XY anchored to the
+                    # un-twisted port frame so the wiggle only changes orientation.
+                    if abs(yaw_offset_rad) > 1e-6:
+                        port_z_world = R_port[:, 2]
+                        q_yaw = self._axis_angle_to_quat_wxyz(
+                            port_z_world * float(yaw_offset_rad)
+                        )
+                        q_yawed = quat_normalize_wxyz(
+                            quaternion_multiply(q_yaw, q_tip)
+                        )
+                        if q_yawed is not None:
+                            q_tip = q_yawed
                     world_offset = R_port[:, :2] @ np.array(xy_offset, dtype=np.float64)
                     target_tip_xyz = np.array(
                         [
@@ -3153,12 +3339,18 @@ class PerceptionInsert(Policy):
                             f"axis={assist['metrics']['axis']:.3f} "
                             f"twist={assist['metrics']['twist']:.3f}"
                         )
+                yaw_log = (
+                    f" yaw={np.rad2deg(yaw_offset_rad):+.1f}deg"
+                    if abs(yaw_offset_rad) > 1e-6
+                    else ""
+                )
                 self.get_logger().info(
                     f"SC seating {stage_name} offset=({xy_offset[0]*1000:.1f},"
                     f"{xy_offset[1]*1000:.1f})mm "
                     f"depth={insertion_depth*1000:.1f}mm "
                     f"tip_xy_err={tip_xy_err*1000:.1f}mm "
                     f"fts_delta={delta:.1f}N"
+                    + yaw_log
                     + assist_log
                 )
                 if abs(delta) > 24.0:
@@ -3181,7 +3373,7 @@ class PerceptionInsert(Policy):
                         break
                     if (
                         insertion_depth is not None
-                        and insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015
+                        and insertion_depth >= INSERTION_DEPTH[task.port_type]
                     ):
                         if tip_xy_err is None or tip_xy_err > SC_SEATING_SUCCESS_XY_M:
                             xy_text = (
@@ -3207,13 +3399,19 @@ class PerceptionInsert(Policy):
                         and insertion_depth >= partial_early_depth
                         and tip_xy_err <= partial_early_xy
                     ):
+                        # Stop spiraling — dragging the plug across more XY
+                        # offsets from a good seat tends to back it out. But
+                        # DON'T declare seated_sc=True: we are below the full-
+                        # depth gate, so the eval grader will only give us
+                        # partial credit. Falling through (seated_sc=False,
+                        # stop_sc_search=False) lets the final hold + yaw
+                        # wiggle + final hard push drive the last fraction.
                         self.get_logger().info(
                             "SC seating reached practical partial-insertion target; "
                             f"depth={insertion_depth*1000:.1f}mm "
-                            f"xy={tip_xy_err*1000:.1f}mm. Ending search early."
+                            f"xy={tip_xy_err*1000:.1f}mm. Ending spiral, "
+                            "letting final hold + wiggle + push finish the job."
                         )
-                        seated_sc = True
-                        stop_sc_search = True
                         break
 
             if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
@@ -3223,6 +3421,127 @@ class PerceptionInsert(Policy):
                     f"at depth={best_sc_depth*1000:.1f}mm for final hold"
                 )
                 evaluate_sc_offset("final", best_sc_offset, -0.095, 2.0)
+
+            # Last-ditch yaw wiggle about the plug insertion axis: try to twist
+            # the plug into the keyway if pure XY search did not seat it.
+            # Stays at the best XY/Z so we are working from the most promising
+            # position. Honors the same neighborhood gate as the final hold.
+            if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
+                wiggle_yaw_deg = float(os.environ.get("AIC_SC_WIGGLE_YAW_DEG", "5.0"))
+                wiggle_yaw_rad = float(np.deg2rad(wiggle_yaw_deg))
+                wiggle_hold = float(os.environ.get("AIC_SC_WIGGLE_HOLD_S", "1.20"))
+                wiggle_z = float(os.environ.get("AIC_SC_WIGGLE_Z_OFFSET_M", "-0.095"))
+                self.get_logger().info(
+                    f"Plug not seated after final hold; trying yaw wiggle "
+                    f"+/-{wiggle_yaw_deg:.1f}deg about plug yaw axis at "
+                    f"({best_sc_offset[0]*1000:.1f},{best_sc_offset[1]*1000:.1f})mm"
+                )
+                wiggle_steps = [
+                    (+wiggle_yaw_rad, "yaw+"),
+                    (-wiggle_yaw_rad, "yaw-"),
+                    (0.0, "yaw0"),  # return to neutral so downstream pose is sane
+                ]
+                for yaw_step_rad, label in wiggle_steps:
+                    insertion_depth, tip_xy_err, _ = evaluate_sc_offset(
+                        f"wiggle_{label}",
+                        best_sc_offset,
+                        wiggle_z,
+                        wiggle_hold,
+                        yaw_offset_rad=yaw_step_rad,
+                    )
+                    if stop_sc_search:
+                        break
+                    if (
+                        insertion_depth is not None
+                        and insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015
+                        and tip_xy_err is not None
+                        and tip_xy_err <= SC_SEATING_SUCCESS_XY_M
+                    ):
+                        self.get_logger().info(
+                            f"Yaw wiggle ({label}) seated plug at full depth"
+                        )
+                        seated_sc = True
+                        stop_sc_search = True
+                        break
+                    if (
+                        insertion_depth is not None
+                        and tip_xy_err is not None
+                        and insertion_depth >= partial_early_depth
+                        and tip_xy_err <= partial_early_xy
+                    ):
+                        self.get_logger().info(
+                            f"Yaw wiggle ({label}) reached practical partial-insertion target; "
+                            f"depth={insertion_depth*1000:.1f}mm "
+                            f"xy={tip_xy_err*1000:.1f}mm"
+                        )
+                        seated_sc = True
+                        stop_sc_search = True
+                        break
+
+            # Final hard push: if the plug is sitting at the lip (depth ~0mm)
+            # but XY-aligned, the impedance loop's nominal ~9.5N press isn't
+            # enough to overcome stiction. Bump Z stiffness so the same Z
+            # command produces more press without exceeding the 24N FTS abort.
+            # Stays at the best XY so we are pressing into the most aligned
+            # spot. Only fires if neighborhood gate still says we are near
+            # the port.
+            if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
+                push_z_offset = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_OFFSET_M", "-0.105"))
+                push_z_stiffness = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_STIFFNESS", "200.0"))
+                push_hold = float(os.environ.get("AIC_SC_FINAL_PUSH_HOLD_S", "2.5"))
+                push_stiffness = list(SC_SEAT_STIFFNESS)
+                push_stiffness[2] = push_z_stiffness
+                push_damping = list(SC_SEAT_DAMPING)
+                # Keep the same damping ratio as the nominal seat (Z=100,D=50)
+                # so we stay overdamped as stiffness grows.
+                push_damping[2] = float(SC_SEAT_DAMPING[2] * np.sqrt(push_z_stiffness / SC_SEAT_STIFFNESS[2]))
+                est_press_n = push_z_stiffness * abs(push_z_offset)
+                self.get_logger().info(
+                    f"Plug at lip but not seated (best_depth={best_sc_depth*1000:.1f}mm); "
+                    f"final hard push at z_offset={push_z_offset*1000:.0f}mm, "
+                    f"z_stiffness={push_z_stiffness:.0f}N/m "
+                    f"(~{est_press_n:.1f}N nominal press), hold={push_hold:.1f}s"
+                )
+                insertion_depth, tip_xy_err, _ = evaluate_sc_offset(
+                    "final_push",
+                    best_sc_offset,
+                    push_z_offset,
+                    push_hold,
+                    stiffness=push_stiffness,
+                    damping=push_damping,
+                )
+                if (
+                    insertion_depth is not None
+                    and insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015
+                    and tip_xy_err is not None
+                    and tip_xy_err <= SC_SEATING_SUCCESS_XY_M
+                ):
+                    self.get_logger().info("Final push seated plug at full depth")
+                    seated_sc = True
+                    stop_sc_search = True
+                elif (
+                    insertion_depth is not None
+                    and tip_xy_err is not None
+                    and insertion_depth >= partial_early_depth
+                    and tip_xy_err <= partial_early_xy
+                ):
+                    self.get_logger().info(
+                        f"Final push reached practical partial-insertion target; "
+                        f"depth={insertion_depth*1000:.1f}mm xy={tip_xy_err*1000:.1f}mm"
+                    )
+                    seated_sc = True
+                    stop_sc_search = True
+                else:
+                    final_depth_mm = (
+                        insertion_depth * 1000 if insertion_depth is not None else float("nan")
+                    )
+                    final_xy_mm = (
+                        tip_xy_err * 1000 if tip_xy_err is not None else float("nan")
+                    )
+                    self.get_logger().info(
+                        f"Final push did not seat plug; ended at "
+                        f"depth={final_depth_mm:.1f}mm xy={final_xy_mm:.1f}mm"
+                    )
 
         # Screenshot 3: at end of descent
         obs = get_observation()
