@@ -46,12 +46,12 @@ trials:
     scene:
       task_board:
         pose:
-          x: 0.1819
-          y: -0.049
+          x: 0.0859
+          y: 0.0519
           z: 1.14
           roll: 0.0
           pitch: 0.0
-          yaw: 0
+          yaw: 2.9338
         nic_rail_0:
           entity_present: false
         nic_rail_1:
@@ -63,58 +63,64 @@ trials:
         nic_rail_4:
           entity_present: false
         sc_rail_0:
-          entity_present: true
-          entity_name: sc_mount_1_0
-          entity_pose:
-            translation: 0.0064
-            roll: 0.0
-            pitch: 0.0
-            yaw: 0.1222
+          entity_present: false
         sc_rail_1:
           entity_present: true
           entity_name: sc_mount_0_1
           entity_pose:
-            translation: -0.0006
+            translation: -0.0414
             roll: 0.0
             pitch: 0.0
-            yaw: 0.02
+            yaw: 0.0546
         lc_mount_rail_0:
           entity_present: true
-          entity_name: lc_mount_1_0
+          entity_name: lc_mount_0_0
           entity_pose:
-            translation: -0.0239
+            translation: 0.0423
             roll: 0.0
             pitch: 0.0
             yaw: 0.0
         sfp_mount_rail_0:
           entity_present: true
-          entity_name: sfp_mount_1_0
+          entity_name: sfp_mount_0_0
           entity_pose:
-            translation: 0.0386
+            translation: 0.0625
             roll: 0.0
             pitch: 0.0
             yaw: 0.0
         sc_mount_rail_0:
-          entity_present: false
+          entity_present: true
+          entity_name: sc_mount_0_0
+          entity_pose:
+            translation: -0.0291
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
         lc_mount_rail_1:
-          entity_present: false
+          entity_present: true
+          entity_name: lc_mount_0_1
+          entity_pose:
+            translation: 0.0832
+            roll: 0.0
+            pitch: 0.0
+            yaw: 0.0
         sfp_mount_rail_1:
           entity_present: true
-          entity_name: sfp_mount_1_1
+          entity_name: sfp_mount_0_1
           entity_pose:
-            translation: 0.078
+            translation: 0.0287
             roll: 0.0
             pitch: 0.0
             yaw: 0.0
         sc_mount_rail_1:
           entity_present: false
       cables:
-        cable_1:
+        cable_0:
           pose:
             gripper_offset:
               x: 0.0
               y: 0.015385
-              z: 0.047
+              z: 0.0421
             roll: 0.4432
             pitch: -0.4838
             yaw: 1.3303
@@ -123,12 +129,12 @@ trials:
     tasks:
       task_1:
         cable_type: sfp_sc
-        cable_name: cable_1
+        cable_name: cable_0
         plug_type: sc
         plug_name: sc_tip
         port_type: sc
         port_name: sc_port_base
-        target_module_name: sc_port_0
+        target_module_name: sc_port_1
         time_limit: 180
   trial_2:
     scene:
@@ -159,13 +165,7 @@ trials:
             pitch: 0.0
             yaw: 0.1222
         sc_rail_1:
-          entity_present: true
-          entity_name: sc_mount_0_1
-          entity_pose:
-            translation: -0.0006
-            roll: 0.0
-            pitch: 0.0
-            yaw: 0.02
+          entity_present: false
         lc_mount_rail_0:
           entity_present: true
           entity_name: lc_mount_1_0

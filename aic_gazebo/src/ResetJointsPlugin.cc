@@ -120,28 +120,24 @@ void ResetJointsPlugin::Configure(
 //////////////////////////////////////////////////
 void ResetJointsPlugin::PreUpdate(const gz::sim::UpdateInfo& _info,
                                   gz::sim::EntityComponentManager& _ecm) {
-  std::lock_guard<std::mutex> lock(this->mutex_);
+  // Throttle update rate.
+  auto elapsed = _info.simTime - this->lastUpdateTime_;
+  if (elapsed > std::chrono::steady_clock::duration::zero() &&
+      elapsed < this->updatePeriod_) {
+    return;
+  }
+  this->lastUpdateTime_ = _info.simTime;
 
-  // Idle path only: throttle periodic wake-ups. Pending resets must not wait
-  // on update_period_ — otherwise the service thread blocks until roughly one
-  // period of simulation time passes (default update_rate is 1 Hz → ~1 sim s).
+  std::lock_guard<std::mutex> lock(this->mutex_);
   if (this->requestedJoints_.empty()) {
-    auto elapsed = _info.simTime - this->lastUpdateTime_;
-    if (elapsed > std::chrono::steady_clock::duration::zero() &&
-        elapsed < this->updatePeriod_) {
-      return;
-    }
-    this->lastUpdateTime_ = _info.simTime;
     return;
   }
 
-  bool all_found = true;
   for (const auto& [jointName, initialPosition] : this->requestedJoints_) {
     auto jointEntity = this->model_.JointByName(_ecm, jointName);
     if (!jointEntity) {
       gzwarn << "Joint " << jointName << " cannot be found! Skipping reset."
              << std::endl;
-      all_found = false;
       continue;
     }
 
@@ -155,16 +151,11 @@ void ResetJointsPlugin::PreUpdate(const gz::sim::UpdateInfo& _info,
   }
 
   aic_engine_interfaces::srv::ResetJoints::Response response;
-  response.success = all_found;
-  if (!all_found) {
-    response.message =
-        "One or more joint names were not found on the model; see Gazebo WARN.";
-  }
+  response.success = true;
   this->reset_promise_->set_value(response);
 
   this->requestedJoints_.clear();
   this->reset_promise_ = nullptr;
-  this->lastUpdateTime_ = _info.simTime;
 }
 
 //////////////////////////////////////////////////

@@ -15,7 +15,7 @@ services:
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       # AIC_ENABLE_ACL: true
   model:
-    image: my-solution:v5
+    image: my-solution:v8
     build:
       dockerfile: docker/aic_model/Dockerfile
       context: ..
