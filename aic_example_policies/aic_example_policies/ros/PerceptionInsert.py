@@ -229,6 +229,7 @@ class PerceptionInsert(Policy):
         self._last_port_quat_wxyz = None
         self._last_port_yaw = None
         self._sc_slot_axis_xy = None
+        self._sc_yaw_flip_allowed = False
         self._last_sc_slot_selected_from_multi = False
         self._final_insert_policy = None
         self._final_insert_policy_kind = None
@@ -1003,14 +1004,75 @@ class PerceptionInsert(Policy):
             quaternion_multiply(q_port_wxyz, (0.0, 0.0, 0.0, 1.0))
         )
 
+    def _sc_yaw_flip_is_allowed(self, label):
+        if getattr(self, "_sc_yaw_flip_allowed", False):
+            return True
+        self.get_logger().info(
+            f"{label}: suppressing SC 180deg yaw flip because board is not detected as flipped"
+        )
+        return False
+
+    def _sc_yaw_board_axis_scores(self, q_current, q_flipped):
+        slot_axis = getattr(self, "_sc_slot_axis_xy", None)
+        if slot_axis is None or q_current is None or q_flipped is None:
+            return None
+        slot_axis = normalize(np.asarray(slot_axis, dtype=np.float64).copy())
+        if slot_axis is None:
+            return None
+
+        # Slot axis is slot0 -> slot1. The SC entrance x-axis should point the
+        # opposite way; this encodes the board's 0/180 yaw without using tip error.
+        target_x_axis = -slot_axis
+
+        def x_axis_score(q):
+            R = quat_to_rotmat_wxyz(q)
+            x_axis = normalize(np.array([R[0, 0], R[1, 0], 0.0], dtype=np.float64))
+            if x_axis is None:
+                return None
+            return float(np.dot(x_axis[:2], target_x_axis[:2]))
+
+        current_score = x_axis_score(q_current)
+        flipped_score = x_axis_score(q_flipped)
+        if current_score is None or flipped_score is None:
+            return None
+        return current_score, flipped_score, target_x_axis
+
+    def _choose_sc_yaw_by_board_axis(self, q_current, q_flipped, label):
+        scores = self._sc_yaw_board_axis_scores(q_current, q_flipped)
+        if scores is None:
+            return None
+        current_score, flipped_score, target_x_axis = scores
+        self.get_logger().info(
+            f"{label}: SC yaw board-axis scores current={current_score:.3f} "
+            f"flipped={flipped_score:.3f} target_x_axis=({target_x_axis[0]:.3f},{target_x_axis[1]:.3f}) "
+            f"board_flipped={getattr(self, '_sc_yaw_flip_allowed', False)}"
+        )
+        if flipped_score > current_score:
+            self._last_port_quat_wxyz = q_flipped
+            if self._last_port_yaw is not None:
+                self._last_port_yaw = float(
+                    np.arctan2(
+                        np.sin(self._last_port_yaw + np.pi),
+                        np.cos(self._last_port_yaw + np.pi),
+                    )
+                )
+            self.get_logger().info(f"{label}: selected 180deg-flipped SC yaw from board axis")
+            return True
+        self.get_logger().info(f"{label}: kept current SC yaw from board axis")
+        return False
+
     def _choose_sc_yaw_by_tip_error(self, X, label, margin=0.0015):
-        """Resolve the SC pose model's 180deg ambiguity using plug-tip geometry."""
+        """Resolve SC 180deg ambiguity from board axis when available; tip error as fallback."""
         if self._last_port_quat_wxyz is None:
             return False
         q_current = self._last_port_quat_wxyz
         q_flipped = self._flip_port_quat_180_about_insertion_axis(q_current)
         if q_flipped is None:
             return False
+
+        board_axis_choice = self._choose_sc_yaw_by_board_axis(q_current, q_flipped, label)
+        if board_axis_choice is not None:
+            return board_axis_choice
 
         err_current = self._predict_tip_xy_error_for_port_quat(X, q_current, "sc")
         err_flipped = self._predict_tip_xy_error_for_port_quat(X, q_flipped, "sc")
@@ -1022,6 +1084,8 @@ class PerceptionInsert(Policy):
             f"flipped={err_flipped*1000:.1f}mm"
         )
         if err_flipped + margin < err_current:
+            if not self._sc_yaw_flip_is_allowed(label):
+                return False
             self._last_port_quat_wxyz = q_flipped
             if self._last_port_yaw is not None:
                 self._last_port_yaw = float(
@@ -1122,6 +1186,7 @@ class PerceptionInsert(Policy):
                     return float(np.dot(d, d))
 
                 candidate_summary = []
+                finite_logo_distances = []
                 for i, c in enumerate(unique):
                     det = c.get("picked_by_cam", {}).get(ref_cam)
                     pt = self._sc_port_detection_centroid_px(det)
@@ -1131,6 +1196,7 @@ class PerceptionInsert(Policy):
                         )
                         continue
                     dist_px = float(np.linalg.norm(pt - logo_uv))
+                    finite_logo_distances.append((c, dist_px))
                     xyz_mm = (np.asarray(c["X"], dtype=np.float64) * 1000.0).round(1).tolist()
                     candidate_summary.append(
                         f"cand{i}:uv=({pt[0]:.1f},{pt[1]:.1f}) "
@@ -1143,11 +1209,18 @@ class PerceptionInsert(Policy):
                     f"candidates={candidate_summary}"
                 )
 
-                if target_idx == 0:
-                    chosen = max(unique, key=dist_sq_to_logo)
+                if not finite_logo_distances:
+                    chosen = min(unique, key=lambda c: c.get("score", 0.0))
+                    selection_rule = "best score (no finite purple-logo distances)"
+                    self.get_logger().warn(
+                        f"{label}: no finite SC-to-purple distances; "
+                        "using best multiview reprojection score"
+                    )
+                elif target_idx == 0:
+                    chosen = max(finite_logo_distances, key=lambda cd: cd[1])[0]
                     selection_rule = "farthest from purple logo (slot 0)"
                 elif target_idx == 1:
-                    chosen = min(unique, key=dist_sq_to_logo)
+                    chosen = min(finite_logo_distances, key=lambda cd: cd[1])[0]
                     selection_rule = "closest to purple logo (slot 1)"
                 else:
                     chosen = min(unique, key=lambda c: c.get("score", 0.0))
@@ -1156,6 +1229,19 @@ class PerceptionInsert(Policy):
                         f"{label}: could not map requested SC slot {target_idx}; "
                         "using best multiview reprojection score"
                     )
+                if len(finite_logo_distances) > 1:
+                    slot0 = max(finite_logo_distances, key=lambda cd: cd[1])[0]
+                    slot1 = min(finite_logo_distances, key=lambda cd: cd[1])[0]
+                    slot_axis = slot1["X"] - slot0["X"]
+                    slot_axis[2] = 0.0
+                    ax = normalize(slot_axis)
+                    if ax is not None:
+                        self._sc_slot_axis_xy = ax
+                        self._sc_yaw_flip_allowed = bool(ax[1] < 0.0)
+                        self.get_logger().info(
+                            f"{label}: inferred SC slot0->slot1 axis_xy=({ax[0]:.3f},{ax[1]:.3f}); "
+                            f"board_flipped={self._sc_yaw_flip_allowed}"
+                        )
                 d_px = float(np.sqrt(dist_sq_to_logo(chosen)))
                 self.get_logger().info(
                     f"{label}: {len(unique)} SC ports visible; selected {selection_rule} "
@@ -1163,6 +1249,8 @@ class PerceptionInsert(Policy):
                 )
 
         if len(unique) > 1:
+            if self._sc_slot_axis_xy is not None:
+                return chosen
             others = [
                 c for c in unique
                 if np.linalg.norm(c["X"][:2] - chosen["X"][:2]) >= 1e-6
@@ -1324,6 +1412,7 @@ class PerceptionInsert(Policy):
         self._last_port_quat_wxyz = None
         self._last_port_yaw = None
         self._sc_slot_axis_xy = None
+        self._sc_yaw_flip_allowed = False
         self._last_sc_slot_selected_from_multi = False
         views = self._build_views(obs)
         if len(views) < 2:
@@ -1383,10 +1472,14 @@ class PerceptionInsert(Policy):
                 self._last_port_quat_wxyz = chosen["q_wxyz"]
                 self._last_port_yaw = chosen["yaw"]
                 self._choose_sc_yaw_by_tip_error(X, "SC pose target")
+                tip_bias_mm = (
+                    self._plug_tip_bias_world("sc", self._last_port_quat_wxyz) * 1000.0
+                ).round(1).tolist()
                 self.get_logger().info(
                     f"SC selected {task.target_module_name}/{task.port_name}: "
                     f"yaw={np.degrees(self._last_port_yaw):.1f}deg reproj={chosen['reproj_px']:.1f}px "
-                    f"size=({chosen['width']*1000:.1f},{chosen['height']*1000:.1f})mm"
+                    f"size=({chosen['width']*1000:.1f},{chosen['height']*1000:.1f})mm "
+                    f"tip_bias_mm={tip_bias_mm}"
                 )
             else:
                 # Fallback: existing HSV + edge-axis pipeline when SC pose is
@@ -1441,9 +1534,12 @@ class PerceptionInsert(Policy):
                     self._last_port_quat_wxyz = q_wxyz
                     self._last_port_yaw = yaw
                     self._choose_sc_yaw_by_tip_error(X, "SC edge-fallback target")
+                    tip_bias_mm = (
+                        self._plug_tip_bias_world("sc", self._last_port_quat_wxyz) * 1000.0
+                    ).round(1).tolist()
                     self.get_logger().info(
                         f"SC edge-fallback yaw estimate: {np.degrees(self._last_port_yaw):.1f}deg "
-                        f"from {len(det_by_cam)} camera fits"
+                        f"from {len(det_by_cam)} camera fits tip_bias_mm={tip_bias_mm}"
                     )
                 else:
                     self.get_logger().warn(
@@ -1702,10 +1798,39 @@ class PerceptionInsert(Policy):
             bias_world = np.array([0.0006, -0.0167, -0.010], dtype=np.float64)
         return offset, q_plug_wxyz, bias_world
 
+    def _plug_tip_bias_world(self, port_type, q_tip_wxyz=None):
+        """Return the empirical tip bias in world frame.
+
+        The SC bias was tuned in the normal-board yaw where the SC entrance
+        x-axis points roughly world -Y. Rotate that XY bias with the estimated
+        port/tip yaw so a 180deg-flipped board does not reuse the normal-board
+        correction direction.
+        """
+        _, _, bias_world_ref = self._plug_tip_local_pose(port_type)
+        if port_type != "sc" or q_tip_wxyz is None:
+            return bias_world_ref
+
+        R_tip = quat_to_rotmat_wxyz(q_tip_wxyz)
+        x_axis = normalize(np.array([R_tip[0, 0], R_tip[1, 0], 0.0], dtype=np.float64))
+        if x_axis is None:
+            return bias_world_ref
+
+        ref_x_axis = np.array([0.0, -1.0, 0.0], dtype=np.float64)
+        angle = float(np.arctan2(
+            ref_x_axis[0] * x_axis[1] - ref_x_axis[1] * x_axis[0],
+            np.dot(ref_x_axis[:2], x_axis[:2]),
+        ))
+        c = float(np.cos(angle))
+        s = float(np.sin(angle))
+        bx, by, bz = bias_world_ref
+        return np.array([c * bx - s * by, s * bx + c * by, bz], dtype=np.float64)
+
     def _plug_tip_world(self, gripper_xyz, q_gripper_wxyz, port_type):
-        offset, q_plug_wxyz, bias_world = self._plug_tip_local_pose(port_type)
+        offset, q_plug_wxyz, _ = self._plug_tip_local_pose(port_type)
         R_plug_in_gripper = quat_to_rotmat_wxyz(q_plug_wxyz)
         R_gripper = quat_to_rotmat_wxyz(q_gripper_wxyz)
+        q_tip_wxyz = quat_normalize_wxyz(quaternion_multiply(q_gripper_wxyz, q_plug_wxyz))
+        bias_world = self._plug_tip_bias_world(port_type, q_tip_wxyz)
 
         # In _plug_tip_world, after computing tip, add the measured world-frame bias correction
         tip = gripper_xyz + R_gripper @ (R_plug_in_gripper @ offset)
@@ -1720,7 +1845,8 @@ class PerceptionInsert(Policy):
 
     def _gripper_pose_for_tip_pose(self, tip_xyz, q_tip_wxyz, port_type):
         """Invert the calibrated gripper->tip transform for a desired tip pose."""
-        offset, q_plug_wxyz, bias_world = self._plug_tip_local_pose(port_type)
+        offset, q_plug_wxyz, _ = self._plug_tip_local_pose(port_type)
+        bias_world = self._plug_tip_bias_world(port_type, q_tip_wxyz)
         q_gripper = quat_normalize_wxyz(
             quaternion_multiply(q_tip_wxyz, quat_inverse_wxyz(q_plug_wxyz))
         )
@@ -2544,7 +2670,7 @@ class PerceptionInsert(Policy):
                 self.set_pose_target(move_robot=move_robot, pose=self.calc_gripper_pose(
                     port_transform, slerp_fraction=f, position_fraction=f,
                     z_offset=z_offset, reset_xy_integrator=True,
-                    compensate_tip_xy=False))
+                    compensate_tip_xy=(task.port_type == "sc")))
                 self._publish_port_tf(X, port_transform) #DEBUGGING TF
             except TransformException as ex:
                 self.get_logger().warn(f"TF fail interp: {ex}")
@@ -2554,6 +2680,7 @@ class PerceptionInsert(Policy):
         obs = get_observation()
         prev_port_quat = self._last_port_quat_wxyz
         prev_port_yaw = self._last_port_yaw
+        prev_sc_yaw_flip_allowed = self._sc_yaw_flip_allowed
         prev_sc_slot_selected_from_multi = self._last_sc_slot_selected_from_multi
         refined = self.perceive_port_position(task, obs)
         if refined is not None:
@@ -2585,6 +2712,7 @@ class PerceptionInsert(Policy):
                 )
                 self._last_port_quat_wxyz = prev_port_quat
                 self._last_port_yaw = prev_port_yaw
+                self._sc_yaw_flip_allowed = prev_sc_yaw_flip_allowed
                 self._last_sc_slot_selected_from_multi = prev_sc_slot_selected_from_multi
             elif task.port_type == "sc":
                 if sc_xy_shift_mm > SC_REFINEMENT_MAX_XY_SHIFT_M * 1000.0:
@@ -2675,9 +2803,10 @@ class PerceptionInsert(Policy):
                 tip_recenter = self._plug_tip_world(g_recenter, q_recenter, task.port_type)
                 recenter_xy_err = np.linalg.norm(tip_recenter[:2] - X[:2])
                 if recenter_xy_err > 0.004:
+                    recenter_err_vec_mm = ((X[:2] - tip_recenter[:2]) * 1000.0).round(1).tolist()
                     self.get_logger().info(
                         f"SC refinement recenter: tip_xy_err={recenter_xy_err*1000:.1f}mm; "
-                        "moving above refined port before descent"
+                        f"tip_to_port_xy_mm={recenter_err_vec_mm}; moving above refined port before descent"
                     )
 
                     def run_sc_recenter(max_steps, label):
@@ -2707,8 +2836,10 @@ class PerceptionInsert(Policy):
                                     tip_cur = self._plug_tip_world(g_cur, q_cur, task.port_type)
                                     final_err = float(np.linalg.norm(tip_cur[:2] - X[:2]))
                                     if step % 20 == 19:
+                                        err_vec_mm = ((X[:2] - tip_cur[:2]) * 1000.0).round(1).tolist()
                                         self.get_logger().info(
-                                            f"{label}: tip_xy_err={final_err*1000:.1f}mm"
+                                            f"{label}: tip_xy_err={final_err*1000:.1f}mm "
+                                            f"tip_to_port_xy_mm={err_vec_mm}"
                                         )
                                     if step >= 20 and final_err < 0.004:
                                         break
@@ -2719,31 +2850,47 @@ class PerceptionInsert(Policy):
 
                     final_recenter_err = run_sc_recenter(100, "SC recenter progress")
                     if final_recenter_err > 0.008 and self._last_port_quat_wxyz is not None:
-                        q_before_retry = self._last_port_quat_wxyz
-                        yaw_before_retry = self._last_port_yaw
-                        q_flipped = self._flip_port_quat_180_about_insertion_axis(q_before_retry)
-                        if q_flipped is not None:
-                            self._last_port_quat_wxyz = q_flipped
-                            if self._last_port_yaw is not None:
-                                self._last_port_yaw = float(
-                                    np.arctan2(
-                                        np.sin(self._last_port_yaw + np.pi),
-                                        np.cos(self._last_port_yaw + np.pi),
-                                    )
+                        if self._sc_yaw_flip_is_allowed("SC recenter retry"):
+                            q_before_retry = self._last_port_quat_wxyz
+                            yaw_before_retry = self._last_port_yaw
+                            q_flipped = self._flip_port_quat_180_about_insertion_axis(q_before_retry)
+                            board_scores = self._sc_yaw_board_axis_scores(q_before_retry, q_flipped)
+                            should_retry_flip = False
+                            if board_scores is not None:
+                                current_score, flipped_score, _ = board_scores
+                                should_retry_flip = flipped_score > current_score
+                                self.get_logger().info(
+                                    f"SC recenter retry: yaw board-axis scores "
+                                    f"current={current_score:.3f} flipped={flipped_score:.3f} "
+                                    f"retry_flip={should_retry_flip}"
                                 )
-                            port_transform = self.build_port_transform(X)
-                            self.get_logger().info(
-                                "SC recenter still has large XY error; retrying with 180deg yaw flip"
-                            )
-                            retry_err = run_sc_recenter(80, "SC yaw-flip recenter progress")
-                            if retry_err < final_recenter_err:
-                                final_recenter_err = retry_err
-                            else:
-                                self._last_port_quat_wxyz = q_before_retry
-                                self._last_port_yaw = yaw_before_retry
+                            if q_flipped is not None and should_retry_flip:
+                                self._last_port_quat_wxyz = q_flipped
+                                if self._last_port_yaw is not None:
+                                    self._last_port_yaw = float(
+                                        np.arctan2(
+                                            np.sin(self._last_port_yaw + np.pi),
+                                            np.cos(self._last_port_yaw + np.pi),
+                                        )
+                                    )
                                 port_transform = self.build_port_transform(X)
                                 self.get_logger().info(
-                                    "SC yaw-flip recenter did not improve; restoring previous yaw"
+                                    "SC recenter still has large XY error; retrying with 180deg yaw flip"
+                                )
+                                retry_err = run_sc_recenter(80, "SC yaw-flip recenter progress")
+                                if retry_err < final_recenter_err:
+                                    final_recenter_err = retry_err
+                                else:
+                                    self._last_port_quat_wxyz = q_before_retry
+                                    self._last_port_yaw = yaw_before_retry
+                                    port_transform = self.build_port_transform(X)
+                                    self.get_logger().info(
+                                        "SC yaw-flip recenter did not improve; restoring previous yaw"
+                                    )
+                            elif q_flipped is not None:
+                                self.get_logger().info(
+                                    "SC recenter still has large XY error; not retrying 180deg yaw flip "
+                                    "because board-axis yaw already matches"
                                 )
                     self.get_logger().info(
                         f"SC recenter finished: tip_xy_err={final_recenter_err*1000:.1f}mm"
