@@ -78,6 +78,15 @@ FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
 SC_DESCENT_STIFFNESS = [500.0, 500.0, 80.0, 60.0, 60.0, 60.0]
 SC_DESCENT_DAMPING = [100.0, 100.0, 70.0, 25.0, 25.0, 25.0]
 
+# Non-flipped SC boards can snag the cable during the straight-down approach.
+# Before normal descent, move the plug tip in world +Y, descend partway there,
+# then translate back above the port so the cable approaches from a cleaner side.
+SC_CABLE_CLEARANCE_Y_OFFSET_M = float(os.environ.get("AIC_SC_CABLE_CLEARANCE_Y_OFFSET_M", "0.030"))
+SC_CABLE_CLEARANCE_DESCENT_FRACTION = float(
+    os.environ.get("AIC_SC_CABLE_CLEARANCE_DESCENT_FRACTION", "0.60")
+)
+SC_CABLE_CLEARANCE_STEP_HOLD_S = float(os.environ.get("AIC_SC_CABLE_CLEARANCE_STEP_HOLD_S", "0.70"))
+
 # SC last-mm seating compliance: XY stiffness HIGH (~3x descent default) so the
 # spiral perturbation actually transmits lateral force into the port lip; Z
 # stiffness ~= descent (~180 N/m) so the over-press at SC_SPIRAL_Z_OFFSET_M
@@ -2931,6 +2940,62 @@ class PerceptionInsert(Policy):
             self.get_logger().info(
                 f"Depth gate: using entrance_z={entrance_z_for_depth:.4f} "
                 f"(perception X[2]={X[2]:.4f}) for insertion_depth"
+            )
+
+        if (
+            task.port_type == "sc"
+            and self._last_port_quat_wxyz is not None
+            and not getattr(self, "_sc_yaw_flip_allowed", False)
+            and abs(SC_CABLE_CLEARANCE_Y_OFFSET_M) > 1e-6
+        ):
+            q_tip = (
+                port_transform.rotation.w,
+                port_transform.rotation.x,
+                port_transform.rotation.y,
+                port_transform.rotation.z,
+            )
+            fraction = float(np.clip(SC_CABLE_CLEARANCE_DESCENT_FRACTION, 0.0, 1.0))
+            clearance_y = SC_CABLE_CLEARANCE_Y_OFFSET_M
+            detour_z_offset = z_offset * (1.0 - fraction)
+            detour_tip_high = np.array([X[0], X[1] + clearance_y, X[2] + z_offset], dtype=np.float64)
+            detour_tip_low = np.array(
+                [X[0], X[1] + clearance_y, X[2] + detour_z_offset],
+                dtype=np.float64,
+            )
+            return_tip_low = np.array([X[0], X[1], X[2] + detour_z_offset], dtype=np.float64)
+            self.get_logger().info(
+                "SC non-flipped cable-clearance descent: "
+                f"move +Y {clearance_y*1000:.1f}mm, descend {fraction*100:.0f}% "
+                f"to z_offset={detour_z_offset*1000:.1f}mm, then return above port"
+            )
+            for label, tip_target in (
+                ("offset_high", detour_tip_high),
+                ("offset_low", detour_tip_low),
+                ("return_low", return_tip_low),
+            ):
+                try:
+                    self._set_tip_pose_target(
+                        move_robot=move_robot,
+                        tip_xyz=tip_target,
+                        q_tip_wxyz=q_tip,
+                        port_type=task.port_type,
+                        stiffness=SC_DESCENT_STIFFNESS,
+                        damping=SC_DESCENT_DAMPING,
+                    )
+                    self._publish_port_tf(X, port_transform)
+                    self.get_logger().info(
+                        f"SC cable-clearance {label}: "
+                        f"tip_target_mm={(tip_target * 1000.0).round(1).tolist()}"
+                    )
+                except TransformException as ex:
+                    self.get_logger().warn(f"TF fail SC cable-clearance {label}: {ex}")
+                    break
+                self.sleep_for(SC_CABLE_CLEARANCE_STEP_HOLD_S)
+            z_offset = detour_z_offset
+        elif task.port_type == "sc":
+            self.get_logger().info(
+                "SC cable-clearance detour skipped "
+                f"(board_flipped={getattr(self, '_sc_yaw_flip_allowed', False)})"
             )
 
         # Descent — extended to -0.025 (25mm below port entrance)
