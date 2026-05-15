@@ -3687,62 +3687,6 @@ class PerceptionInsert(Policy):
                 )
                 evaluate_sc_offset("final", best_sc_offset, -0.095, 2.0)
 
-            # Last-ditch yaw wiggle about the plug insertion axis: try to twist
-            # the plug into the keyway if pure XY search did not seat it.
-            # Stays at the best XY/Z so we are working from the most promising
-            # position. Honors the same neighborhood gate as the final hold.
-            if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
-                wiggle_yaw_deg = float(os.environ.get("AIC_SC_WIGGLE_YAW_DEG", "5.0"))
-                wiggle_yaw_rad = float(np.deg2rad(wiggle_yaw_deg))
-                wiggle_hold = float(os.environ.get("AIC_SC_WIGGLE_HOLD_S", "1.20"))
-                wiggle_z = float(os.environ.get("AIC_SC_WIGGLE_Z_OFFSET_M", "-0.095"))
-                self.get_logger().info(
-                    f"Plug not seated after final hold; trying yaw wiggle "
-                    f"+/-{wiggle_yaw_deg:.1f}deg about plug yaw axis at "
-                    f"({best_sc_offset[0]*1000:.1f},{best_sc_offset[1]*1000:.1f})mm"
-                )
-                wiggle_steps = [
-                    (+wiggle_yaw_rad, "yaw+"),
-                    (-wiggle_yaw_rad, "yaw-"),
-                    (0.0, "yaw0"),  # return to neutral so downstream pose is sane
-                ]
-                for yaw_step_rad, label in wiggle_steps:
-                    insertion_depth, tip_xy_err, _ = evaluate_sc_offset(
-                        f"wiggle_{label}",
-                        best_sc_offset,
-                        wiggle_z,
-                        wiggle_hold,
-                        yaw_offset_rad=yaw_step_rad,
-                    )
-                    if stop_sc_search:
-                        break
-                    if (
-                        insertion_depth is not None
-                        and insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.0015
-                        and tip_xy_err is not None
-                        and tip_xy_err <= SC_SEATING_SUCCESS_XY_M
-                    ):
-                        self.get_logger().info(
-                            f"Yaw wiggle ({label}) seated plug at full depth"
-                        )
-                        seated_sc = True
-                        stop_sc_search = True
-                        break
-                    if (
-                        insertion_depth is not None
-                        and tip_xy_err is not None
-                        and insertion_depth >= partial_early_depth
-                        and tip_xy_err <= partial_early_xy
-                    ):
-                        self.get_logger().info(
-                            f"Yaw wiggle ({label}) reached practical partial-insertion target; "
-                            f"depth={insertion_depth*1000:.1f}mm "
-                            f"xy={tip_xy_err*1000:.1f}mm"
-                        )
-                        seated_sc = True
-                        stop_sc_search = True
-                        break
-
             # Final hard push: if the plug is sitting at the lip (depth ~0mm)
             # but XY-aligned, the impedance loop's nominal ~9.5N press isn't
             # enough to overcome stiction. Bump Z stiffness gently so the same
