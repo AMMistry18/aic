@@ -3537,6 +3537,7 @@ class PerceptionInsert(Policy):
             ]
             partial_early_depth = float(os.environ.get("AIC_SC_PARTIAL_EARLY_DEPTH_M", "0.0145"))
             partial_early_xy = float(os.environ.get("AIC_SC_PARTIAL_EARLY_XY_M", "0.010"))
+            sc_force_stop_n = float(os.environ.get("AIC_SC_SEATING_FORCE_STOP_N", "19.0"))
             stop_sc_search = False
             seated_sc = False
             best_sc_offset = (0.0, 0.0)
@@ -3629,10 +3630,34 @@ class PerceptionInsert(Policy):
                     self.get_logger().warn(f"TF fail SC seating search: {ex}")
                     return None, None, None
 
-                self.sleep_for(hold_time)
-                obs = get_observation()
-                fts = self._fts_z(obs)
-                delta = fts - fts_baseline
+                obs = None
+                fts = 0.0
+                delta = 0.0
+                hold_until = time.monotonic() + hold_time
+                while True:
+                    remaining = hold_until - time.monotonic()
+                    if remaining <= 0.0:
+                        break
+                    self.sleep_for(min(0.10, remaining))
+                    obs_probe = get_observation()
+                    if obs_probe is None:
+                        continue
+                    obs = obs_probe
+                    fts = self._fts_z(obs)
+                    delta = fts - fts_baseline
+                    if abs(delta) >= sc_force_stop_n:
+                        self.get_logger().warn(
+                            f"SC seating force guard: {stage_name} offset="
+                            f"({xy_offset[0]*1000:.1f},{xy_offset[1]*1000:.1f})mm "
+                            f"fts_delta={delta:.1f}N exceeds {sc_force_stop_n:.1f}N; "
+                            "ending SC search"
+                        )
+                        stop_sc_search = True
+                        break
+                if obs is None:
+                    obs = get_observation()
+                    fts = self._fts_z(obs)
+                    delta = fts - fts_baseline
                 g, q_wxyz = self._gripper_pose_from_tf()
                 if g is None or q_wxyz is None:
                     return None, None, delta
@@ -3683,7 +3708,7 @@ class PerceptionInsert(Policy):
                     + yaw_log
                     + assist_log
                 )
-                if abs(delta) > 24.0:
+                if abs(delta) >= sc_force_stop_n and not stop_sc_search:
                     self.get_logger().warn(
                         f"SC seating force delta {delta:.1f}N, ending SC search")
                     stop_sc_search = True
