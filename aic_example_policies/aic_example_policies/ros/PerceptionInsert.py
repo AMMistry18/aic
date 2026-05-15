@@ -107,12 +107,10 @@ SFP_PARTIAL_EARLY_DEPTH_M = float(os.environ.get("AIC_SFP_PARTIAL_EARLY_DEPTH_M"
 SFP_PARTIAL_EARLY_XY_M = float(os.environ.get("AIC_SFP_PARTIAL_EARLY_XY_M", "0.010"))
 
 # Reject only truly tiny SC color blobs. Target selection below uses multiview
-# reprojection and the requested task identity, so a high color-area gate is
-# more harmful than helpful when the port is partially occluded or close up.
+# reprojection; SC slot choice uses visible-count + proximity to the purple logo.
 SC_MIN_POSE_AREA = 80
 
 SFP_RAIL_LOCAL_Y = np.array([-0.1745 + 0.04 * i for i in range(5)], dtype=np.float64)
-SC_PORT_LOCAL_Y = np.array([0.0295, 0.0705], dtype=np.float64)
 
 # SFP corner keypoints in the port entrance frame. This matches
 # DataCollectorPose2.LOCAL_PORT_KPS and the YOLO-pose keypoint order.
@@ -646,6 +644,71 @@ class PerceptionInsert(Policy):
             unique.append(cand)
         return unique
 
+    def _sc_purple_logo_centroid_px(self, bgr):
+        """Centroid (u, v) of the largest purple patch (evaluation-board logo), or None."""
+        if bgr is None or bgr.size == 0:
+            return None
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        lower = np.array([125, 45, 45], dtype=np.uint8)
+        upper = np.array([165, 255, 255], dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower, upper)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_cnt = None
+        best_area = 0
+        min_area = 100
+        for cnt in contours:
+            area = int(cv2.contourArea(cnt))
+            if area >= min_area and area > best_area:
+                best_area = area
+                best_cnt = cnt
+        if best_cnt is None:
+            return None
+        m = cv2.moments(best_cnt)
+        if abs(m["m00"]) < 1e-6:
+            return None
+        return np.array([m["m10"] / m["m00"], m["m01"] / m["m00"]], dtype=np.float64)
+
+    def _sc_port_detection_centroid_px(self, det):
+        """Image centroid for one SC detection (HSV blob or pose keypoints)."""
+        if det is None:
+            return None
+        if "centroid" in det:
+            c = det["centroid"]
+            return np.array([float(c[0]), float(c[1])], dtype=np.float64)
+        kps = det.get("kps")
+        if kps is not None:
+            arr = np.asarray(kps, dtype=np.float64)
+            if arr.ndim == 2 and arr.shape[0] >= 4:
+                return np.mean(arr[:4], axis=0)
+            if arr.ndim == 2 and arr.shape[0] >= 1:
+                return np.mean(arr, axis=0)
+        bbox = det.get("bbox")
+        if bbox is not None and len(bbox) >= 4:
+            x, y, w, h = (float(bbox[i]) for i in range(4))
+            return np.array([x + 0.5 * w, y + 0.5 * h], dtype=np.float64)
+        return None
+
+    def _sc_ref_cam_for_logo_compare(self, unique, purple_uv_by_cam):
+        """Shared camera across candidates; prefer one where the purple logo was found."""
+        common = None
+        for c in unique:
+            pbm = c.get("picked_by_cam")
+            if not pbm:
+                return None
+            ks = set(pbm.keys())
+            common = ks if common is None else common & ks
+        if not common:
+            return None
+        sorted_cams = sorted(common)
+        if purple_uv_by_cam:
+            for cam in sorted_cams:
+                if cam in purple_uv_by_cam:
+                    return cam
+        return sorted_cams[0]
+
     def _candidate_y_axis(self, candidates):
         axes = []
         for cand in candidates:
@@ -1024,30 +1087,104 @@ class PerceptionInsert(Policy):
         candidates.sort(key=lambda c: c["score"])
         return candidates
 
-    def _select_sc_by_task_slot(self, candidates, target_idx, label):
-        chosen = self._select_by_task_slot(candidates, target_idx, SC_PORT_LOCAL_Y, label)
-        unique = self._dedupe_spatial_candidates(candidates, min_sep=0.018)
-        self._last_sc_slot_selected_from_multi = chosen is not None and len(unique) > 1
+    def _select_sc_by_screen_geometry(self, candidates, purple_uv_by_cam, target_idx, label):
+        """Pick SC port: sole visible candidate; otherwise slot 1 is closest to purple."""
+        if not candidates:
+            return None
+        unique = self._dedupe_spatial_candidates(candidates)
+        self._last_sc_slot_selected_from_multi = len(unique) > 1
         self._sc_slot_axis_xy = None
-        if chosen is not None and target_idx in (0, 1) and len(unique) > 1:
-            other = min(
-                (c for c in unique if np.linalg.norm(c["X"][:2] - chosen["X"][:2]) > 1e-6),
-                key=lambda c: np.linalg.norm(c["X"][:2] - chosen["X"][:2]),
-                default=None,
+
+        purple_uv_by_cam = purple_uv_by_cam or {}
+
+        if len(unique) == 1:
+            chosen = unique[0]
+            self.get_logger().info(
+                f"{label}: single SC port visible; selecting it for requested slot {target_idx}"
             )
-            if other is not None:
-                slot_axis = (other["X"] - chosen["X"]) if target_idx == 0 else (chosen["X"] - other["X"])
+        else:
+            ref_cam = self._sc_ref_cam_for_logo_compare(unique, purple_uv_by_cam)
+            logo_uv = purple_uv_by_cam.get(ref_cam) if ref_cam is not None else None
+
+            if ref_cam is None or logo_uv is None:
+                chosen = min(unique, key=lambda c: c.get("score", 0.0))
+                self.get_logger().warn(
+                    f"{label}: {len(unique)} SC ports visible but purple-logo proximity unavailable "
+                    f"(ref_cam={ref_cam}); using best multiview reprojection score"
+                )
+            else:
+                def dist_sq_to_logo(c):
+                    det = c.get("picked_by_cam", {}).get(ref_cam)
+                    pt = self._sc_port_detection_centroid_px(det)
+                    if pt is None:
+                        return float("inf")
+                    d = pt - logo_uv
+                    return float(np.dot(d, d))
+
+                candidate_summary = []
+                for i, c in enumerate(unique):
+                    det = c.get("picked_by_cam", {}).get(ref_cam)
+                    pt = self._sc_port_detection_centroid_px(det)
+                    if pt is None:
+                        candidate_summary.append(
+                            f"cand{i}:uv=None dist=inf score={c.get('score', 0.0):.2f}"
+                        )
+                        continue
+                    dist_px = float(np.linalg.norm(pt - logo_uv))
+                    xyz_mm = (np.asarray(c["X"], dtype=np.float64) * 1000.0).round(1).tolist()
+                    candidate_summary.append(
+                        f"cand{i}:uv=({pt[0]:.1f},{pt[1]:.1f}) "
+                        f"dist={dist_px:.1f}px score={c.get('score', 0.0):.2f} "
+                        f"xyz_mm={xyz_mm}"
+                    )
+                self.get_logger().info(
+                    f"{label}: purple-logo compare on {ref_cam}; "
+                    f"logo_uv=({logo_uv[0]:.1f},{logo_uv[1]:.1f}); "
+                    f"candidates={candidate_summary}"
+                )
+
+                if target_idx == 0:
+                    chosen = max(unique, key=dist_sq_to_logo)
+                    selection_rule = "farthest from purple logo (slot 0)"
+                elif target_idx == 1:
+                    chosen = min(unique, key=dist_sq_to_logo)
+                    selection_rule = "closest to purple logo (slot 1)"
+                else:
+                    chosen = min(unique, key=lambda c: c.get("score", 0.0))
+                    selection_rule = f"best score (unrecognized slot {target_idx})"
+                    self.get_logger().warn(
+                        f"{label}: could not map requested SC slot {target_idx}; "
+                        "using best multiview reprojection score"
+                    )
+                d_px = float(np.sqrt(dist_sq_to_logo(chosen)))
+                self.get_logger().info(
+                    f"{label}: {len(unique)} SC ports visible; selected {selection_rule} "
+                    f"on {ref_cam} (dist_px={d_px:.1f})"
+                )
+
+        if len(unique) > 1:
+            others = [
+                c for c in unique
+                if np.linalg.norm(c["X"][:2] - chosen["X"][:2]) >= 1e-6
+            ]
+            if others:
+                other = min(
+                    others,
+                    key=lambda c: np.linalg.norm(c["X"][:2] - chosen["X"][:2]),
+                )
+                slot_axis = other["X"] - chosen["X"]
                 slot_axis[2] = 0.0
-                self._sc_slot_axis_xy = normalize(slot_axis)
+                ax = normalize(slot_axis)
+                if ax is not None:
+                    self._sc_slot_axis_xy = ax
+
         return chosen
 
-    def _select_sc_multiview_match(self, per_cam_candidates, task):
+    def _select_sc_multiview_match(self, per_cam_candidates, purple_uv_by_cam, target_idx):
         candidates = self._make_sc_multiview_candidates(per_cam_candidates)
         if not candidates:
             return None, None
-        # Add an orientation estimate to the best few candidates before slot
-        # selection. This also gives _select_by_task_slot a rail axis when the
-        # edge fit is reliable.
+        # Orientation estimates for downstream yaw resolution when edges are reliable.
         for cand in candidates[:12]:
             det_by_cam = {
                 cam: {"major_axis": d.get("major_axis"), "K": d["K"], "T": d["T"]}
@@ -1057,15 +1194,12 @@ class PerceptionInsert(Policy):
             cand["q_wxyz"] = q_wxyz
             cand["yaw"] = yaw
 
-        target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
-        chosen = self._select_sc_by_task_slot(candidates[:12], target_idx, "SC target")
+        chosen = self._select_sc_by_screen_geometry(
+            candidates[:12], purple_uv_by_cam, target_idx, "SC target"
+        )
         if chosen is None:
             return None, None
         return chosen["X"], chosen["picked_by_cam"]
-
-    def _select_sc_pose_candidate(self, candidates, task, label):
-        target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
-        return self._select_sc_by_task_slot(candidates, target_idx, label)
 
     def _make_sc_pose_multiview_candidates(self, per_cam):
         """Build SC candidates from YOLO-pose keypoints, mirroring SFP flow."""
@@ -1197,8 +1331,19 @@ class PerceptionInsert(Policy):
             return None
 
         if task.port_type == "sc":
-            # First try the same keypoint-based multiview candidate flow used
-            # for SFP, but with the SC pose model and SC slot mapping.
+            target_idx = self._extract_trailing_index(task.target_module_name, "sc_port_")
+            purple_uv_by_cam = {}
+            for cam, (bgr, _, _) in views.items():
+                uv = self._sc_purple_logo_centroid_px(bgr)
+                if uv is not None:
+                    purple_uv_by_cam[cam] = uv
+                    self.get_logger().info(
+                        f"{cam}: purple logo centroid uv=({uv[0]:.1f},{uv[1]:.1f})"
+                    )
+                else:
+                    self.get_logger().warn(f"{cam}: purple logo not detected")
+
+            # SC pose multiview flow; port choice uses visible count + purple-logo proximity.
             per_cam_pose = {}
             for cam, (bgr, K, T) in views.items():
                 sc_pose_dets = []
@@ -1229,8 +1374,8 @@ class PerceptionInsert(Policy):
 
             pose_candidates = self._make_sc_pose_multiview_candidates(per_cam_pose)
             if pose_candidates:
-                chosen = self._select_sc_pose_candidate(
-                    pose_candidates[:12], task, "SC pose target"
+                chosen = self._select_sc_by_screen_geometry(
+                    pose_candidates[:12], purple_uv_by_cam, target_idx, "SC pose target"
                 )
                 if chosen is None:
                     return None
@@ -1246,6 +1391,9 @@ class PerceptionInsert(Policy):
             else:
                 # Fallback: existing HSV + edge-axis pipeline when SC pose is
                 # missing in too many views.
+                self.get_logger().warn(
+                    "SC pose multiview candidates unavailable; falling back to HSV blue blob detection"
+                )
                 per_cam_candidates = {}
                 for cam, (bgr, K, T) in views.items():
                     blobs = self._pc.detect_sc(bgr)
@@ -1278,7 +1426,9 @@ class PerceptionInsert(Policy):
                         f"top_centroid={candidates[0]['centroid']} top_area={candidates[0]['area']:.1f}"
                     )
 
-                X, picked_by_cam = self._select_sc_multiview_match(per_cam_candidates, task)
+                X, picked_by_cam = self._select_sc_multiview_match(
+                    per_cam_candidates, purple_uv_by_cam, target_idx
+                )
                 if X is None or picked_by_cam is None:
                     return None
 
