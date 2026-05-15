@@ -3745,15 +3745,16 @@ class PerceptionInsert(Policy):
 
             # Final hard push: if the plug is sitting at the lip (depth ~0mm)
             # but XY-aligned, the impedance loop's nominal ~9.5N press isn't
-            # enough to overcome stiction. Bump Z stiffness so the same Z
-            # command produces more press without exceeding the 24N FTS abort.
+            # enough to overcome stiction. Bump Z stiffness gently so the same
+            # Z command produces more press while staying below the 20N penalty
+            # threshold with margin.
             # Stays at the best XY so we are pressing into the most aligned
             # spot. Only fires if neighborhood gate still says we are near
             # the port.
             if not stop_sc_search and not seated_sc and best_sc_depth > -0.010:
-                push_z_offset = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_OFFSET_M", "-0.105"))
-                push_z_stiffness = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_STIFFNESS", "200.0"))
-                push_hold = float(os.environ.get("AIC_SC_FINAL_PUSH_HOLD_S", "2.5"))
+                push_z_offset = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_OFFSET_M", "-0.085"))
+                push_z_stiffness = float(os.environ.get("AIC_SC_FINAL_PUSH_Z_STIFFNESS", "140.0"))
+                push_hold = float(os.environ.get("AIC_SC_FINAL_PUSH_HOLD_S", "1.0"))
                 push_stiffness = list(SC_SEAT_STIFFNESS)
                 push_stiffness[2] = push_z_stiffness
                 push_damping = list(SC_SEAT_DAMPING)
@@ -3822,6 +3823,11 @@ class PerceptionInsert(Policy):
             )
             self._log_tip_to_actual_port(task, "Descent end", g2, q2)
 
-        self.sleep_for(3.0)
+        done_hold_s = (
+            float(os.environ.get("AIC_SC_DONE_HOLD_S", "0.5"))
+            if task.port_type == "sc"
+            else 3.0
+        )
+        self.sleep_for(done_hold_s)
         self.get_logger().info("PerceptionInsert done")
         return True
