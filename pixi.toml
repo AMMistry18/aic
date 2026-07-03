@@ -75,12 +75,10 @@ huggingface-hub = { version = "~=1.7" }
 lerobot = "==0.5.1"
 lerobot_robot_ros = { git = "https://github.com/koonpeng/lerobot-ros", rev = "87708d0ae14a724bca78f8ae9d55448332509a57", subdirectory = "lerobot_robot_ros" }
 lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros", rev = "87708d0ae14a724bca78f8ae9d55448332509a57", subdirectory = "lerobot_teleoperator_devices" }
-# mujoco >=3.2 includes mujoco.mjx (GPU-backed stepping via JAX/XLA).
-# Bumped from ==3.5.0 so we can use mjx for the 4096-env curriculum trainer.
+# Classic MuJoCo (CPU) is the sim backend for the Gazebo->MuJoCo pipeline and RL.
+# We run classic MuJoCo only — no mjx / no JAX (dropped the GPU-MJX path).
+# The scene is loaded from aic_utils/aic_mujoco/mjcf/scene.xml.
 mujoco = ">=3.2,<4"
-# JAX (CUDA 12 build) — required for mjx to step in parallel on the GPU.
-jax = ">=0.4.35,<0.5"
-jaxlib = ">=0.4.35,<0.5"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
 ultralytics = ">=8.4.37, <9"
