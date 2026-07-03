@@ -33,7 +33,7 @@ ros-kilted-aic-teleoperation = { path = "aic_utils/aic_teleoperation" }
 # ros-kilted-aic-training-interfaces = { path = "aic_utils/aic_training_interfaces" }
 ros-kilted-control-msgs = "*"                                                          # lerobot_robot_ros
 ros-kilted-geometry-msgs = "*"                                                         # lerobot_robot_ros
-# ros-kilted-lerobot-robot-aic = { path = "aic_utils/lerobot_robot_aic" }
+ros-kilted-lerobot-robot-aic = { path = "aic_utils/lerobot_robot_aic" }
 ros-kilted-moveit-msgs = "*"                                                           # lerobot_robot_ros
 ros-kilted-rclpy = "*"
 ros-kilted-rmw-zenoh-cpp = "*"
@@ -75,10 +75,24 @@ huggingface-hub = { version = "~=1.7" }
 lerobot = "==0.5.1"
 lerobot_robot_ros = { git = "https://github.com/koonpeng/lerobot-ros", rev = "87708d0ae14a724bca78f8ae9d55448332509a57", subdirectory = "lerobot_robot_ros" }
 lerobot_teleoperator_devices = { git = "https://github.com/koonpeng/lerobot-ros", rev = "87708d0ae14a724bca78f8ae9d55448332509a57", subdirectory = "lerobot_teleoperator_devices" }
-mujoco = "==3.5.0"
+# mujoco >=3.2 includes mujoco.mjx (GPU-backed stepping via JAX/XLA).
+# Bumped from ==3.5.0 so we can use mjx for the 4096-env curriculum trainer.
+mujoco = ">=3.2,<4"
+# JAX (CUDA 12 build) — required for mjx to step in parallel on the GPU.
+jax = ">=0.4.35,<0.5"
+jaxlib = ">=0.4.35,<0.5"
 pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
 ultralytics = ">=8.4.37, <9"
+stable-baselines3 = ">=2.6"
+wandb = ">=0.20"
+
+
+[pypi-options.dependency-overrides]
+# RTX 5090 (sm_120) needs PyTorch 2.8.0+ with CUDA 12.8+ kernels
+# (cu128 wheels first shipped in torch 2.8.0; cu126 lacks sm_120 kernels)
+torch = ">=2.8.0"
+torchvision = ">=0.23.0"
 
 [activation]
 scripts = ["pixi_env_setup.sh"]

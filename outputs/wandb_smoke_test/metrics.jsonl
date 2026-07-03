@@ -1,0 +1,1 @@
+{"ep": 1, "step": 600, "return": -1246.650829, "length": 600, "term": "timeout", "image_l1_final": 1.2188584804534912, "f_z_mean": 0.0, "f_z_max": 0.0, "t_start": 30.0, "image": -1.2188585069444444, "force": 0.0, "xy": -0.010991070419549942, "action": -0.0, "lateral": -0.0, "done": 0.0}

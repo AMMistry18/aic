@@ -1,0 +1,16 @@
+{"time":"2026-07-02T00:32:16.150974292-05:00","level":"INFO","msg":"stream: starting","core version":"0.24.2"}
+{"time":"2026-07-02T00:32:16.329094707-05:00","level":"INFO","msg":"stream: created new stream","id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.329210182-05:00","level":"INFO","msg":"stream: started","id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.32922151-05:00","level":"INFO","msg":"handler: started","stream_id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.329223098-05:00","level":"INFO","msg":"writer: started","stream_id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.329220591-05:00","level":"INFO","msg":"sender: started","stream_id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.384605738-05:00","level":"ERROR","msg":"api: HTTP error","status":404,"method":"POST","url":"https://api.wandb.ai/graphql"}
+{"time":"2026-07-02T00:32:16.384678971-05:00","level":"ERROR","msg":"runupserter: failed to init run","error":"returned error 404: {\"data\":{\"upsertBucket\":null},\"errors\":[{\"message\":\"entity satya_anandh not found during upsertBucket\",\"path\":[\"upsertBucket\"]}]}"}
+{"time":"2026-07-02T00:32:16.388854415-05:00","level":"INFO","msg":"stream: closing","id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.388989704-05:00","level":"ERROR","msg":"sender: uploadConfigFile: runhandle: run not yet initialized"}
+{"time":"2026-07-02T00:32:16.389216809-05:00","level":"ERROR","msg":"runfiles: runhandle: run not yet initialized"}
+{"time":"2026-07-02T00:32:16.3893515-05:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2026-07-02T00:32:16.389359582-05:00","level":"INFO","msg":"handler: closed","stream_id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.389369755-05:00","level":"INFO","msg":"sender: closed","stream_id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.389371921-05:00","level":"INFO","msg":"stream: closed","id":"g3evmmqa"}
+{"time":"2026-07-02T00:32:16.389952522-05:00","level":"ERROR","msg":"stream: runURL: runhandle: run not yet initialized"}

@@ -1,0 +1,107 @@
+# =====================================================================
+#  AIC Last-Inch Policy Model Registry
+# =====================================================================
+#
+#  Use this file to register every model/checkpoint the team has trained
+#  or plans to train. Switch the active model by exporting AIC_MODEL
+#  (the bash session picks it up automatically; see RL/load_model.py).
+#
+#  Layout conventions
+#  ------------------
+#    [models.<name>]        one entry per checkpoint/variant
+#      type                 "ros_policy" | "residual_rl" | ...
+#      policy_class         Python class that aic_model will dynamic-import
+#                            (must subclass aic_model.policy.Policy)
+#      description          free text, surfaces in ROS logs
+#      weight_path|dir      absolute path to learned weights / model dir
+#      trained_with         python framework used to produce the weights
+#      hyperparams          any dict captured at train time
+#      last_score           manually updated after a Phase-1 submission
+#
+#  Workflow
+#  --------
+#    1. Train a new model:   pixi run python RL/train.py --out models/residual_sac_v2
+#    2. Add [models.residual_sac_v2] below with the same fields.
+#    3. To evaluate locally:
+#         export AIC_MODEL=residual_sac_v2
+#         pixi run ros2 run aic_model aic_model --ros-args \
+#            -p use_sim_time:=true -p policy:=$(pixi run python RL/load_model.py --class)
+#    4. To deploy to Flowstate: build with build_aic_model.sh and submit.
+#
+#  All paths below must be absolute (resolve ~ / $env at use time).
+# =====================================================================
+
+[meta]
+version = 1
+last_edited = "2026-06-30"
+notes = "Initial registry; add new entries as training progresses."
+
+# ---------------------------------------------------------------------
+# Active model — used when AIC_MODEL env var is unset or unmatched
+# ---------------------------------------------------------------------
+[defaults]
+active = "perception_insert_baseline"
+fallback_to_baseline_on_missing_weights = true   # safer for Phase-1 submissions
+
+# ---------------------------------------------------------------------
+# Baseline (hand-coded) — your existing qualifying-period policy
+# ---------------------------------------------------------------------
+[models.perception_insert_baseline]
+type               = "ros_policy"
+policy_class       = "aic_example_policies.ros.PerceptionInsert"
+description        = "Hand-coded YOLO keypoints + spiral seating for SC; direct search for SFP. The qualifying-phase policy imported into Flowstate."
+weight_path        = ""
+weight_format      = ""
+trained_with       = "none (rule-based + perception_core.py)"
+hyperparams        = {}
+last_score         = ""           # empty string when not yet recorded
+ephemeral_recorded = false
+
+# ---------------------------------------------------------------------
+# Residual SAC v0 (placeholder — fill in after first training run)
+# ---------------------------------------------------------------------
+[models.residual_sac_v0]
+type               = "residual_rl"
+policy_class       = "aic_example_policies.ros.LastInchInsert"
+weight_path        = "/home/Anshul/AIC_Phase_1/aic_0/aic/outputs/residual_sac_v0/"
+weight_format      = "stable_baselines3 .zip"
+trained_with       = "stable_baselines3 SAC + custom feature extractor"
+hyperparams        = { learning_rate = 3e-4, total_timesteps = 200000, buffer_size = 300000, batch_size = 256, reward_spec = "v0.1" }
+reward_function    = "RL.reward.compute_reward"
+observation_spec   = "RL.observation.build_obs_dict (REWARD_SPEC.md §4)"
+last_score         = ""
+ephemeral_recorded = false
+notes              = "Template entry — populate after first training run."
+
+# ---------------------------------------------------------------------
+# Residual SAC v1 with image-only reward (force shaping disabled)
+# Useful for ablation studies.
+# ---------------------------------------------------------------------
+[models.residual_sac_v0_imageonly]
+type               = "residual_rl"
+policy_class       = "aic_example_policies.ros.LastInchInsert"
+weight_path        = "/home/Anshul/AIC_Phase_1/aic_0/aic/outputs/residual_sac_v0_imageonly/"
+weight_format      = "stable_baselines3 .zip"
+trained_with       = "stable_baselines3 SAC (w_force=0)"
+hyperparams        = { learning_rate = 3e-4, total_timesteps = 200000, w_force = 0.0 }
+reward_function    = "RL.reward.compute_reward (w_force=0)"
+last_score         = ""
+ephemeral_recorded = false
+notes             = "Ablation: image reward only, no force shaping."
+
+# ---------------------------------------------------------------------
+# How to add a new model
+# ---------------------------------------------------------------------
+#   [models.YOUR_NAME]
+#   type               = "residual_rl"        # or "ros_policy", "diffusion_policy", ...
+#   policy_class       = "path.to.ClassName"   # importable Python class
+#   weight_path        = "/absolute/path"     # empty for rule-based
+#   weight_format      = "stable_baselines3 .zip"
+#   trained_with       = "stable_baselines3 + your custom hooks"
+#   hyperparams        = { lr = 3e-4, ... }
+#   reward_function    = "RL.reward.compute_reward"
+#   observation_spec   = "RL.observation.build_obs_dict"
+#   last_score         = null
+#   ephemeral_recorded = false
+#   notes              = "any narrative you want"
+# =====================================================================
