@@ -144,3 +144,43 @@ wandb: WARNING `fps` argument does not affect the frame rate of the video when p
 |    time_elapsed    | 40       |
 |    total_timesteps | 121      |
 ---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.2      |
+|    ep_rew_mean     | 5.5      |
+| time/              |          |
+|    episodes        | 60       |
+|    fps             | 3        |
+|    time_elapsed    | 42       |
+|    total_timesteps | 132      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.2      |
+|    ep_rew_mean     | 5.45     |
+| time/              |          |
+|    episodes        | 64       |
+|    fps             | 3        |
+|    time_elapsed    | 45       |
+|    total_timesteps | 141      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.24     |
+|    ep_rew_mean     | 4.8      |
+| time/              |          |
+|    episodes        | 68       |
+|    fps             | 3        |
+|    time_elapsed    | 47       |
+|    total_timesteps | 152      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.32     |
+|    ep_rew_mean     | 3.06     |
+| time/              |          |
+|    episodes        | 72       |
+|    fps             | 3        |
+|    time_elapsed    | 50       |
+|    total_timesteps | 167      |
+---------------------------------
