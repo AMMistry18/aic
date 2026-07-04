@@ -1313,3 +1313,20 @@ wandb: WARNING Fatal error while uploading data. Some run data will not be synce
 |    learning_rate   | 0.0003   |
 |    n_updates       | 3352     |
 ---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 18.1     |
+|    ep_rew_mean     | -63.6    |
+| time/              |          |
+|    episodes        | 328      |
+|    fps             | 5        |
+|    time_elapsed    | 945      |
+|    total_timesteps | 5460     |
+| train/             |          |
+|    actor_loss      | 36       |
+|    critic_loss     | 52.5     |
+|    ent_coef        | 0.39     |
+|    ent_coef_loss   | -5.9     |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 3411     |
+---------------------------------
