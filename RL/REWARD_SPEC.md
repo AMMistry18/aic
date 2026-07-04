@@ -1,6 +1,27 @@
 # Reward Function Spec — Residual SAC for Last-Inch Cable Insertion
 
-**Status:** v0.2 — tuned for **arbitrary-start last-inch** regime.
+**Status:** v0.3 (2026-07-03) — recalibrated to the **fixed** MuJoCo scene.
+v0.2 → v0.3 changes (these SUPERSEDE the older numbers below where they conflict):
+- **Scene was broken** (solid brick, no cavity, force always 0 → success could
+  never fire). Now a real open-top socket; contact force reads **0–8 N**
+  (seating 3–5 N). See §11 (rewritten) and the `rl-env-scene-fix` note.
+- **Killed the double +50 bonus**: `β_s = 0` (image bonus off); the single
+  success bonus lives in `r_done` (+50). v0.2 paid +100 at the success step.
+- **Force thresholds recalibrated** to the measured band: `f_low=0.5`,
+  `f_optimal=4.0`, `f_max=8.0 N` (were 2/10/20, never realized in-sim). Abort
+  `f_abort=15`, `f_linger=10` (were 24/16). Positive force branch gated on
+  `depth_norm>0.3` so it can't be farmed at the entrance.
+- **Added `r_depth`**: potential-based insertion-depth progress (`w_depth=2.0`),
+  the primary low-variance last-inch signal (Ng et al. 1999).
+- **Fixed numerically-dead scaling** of `r_xy` (normalise by 5 mm) and
+  `r_lateral` (per-N), which were ~1e-4 in metres.
+- Reverse curriculum start now interpolates plug z from **near-seated** (level 0)
+  up to **above the mouth** (level 1) — v0.2 wrongly started at the entrance for
+  all levels.
+
+---
+
+**Status (historical):** v0.2 — tuned for **arbitrary-start last-inch** regime.
 v0.1 → v0.2 changes:
 - Episode structure now starts the plug from random poses inside the last-inch box (not from a fixed handoff pose).
 - `r_xy` down-weighted so the policy is not incentivised to sit at port centre.
@@ -365,17 +386,26 @@ residual_action_scale = [0.0015, 0.0015, 0.0035, 0.08, 0.08, 0.12]  # from Perce
 sim. MuJoCo runs ~1000× faster than Gazebo, which is required for
 residual SAC to converge in <2 GPU-hours per port type.
 
-### 11.1 Scene contents
+### 11.1 Scene contents (v0.3 — corrected)
 
-- A 6-DoF free joint for the plug, parameterised so that the controllable
-  DoFs match the deployment TCP pose delta (mx, my, mz, drx, dry, drz).
-- A fixed port mesh (box with a small inset chamfer) at world origin.
-- A single overhead virtual camera at `(0, 0, 0.10)` looking down `-Z`,
-  rendering `32×32` grayscale frames at 20 Hz to match the AIC wrist cam
-  convention. Image observation = this render.
-- Optional second / third camera offsets to mimic the left/right wrist
-  views in the AIC setup. For v0.2 we keep one camera; add more if the
-  single-view policy under-fits in early runs.
+- A 6-DoF free joint for the plug (box, half-extents 3.5×3.5×5 mm), actuated by
+  six **velocity-servo actuators** (`<velocity kv=…>`) — one per DoF (mx, my,
+  mz, drx, dry, drz). The action is a per-step pose delta → target velocity;
+  velocity servos let contact genuinely resist the plug so force is real.
+  (v0.2 overwrote `qvel` directly each step, which killed contact/force.)
+- A **real open-top rectangular socket**: 4 side walls + a bottom wall forming
+  a cavity sized to the plug + clearance (SC ~0.6 mm, SFP ~0.8 mm). The plug is
+  driven in until the bottom wall stops it at `z = −depth`
+  (SC 16 mm, SFP 51 mm). **There is no top cap** — v0.2 had a solid top cap +
+  a brick-filled interior, so the plug could never enter (the core bug).
+- Physics timestep 0.005 s, **10 substeps** per 20 Hz control step
+  (`integrator=implicitfast`, gravity 0).
+- **Three** overhead virtual cameras (left/centre/right, `±12 mm` x-offset) at
+  `z=0.06` looking down `−Z`, rendering `32×32` RGB, stacked on the channel
+  axis → `(32,32,9)`, matching the AIC 3-wrist-cam observation.
+- Contact force = **`mj_contactForce` summed** over the plug's active contacts,
+  rotated to world frame → the `force` obs and `f_z` for the reward
+  (v0.2 read `cfrc_int`, which is 0 for a free-joint body).
 
 ### 11.2 Contact model
 

@@ -1,0 +1,35 @@
+[wandb] run live at https://wandb.ai/tar2/1-inch-intrinsic-policy/runs/nh96qipm (entity=tar2, project=1-inch-intrinsic-policy)
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 3.5      |
+|    ep_rew_mean     | -19.2    |
+| time/              |          |
+|    episodes        | 4        |
+|    fps             | 2        |
+|    time_elapsed    | 5        |
+|    total_timesteps | 14       |
+| train/             |          |
+|    actor_loss      | -3.45    |
+|    critic_loss     | 504      |
+|    ent_coef        | 0.998    |
+|    ent_coef_loss   | -0.0246  |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 9        |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.25     |
+|    ep_rew_mean     | 5.69     |
+| time/              |          |
+|    episodes        | 8        |
+|    fps             | 2        |
+|    time_elapsed    | 7        |
+|    total_timesteps | 18       |
+| train/             |          |
+|    actor_loss      | -3.37    |
+|    critic_loss     | 499      |
+|    ent_coef        | 0.996    |
+|    ent_coef_loss   | -0.0365  |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 13       |
+---------------------------------

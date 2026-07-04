@@ -1,0 +1,83 @@
+{
+  "os": "Linux-7.0.0-27-generic-x86_64-with-glibc2.43",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-07-04T00:56:37.652274Z",
+  "args": [
+    "--scene",
+    "--out",
+    "RL/output/smoke_wandb_video_probe",
+    "--steps",
+    "12",
+    "--num-envs",
+    "1",
+    "--batch-size",
+    "8",
+    "--warmup-steps",
+    "4",
+    "--image-size",
+    "64",
+    "--reward-image-res",
+    "64",
+    "--buffer-size",
+    "200",
+    "--gradient-steps",
+    "1",
+    "--train-freq",
+    "1",
+    "--ckpt-every",
+    "1000",
+    "--buffer-every",
+    "0",
+    "--log-every",
+    "10",
+    "--no-video",
+    "--no-torchscript",
+    "--reset-mode",
+    "near_goal",
+    "--force",
+    "--wandb",
+    "--wandb-log-every",
+    "5",
+    "--wandb-video-every",
+    "1",
+    "--wandb-video-steps",
+    "20",
+    "--wandb-run-name",
+    "video-probe-level0-v2"
+  ],
+  "program": "/home/Anshul/AIC_Phase_1/aic_0/aic/RL/train.py",
+  "codePath": "RL/train.py",
+  "codePathLocal": "RL/train.py",
+  "git": {
+    "remote": "https://github.com/AMMistry18/aic.git",
+    "commit": "247d00966c995f5eb714e804f6f242fd1d614d43"
+  },
+  "email": "Anshulmistry1@gmail.com",
+  "root": "/home/Anshul/AIC_Phase_1/aic_0/aic",
+  "host": "JARVIS",
+  "executable": "/home/Anshul/AIC_Phase_1/aic_0/aic/.pixi/envs/default/bin/python",
+  "cpu_count": 16,
+  "cpu_count_logical": 24,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "982240026624",
+      "used": "682082738176"
+    }
+  },
+  "memory": {
+    "total": "32837107712"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "memoryTotal": "34190917632",
+      "cudaCores": 21760,
+      "architecture": "Blackwell",
+      "uuid": "GPU-3610b186-8a66-b914-1983-c3324a1b93b9"
+    }
+  ],
+  "cudaVersion": "13.2",
+  "writerId": "7l6jpt1afjnfxp1spu7lj9ykscccjquv"
+}

@@ -1,0 +1,5 @@
+[wandb] run live at https://wandb.ai/tar2/intrinsic/runs/7qaezxm5 (entity=tar2, project=intrinsic)
+wandb: WARNING `fps` argument does not affect the frame rate of the video when providing a file path or raw bytes.
+[wandb-video] logged episode_000001 (5 frames) to eval/rollout_video
+wandb: WARNING `fps` argument does not affect the frame rate of the video when providing a file path or raw bytes.
+[wandb-video] logged episode_000002 (8 frames) to eval/rollout_video

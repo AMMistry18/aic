@@ -1,0 +1,146 @@
+[wandb] run live at https://wandb.ai/tar2/intrinsic/runs/cgwqx76z (entity=tar2, project=intrinsic)
+wandb: WARNING `fps` argument does not affect the frame rate of the video when providing a file path or raw bytes.
+[wandb-video] logged episode_000001 (5 frames) to eval/rollout_video
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.25     |
+|    ep_rew_mean     | 4.72     |
+| time/              |          |
+|    episodes        | 4        |
+|    fps             | 1        |
+|    time_elapsed    | 7        |
+|    total_timesteps | 9        |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.38     |
+|    ep_rew_mean     | 2.13     |
+| time/              |          |
+|    episodes        | 8        |
+|    fps             | 1        |
+|    time_elapsed    | 10       |
+|    total_timesteps | 19       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.08     |
+|    ep_rew_mean     | 8.11     |
+| time/              |          |
+|    episodes        | 12       |
+|    fps             | 1        |
+|    time_elapsed    | 12       |
+|    total_timesteps | 25       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.06     |
+|    ep_rew_mean     | 8.55     |
+| time/              |          |
+|    episodes        | 16       |
+|    fps             | 2        |
+|    time_elapsed    | 15       |
+|    total_timesteps | 33       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.15     |
+|    ep_rew_mean     | 6.76     |
+| time/              |          |
+|    episodes        | 20       |
+|    fps             | 2        |
+|    time_elapsed    | 17       |
+|    total_timesteps | 43       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.25     |
+|    ep_rew_mean     | 4.68     |
+| time/              |          |
+|    episodes        | 24       |
+|    fps             | 2        |
+|    time_elapsed    | 20       |
+|    total_timesteps | 54       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.29     |
+|    ep_rew_mean     | 3.88     |
+| time/              |          |
+|    episodes        | 28       |
+|    fps             | 2        |
+|    time_elapsed    | 22       |
+|    total_timesteps | 64       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.31     |
+|    ep_rew_mean     | 3.31     |
+| time/              |          |
+|    episodes        | 32       |
+|    fps             | 2        |
+|    time_elapsed    | 25       |
+|    total_timesteps | 74       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.28     |
+|    ep_rew_mean     | 4.01     |
+| time/              |          |
+|    episodes        | 36       |
+|    fps             | 2        |
+|    time_elapsed    | 27       |
+|    total_timesteps | 82       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.25     |
+|    ep_rew_mean     | 4.56     |
+| time/              |          |
+|    episodes        | 40       |
+|    fps             | 2        |
+|    time_elapsed    | 30       |
+|    total_timesteps | 90       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.34     |
+|    ep_rew_mean     | 2.6      |
+|    f_z             | 0        |
+|    image_l1_norm   | 0        |
+|    term_status     |          |
+| time/              |          |
+|    episodes        | 44       |
+|    fps             | 3        |
+|    time_elapsed    | 32       |
+|    total_timesteps | 103      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.31     |
+|    ep_rew_mean     | 3.18     |
+| time/              |          |
+|    episodes        | 48       |
+|    fps             | 3        |
+|    time_elapsed    | 35       |
+|    total_timesteps | 111      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.23     |
+|    ep_rew_mean     | 4.88     |
+| time/              |          |
+|    episodes        | 52       |
+|    fps             | 3        |
+|    time_elapsed    | 37       |
+|    total_timesteps | 116      |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 2.16     |
+|    ep_rew_mean     | 6.32     |
+| time/              |          |
+|    episodes        | 56       |
+|    fps             | 2        |
+|    time_elapsed    | 40       |
+|    total_timesteps | 121      |
+---------------------------------

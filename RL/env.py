@@ -1,24 +1,39 @@
 """
 Gymnasium environment for residual-SAC last-inch insertion training.
 
-We wrap a *MuJoCo* scene (not the AIC Gazebo sim) so we can step at 0.1 ms
-per env step. This is required for residual SAC to converge in <2 GPU-hours
-per port type — Gazebo would take ~80 days for the same number of steps.
+We wrap a *MuJoCo* scene (not the AIC Gazebo sim) so we can step at ~0.1 ms
+per physics tick. This is required for image-SAC to converge in a few
+GPU-hours per port type — Gazebo would take weeks for the same step count.
 
 Scene contents (see REWARD_SPEC.md §11):
-    - 6-DoF free joint for the plug, controllable in (mx, my, mz, drx, dry, drz)
-    - Fixed port box with chamfer inset at world origin
-    - One overhead virtual camera rendering 32x32 grayscale at 20 Hz
+    - 6-DoF free joint for the plug, actuated in (mx, my, mz, drx, dry, drz)
+      via velocity-servo actuators (one per DoF).
+    - A real receptacle: 4 side walls + a bottom wall forming an OPEN-top
+      rectangular cavity sized to the plug plus a small clearance. The plug
+      can actually be driven into it; the bottom wall stops it at full depth.
+    - Three overhead virtual cameras (left/centre/right) rendering H×W RGB
+      at 20 Hz, stacked on the channel axis to match the AIC 3-wrist-cam obs.
 
-Episode structure (REWARD_SPEC.md §7b):
-    At reset, the plug is sampled from a random pose inside the last-inch
-    envelope (±3 mm XY, −8/+4 mm Z, ±15° yaw). Force pre-contact is
-    optional (random U(0, 8) N).
+Physics / actuation (v0.3 — fixed):
+    - Action ∈ [-1, 1]^6 → target pose-delta per control step, converted to a
+      target velocity `action * scale / dt` and tracked by velocity actuators.
+    - The velocity servo lets contact forces actually resist the plug, so
+      `mj_contactForce`-summed wrench on the plug is a real, bounded signal.
+    - Control rate 20 Hz (dt=0.05 s); physics timestep 0.005 s → 10 substeps.
+
+Episode structure — reverse curriculum (REWARD_SPEC.md §7c):
+    level 0  → plug starts *near the seated goal* (deep in the cavity,
+               centred): a small nudge seats it, so success is dense from
+               the very first episodes and bootstraps SAC.
+    level 1  → plug starts *above the mouth* with up to ±full xy miss and
+               ±full yaw: the policy must align and insert the whole way.
+    The trainer's CurriculumScheduler advances the level as the success
+    rate rises; the env reads the level from a file on every reset (so it
+    works across SubprocVecEnv workers).
 
 Reward:
-    From `RL.reward.compute_reward`. The goal image is captured at the
-    fully-inserted pose once during `__init__` (no per-reset capture —
-    the port doesn't move in this sim).
+    From `RL.reward.compute_reward`. The goal image is captured once at the
+    fully-seated pose during `__init__` (the port never moves in this sim).
 """
 
 from __future__ import annotations
@@ -26,10 +41,9 @@ from __future__ import annotations
 import dataclasses
 import os
 import tempfile
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -46,14 +60,13 @@ try:
 except ImportError:  # pragma: no cover
     _HAS_MUJOCO = False
 
-# Render backend — EGL for headless, OSMesa fallback, GLFW otherwise.
+# Render backend — EGL for headless (the only one that works on this box).
 # Set BEFORE mujoco.Renderer is constructed.
 try:
-    if os.environ.get("AIC_MUJOCO_GL", "egl").lower() == "egl":
-        mujoco.GLContext_EGL = None  # placeholder to avoid lint complaints
-        # modern mujoco picks backend based on env var MUJOCO_GL
+    _gl = os.environ.get("AIC_MUJOCO_GL", "egl").lower()
+    if _gl == "egl":
         os.environ.setdefault("MUJOCO_GL", "egl")
-    elif os.environ.get("AIC_MUJOCO_GL", "egl").lower() == "osmesa":
+    elif _gl == "osmesa":
         os.environ.setdefault("MUJOCO_GL", "osmesa")
 except Exception:
     pass
@@ -61,7 +74,6 @@ except Exception:
 from .observation import ObsConfig, build_obs_dict_from_arrays
 from .reward import (
     RewardConfig,
-    RewardBreakdown,
     TerminationConfig,
     check_termination,
     compute_reward,
@@ -69,162 +81,169 @@ from .reward import (
 
 
 # --------------------------------------------------------------------------- #
-# MJCF scene (built once, cached)
+# scene geometry
 # --------------------------------------------------------------------------- #
 
+# The plug is a simple box (half-extents in metres). Everything else is
+# derived from the plug so the cavity always actually fits the plug.
+_PLUG_HALF = (0.0035, 0.0035, 0.005)   # 7 x 7 x 10 mm plug
 
-# Port-type-specific MJCF geometry.
-# Values are taken from the AIC engine's SDFs:
-#   aic_assets/models/SFP Module/model.sdf   (SFP cage collision boxes)
-#   aic_assets/models/SC Port/model.sdf      (SC port collision boxes)
-#   aic_example_policies/.../PerceptionInsert.py: INSERTION_DEPTH
-# Plug dimensions are the LC Plug (sfp_sc_cable) reduced to a simple
-# box of half-extents (0.0035, 0.0035, 0.005) — close enough to the
-# real plug for the dynamics to be representative without modeling the
-# full mesh.
-
+# Per-port-type geometry. Only the depth, clearance, and start/success
+# envelopes differ; the wall construction is shared. Values are informed by
+# the AIC SDFs (SFP cage / SC port) and PerceptionInsert.INSERTION_DEPTH.
+#
+#   depth        : cavity depth (m). Plug tip reaches z=-depth when seated.
+#   clearance    : radial gap between plug and interior wall (m). Tighter =
+#                  harder / more contact-rich (aligned with ISO 286 upper
+#                  bound ~0.5-0.6 mm from IndustReal).
+#   wall         : wall thickness (m).
+#   full_xy_max  : level-1 start xy miss radius (m).
+#   full_yaw_max : level-1 start yaw range (rad).
+#   success_frac : insertion fraction (of depth) that counts as success.
+#   success_xy   : xy radial tolerance for success (m).
 _PORT_GEOMETRY = {
-    # SC: shallow, wider slot, 16 mm insertion depth
+    # SC: shallow, 16 mm insertion depth.
     "sc": {
-        "entrance_radius_x": 0.00515,  # 10.3 mm wide / 2
-        "entrance_radius_y": 0.003,    # chamfered
-        "entrance_height": 0.004,      # the slot's vertical extent
-        "insertion_depth": 0.016,      # matches INSERTION_DEPTH["sc"]
-        "chamfer_radius": 0.0015,      # top-edge chamfer
-        "wall_thickness": 0.001,
-        "color": "0.3 0.3 0.4 1",      # bluish plastic
-        "start_xy_max_m": 0.004,
-        "start_z_min_m": -0.001,       # 1 mm above port entrance
-        "start_z_max_m": 0.0005,
-        "start_yaw_max_rad": 0.262,    # 15 deg
-        "success_xy_max_m": 0.001,     # 1 mm radial error
-        "success_z_max_m": -0.0015,    # 1.5 mm below (seated)
-        "success_force_z_n": 1.0,
+        "depth": 0.016,
+        "clearance": 0.0006,
+        "wall": 0.002,
+        "color": "0.30 0.30 0.40 1",   # bluish plastic
+        "full_xy_max": 0.003,          # ±3 mm sideways miss at level 1
+        "full_yaw_max": np.deg2rad(15.0),
+        "success_frac": 0.70,          # tip ≥70 % of depth in
+        "success_xy": 0.0015,          # 1.5 mm radial tolerance
     },
-    # SFP: deep narrow cage, 51 mm insertion depth
+    # SFP: deep narrow cage, 51 mm insertion depth.
     "sfp": {
-        "entrance_radius_x": 0.007,    # 14 mm wide / 2 (SFP cage opening)
-        "entrance_radius_y": 0.0043,   # 8.6 mm tall / 2
-        "entrance_height": 0.0086,     # full cage height
-        "insertion_depth": 0.051,      # matches INSERTION_DEPTH["sfp"]
-        "chamfer_radius": 0.001,
-        "wall_thickness": 0.001,
-        "color": "0.5 0.4 0.3 1",      # brownish metal
-        "start_xy_max_m": 0.003,       # tighter — SFP is more sensitive
-        "start_z_min_m": -0.0005,      # 0.5 mm above port entrance
-        "start_z_max_m": 0.0003,
-        "start_yaw_max_rad": 0.175,    # 10 deg
-        "success_xy_max_m": 0.001,     # 1 mm radial error
-        "success_z_max_m": -0.025,     # 25 mm below — past the top cap (z=0)
-        "success_force_z_n": 1.0,      # require contact (not flying through)
+        "depth": 0.051,
+        "clearance": 0.0008,
+        "wall": 0.002,
+        "color": "0.50 0.40 0.30 1",   # brownish metal
+        "full_xy_max": 0.003,
+        "full_yaw_max": np.deg2rad(10.0),
+        "success_frac": 0.65,
+        "success_xy": 0.0015,
     },
 }
 
 
-def _build_mjcf(port_type: str, meshdir: str, cam_res: int) -> str:
-    """Generate the MJCF XML for a given port type. Cameras + plug are
-    shared; only the port body changes between port types.
-    """
+def _derive_geometry(port_type: str) -> dict:
+    """Compute all derived scene/curriculum anchors for a port type."""
     g = _PORT_GEOMETRY[port_type]
-    color = g["color"]
-    rx = g["entrance_radius_x"]
-    ry = g["entrance_radius_y"]
-    h = g["entrance_height"]
-    chamfer = g["chamfer_radius"]
-    wall = g["wall_thickness"]
-    depth = g["insertion_depth"]
+    ph_x, ph_y, ph_z = _PLUG_HALF
+    depth = g["depth"]
+    interior_half_x = ph_x + g["clearance"]
+    interior_half_y = ph_y + g["clearance"]
+    # Plug body-origin z when fully seated (tip at cavity bottom z=-depth).
+    seated_center_z = -depth + ph_z
+    # z (of plug body origin) at which the tip has entered by `success_frac`.
+    # tip_z = center_z - ph_z ; tip at -success_frac*depth  → center threshold:
+    success_z_max = -g["success_frac"] * depth + ph_z
+    # Level-1 start: tip a hair above the mouth (center z slightly positive).
+    mouth_start_z = ph_z - 0.002   # tip ~2 mm above entrance
+    return {
+        **g,
+        "interior_half_x": interior_half_x,
+        "interior_half_y": interior_half_y,
+        "seated_center_z": seated_center_z,
+        "success_z_max": success_z_max,
+        "mouth_start_z": mouth_start_z,
+    }
 
-    # The port is a closed receptacle:
-    #   * 4 side walls forming the U-shape opening at the top
-    #   * a back wall at the bottom (the plug tip target at z=-insertion_depth)
-    #   * a TOP CAP so the plug can't fall through the open top by gravity
-    # The top cap is the small slab at z=0..+h/2 just inside the opening.
+
+def _build_mjcf(port_type: str, meshdir: str, cam_res: int) -> str:
+    """Generate the MJCF for a port type: an open-top rectangular socket the
+    plug can actually be inserted into, plus 3 wrist cameras and a
+    velocity-actuated free-joint plug.
+    """
+    d = _derive_geometry(port_type)
+    color = d["color"]
+    depth = d["depth"]
+    wall = d["wall"]
+    ox = d["interior_half_x"]   # interior half-opening x
+    oy = d["interior_half_y"]   # interior half-opening y
+    ph_x, ph_y, ph_z = _PLUG_HALF
+
+    # Max target velocities (for actuator ctrlrange) from the action scales.
+    # pos ±(1.5,1.5,3.5) mm and rot ±(0.08,0.08,0.12) rad per dt=0.05 s.
     return f"""\
 <mujoco model="aic_last_inch_{port_type}">
   <compiler angle="radian" meshdir="{meshdir}"/>
-  <option timestep="0.05" gravity="0 0 0"/>
+  <option timestep="0.005" gravity="0 0 0" integrator="implicitfast"/>
   <default>
-    <geom rgba="0.7 0.7 0.7 1" contype="1" conaffinity="1"/>
+    <geom contype="1" conaffinity="1" solref="0.008 1" solimp="0.95 0.99 0.001"
+          friction="0.4 0.01 0.001"/>
   </default>
   <worldbody>
-    <light pos="0 0 0.5" dir="0 0 -1" diffuse="0.8 0.8 0.8"/>
-    <camera name="left_cam"   pos="-0.012  0     0.06" mode="fixed"
-            fovy="60" resolution="{cam_res} {cam_res}"/>
-    <camera name="center_cam" pos=" 0      0     0.06" mode="fixed"
-            fovy="60" resolution="{cam_res} {cam_res}"/>
-    <camera name="right_cam"  pos=" 0.012  0     0.06" mode="fixed"
-            fovy="60" resolution="{cam_res} {cam_res}"/>
+    <light pos="0 0 0.3" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
+    <camera name="left_cam"   pos="-0.012 0 0.06" mode="fixed" fovy="60"
+            resolution="{cam_res} {cam_res}"/>
+    <camera name="center_cam" pos=" 0     0 0.06" mode="fixed" fovy="60"
+            resolution="{cam_res} {cam_res}"/>
+    <camera name="right_cam"  pos=" 0.012 0 0.06" mode="fixed" fovy="60"
+            resolution="{cam_res} {cam_res}"/>
     <body name="port" pos="0 0 0">
-      <!-- Back wall + receptacle cavity. The plug tip should reach
-           z = -insertion_depth when fully inserted. -->
-      <geom type="box" pos="0 0 {-depth/2:.4f}" size="{rx + wall:.5f} {ry + wall:.5f} {depth/2:.5f}"
-            rgba="{color}" solref="0.02 1" friction="0.15 0.005 0.0001"/>
-      <!-- 4 side walls forming the U opening (top half of the receptacle) -->
-      <geom type="box" pos=" {rx + wall/2:.5f}  0           {-h/4:.5f}"
-            size="{wall/2:.5f} {ry + wall:.5f} {h/4:.5f}"
-            rgba="{color}" friction="0.30 0.005 0.0001"/>
-      <geom type="box" pos="-{rx + wall/2:.5f}  0           {-h/4:.5f}"
-            size="{wall/2:.5f} {ry + wall:.5f} {h/4:.5f}"
-            rgba="{color}" friction="0.30 0.005 0.0001"/>
-      <geom type="box" pos=" 0           {ry + wall/2:.5f} {-h/4:.5f}"
-            size="{rx + wall:.5f} {wall/2:.5f} {h/4:.5f}"
-            rgba="{color}" friction="0.30 0.005 0.0001"/>
-      <geom type="box" pos=" 0          -{ry + wall/2:.5f} {-h/4:.5f}"
-            size="{rx + wall:.5f} {wall/2:.5f} {h/4:.5f}"
-            rgba="{color}" friction="0.30 0.005 0.0001"/>
-      <!-- Top cap: closes the receptacle so the plug cannot fall through.
-           Spans the full opening (rx, ry) at the top edge z=0. -->
-      <geom type="box" pos="0 0 0" size="{rx + wall:.5f} {ry + wall:.5f} {wall/2:.5f}"
-            rgba="{color}" friction="0.30 0.005 0.0001"/>
+      <!-- bottom wall: the plug tip seats against this at z=-depth -->
+      <geom name="port_bottom" type="box"
+            pos="0 0 {-depth - wall/2:.5f}"
+            size="{ox + wall:.5f} {oy + wall:.5f} {wall/2:.5f}" rgba="{color}"/>
+      <!-- 4 side walls forming an OPEN-top rectangular cavity -->
+      <geom name="port_wx_pos" type="box"
+            pos="{ox + wall/2:.5f} 0 {-depth/2:.5f}"
+            size="{wall/2:.5f} {oy + wall:.5f} {depth/2:.5f}" rgba="{color}"/>
+      <geom name="port_wx_neg" type="box"
+            pos="{-(ox + wall/2):.5f} 0 {-depth/2:.5f}"
+            size="{wall/2:.5f} {oy + wall:.5f} {depth/2:.5f}" rgba="{color}"/>
+      <geom name="port_wy_pos" type="box"
+            pos="0 {oy + wall/2:.5f} {-depth/2:.5f}"
+            size="{ox + wall:.5f} {wall/2:.5f} {depth/2:.5f}" rgba="{color}"/>
+      <geom name="port_wy_neg" type="box"
+            pos="0 {-(oy + wall/2):.5f} {-depth/2:.5f}"
+            size="{ox + wall:.5f} {wall/2:.5f} {depth/2:.5f}" rgba="{color}"/>
     </body>
-    <body name="plug" pos="0 0 -0.005">
+    <body name="plug" pos="0 0 0.006">
       <freejoint name="plug_free"/>
-      <inertial pos="0 0 0" mass="0.5" diaginertia="0.005 0.005 0.005"/>
-      <geom type="box" size="0.0035 0.0035 0.005" rgba="0.9 0.5 0.2 1"
-            solref="0.02 1" friction="0.30 0.005 0.0001" mass="0.5"/>
+      <inertial pos="0 0 0" mass="0.05" diaginertia="1e-4 1e-4 1e-4"/>
+      <geom name="plug" type="box" size="{ph_x:.5f} {ph_y:.5f} {ph_z:.5f}"
+            rgba="0.9 0.5 0.2 1"/>
     </body>
   </worldbody>
   <actuator>
-    <motor name="vx" joint="plug_free" gear="1 0 0 0 0 0" ctrlrange="-1 1"/>
-    <motor name="vy" joint="plug_free" gear="0 1 0 0 0 0" ctrlrange="-1 1"/>
-    <motor name="vz" joint="plug_free" gear="0 0 1 0 0 0" ctrlrange="-1 1"/>
-    <motor name="wx" joint="plug_free" gear="0 0 0 1 0 0" ctrlrange="-1 1"/>
-    <motor name="wy" joint="plug_free" gear="0 0 0 0 1 0" ctrlrange="-1 1"/>
-    <motor name="wz" joint="plug_free" gear="0 0 0 0 0 1" ctrlrange="-1 1"/>
+    <velocity name="vx" joint="plug_free" gear="1 0 0 0 0 0" kv="100" ctrlrange="-0.06 0.06"/>
+    <velocity name="vy" joint="plug_free" gear="0 1 0 0 0 0" kv="100" ctrlrange="-0.06 0.06"/>
+    <velocity name="vz" joint="plug_free" gear="0 0 1 0 0 0" kv="100" ctrlrange="-0.12 0.12"/>
+    <velocity name="wx" joint="plug_free" gear="0 0 0 1 0 0" kv="5"   ctrlrange="-2.5 2.5"/>
+    <velocity name="wy" joint="plug_free" gear="0 0 0 0 1 0" kv="5"   ctrlrange="-2.5 2.5"/>
+    <velocity name="wz" joint="plug_free" gear="0 0 0 0 0 1" kv="5"   ctrlrange="-3.0 3.0"/>
   </actuator>
 </mujoco>
 """
 
 
-# Old single-template constant removed. Per-port MJCFs are now built
-# dynamically by `_build_mjcf(port_type, ...)` and written to disk by
-# `_make_mjcf_path(port_type, cam_res)`.
-
-
 def _make_mjcf_path(port_type: str = "sc", cam_res: int = 32) -> Path:
-    """Write the MJCF for a given port type to a tmpdir. Cache per-port.
+    """Write the MJCF for a port type to a tmpdir and return its path.
 
-    The cache key combines (port_type, cam_res) so changing either
-    invalidates the cache.
+    Cache key is (port_type, cam_res, mjcf-content-hash) so any scene edit
+    invalidates the cached file.
     """
+    import hashlib
     cache_dir = Path(os.environ.get("AIC_MJCF_CACHE_DIR", tempfile.gettempdir()))
     cache_dir.mkdir(parents=True, exist_ok=True)
-    f = cache_dir / f"aic_last_inch_{port_type}_cam{cam_res}.xml"
+    xml = _build_mjcf(port_type, str(cache_dir), cam_res)
+    h = hashlib.sha1(xml.encode()).hexdigest()[:8]
+    f = cache_dir / f"aic_last_inch_{port_type}_cam{cam_res}_{h}.xml"
     if not f.exists():
-        f.write_text(_build_mjcf(port_type, str(cache_dir), cam_res))
+        f.write_text(xml)
     return f
 
 
 def _make_mjcf_path_legacy(cam_res: int = 32) -> Path:
-    """Legacy stub - see the per-port version above. Kept for any
-    stragglers that imported this name; the new _make_mjcf_path
-    requires a port_type arg.
-    """
+    """Legacy stub — kept for any importer of the old name."""
     return _make_mjcf_path("sc", cam_res)
 
 
 # --------------------------------------------------------------------------- #
-# env
+# env config
 # --------------------------------------------------------------------------- #
 
 
@@ -236,49 +255,43 @@ class EnvConfig:
     pos_scale: tuple = (0.0015, 0.0015, 0.0035)
     rot_scale: tuple = (0.08, 0.08, 0.12)
     dt: float = 0.05
-    # Port type — selects MJCF geometry + start envelope + success region.
-    # If set, the start/success fields below are auto-populated from
-    # _PORT_GEOMETRY. If left as None, the explicit values are used.
+    physics_timestep: float = 0.005     # → n_substeps = dt / physics_timestep
+    # Port type — selects MJCF geometry + envelopes. Auto-populated by
+    # for_port(); left None uses the explicit fields below.
     port_type: Optional[str] = None
-    # start envelope — must NOT overlap with the success region below
-    start_xy_max_m: float = 0.004      # ±4 mm sideways miss
-    start_z_min_m: float = -0.001      # 1 mm above port entrance (highest start)
-    start_z_max_m: float = 0.0005      # 0.5 mm below — still well above success
+    # start envelope (level-1 / "full") — derived from port geometry by for_port()
+    start_xy_max_m: float = 0.003
     start_yaw_max_rad: float = np.deg2rad(15.0)
-    pre_force_z_n_max: float = 2.0
-    # success region — tightened so episodes are 200-600 steps, not 1-18
-    success_xy_max_m: float = 0.001    # 1 mm radial error
-    success_z_max_m: float = -0.0015   # 1.5 mm below port entrance (seated)
-    success_force_z_n: float = 1.0     # must be in contact
+    # success region — derived from port geometry by for_port()
+    success_xy_max_m: float = 0.0015
+    success_z_max_m: float = -0.006     # plug-origin z below which = seated
+    success_force_z_n: float = 0.2      # min contact force to confirm a seat
 
     def for_port(self, port_type: str) -> "EnvConfig":
-        """Return a new EnvConfig with the geometry params for `port_type`."""
-        g = _PORT_GEOMETRY[port_type]
+        """Return a copy with start/success fields derived from geometry."""
+        d = _derive_geometry(port_type)
         return dataclasses.replace(self,
             port_type=port_type,
-            start_xy_max_m=g["start_xy_max_m"],
-            start_z_min_m=g["start_z_min_m"],
-            start_z_max_m=g["start_z_max_m"],
-            start_yaw_max_rad=g["start_yaw_max_rad"],
-            success_xy_max_m=g["success_xy_max_m"],
-            success_z_max_m=g["success_z_max_m"],
-            success_force_z_n=g["success_force_z_n"],
+            start_xy_max_m=d["full_xy_max"],
+            start_yaw_max_rad=d["full_yaw_max"],
+            success_xy_max_m=d["success_xy"],
+            success_z_max_m=d["success_z_max"],
         )
 
 
 class LastInchInsertEnv(gym.Env):
-    """MuJoCo gym env for residual SAC last-inch insertion training.
+    """MuJoCo gym env for image-SAC last-inch insertion training.
 
     Observation space (Dict):
-        image           (H, W, N) uint8
-        force           (3,)      float32
-        tcp_pose        (7,)      float32
-        port_pose       (7,)      float32
-        tcp_pose_err    (7,)      float32
-        last_action     (6,)      float32
+        image           (H, W, n_cams*3) uint8
+        force           (3,)             float32   world-frame contact force
+        tcp_pose        (7,)             float32   plug pose [xyz, wxyz]
+        port_pose       (7,)             float32   port entrance pose (origin)
+        tcp_pose_err    (6,)             float32   [Δxyz_port, axis·angle]
+        last_action     (6,)             float32   previous action
 
-    Action space: Box(6,) float32 in [-1, 1] - scaled by EnvConfig scales
-    to a pose delta applied to the plug's free joint.
+    Action space: Box(6,) in [-1, 1], scaled to a per-step pose delta and
+    applied as a velocity target to the plug's free joint.
     """
 
     metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
@@ -290,34 +303,40 @@ class LastInchInsertEnv(gym.Env):
         if port_type not in _PORT_GEOMETRY:
             raise ValueError(f"unknown port_type {port_type!r}; "
                              f"supported: {list(_PORT_GEOMETRY)}")
-        # Auto-populate start envelope + success region from port type.
-        # If cfg.port_type is None, the explicit cfg values are used.
         if cfg.port_type is None:
             cfg = cfg.for_port(port_type)
+        # Always 3 wrist cams (matching AIC Observation.msg), RGB per cam.
+        if cfg.obs.n_cams != 3 or cfg.obs.image_ch_per_cam != 3:
+            cfg = dataclasses.replace(cfg, obs=dataclasses.replace(
+                cfg.obs, n_cams=3, image_ch_per_cam=3))
         self.cfg = cfg
         self.port_type = port_type
-        # Always use 3 wrist cams (matching AIC Observation.msg). The image
-        # is RGB; the channel count is n_cams*3 (left, center, right stacked).
-        if cfg.obs.n_cams != 3:
-            self.cfg = dataclasses.replace(cfg, obs=dataclasses.replace(
-                cfg.obs, n_cams=3, image_ch_per_cam=3))
+        self._geom = _derive_geometry(port_type)
+
         self._mjcf_path = _make_mjcf_path(port_type, cam_res=cfg.obs.image_h)
         self._model = mujoco.MjModel.from_xml_path(str(self._mjcf_path))
         self._data = mujoco.MjData(self._model)
-        self._renderer = mujoco.Renderer(self._model, height=cfg.obs.image_h, width=cfg.obs.image_w)
-        self._port_q = np.array([1.0, 0, 0, 0], dtype=np.float64)  # identity port frame
+        self._renderer = mujoco.Renderer(self._model, height=cfg.obs.image_h,
+                                         width=cfg.obs.image_w)
+        self._plug_gid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_GEOM, "plug")
+        self._n_substeps = max(1, int(round(cfg.dt / cfg.physics_timestep)))
+
+        self._port_q = np.array([1.0, 0, 0, 0], dtype=np.float64)
         self._step_count = 0
-        # curriculum / reset-mode state
         self._reset_mode: str = "curriculum"
         self._curriculum_level: float = 0.0
-        self._level_file: Optional[Path] = None  # set by set_level_file()
+        self._level_file: Optional[Path] = None
         self._last_action = np.zeros(6, dtype=np.float32)
-        self._goal_image = None  # set during _capture_goal_image
+        self._goal_image = None
         self._f_linger_dwell_s = 0.0
-        # insertion depth for this port type (used by success check, video)
-        self._insertion_depth = _PORT_GEOMETRY[port_type]["insertion_depth"]
+        self._f_z_buf: list[float] = []
+        self._prev_depth_norm: float = 0.0
+        self._insertion_depth = self._geom["depth"]
 
-        # spaces
+        # action → velocity scale (concat pos+rot)
+        self._vel_scale = np.concatenate([
+            np.asarray(cfg.pos_scale), np.asarray(cfg.rot_scale)]) / cfg.dt
+
         H, W, ch = cfg.obs.image_h, cfg.obs.image_w, cfg.obs.image_channels
         self.observation_space = spaces.Dict({
             "image": spaces.Box(low=0, high=255, shape=(H, W, ch), dtype=np.uint8),
@@ -329,7 +348,6 @@ class LastInchInsertEnv(gym.Env):
         })
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
 
-        # capture the goal image once at the canonical fully-inserted pose
         self._capture_goal_image()
 
     # ------------------------------------------------------------------ #
@@ -337,29 +355,19 @@ class LastInchInsertEnv(gym.Env):
     # ------------------------------------------------------------------ #
 
     def _capture_goal_image(self):
-        """Render the image at the canonical fully-inserted pose.
-
-        For both SFP and SC the goal is: tip at port centre (XY), seated
-        at the bottom of the receptacle (z = -insertion_depth). We let
-        the plug settle for 20 steps so contact forces reach steady state.
-        """
-        goal_xyz = np.array([0.0, 0.0, -self._insertion_depth * 0.95], dtype=np.float64)
-        self._reset_to_pose(tip_xyz=goal_xyz, tip_q_wxyz=np.array([1, 0, 0, 0]))
-        # let it settle
-        for _ in range(20):
+        """Render the image at the fully-seated pose (tip at cavity bottom)."""
+        self._reset_to_pose(
+            tip_xyz=np.array([0.0, 0.0, self._geom["seated_center_z"]]),
+            tip_q_wxyz=np.array([1.0, 0, 0, 0]))
+        for _ in range(40):
             mujoco.mj_step(self._model, self._data)
         self._goal_image = self._render_image()
 
     def _reset_to_pose(self, tip_xyz: np.ndarray, tip_q_wxyz: np.ndarray):
-        # Plug body is positioned with its tip at `tip_xyz`. Since the
-        # plug's geometry is a 0.005 m half-extent box centred at the body
-        # origin, we shift the body by -tip_xyz_world_origin + tip_offset.
-        # For simplicity, set the body position to `tip_xyz` and the
-        # orientation to `tip_q_wxyz` (plug orientation == tip orientation
-        # in this simplified model).
         self._data.qpos[:3] = tip_xyz
         self._data.qpos[3:7] = tip_q_wxyz
         self._data.qvel[:] = 0.0
+        self._data.ctrl[:] = 0.0
         mujoco.mj_forward(self._model, self._data)
 
     # ------------------------------------------------------------------ #
@@ -367,22 +375,16 @@ class LastInchInsertEnv(gym.Env):
     # ------------------------------------------------------------------ #
 
     def _render_image(self) -> np.ndarray:
-        """Render the 3 wrist cameras and stack along the channel axis.
-
-        Returns (H, W, n_cams*3) uint8 — the policy's image observation.
-        Each cam is rendered independently, so the policy gets a proper
-        stereo / multi-view signal matching the AIC wrist mount.
-        """
+        """Render the 3 wrist cameras stacked along the channel axis →
+        (H, W, n_cams*3) uint8."""
         frames = []
         for cam_name in ("left_cam", "center_cam", "right_cam"):
             self._renderer.update_scene(self._data, camera=cam_name)
-            rgb = self._renderer.render()  # (H, W, 3) uint8
-            frames.append(rgb)
-        # Concatenate along channel axis → (H, W, n_cams*3) uint8
+            frames.append(self._renderer.render())
         return np.concatenate(frames, axis=2)
 
     def render(self) -> np.ndarray:
-        """Public render — returns the center-cam RGB frame for video logging."""
+        """Public render — center-cam RGB frame for video logging."""
         self._renderer.update_scene(self._data, camera="center_cam")
         return self._renderer.render()
 
@@ -394,80 +396,88 @@ class LastInchInsertEnv(gym.Env):
         return self._data.qpos[:3].copy(), self._data.qpos[3:7].copy()
 
     def _force_xyz(self) -> np.ndarray:
-        # Aggregate contact forces on the plug body for the z-axis
-        # reading. Mujoco exposes `data.cfrc_int` (6-vectors per body).
-        # We pull the world-frame force on the plug body.
-        # body id 1 == plug (after worldbody)
-        try:
-            plug_body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, "plug")
-        except Exception:
-            return np.zeros(3, dtype=np.float32)
-        cfrc = self._data.cfrc_int[plug_body_id]
-        return np.array(cfrc[:3], dtype=np.float32)
+        """Sum world-frame contact force on the plug via mj_contactForce.
+
+        cfrc_int / cfrc_ext do not report contact for a free-joint body in a
+        usable way here, so we iterate the active contacts, pull the 6-D
+        contact wrench (in the contact frame), rotate the force part to world,
+        and accumulate with the correct sign for the plug geom.
+        """
+        d = self._data
+        m = self._model
+        total = np.zeros(3, dtype=np.float64)
+        buf = np.zeros(6, dtype=np.float64)
+        for i in range(d.ncon):
+            c = d.contact[i]
+            if c.geom1 != self._plug_gid and c.geom2 != self._plug_gid:
+                continue
+            mujoco.mj_contactForce(m, d, i, buf)
+            frame = np.asarray(c.frame, dtype=np.float64).reshape(3, 3)
+            f_world = frame.T @ buf[:3]      # contact-frame force → world
+            # contact normal points from geom1 to geom2; force on geom2 is
+            # +f_world. Flip if the plug is geom1.
+            sign = 1.0 if c.geom2 == self._plug_gid else -1.0
+            total += sign * f_world
+        return total.astype(np.float32)
 
     def _tip_xy(self) -> np.ndarray:
-        # In this simplified model, tip == plug body origin
         return self._data.qpos[:2].copy()
 
     def _port_xy(self) -> np.ndarray:
         return np.zeros(2, dtype=np.float32)
 
+    def _depth_norm(self, z: float) -> float:
+        """Insertion fraction in [0, 1]: 0 at/above the entrance, 1 fully seated."""
+        denom = abs(self._geom["seated_center_z"]) + 1e-9
+        return float(np.clip(-z / denom, 0.0, 1.0))
+
     # ------------------------------------------------------------------ #
-    # start-pose sampling (curriculum / random / near_goal)
+    # start-pose sampling (reverse curriculum)
     # ------------------------------------------------------------------ #
 
     def capture_initial_state(self) -> dict:
-        """Sample a start pose for a new episode.
+        """Sample a start pose. Reverse curriculum by distance-from-goal:
 
-        The distribution is governed by `self._curriculum_level` (0..1) and
-        `self._reset_mode`:
+            level 0  → near the SEATED goal (deep, centred, tiny yaw)
+            level 1  → above the mouth, ±full xy miss, ±full yaw
+            random   → always level-1 envelope
+            near_goal→ always level-0 envelope
 
-            mode="curriculum", level=0   → near the goal (small jitter)
-            mode="curriculum", level=1   → full last-inch envelope
-            mode="curriculum", level=0.5 → half the envelope
-            mode="random"                → always full envelope
-            mode="near_goal"             → always near the goal
-
-        Curriculum progression is driven externally by the trainer (see
-        `CurriculumScheduler`). The env just samples the start pose.
+        Interpolating the *start z* from near-seated (level 0) up to
+        above-the-mouth (level 1) is what makes the curriculum "reverse":
+        early episodes begin almost inserted so success is dense.
         """
         rng = self.np_random
-        if self._reset_mode == "near_goal":
-            # Tighter distribution: plug starts very close to the goal.
-            xy_err = rng.uniform(-0.001, 0.001, size=2)
-            z_err = rng.uniform(-0.001, 0.0005)
-            yaw = rng.uniform(-np.deg2rad(5.0), np.deg2rad(5.0))
-        elif self._reset_mode == "curriculum":
-            level = float(np.clip(self._curriculum_level, 0.0, 1.0))
-            # Interpolate envelope radii between (near_goal) and (full).
-            near_xy = 0.0015      # 1.5 mm at level=0
-            near_z = (0.0005, -0.0015)  # z range at level=0
-            near_yaw = np.deg2rad(5.0)
-            full_xy = self.cfg.start_xy_max_m
-            full_z_lo, full_z_hi = self.cfg.start_z_min_m, self.cfg.start_z_max_m
-            full_yaw = self.cfg.start_yaw_max_rad
+        g = self._geom
+        seated_z = g["seated_center_z"]
+        mouth_z = g["mouth_start_z"]
 
-            # If start_z_max_m is positive and start_z_min_m is negative,
-            # we interpolate each endpoint separately. For our config:
-            # start_z_min_m = -0.001, start_z_max_m = 0.0005. So we
-            # treat z_low as the "deepest" (most negative) and z_high as
-            # the "highest" (least negative) start. The near-goal range
-            # is (z_high=-0.0015, z_low=0.0005) — actually inverted,
-            # we want near-goal to be *close to 0*. Adjust:
-            z_high = near_z[0] + level * (full_z_hi - near_z[0])
-            z_low  = near_z[1] + level * (full_z_lo - near_z[1])
-            xy_r   = near_xy + level * (full_xy - near_xy)
-            yaw_r  = near_yaw + level * (full_yaw - near_yaw)
-            xy_err = rng.uniform(-xy_r, xy_r, size=2)
-            z_err  = rng.uniform(z_low, z_high)
-            yaw    = rng.uniform(-yaw_r, yaw_r)
-        else:  # "random"
-            xy_err = rng.uniform(-self.cfg.start_xy_max_m, self.cfg.start_xy_max_m, size=2)
-            z_err = rng.uniform(self.cfg.start_z_min_m, self.cfg.start_z_max_m)
-            yaw = rng.uniform(-self.cfg.start_yaw_max_rad, self.cfg.start_yaw_max_rad)
+        if self._reset_mode == "near_goal":
+            level = 0.0
+        elif self._reset_mode == "random":
+            level = 1.0
+        else:  # "curriculum"
+            level = float(np.clip(self._curriculum_level, 0.0, 1.0))
+
+        # near-goal (level 0) anchors
+        near_xy = 0.0005
+        near_yaw = np.deg2rad(2.0)
+        near_z = seated_z + 0.002       # just above fully seated
+        # full (level 1) anchors
+        full_xy = self.cfg.start_xy_max_m
+        full_yaw = self.cfg.start_yaw_max_rad
+        full_z = mouth_z                # above the entrance
+
+        xy_r = near_xy + level * (full_xy - near_xy)
+        yaw_r = near_yaw + level * (full_yaw - near_yaw)
+        z_center = near_z + level * (full_z - near_z)
+
+        xy_err = rng.uniform(-xy_r, xy_r, size=2)
+        z = z_center + rng.uniform(-0.0005, 0.0005)   # ±0.5 mm z jitter
+        yaw = rng.uniform(-yaw_r, yaw_r)
         cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
         return {
-            "tip_xyz": np.array([xy_err[0], xy_err[1], z_err], dtype=np.float64),
+            "tip_xyz": np.array([xy_err[0], xy_err[1], z], dtype=np.float64),
             "tip_q_wxyz": np.array([cy, 0, 0, sy], dtype=np.float64),
             "qvel": np.zeros(6, dtype=np.float64),
             "step": 0,
@@ -477,95 +487,74 @@ class LastInchInsertEnv(gym.Env):
         }
 
     def set_curriculum_level(self, level: float) -> None:
-        """Set the start-pose curriculum level (0=near goal, 1=full envelope)."""
         self._curriculum_level = float(np.clip(level, 0.0, 1.0))
 
     def get_curriculum_level(self) -> float:
         return float(self._curriculum_level)
 
     def set_reset_mode(self, mode: str) -> None:
-        """Set the reset distribution mode: 'curriculum' / 'random' / 'near_goal'."""
         if mode not in ("curriculum", "random", "near_goal"):
             raise ValueError(f"unknown reset mode {mode!r}")
         self._reset_mode = mode
 
     def set_level_file(self, path: Optional[str]) -> None:
-        """Make the env re-read its curriculum level from `path` on every reset.
-
-        Used by `CurriculumScheduler` to communicate level changes to
-        SubprocVecEnv workers (which can't call methods on the parent).
-        """
+        """Re-read the curriculum level from `path` on every reset (so a
+        SubprocVecEnv worker picks up trainer-side level changes)."""
         self._level_file = Path(path) if path is not None else None
 
     # ------------------------------------------------------------------ #
     # gym API
     # ------------------------------------------------------------------ #
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None) -> tuple[dict, dict]:
+    def reset(self, *, seed: Optional[int] = None,
+              options: Optional[dict] = None) -> tuple[dict, dict]:
         super().reset(seed=seed)
-        # Re-read curriculum level from file (if set). This lets a
-        # SubprocVecEnv worker pick up level changes from the trainer
-        # without needing in-process access to the env.
         if self._level_file is not None and Path(self._level_file).exists():
             try:
-                self._curriculum_level = float(Path(self._level_file).read_text().strip())
+                self._curriculum_level = float(
+                    Path(self._level_file).read_text().strip())
             except Exception:
                 pass
         state = self.capture_initial_state()
         self._data.qpos[:3] = state["tip_xyz"]
         self._data.qpos[3:7] = state["tip_q_wxyz"]
-        self._data.qvel[:] = state["qvel"]
-        self._step_count = state["step"]
-        self._last_action = state["last_action"]
-        self._f_linger_dwell_s = state["f_linger_dwell_s"]
-        self._f_z_buf = []
-        # settle for a couple of steps so contact forces are visible
-        for _ in range(2):
-            mujoco.mj_step(self._model, self._data)
+        self._data.qvel[:] = 0.0
+        self._data.ctrl[:] = 0.0
+        mujoco.mj_forward(self._model, self._data)
         self._step_count = 0
         self._last_action = np.zeros(6, dtype=np.float32)
         self._f_linger_dwell_s = 0.0
-        self._f_z_buf: list[float] = []   # per-episode Fz samples for stats
-
-        # settle for a couple of steps so contact forces are visible
+        self._f_z_buf = []
+        # settle a couple of physics ticks so contact forces are visible
         for _ in range(2):
             mujoco.mj_step(self._model, self._data)
-
-        obs = self._obs()
-        return obs, {}
+        self._prev_depth_norm = self._depth_norm(float(self._data.qpos[2]))
+        return self._obs(), {}
 
     def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
         action = np.clip(np.asarray(action, dtype=np.float64).reshape(-1), -1.0, 1.0)
 
-        # Apply the action as a *velocity target* via the 6 actuators.
-        # We set qvel directly to the action-derived velocity (no force
-        # integration), which is the simplest stable mapping for a
-        # free joint at our coarse dt=0.05s. With gravity=0 the plug
-        # doesn't accumulate unwanted drift between actions.
-        pos_scale = np.asarray(self.cfg.pos_scale)
-        rot_scale = np.asarray(self.cfg.rot_scale)
-        scale = np.concatenate([pos_scale, rot_scale])
-        # Action in [-1, 1] -> velocity in scale / dt m/s
-        target_vel = (action * scale) / self.cfg.dt
-        self._data.ctrl[:] = np.clip(target_vel, -10.0, 10.0)
-        # The free-joint accepts a 6-vector of velocity directly
-        self._data.qvel[:6] = target_vel
-        mujoco.mj_step(self._model, self._data)
+        # Action → per-step pose delta → target velocity, tracked by the
+        # velocity-servo actuators. Contact can now genuinely resist the plug.
+        target_vel = action * self._vel_scale
+        self._data.ctrl[:] = target_vel
+        for _ in range(self._n_substeps):
+            mujoco.mj_step(self._model, self._data)
 
         self._step_count += 1
-        self._last_action = action.astype(np.float32)
 
-        # build obs + reward
         obs = self._obs()
         image_curr = obs["image"]
         f_xyz = obs["force"]
         self._f_z_buf.append(float(f_xyz[2]))
         tip_xyz, tip_q = self._plug_pose()
+        depth_norm = self._depth_norm(float(tip_xyz[2]))
 
+        # Success = seated deep enough AND centred (bottom wall guarantees a
+        # z below the seated threshold is genuinely inside the cavity). A tiny
+        # contact-force check confirms the plug is actually pressing, not
+        # ghosting through.
         term_status = None
-        # Success = tip within success_xy_max_m of port XY, seated below
-        # port entrance by success_z_max_m, AND in light contact (so the
-        # policy can't get "success" by hovering below the port).
         xy_close = np.linalg.norm(tip_xyz[:2]) < self.cfg.success_xy_max_m
         seated = tip_xyz[2] < self.cfg.success_z_max_m
         in_contact = abs(f_xyz[2]) > self.cfg.success_force_z_n
@@ -578,8 +567,6 @@ class LastInchInsertEnv(gym.Env):
         else:
             self._f_linger_dwell_s = 0.0
 
-        image_l1_norm = float("nan")
-        off_limit_contact = False  # not modelled in this minimal sim
         total, breakdown = compute_reward(
             image_curr=image_curr,
             image_goal=self._goal_image,
@@ -591,23 +578,18 @@ class LastInchInsertEnv(gym.Env):
             a_prev=self._last_action,
             term_status=term_status,
             cfg=self.cfg.reward,
-            # Gate the image success bonus on the geometric success check.
-            # Without this, a "fall through the cage" state would have
-            # image ≈ goal image and flood the reward with +β_s per step.
             bonus_eligible=(term_status == "success"),
+            depth_norm=depth_norm,
+            prev_depth_norm=self._prev_depth_norm,
         )
         image_l1_norm = breakdown.image_l1_norm
+        self._prev_depth_norm = depth_norm
 
-        # termination check (only force_abort/timeout/off_limit here).
-        # Success is determined above by the 3-condition geometry+contact
-        # check; the image-based success in check_termination is bypassed
-        # because the goal image matches the empty cage as well as the
-        # seated plug.
         if term_status is None:
             term_status = check_termination(
                 image_l1_norm=image_l1_norm,
                 f_z=float(f_xyz[2]),
-                off_limit_contact=off_limit_contact,
+                off_limit_contact=False,
                 step=self._step_count,
                 cfg_rew=self.cfg.reward,
                 cfg_term=self.cfg.term,
@@ -615,9 +597,11 @@ class LastInchInsertEnv(gym.Env):
                 bypass_image_success=True,
             )
 
+        # last_action is updated AFTER the reward (so r_action sees a_{t-1}).
+        self._last_action = action.astype(np.float32)
+
         terminated = term_status in ("success", "force_abort", "off_limit")
         truncated = term_status == "timeout"
-        # per-episode F/T stats (only meaningful at episode end, but cheap to ship)
         f_z_mean = float(np.mean(self._f_z_buf)) if self._f_z_buf else float("nan")
         f_z_max = float(np.max(np.abs(self._f_z_buf))) if self._f_z_buf else float("nan")
         info = {
@@ -627,6 +611,8 @@ class LastInchInsertEnv(gym.Env):
             "f_z": float(f_xyz[2]),
             "f_z_mean": f_z_mean,
             "f_z_max": f_z_max,
+            "tip_z_mm": float(tip_xyz[2] * 1000.0),
+            "depth_norm": float(depth_norm),
             "wallclock": float(self._step_count) * self.cfg.dt,
             "curriculum_level": float(self._curriculum_level),
             "reset_mode": self._reset_mode,
@@ -647,9 +633,20 @@ class LastInchInsertEnv(gym.Env):
             cfg=self.cfg.obs,
         )
 
-    # gym required helpers
-    def render(self):
-        return self._render_image()
+    def close(self):
+        """Free the MuJoCo renderer explicitly (idempotent).
+
+        Without this, the renderer is only released at GC time via
+        Renderer.__del__, which throws noisy AttributeError / EGLError
+        during interpreter teardown under SubprocVecEnv.
+        """
+        renderer = getattr(self, "_renderer", None)
+        if renderer is not None:
+            try:
+                renderer.close()
+            except Exception:
+                pass
+            self._renderer = None
 
 
-__all__ = ["EnvConfig", "LastInchInsertEnv"]
+__all__ = ["EnvConfig", "LastInchInsertEnv", "_PORT_GEOMETRY", "_build_mjcf"]

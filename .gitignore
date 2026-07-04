@@ -19,5 +19,8 @@ aic_utils/aic_isaac/aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/ai
 *.pdf
 *.gv
 
+# local credentials
+wandb/info.txt
+
 # Ignore my-testing folder in testing folder
 testing/my-testing/*
