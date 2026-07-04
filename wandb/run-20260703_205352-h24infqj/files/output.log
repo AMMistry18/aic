@@ -1239,3 +1239,77 @@ wandb: WARNING Fatal error while uploading data. Some run data will not be synce
 |    n_updates       | 3178     |
 ---------------------------------
 [step     5251] ret(50)=  -85.7  score_succ(50)=70.0%  term_succ(50)=70.0%  score(50)= 83.9  img_l1=0.206  q_loss=  93.35  alpha=0.411
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 19.5     |
+|    ep_rew_mean     | -77.3    |
+|    f_z             | 0        |
+|    image_l1_norm   | 0        |
+|    term_status     |          |
+| time/              |          |
+|    episodes        | 312      |
+|    fps             | 5        |
+|    time_elapsed    | 907      |
+|    total_timesteps | 5304     |
+| train/             |          |
+|    actor_loss      | 34.8     |
+|    critic_loss     | 66.9     |
+|    ent_coef        | 0.406    |
+|    ent_coef_loss   | -5.71    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 3255     |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 19.2     |
+|    ep_rew_mean     | -76      |
+| time/              |          |
+|    episodes        | 316      |
+|    fps             | 5        |
+|    time_elapsed    | 914      |
+|    total_timesteps | 5332     |
+| train/             |          |
+|    actor_loss      | 26.4     |
+|    critic_loss     | 119      |
+|    ent_coef        | 0.403    |
+|    ent_coef_loss   | -5.73    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 3283     |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 18.9     |
+|    ep_rew_mean     | -72      |
+| time/              |          |
+|    episodes        | 320      |
+|    fps             | 5        |
+|    time_elapsed    | 924      |
+|    total_timesteps | 5380     |
+| train/             |          |
+|    actor_loss      | 37.7     |
+|    critic_loss     | 65.5     |
+|    ent_coef        | 0.398    |
+|    ent_coef_loss   | -5.67    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 3331     |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 18.7     |
+|    ep_rew_mean     | -70.8    |
+|    f_z             | 0        |
+|    image_l1_norm   | 0        |
+|    term_status     |          |
+| time/              |          |
+|    episodes        | 324      |
+|    fps             | 5        |
+|    time_elapsed    | 930      |
+|    total_timesteps | 5401     |
+| train/             |          |
+|    actor_loss      | 30.4     |
+|    critic_loss     | 111      |
+|    ent_coef        | 0.396    |
+|    ent_coef_loss   | -5.67    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 3352     |
+---------------------------------
