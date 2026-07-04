@@ -1,0 +1,13 @@
+port_type=sc
+steps=8
+seed=42
+lr=0.0003
+batch_size=8
+buffer_size=200
+warmup_steps=4
+train_freq=1
+gradient_steps=1
+num_envs=1
+elapsed_s=26.8
+cache_key=b4e332350dc23325
+policy_class=aic_example_policies.ros.LastInchInsert

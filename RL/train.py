@@ -172,11 +172,27 @@ def main():
     p.add_argument("--wandb-run-name", type=str, default=None)
     p.add_argument("--wandb-log-every", type=int, default=1_000)
     p.add_argument("--wandb-success-window", type=int, default=100)
+    p.add_argument("--wandb-eval-every", type=int, default=0,
+                   help="[--scene] run a no-video W&B score eval every N env steps "
+                        "(0 = off; uses --wandb-video-level)")
+    p.add_argument("--wandb-eval-steps", type=int, default=200,
+                   help="[--scene] max steps for no-video W&B score eval")
     p.add_argument("--wandb-video-every", type=int, default=0,
                    help="log a W&B rollout video every N completed episodes (0 = off)")
     p.add_argument("--wandb-video-steps", type=int, default=120,
                    help="max eval steps per W&B rollout video")
     p.add_argument("--wandb-video-fps", type=int, default=20)
+    p.add_argument("--wandb-video-level", type=float, default=1.0,
+                   help="[--scene] curriculum level used for W&B eval videos. "
+                        "Use a negative value to mirror the training reset mode.")
+    p.add_argument("--wandb-video-camera", type=str, default="center_camera",
+                   help="[--scene] camera used for W&B videos")
+    p.add_argument("--wandb-video-width", type=int, default=768,
+                   help="[--scene] W&B video render width; independent of policy image size")
+    p.add_argument("--wandb-video-height", type=int, default=688,
+                   help="[--scene] W&B video render height; independent of policy image size")
+    p.add_argument("--wandb-video-min-frames", type=int, default=12,
+                   help="pad short W&B clips to at least this many frames")
     p.add_argument("--wandb-entity", type=str, default=None,
                    help="W&B entity/team. Defaults to WANDB_ENTITY or wandb/info.txt.")
     p.add_argument("--wandb-project", type=str, default=None,
@@ -305,8 +321,12 @@ def main():
                     image_h=args.image_size, image_w=args.image_size,
                     reward_image_res=args.reward_image_res,
                     max_episode_steps=env_cfg.term.max_steps))
-                e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
+                if args.wandb_video_level >= 0.0:
+                    e.set_reset_mode("curriculum")
+                    e.set_curriculum_level(float(args.wandb_video_level))
+                else:
+                    e.set_reset_mode(args.reset_mode)
+                if args.reset_mode == "curriculum" and args.wandb_video_level < 0.0:
                     e.set_level_file(str(args.out / "curriculum_level.txt"))
                 holder["render_env"] = e
                 return Monitor(TimeLimit(e, max_episode_steps=env_cfg.term.max_steps))
@@ -519,7 +539,7 @@ def main():
     # ------------------------------------------------------------------ #
     from RL.logging_utils import (
         MetricsLogger, VideoRecorder, CurriculumScheduler, CheckpointManager,
-        ProgressPrinter, WandbLogger, WandbVideoRecorder)
+        ProgressPrinter, WandbLogger, WandbVideoRecorder, WandbScoreEvaluator)
 
     ckpt = CheckpointManager(
         args.out,
@@ -567,12 +587,23 @@ def main():
         project=args.wandb_project or os.environ.get("WANDB_PROJECT"),
         enabled=wandb_enabled)
     callbacks.append(wandb_cb)
+    if wandb_enabled and args.wandb_eval_every > 0 and make_wandb_video_env is not None:
+        callbacks.append(WandbScoreEvaluator(
+            make_eval_env=make_wandb_video_env,
+            every_steps=args.wandb_eval_every,
+            max_steps=args.wandb_eval_steps,
+            deterministic=True,
+            enabled=True))
     if wandb_enabled and args.wandb_video_every > 0 and make_wandb_video_env is not None:
         callbacks.append(WandbVideoRecorder(
             make_eval_env=make_wandb_video_env,
             every_n_episodes=args.wandb_video_every,
             max_steps=args.wandb_video_steps,
             fps=args.wandb_video_fps,
+            render_camera=args.wandb_video_camera,
+            render_width=args.wandb_video_width,
+            render_height=args.wandb_video_height,
+            min_frames=args.wandb_video_min_frames,
             key="eval/rollout_video",
             record_on_training_end=True,
             enabled=True))

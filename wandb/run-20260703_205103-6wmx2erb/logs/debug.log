@@ -1,0 +1,24 @@
+2026-07-03 20:51:03,688 INFO    MainThread:302871 [wandb_setup.py:_flush():81] Current SDK version is 0.24.2
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_setup.py:_flush():81] Configure stats pid to 302871
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_init.py:setup_run_log_directory():717] Logging user logs to /home/Anshul/AIC_Phase_1/aic_0/aic/wandb/run-20260703_205103-6wmx2erb/logs/debug.log
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_init.py:setup_run_log_directory():718] Logging internal logs to /home/Anshul/AIC_Phase_1/aic_0/aic/wandb/run-20260703_205103-6wmx2erb/logs/debug-internal.log
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_init.py:init():844] calling init triggers
+2026-07-03 20:51:03,689 INFO    MainThread:302871 [wandb_init.py:init():849] wandb.init called with sweep_config: {}
+config: {'out': PosixPath('RL/output/curriculum_b4096_15k_score_eval_v2'), 'steps': 15000, 'port_type': 'sc', 'seed': 42, 'lr': 0.0003, 'batch_size': 4096, 'buffer_size': 50000, 'warmup_steps': 2048, 'tau': 0.01, 'gamma': 0.99, 'ent_coef': 'auto', 'target_entropy': 'auto', 'train_freq': 1, 'gradient_steps': 1, 'num_envs': 1, 'ckpt_every': 1000, 'buffer_every': 0, 'skip_if_cached': True, 'log_every': 250, 'no_torchscript': True, 'video_every': 0, 'no_video': True, 'plot': False, 'recorded': False, 'dataset_dir': None, 'last_inch_start_frame': 80, 'scene': True, 'image_size': 64, 'reward_image_res': 64, 'reset_mode': 'curriculum', 'curriculum_eval_window': 100, 'curriculum_advance_threshold': 0.75, 'curriculum_retreat_threshold': 0.2, 'curriculum_force_abort_guard': 0.15, 'curriculum_force_abort_retreat': 0.4, 'curriculum_step': 0.05, 'wandb': True, 'wandb_run_name': 'curriculum-b4096-15k-score-eval-v2', 'wandb_log_every': 200, 'wandb_success_window': 100, 'wandb_eval_every': 500, 'wandb_eval_steps': 160, 'wandb_video_every': 500, 'wandb_video_steps': 120, 'wandb_video_fps': 20, 'wandb_video_level': 1.0, 'wandb_video_camera': 'center_camera', 'wandb_video_width': 768, 'wandb_video_height': 688, 'wandb_video_min_frames': 12, 'wandb_entity': 'tar2', 'wandb_project': 'intrinsic', 'wandb_info_file': PosixPath('wandb/info.txt'), 'reward': {'alpha': 1.0, 'beta_s': 0.0, 'eps': 0.02, 'f_low': 0.5, 'f_optimal': 4.0, 'f_max': 8.0, 'beta_low': 0.5, 'gamma': 0.5, 'force_depth_gate': 0.3, 'w_depth': 8.0, 'disc_gamma': 0.99, 'delta_xy': 0.5, 'xy_ref': 0.005, 'delta_a': 0.1, 'delta_lat': 0.05, 'axis_free_rad': 0.03, 'axis_ref_rad': 0.12, 'collision_ref_m': 0.002, 'w_image': 1.0, 'w_force': 0.2, 'w_xy': 0.2, 'w_action': 0.5, 'w_lateral': 1.0, 'w_axis': 3.0, 'w_collision': 12.0}, 'termination': {'f_abort_n': 15.0, 'f_linger_n': 10.0, 'f_linger_sec': 0.5, 'max_steps': 600}, 'env/port_type': 'sc', 'env/pos_scale': [0.0015, 0.0015, 0.0035], 'env/rot_scale': [0.08, 0.08, 0.12], 'algorithm': 'SAC', '_wandb': {}}
+2026-07-03 20:51:03,690 INFO    MainThread:302871 [wandb_init.py:init():892] starting backend
+2026-07-03 20:51:03,928 INFO    MainThread:302871 [wandb_init.py:init():895] sending inform_init request
+2026-07-03 20:51:03,933 INFO    MainThread:302871 [wandb_init.py:init():903] backend started and connected
+2026-07-03 20:51:03,948 INFO    MainThread:302871 [wandb_init.py:init():973] updated telemetry
+2026-07-03 20:51:03,950 INFO    MainThread:302871 [wandb_init.py:init():997] communicating run to backend with 90.0 second timeout
+2026-07-03 20:51:04,562 INFO    MainThread:302871 [wandb_init.py:init():1042] starting run threads in backend
+2026-07-03 20:51:04,635 INFO    MainThread:302871 [wandb_run.py:_console_start():2529] atexit reg
+2026-07-03 20:51:04,635 INFO    MainThread:302871 [wandb_run.py:_redirect():2377] redirect: wrap_raw
+2026-07-03 20:51:04,635 INFO    MainThread:302871 [wandb_run.py:_redirect():2446] Wrapping output streams.
+2026-07-03 20:51:04,635 INFO    MainThread:302871 [wandb_run.py:_redirect():2469] Redirects installed.
+2026-07-03 20:51:04,637 INFO    MainThread:302871 [wandb_init.py:init():1082] run started, returning control to user process
+2026-07-03 20:53:02,144 INFO    MainThread:302871 [wandb_run.py:_finish():2295] finishing run tar2/intrinsic/6wmx2erb
+2026-07-03 20:53:02,145 INFO    MainThread:302871 [wandb_run.py:_atexit_cleanup():2494] got exitcode: 0
+2026-07-03 20:53:02,145 INFO    MainThread:302871 [wandb_run.py:_restore():2476] restore
+2026-07-03 20:53:02,145 INFO    MainThread:302871 [wandb_run.py:_restore():2482] restore done
+2026-07-03 20:53:02,851 INFO    MainThread:302871 [wandb_run.py:_footer_sync_info():3871] logging synced files

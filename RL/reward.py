@@ -59,7 +59,7 @@ class RewardConfig:
     force_depth_gate: float = 0.3  # positive force branch only when depth_norm>gate
 
     # §2.2b insertion-depth progress (potential-based)
-    w_depth: float = 2.0         # weight on the depth potential term
+    w_depth: float = 8.0         # depth dominates Tier-3 partial insertion
     disc_gamma: float = 0.99     # discount used for potential shaping (match SAC's)
 
     # §2.3 tip–port xy progress (normalised)
@@ -79,8 +79,8 @@ class RewardConfig:
 
     # §3 component weights in total
     w_image: float = 1.0
-    w_force: float = 0.05
-    w_xy: float = 0.05
+    w_force: float = 0.20
+    w_xy: float = 0.20
     w_action: float = 0.5        # eff. smoothness coef = w_action*delta_a = 0.05
     w_lateral: float = 1.0       # eff. lateral coef = w_lateral*delta_lat = 0.05
     w_axis: float = 3.0
@@ -122,7 +122,10 @@ def r_image(
     a = image_curr.astype(np.float32)
     b = image_goal.astype(np.float32)
     l1 = float(np.sum(np.abs(a - b)))
-    norm = l1 / max(a.size, 1)
+    # Average absolute pixel difference, normalised to [0, 1]. The scene
+    # renderer returns uint8 images; using raw 0-255 averages made long
+    # non-terminal episodes dominate every scoring-aligned term.
+    norm = l1 / max(a.size * 255.0, 1.0)
     bonus = cfg.beta_s if (bonus_eligible and norm < cfg.eps) else 0.0
     scalar = -cfg.alpha * norm + bonus
     return scalar, np.array(norm, dtype=np.float32)

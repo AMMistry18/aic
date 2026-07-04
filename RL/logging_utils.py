@@ -82,6 +82,26 @@ class MetricsLogger(BaseCallback):
                 "plug_port_penetration_m": float(info.get("plug_port_penetration_m", float("nan"))),
                 "plug_port_penetration_excess_m": float(
                     info.get("plug_port_penetration_excess_m", float("nan"))),
+                "curriculum_level": float(info.get("curriculum_level", float("nan"))),
+                "off_limit_contacts": int(info.get("off_limit_contacts", 0)),
+                "score_success": bool(info.get("score_success", False)),
+                "score_partial": bool(info.get("score_partial", False)),
+                "score_tier3": float(info.get("score_tier3", float("nan"))),
+                "score_tier2": float(info.get("score_tier2", float("nan"))),
+                "score_total": float(info.get("score_total", float("nan"))),
+                "score_duration_points": float(info.get("score_duration_points", float("nan"))),
+                "score_efficiency_points": float(info.get("score_efficiency_points", float("nan"))),
+                "score_smoothness_points": float(info.get("score_smoothness_points", float("nan"))),
+                "score_force_penalty": float(info.get("score_force_penalty", float("nan"))),
+                "score_off_limit_penalty": float(info.get("score_off_limit_penalty", float("nan"))),
+                "score_proximity_points": float(info.get("score_proximity_points", float("nan"))),
+                "score_duration_s": float(info.get("score_duration_s", float("nan"))),
+                "score_path_length_m": float(info.get("score_path_length_m", float("nan"))),
+                "score_force_over_s": float(info.get("score_force_over_s", float("nan"))),
+                "score_jerk_mps3": float(info.get("score_jerk_mps3", float("nan"))),
+                "score_in_port_box": bool(info.get("score_in_port_box", False)),
+                "score_force_over_limit": bool(info.get("score_force_over_limit", False)),
+                "score_off_limit_contact": bool(info.get("score_off_limit_contact", False)),
                 "t_start": float(info.get("wallclock", 0.0)),
             }
             b = info.get("breakdown")
@@ -244,6 +264,10 @@ class WandbVideoRecorder(BaseCallback):
     def __init__(self, make_eval_env, every_n_episodes: int = 25,
                  max_steps: int = 200, fps: int = 20,
                  key: str = "eval/rollout_video",
+                 render_camera: str = "center_camera",
+                 render_height: int = 688,
+                 render_width: int = 768,
+                 min_frames: int = 12,
                  record_on_training_end: bool = True,
                  deterministic: bool = True,
                  enabled: bool = True,
@@ -254,6 +278,10 @@ class WandbVideoRecorder(BaseCallback):
         self.max_steps = int(max_steps)
         self.fps = int(fps)
         self.key = key
+        self.render_camera = render_camera
+        self.render_height = int(render_height)
+        self.render_width = int(render_width)
+        self.min_frames = int(min_frames)
         self.record_on_training_end = bool(record_on_training_end)
         self.deterministic = bool(deterministic)
         self.enabled = bool(enabled)
@@ -321,7 +349,13 @@ class WandbVideoRecorder(BaseCallback):
             obs = vec_env.reset()
             for step in range(self.max_steps):
                 try:
-                    frame = render_env.render()
+                    if hasattr(render_env, "render_camera"):
+                        frame = render_env.render_camera(
+                            camera=self.render_camera,
+                            height=self.render_height,
+                            width=self.render_width)
+                    else:
+                        frame = render_env.render()
                 except Exception:
                     frame = None
                 if frame is not None:
@@ -332,10 +366,14 @@ class WandbVideoRecorder(BaseCallback):
                     axis_deg = np.degrees(float(last_info.get("plug_axis_error_rad", 0.0)))
                     excess_mm = 1000.0 * float(last_info.get("plug_port_penetration_excess_m", 0.0))
                     depth = float(last_info.get("depth_norm", 0.0))
+                    score = float(last_info.get("score_total", 0.0))
+                    tier3 = float(last_info.get("score_tier3", 0.0))
+                    score_success = bool(last_info.get("score_success", False))
                     lines = [
                         f"{tag} train_step={int(self.num_timesteps)} eval_step={step}",
                         f"term={term_status} reward={last_reward:.2f}",
                         f"depth={depth:.3f} axis={axis_deg:.1f}deg excess={excess_mm:.2f}mm",
+                        f"score={score:.1f} tier3={tier3:.1f} score_success={score_success}",
                     ]
                     frames.append(self._overlay(frame[:, :, :3], lines))
 
@@ -361,6 +399,8 @@ class WandbVideoRecorder(BaseCallback):
             if self.verbose:
                 print("[wandb-video] no frames captured", flush=True)
             return
+        if self.min_frames > 0 and len(frames) < self.min_frames:
+            frames.extend([frames[-1].copy() for _ in range(self.min_frames - len(frames))])
         try:
             import tempfile
             import imageio.v2 as imageio
@@ -371,6 +411,12 @@ class WandbVideoRecorder(BaseCallback):
                     self.key: wandb.Video(str(path), fps=self.fps, format="mp4"),
                     "eval/video_frames": len(frames),
                     "eval/video_term_status": str(term_status),
+                    "eval/video_score_total": float(last_info.get("score_total", 0.0)),
+                    "eval/video_tier3": float(last_info.get("score_tier3", 0.0)),
+                    "eval/video_score_success": float(bool(last_info.get("score_success", False))),
+                    "eval/score_total": float(last_info.get("score_total", 0.0)),
+                    "eval/tier3": float(last_info.get("score_tier3", 0.0)),
+                    "eval/success_rate": float(bool(last_info.get("score_success", False))),
                 }
                 wandb.log(payload, step=int(self.num_timesteps))
         except Exception as exc:
@@ -381,6 +427,103 @@ class WandbVideoRecorder(BaseCallback):
         if self.verbose:
             print(f"[wandb-video] logged {tag} ({len(frames)} frames) to {self.key}",
                   flush=True)
+
+
+class WandbScoreEvaluator(BaseCallback):
+    """Cheap deterministic eval rollout for score-style W&B curves.
+
+    Unlike `WandbVideoRecorder`, this does not render frames. It is meant to run
+    often enough that `eval/score_total` and `eval/tier3` show learning progress
+    from a fixed diagnostic curriculum level.
+    """
+
+    def __init__(self, make_eval_env, every_steps: int = 500,
+                 max_steps: int = 200, deterministic: bool = True,
+                 enabled: bool = True, verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.make_eval_env = make_eval_env
+        self.every_steps = max(int(every_steps), 1)
+        self.max_steps = int(max_steps)
+        self.deterministic = bool(deterministic)
+        self.enabled = bool(enabled)
+        self._next_eval_step = 0
+
+    def _on_step(self) -> bool:
+        if not self.enabled or int(self.num_timesteps) < self._next_eval_step:
+            return True
+        self._next_eval_step = int(self.num_timesteps) + self.every_steps
+        self._run_eval()
+        return True
+
+    def _run_eval(self) -> None:
+        try:
+            import wandb
+        except Exception as exc:
+            if self.verbose:
+                print(f"[wandb-eval] wandb import failed: {exc}", flush=True)
+            return
+        if wandb.run is None:
+            if self.verbose:
+                print("[wandb-eval] no live wandb run yet; skipping", flush=True)
+            return
+
+        vec_env = None
+        total_return = 0.0
+        last_info: dict[str, Any] = {}
+        term_status = None
+        steps = 0
+        try:
+            vec_env, _render_env = self.make_eval_env()
+            obs = vec_env.reset()
+            for steps in range(1, self.max_steps + 1):
+                action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                obs, reward, done, infos = vec_env.step(action)
+                total_return += float(np.asarray(reward).reshape(-1)[0])
+                last_info = dict(infos[0]) if infos else {}
+                term_status = last_info.get("term_status", term_status)
+                if bool(np.asarray(done).reshape(-1)[0]):
+                    break
+        except Exception as exc:
+            if self.verbose:
+                print(f"[wandb-eval] eval failed: {exc}", flush=True)
+            return
+        finally:
+            if vec_env is not None:
+                try:
+                    vec_env.close()
+                except Exception:
+                    pass
+
+        if not last_info:
+            return
+        payload = {
+            "eval/score_total": float(last_info.get("score_total", 0.0)),
+            "eval/tier2": float(last_info.get("score_tier2", 0.0)),
+            "eval/tier3": float(last_info.get("score_tier3", 0.0)),
+            "eval/success_rate": float(bool(last_info.get("score_success", False))),
+            "eval/partial": float(bool(last_info.get("score_partial", False))),
+            "eval/return": float(total_return),
+            "eval/steps": int(steps),
+            "eval/level": float(last_info.get("curriculum_level", float("nan"))),
+            "eval/depth_norm": float(last_info.get("depth_norm", 0.0)),
+            "eval/axis_error_deg": float(np.degrees(last_info.get("plug_axis_error_rad", 0.0))),
+            "eval/lateral_error_mm": float(1000.0 * last_info.get("lateral_error_m", 0.0)),
+            "eval/penetration_excess_mm": float(
+                1000.0 * last_info.get("plug_port_penetration_excess_m", 0.0)),
+            "eval/off_limit_contacts": int(last_info.get("off_limit_contacts", 0)),
+            "eval/force_over_s": float(last_info.get("score_force_over_s", 0.0)),
+        }
+        try:
+            wandb.log(payload, step=int(self.num_timesteps))
+        except Exception as exc:
+            if self.verbose:
+                print(f"[wandb-eval] upload failed: {exc}", flush=True)
+            return
+        if self.verbose:
+            print(f"[wandb-eval] score={payload['eval/score_total']:.1f} "
+                  f"tier3={payload['eval/tier3']:.1f} "
+                  f"success={payload['eval/success_rate']:.0f} "
+                  f"steps={steps}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -502,7 +645,7 @@ class CurriculumScheduler(BaseCallback):
         self.step_size = float(step_size)
         self.level_path = Path(level_path) if level_path is not None else None
         self._current_level: float = 0.0
-        self._recent: list[str] = []
+        self._recent: list[dict[str, Any]] = []
         # restore prior level if present
         if self.level_path is not None and self.level_path.exists():
             try:
@@ -529,16 +672,20 @@ class CurriculumScheduler(BaseCallback):
         return True
 
     def _record(self, info: dict) -> None:
-        self._recent.append(str(info.get("term_status", "unknown")))
+        term = str(info.get("term_status", "unknown"))
+        self._recent.append({
+            "term": term,
+            "score_success": bool(info.get("score_success", term == "success")),
+        })
         if len(self._recent) > self.eval_window:
             self._recent = self._recent[-self.eval_window:]
 
     def _maybe_update(self) -> None:
         if len(self._recent) < self.eval_window:
             return
-        success_rate = sum(1 for s in self._recent if s == "success") / len(self._recent)
-        force_abort_rate = sum(1 for s in self._recent if s == "force_abort") / len(self._recent)
-        bad_collision_rate = sum(1 for s in self._recent if s == "bad_collision") / len(self._recent)
+        success_rate = sum(1 for r in self._recent if r["score_success"]) / len(self._recent)
+        force_abort_rate = sum(1 for r in self._recent if r["term"] == "force_abort") / len(self._recent)
+        bad_collision_rate = sum(1 for r in self._recent if r["term"] == "bad_collision") / len(self._recent)
         unsafe_rate = force_abort_rate + bad_collision_rate
         cur = self._current_level
         new = cur
@@ -672,6 +819,8 @@ class ProgressPrinter(BaseCallback):
         self.log_every = max(int(log_every_steps), 50)
         self._recent_returns: list[float] = []
         self._recent_terms: list[str] = []
+        self._recent_score_success: list[bool] = []
+        self._recent_score_total: list[float] = []
         self._recent_l1: list[float] = []
         self._next_print_step = 0
 
@@ -682,10 +831,14 @@ class ProgressPrinter(BaseCallback):
             if ep is not None:
                 self._recent_returns.append(float(ep["r"]))
                 self._recent_terms.append(str(info.get("term_status", "?")))
+                self._recent_score_success.append(bool(info.get("score_success", False)))
+                self._recent_score_total.append(float(info.get("score_total", float("nan"))))
                 self._recent_l1.append(float(info.get("image_l1_norm", float("nan"))))
         if len(self._recent_returns) > 50:
             self._recent_returns = self._recent_returns[-50:]
             self._recent_terms = self._recent_terms[-50:]
+            self._recent_score_success = self._recent_score_success[-50:]
+            self._recent_score_total = self._recent_score_total[-50:]
             self._recent_l1 = self._recent_l1[-50:]
 
         if self.num_timesteps < self._next_print_step:
@@ -696,7 +849,13 @@ class ProgressPrinter(BaseCallback):
         terms = self._recent_terms
         l1 = self._recent_l1
         n = max(len(ret), 1)
-        succ = sum(1 for s in terms if s == "success") / len(terms) if terms else 0.0
+        term_succ = sum(1 for s in terms if s == "success") / len(terms) if terms else 0.0
+        score_succ = (
+            sum(1 for s in self._recent_score_success if s) / len(self._recent_score_success)
+            if self._recent_score_success else 0.0
+        )
+        valid_scores = [x for x in self._recent_score_total if x == x]
+        score_mean = float(np.mean(valid_scores)) if valid_scores else float("nan")
         # pull Q-loss / alpha from SB3's logger if present.
         # SB3 SAC logs the combined critic loss as "train/critic_loss" and
         # the entropy coefficient as "train/ent_coef" (NOT qf1_loss /
@@ -707,7 +866,9 @@ class ProgressPrinter(BaseCallback):
         print(
             f"[step {self.num_timesteps:>8d}] "
             f"ret(50)={sum(ret)/n:+7.1f}  "
-            f"succ(50)={succ:5.1%}  "
+            f"score_succ(50)={score_succ:5.1%}  "
+            f"term_succ(50)={term_succ:5.1%}  "
+            f"score(50)={score_mean:5.1f}  "
             f"img_l1={l1_mean:.3f}  "
             f"q_loss={qloss:7.2f}  "
             f"alpha={alpha:.3f}",
@@ -734,7 +895,9 @@ class WandbLogger(BaseCallback):
         train/global_step          (int)
         train/episode_length       (int)
         train/learning_rate        (float)
-        eval/success_rate          (float, rolling over --wandb-success-window)
+        train/score_success_rate   (float, rolling over --wandb-success-window)
+        env/terminal_success_rate  (float, old env terminal-success flag)
+        score/mean_total           (float, local score-style estimate)
         reward/episode             (float)
         reward/mean                (float, rolling mean of episode returns)
         loss/policy                (float, SAC actor_loss)
@@ -797,6 +960,9 @@ class WandbLogger(BaseCallback):
         # rolling stats for episode-end metrics
         self._recent_returns: list[float] = []
         self._recent_terms: list[str] = []
+        self._recent_score_success: list[bool] = []
+        self._recent_score_total: list[float] = []
+        self._recent_score_tier3: list[float] = []
         self._next_log_step = 0
         # optional checkpoint-artifact hook (kept OFF by default; see method)
         self._upload_checkpoints = False
@@ -917,9 +1083,15 @@ class WandbLogger(BaseCallback):
             term = str(info.get("term_status", "unknown"))
             self._recent_returns.append(ret)
             self._recent_terms.append(term)
+            self._recent_score_success.append(bool(info.get("score_success", False)))
+            self._recent_score_total.append(float(info.get("score_total", float("nan"))))
+            self._recent_score_tier3.append(float(info.get("score_tier3", float("nan"))))
             if len(self._recent_returns) > self.success_window:
                 self._recent_returns = self._recent_returns[-self.success_window:]
                 self._recent_terms = self._recent_terms[-self.success_window:]
+                self._recent_score_success = self._recent_score_success[-self.success_window:]
+                self._recent_score_total = self._recent_score_total[-self.success_window:]
+                self._recent_score_tier3 = self._recent_score_tier3[-self.success_window:]
 
             log_payload["reward/episode"] = ret
             log_payload["train/episode_length"] = length
@@ -936,6 +1108,25 @@ class WandbLogger(BaseCallback):
             if "plug_port_penetration_excess_m" in info:
                 log_payload["geometry/plug_port_penetration_excess_mm"] = float(
                     1000.0 * info["plug_port_penetration_excess_m"])
+            if "off_limit_contacts" in info:
+                log_payload["collision/off_limit_contacts"] = int(info["off_limit_contacts"])
+            if "curriculum_level" in info:
+                log_payload["train/curriculum_level"] = float(info["curriculum_level"])
+            if "score_total" in info:
+                log_payload["train_score/total"] = float(info["score_total"])
+                log_payload["train_score/tier2"] = float(info.get("score_tier2", 0.0))
+                log_payload["train_score/tier3"] = float(info.get("score_tier3", 0.0))
+                log_payload["train_score/success"] = float(bool(info.get("score_success", False)))
+                log_payload["train_score/partial"] = float(bool(info.get("score_partial", False)))
+                log_payload["train_score/duration_points"] = float(info.get("score_duration_points", 0.0))
+                log_payload["train_score/efficiency_points"] = float(info.get("score_efficiency_points", 0.0))
+                log_payload["train_score/smoothness_points"] = float(info.get("score_smoothness_points", 0.0))
+                log_payload["train_score/force_penalty"] = float(info.get("score_force_penalty", 0.0))
+                log_payload["train_score/off_limit_penalty"] = float(info.get("score_off_limit_penalty", 0.0))
+                log_payload["train_score/proximity_points"] = float(info.get("score_proximity_points", 0.0))
+                log_payload["train_score/path_length_m"] = float(info.get("score_path_length_m", 0.0))
+                log_payload["train_score/force_over_s"] = float(info.get("score_force_over_s", 0.0))
+                log_payload["train_score/jerk_mps3"] = float(info.get("score_jerk_mps3", 0.0))
 
         # --- rolling aggregates ---
         if self._recent_returns:
@@ -943,8 +1134,18 @@ class WandbLogger(BaseCallback):
                 sum(self._recent_returns) / len(self._recent_returns)
             )
         if self._recent_terms:
-            succ = sum(1 for s in self._recent_terms if s == "success")
-            log_payload["eval/success_rate"] = float(succ / len(self._recent_terms))
+            term_succ = sum(1 for s in self._recent_terms if s == "success")
+            log_payload["env/terminal_success_rate"] = float(term_succ / len(self._recent_terms))
+        if self._recent_score_success:
+            score_succ = sum(1 for s in self._recent_score_success if s)
+            log_payload["train/score_success_rate"] = float(score_succ / len(self._recent_score_success))
+            log_payload["train_score/success_rate"] = float(score_succ / len(self._recent_score_success))
+        valid_score_total = [x for x in self._recent_score_total if x == x]
+        if valid_score_total:
+            log_payload["train_score/mean_total"] = float(np.mean(valid_score_total))
+        valid_score_tier3 = [x for x in self._recent_score_tier3 if x == x]
+        if valid_score_tier3:
+            log_payload["train_score/mean_tier3"] = float(np.mean(valid_score_tier3))
 
         # --- per-N-step SB3 logger passthrough (losses, alpha, lr) ---
         if self.num_timesteps >= self._next_log_step:
@@ -1018,6 +1219,7 @@ __all__ = [
     "MetricsLogger",
     "VideoRecorder",
     "WandbVideoRecorder",
+    "WandbScoreEvaluator",
     "CurriculumScheduler",
     "CheckpointManager",
     "ProgressPrinter",

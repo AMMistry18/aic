@@ -130,16 +130,26 @@ class SceneEnvConfig:
     term: TerminationConfig = field(default_factory=TerminationConfig)
     # --- success ---
     success_pos_tol_m: float = 0.006
-    success_axial_tol_m: float = 0.006
-    success_lateral_tol_m: float = 0.008
-    success_depth_norm: float = 0.97
-    success_axis_tol_rad: float = 0.05
-    success_force_n: float = 2.0
+    success_axial_tol_m: float = 0.003
+    success_lateral_tol_m: float = 0.005
+    success_depth_norm: float = 0.995
+    success_axis_tol_rad: float = 0.035
+    success_force_n: float = 0.5
     success_max_plug_port_penetration_excess_m: float = 0.001
     bad_collision_axis_rad: float = 0.20
     bad_collision_depth_gate: float = 0.20
     bad_collision_penetration_excess_m: float = 0.003
     force_abort_n: float = 60.0          # hard abort on |contact force| (safety)
+    # --- score-style diagnostics (local estimator of the published rubric) ---
+    score_lateral_tol_m: float = 0.005
+    score_axial_tol_m: float = 0.003
+    score_full_depth_norm: float = 0.995
+    score_axis_tol_rad: float = 0.035
+    score_max_penetration_excess_m: float = 0.001
+    score_force_threshold_n: float = 20.0
+    score_force_duration_s: float = 1.0
+    score_wrong_port_penalty: float = -12.0
+    score_off_limit_penalty: float = -24.0
 
 
 class SceneInsertEnv(gym.Env):
@@ -161,6 +171,7 @@ class SceneInsertEnv(gym.Env):
         self._plug_axis_tail_id = bid(cfg.plug_axis_tail_body)
         if self._plug_axis_tail_id < 0:
             self._plug_axis_tail_id = self._plug_id
+        self._manipulated_body_ids = self._find_manipulated_body_ids()
         self._cend_id = bid("cable_end_0")
         self._cfree_adr = self.model.jnt_qposadr[jid("cable_end_0_free")]
         self._tcp_sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripper_tcp")
@@ -190,6 +201,7 @@ class SceneInsertEnv(gym.Env):
         # obs renderer (3 wrist cams) + reward renderer (center cam, native res)
         self._renderer, self._cams = None, []
         self._reward_renderer = None
+        self._debug_renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         if cfg.include_images:
             self._renderer = mujoco.Renderer(self.model, height=cfg.image_h, width=cfg.image_w)
             self._cams = [c for c in cfg.cameras
@@ -624,6 +636,7 @@ class SceneInsertEnv(gym.Env):
         self._last_action = np.zeros(6, np.float32)
         self._prev_depth_norm = self._depth_norm()
         self._f_ax_buf: list[float] = []
+        self._reset_score_state()
         return self._obs(), {
             "curriculum_level": self._curriculum_level,
             "reset_diag": getattr(self, "_last_reset_diag", None),
@@ -638,11 +651,13 @@ class SceneInsertEnv(gym.Env):
             self.data.ctrl[6] = self.cfg.gripper_ctrl
             mujoco.mj_step(self.model, self.data)
         self._step_count += 1
+        self._update_score_path()
         obs = self._obs()
         total, breakdown, term_status = self._reward_and_term(obs, action)
         self._last_action = action.astype(np.float32)
         terminated = term_status in ("success", "force_abort", "bad_collision", "off_limit")
         truncated = (term_status == "timeout") or (self._step_count >= self.cfg.max_episode_steps)
+        score_info = self._score_diag(term_status)
         info = {
             "term_status": term_status if term_status else ("timeout" if truncated else None),
             "breakdown": breakdown,
@@ -658,6 +673,7 @@ class SceneInsertEnv(gym.Env):
             "plug_axis_error_rad": float(self._plug_axis_error()),
             "wallclock": float(self._step_count) * 0.05,
             "curriculum_level": float(self._curriculum_level),
+            **score_info,
         }
         return obs, total, terminated, truncated, info
 
@@ -672,14 +688,27 @@ class SceneInsertEnv(gym.Env):
     def _geom_name(self, gid: int) -> str:
         return mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, int(gid)) or f"geom_{gid}"
 
+    def _find_manipulated_body_ids(self) -> set[int]:
+        ids = {int(self._plug_tip_id), int(self._plug_axis_tail_id)}
+        tokens = ("sfp_module", "sfp_tip")
+        for bid in range(self.model.nbody):
+            name = self._body_name(bid).lower()
+            if any(tok in name for tok in tokens):
+                ids.add(int(bid))
+        return {i for i in ids if i >= 0}
+
     def _contact_summary(self):
         plug_bodies = {int(self._plug_id), int(self._plug_tip_id), int(self._plug_axis_tail_id)}
         target_tokens = ("nic_card", "sfp_port", "sfp", "mount")
+        off_limit_tokens = ("enclosure", "task_board")
+        manipulated_bodies = set(getattr(self, "_manipulated_body_ids", plug_bodies))
         min_dist = float("inf")
         plug_port_min = float("inf")
         worst_pair = ""
         plug_port_worst = ""
         plug_port_contacts = 0
+        off_limit_contacts = 0
+        off_limit_worst = ""
         for k in range(self.data.ncon):
             c = self.data.contact[k]
             g1, g2 = int(c.geom1), int(c.geom2)
@@ -700,6 +729,13 @@ class SceneInsertEnv(gym.Env):
                     plug_port_min = dist
                     plug_port_worst = f"{n1}:{ge1} <-> {n2}:{ge2}"
 
+            one_manipulated = (b1 in manipulated_bodies) ^ (b2 in manipulated_bodies)
+            other_manip_name = n2 if b1 in manipulated_bodies else n1
+            if one_manipulated and any(tok in other_manip_name for tok in off_limit_tokens):
+                off_limit_contacts += 1
+                if not off_limit_worst or dist < min_dist:
+                    off_limit_worst = f"{n1}:{ge1} <-> {n2}:{ge2}"
+
         if not np.isfinite(min_dist):
             min_dist = 0.0
         if not np.isfinite(plug_port_min):
@@ -716,6 +752,8 @@ class SceneInsertEnv(gym.Env):
             "plug_port_penetration_m": plug_port_pen,
             "plug_port_penetration_excess_m": float(max(0.0, plug_port_pen - goal_pen)),
             "plug_port_worst_pair": plug_port_worst,
+            "off_limit_contacts": int(off_limit_contacts),
+            "off_limit_worst_pair": off_limit_worst,
         }
 
     def _depth_norm(self) -> float:
@@ -723,6 +761,139 @@ class SceneInsertEnv(gym.Env):
         tip = self.data.xpos[self._plug_tip_id]
         retract = float(np.dot(tip - self._inserted_tip, self._retract_dir))
         return float(np.clip(1.0 - retract / max(self.cfg.last_inch_m, 1e-6), 0.0, 1.0))
+
+    def _reset_score_state(self) -> None:
+        tcp = self.data.site_xpos[self._tcp_sid].copy()
+        tip = self.data.xpos[self._plug_tip_id].copy()
+        self._score_last_tcp = tcp
+        self._score_tcp_hist = [tcp.copy()]
+        self._score_path_length_m = 0.0
+        self._score_force_over_s = 0.0
+        self._score_initial_insert_distance_m = float(
+            max(np.linalg.norm(tip - self._inserted_tip), 1e-3))
+        self._score_initial_entrance_distance_m = float(
+            max(np.linalg.norm(tip - self._port_pos), 1e-3))
+
+    def _update_score_path(self) -> None:
+        tcp = self.data.site_xpos[self._tcp_sid].copy()
+        last = getattr(self, "_score_last_tcp", tcp)
+        self._score_path_length_m = float(
+            getattr(self, "_score_path_length_m", 0.0) + np.linalg.norm(tcp - last))
+        self._score_last_tcp = tcp
+        hist = getattr(self, "_score_tcp_hist", [])
+        hist.append(tcp.copy())
+        self._score_tcp_hist = hist[-64:]
+
+    def _score_smoothness_points(self, dt: float) -> tuple[float, float]:
+        hist = np.asarray(getattr(self, "_score_tcp_hist", []), dtype=np.float64)
+        if hist.shape[0] < 5:
+            return 6.0, 0.0
+        vel = np.diff(hist, axis=0) / dt
+        acc = np.diff(vel, axis=0) / dt
+        jerk = np.diff(acc, axis=0) / dt
+        if jerk.size == 0:
+            return 6.0, 0.0
+        speed = np.linalg.norm(vel[2:], axis=1)
+        moving = speed > 0.01
+        jerk_mag = np.linalg.norm(jerk, axis=1)
+        if np.any(moving):
+            jerk_mean = float(np.mean(jerk_mag[moving]))
+        else:
+            jerk_mean = 0.0
+        points = 6.0 * (1.0 - np.clip(jerk_mean / 50.0, 0.0, 1.0))
+        return float(points), jerk_mean
+
+    def _score_diag(self, term_status: Optional[str]) -> dict[str, float | int | bool]:
+        """Local estimate of the published score rubric for diagnostics.
+
+        This is intentionally stricter than the dense reward terminal flag. It
+        approximates the official evaluator with geometry/contact signals we can
+        observe inside this single-ended last-inch environment.
+        """
+        dt = 0.05
+        duration_s = float(self._step_count) * dt
+        fc = self._contact_force()
+        force_norm = float(np.linalg.norm(fc))
+        if force_norm > self.cfg.score_force_threshold_n:
+            self._score_force_over_s = float(getattr(self, "_score_force_over_s", 0.0) + dt)
+
+        tip = self.data.xpos[self._plug_tip_id]
+        axial_err, lat_vec = self._tip_port_errors(tip)
+        lateral_err = float(np.linalg.norm(lat_vec))
+        depth_norm = self._depth_norm()
+        axis_err = self._plug_axis_error()
+        contact_summary = self._contact_summary()
+        pen_excess = float(contact_summary["plug_port_penetration_excess_m"])
+        plug_port_contacts = int(contact_summary["plug_port_contacts"])
+        off_limit_contacts = int(contact_summary.get("off_limit_contacts", 0))
+
+        in_port_box = (
+            -self.cfg.score_axial_tol_m <= axial_err <= self.cfg.seated_depth_m + 0.002
+            and lateral_err <= self.cfg.score_lateral_tol_m
+        )
+        full_insert = (
+            in_port_box
+            and depth_norm >= self.cfg.score_full_depth_norm
+            and abs(axial_err) <= self.cfg.score_axial_tol_m
+            and axis_err <= self.cfg.score_axis_tol_rad
+            and pen_excess <= self.cfg.score_max_penetration_excess_m
+            and plug_port_contacts > 0
+        )
+        if full_insert:
+            tier3 = 75.0
+            partial = False
+            proximity = 25.0
+        elif in_port_box:
+            partial = True
+            tier3 = 38.0 + 12.0 * float(np.clip(depth_norm, 0.0, 1.0))
+            proximity = 25.0
+        else:
+            partial = False
+            dist_to_entrance = float(np.linalg.norm(tip - self._port_pos))
+            max_dist = max(float(getattr(self, "_score_initial_entrance_distance_m", 1e-3)) * 0.5, 1e-3)
+            proximity = 25.0 * (1.0 - np.clip(dist_to_entrance / max_dist, 0.0, 1.0))
+            tier3 = float(proximity)
+
+        eligible_tier2 = tier3 > 0.0
+        if eligible_tier2:
+            duration_points = 12.0 * (1.0 - np.clip((duration_s - 5.0) / 55.0, 0.0, 1.0))
+            path_len = float(getattr(self, "_score_path_length_m", 0.0))
+            initial = max(float(getattr(self, "_score_initial_insert_distance_m", 1e-3)), 1e-3)
+            efficiency_points = 6.0 * (1.0 - np.clip((path_len - initial) / 1.0, 0.0, 1.0))
+            smooth_points, jerk_mean = self._score_smoothness_points(dt)
+        else:
+            duration_points = 0.0
+            efficiency_points = 0.0
+            smooth_points, jerk_mean = 0.0, 0.0
+            path_len = float(getattr(self, "_score_path_length_m", 0.0))
+
+        force_penalty = -12.0 if (
+            float(getattr(self, "_score_force_over_s", 0.0)) > self.cfg.score_force_duration_s
+        ) else 0.0
+        off_limit_penalty = self.cfg.score_off_limit_penalty if off_limit_contacts > 0 else 0.0
+        tier2 = duration_points + efficiency_points + smooth_points + force_penalty + off_limit_penalty
+        total = 1.0 + tier2 + tier3
+        return {
+            "score_success": bool(full_insert),
+            "score_partial": bool(partial),
+            "score_tier3": float(tier3),
+            "score_tier2": float(tier2),
+            "score_total": float(total),
+            "score_duration_points": float(duration_points),
+            "score_efficiency_points": float(efficiency_points),
+            "score_smoothness_points": float(smooth_points),
+            "score_force_penalty": float(force_penalty),
+            "score_off_limit_penalty": float(off_limit_penalty),
+            "score_proximity_points": float(proximity),
+            "score_duration_s": float(duration_s),
+            "score_path_length_m": float(path_len),
+            "score_force_over_s": float(getattr(self, "_score_force_over_s", 0.0)),
+            "score_jerk_mps3": float(jerk_mean),
+            "score_in_port_box": bool(in_port_box),
+            "score_force_over_limit": bool(force_penalty < 0.0),
+            "score_off_limit_contact": bool(off_limit_contacts > 0),
+            "score_term_success": bool(term_status == "success"),
+        }
 
     def _tip_port_errors(self, tip=None):
         tip = self.data.xpos[self._plug_tip_id] if tip is None else np.asarray(tip)
@@ -758,6 +929,7 @@ class SceneInsertEnv(gym.Env):
                 and lat_err < self.cfg.success_lateral_tol_m
                 and axis_error <= self.cfg.success_axis_tol_rad
                 and pen_excess <= self.cfg.success_max_plug_port_penetration_excess_m
+                and int(contact_summary["plug_port_contacts"]) > 0
                 and abs(f_axial) > self.cfg.success_force_n):
             term_status = "success"
         elif (pen_excess > self.cfg.bad_collision_penetration_excess_m
@@ -848,8 +1020,29 @@ class SceneInsertEnv(gym.Env):
         self._renderer.update_scene(self.data, camera=self._cams[0] if self._cams else -1)
         return self._renderer.render()[:, :, :3]
 
+    def render_camera(self, camera: str = "center_camera",
+                      height: Optional[int] = None,
+                      width: Optional[int] = None):
+        """Render a diagnostic camera without changing policy observation size."""
+        h = int(height or self.cfg.image_h)
+        w = int(width or self.cfg.image_w)
+        h += h % 2
+        w += w % 2
+        if self._renderer is not None and h == self.cfg.image_h and w == self.cfg.image_w:
+            renderer = self._renderer
+        else:
+            key = (h, w)
+            renderer = self._debug_renderers.get(key)
+            if renderer is None:
+                renderer = mujoco.Renderer(self.model, height=h, width=w)
+                self._debug_renderers[key] = renderer
+        renderer.update_scene(self.data, camera=camera)
+        return renderer.render()[:, :, :3]
+
     def close(self):
-        for r in (getattr(self, "_renderer", None), getattr(self, "_reward_renderer", None)):
+        renderers = [getattr(self, "_renderer", None), getattr(self, "_reward_renderer", None)]
+        renderers.extend(getattr(self, "_debug_renderers", {}).values())
+        for r in renderers:
             if r is not None:
                 try:
                     r.close()
@@ -857,6 +1050,7 @@ class SceneInsertEnv(gym.Env):
                     pass
         self._renderer = None
         self._reward_renderer = None
+        self._debug_renderers = {}
 
 
 __all__ = ["SceneEnvConfig", "SceneInsertEnv"]

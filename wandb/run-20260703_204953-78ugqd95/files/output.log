@@ -1,0 +1,147 @@
+[wandb] run live at https://wandb.ai/tar2/intrinsic/runs/78ugqd95 (entity=tar2, project=intrinsic)
+[wandb-eval] score=-11.0 tier3=0.0 success=0 steps=80
+wandb: WARNING `fps` argument does not affect the frame rate of the video when providing a file path or raw bytes.
+[wandb-video] logged episode_000001 (92 frames) to eval/rollout_video
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.25     |
+|    ep_rew_mean     | 25.2     |
+| time/              |          |
+|    episodes        | 4        |
+|    fps             | 0        |
+|    time_elapsed    | 13       |
+|    total_timesteps | 5        |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.38     |
+|    ep_rew_mean     | 22.5     |
+| time/              |          |
+|    episodes        | 8        |
+|    fps             | 0        |
+|    time_elapsed    | 16       |
+|    total_timesteps | 11       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.25     |
+|    ep_rew_mean     | 25.1     |
+| time/              |          |
+|    episodes        | 12       |
+|    fps             | 0        |
+|    time_elapsed    | 18       |
+|    total_timesteps | 15       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.19     |
+|    ep_rew_mean     | 26.4     |
+| time/              |          |
+|    episodes        | 16       |
+|    fps             | 0        |
+|    time_elapsed    | 21       |
+|    total_timesteps | 19       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.2      |
+|    ep_rew_mean     | 26.2     |
+| time/              |          |
+|    episodes        | 20       |
+|    fps             | 1        |
+|    time_elapsed    | 23       |
+|    total_timesteps | 24       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.21     |
+|    ep_rew_mean     | 26       |
+| time/              |          |
+|    episodes        | 24       |
+|    fps             | 1        |
+|    time_elapsed    | 26       |
+|    total_timesteps | 29       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.18     |
+|    ep_rew_mean     | 26.6     |
+| time/              |          |
+|    episodes        | 28       |
+|    fps             | 1        |
+|    time_elapsed    | 28       |
+|    total_timesteps | 33       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.16     |
+|    ep_rew_mean     | 27.1     |
+| time/              |          |
+|    episodes        | 32       |
+|    fps             | 1        |
+|    time_elapsed    | 30       |
+|    total_timesteps | 37       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.17     |
+|    ep_rew_mean     | 26.8     |
+| time/              |          |
+|    episodes        | 36       |
+|    fps             | 1        |
+|    time_elapsed    | 33       |
+|    total_timesteps | 42       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.15     |
+|    ep_rew_mean     | 27.2     |
+| time/              |          |
+|    episodes        | 40       |
+|    fps             | 1        |
+|    time_elapsed    | 36       |
+|    total_timesteps | 46       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.14     |
+|    ep_rew_mean     | 27.4     |
+| time/              |          |
+|    episodes        | 44       |
+|    fps             | 1        |
+|    time_elapsed    | 38       |
+|    total_timesteps | 50       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.15     |
+|    ep_rew_mean     | 27.2     |
+| time/              |          |
+|    episodes        | 48       |
+|    fps             | 1        |
+|    time_elapsed    | 41       |
+|    total_timesteps | 55       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.19     |
+|    ep_rew_mean     | 26.3     |
+| time/              |          |
+|    episodes        | 52       |
+|    fps             | 1        |
+|    time_elapsed    | 43       |
+|    total_timesteps | 62       |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 1.18     |
+|    ep_rew_mean     | 26.6     |
+| time/              |          |
+|    episodes        | 56       |
+|    fps             | 1        |
+|    time_elapsed    | 45       |
+|    total_timesteps | 66       |
+---------------------------------
+
+[train] interrupted — saving checkpoint before exit
+[ckpt] model.zip @ step 69
