@@ -30,6 +30,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from aic_control_interfaces.msg import JointMotionUpdate, TrajectoryGenerationMode
 from aic_model.policy import (
     GetObservationCallback,
     MoveRobotCallback,
@@ -131,6 +132,14 @@ LOCAL_SFP_PORT_KPS = np.array([
 ], dtype=np.float64)
 
 os.makedirs(DEBUG_DIR, exist_ok=True)
+
+
+def _torch_cuda_available():
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
 
 
 def ros_image_to_cv2(img_msg):
@@ -248,6 +257,8 @@ class PerceptionInsert(Policy):
         self._final_insert_target_tip_quat = None
         self._final_insert_handoff_tip_xyz = None
         self._final_insert_handoff_tip_quat = None
+        self._final_insert_joint_target = None
+        self._final_insert_joint_handoff = None
         self._final_insert_warned = False
         nic_weights = (Path(__file__).parent / "weights" / "best.pt").resolve()
         sc_weights_env = os.environ.get("AIC_SC_POSE_WEIGHTS")
@@ -331,7 +342,20 @@ class PerceptionInsert(Policy):
 
         suffix = Path(policy_path).suffix.lower()
         try:
-            if suffix == ".onnx":
+            if suffix == ".zip":
+                from stable_baselines3 import SAC
+
+                device_name = os.environ.get(
+                    "AIC_FINAL_INSERT_DEVICE",
+                    "cuda" if _torch_cuda_available() else "cpu",
+                )
+                self._final_insert_policy = SAC.load(policy_path, device=device_name)
+                self._final_insert_policy_kind = "sb3_scene"
+                self._final_insert_device = device_name
+                self.get_logger().info(
+                    f"Loaded SB3 scene final-insertion policy on {device_name}: {policy_path}"
+                )
+            elif suffix == ".onnx":
                 import onnxruntime as ort
 
                 providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -389,6 +413,27 @@ class PerceptionInsert(Policy):
         return np.abs(rot_scale)
 
     def _validate_final_insert_policy_contract(self):
+        if self._final_insert_policy_kind == "sb3_scene":
+            try:
+                spaces = self._final_insert_policy.observation_space.spaces
+                dummy_obs = {
+                    key: np.zeros(space.shape, dtype=space.dtype)
+                    for key, space in spaces.items()
+                }
+                action = self._infer_final_insert_action(dummy_obs)
+                if action is None or action.size != 6:
+                    raise ValueError("SB3 scene policy did not return a 6D action")
+                self.get_logger().info(
+                    "SB3 scene final-insertion contract check passed "
+                    f"(obs_keys={list(spaces.keys())}, dummy_action={np.round(action, 4).tolist()})"
+                )
+                return True
+            except Exception as exc:
+                self.get_logger().warn(
+                    f"SB3 scene final-insertion contract check failed: {exc}"
+                )
+                return False
+
         obs_len = int(os.environ.get("AIC_FINAL_INSERT_OBS_LEN", str(FINAL_INSERT_OBS_LEN)))
         pos_scale = self._final_insert_pos_scale()
         rot_scale = self._final_insert_rot_scale()
@@ -2018,11 +2063,92 @@ class PerceptionInsert(Policy):
             return None
         return obs_vec
 
+    def _build_scene_sac_observation(self, obs):
+        if self._final_insert_policy is None:
+            return None
+        spaces = getattr(self._final_insert_policy.observation_space, "spaces", {})
+
+        def zeros_for(key):
+            space = spaces[key]
+            return np.zeros(space.shape, dtype=space.dtype)
+
+        out = {}
+        js = getattr(obs, "joint_states", None)
+        if "arm_qpos" in spaces:
+            arr = zeros_for("arm_qpos")
+            vals = getattr(js, "position", []) if js is not None else []
+            n = min(arr.size, len(vals))
+            if n:
+                arr[:n] = np.asarray(vals[:n], dtype=np.float32)
+            out["arm_qpos"] = arr
+        if "arm_qvel" in spaces:
+            arr = zeros_for("arm_qvel")
+            vals = getattr(js, "velocity", []) if js is not None else []
+            n = min(arr.size, len(vals))
+            if n:
+                arr[:n] = np.asarray(vals[:n], dtype=np.float32)
+            out["arm_qvel"] = arr
+        if "ft" in spaces:
+            arr = zeros_for("ft")
+            ww = getattr(obs, "wrist_wrench", None)
+            w = getattr(ww, "wrench", None) if ww is not None else None
+            if w is not None:
+                vals = [
+                    w.force.x, w.force.y, w.force.z,
+                    w.torque.x, w.torque.y, w.torque.z,
+                ]
+                arr[: min(arr.size, 6)] = np.asarray(vals[: arr.size], dtype=np.float32)
+            out["ft"] = arr
+        if "tcp_pose" in spaces:
+            arr = zeros_for("tcp_pose")
+            controller_state = getattr(obs, "controller_state", None)
+            pose = getattr(controller_state, "tcp_pose", None) if controller_state is not None else None
+            if pose is not None:
+                arr[:7] = np.asarray([
+                    pose.position.x, pose.position.y, pose.position.z,
+                    pose.orientation.w, pose.orientation.x,
+                    pose.orientation.y, pose.orientation.z,
+                ], dtype=np.float32)
+            out["tcp_pose"] = arr
+        if "last_action" in spaces:
+            arr = zeros_for("last_action")
+            n = min(arr.size, self._last_final_insert_action.size)
+            arr[:n] = self._last_final_insert_action[:n]
+            out["last_action"] = arr
+        if "image" in spaces:
+            image_shape = spaces["image"].shape
+            if len(image_shape) != 3:
+                out["image"] = zeros_for("image")
+            else:
+                channels, height, width = image_shape
+                frames = []
+                for name in CAMERA_NAMES:
+                    img_msg = getattr(obs, name.replace("_camera", "_image"), None)
+                    if img_msg is None:
+                        bgr = np.zeros((height, width, 3), dtype=np.uint8)
+                    else:
+                        bgr = ros_image_to_cv2(img_msg)
+                    if bgr.shape[:2] != (height, width):
+                        bgr = cv2.resize(bgr, (width, height), interpolation=cv2.INTER_AREA)
+                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                    frames.append(rgb)
+                hwc = np.concatenate(frames, axis=2)
+                if hwc.shape[2] != channels:
+                    self.get_logger().warn(
+                        f"SB3 scene image channels {hwc.shape[2]} != expected {channels}"
+                    )
+                    return None
+                out["image"] = np.transpose(hwc, (2, 0, 1)).astype(np.uint8)
+        return out
+
     def _infer_final_insert_action(self, obs_vec):
         if self._final_insert_policy is None:
             return None
         try:
-            if self._final_insert_policy_kind == "onnx":
+            if self._final_insert_policy_kind == "sb3_scene":
+                action, _ = self._final_insert_policy.predict(obs_vec, deterministic=True)
+                action = np.asarray(action)
+            elif self._final_insert_policy_kind == "onnx":
                 input_name = self._final_insert_policy.get_inputs()[0].name
                 out = self._final_insert_policy.run(None, {input_name: obs_vec[None, :]})[0]
                 action = np.asarray(out)[0]
@@ -2107,6 +2233,51 @@ class PerceptionInsert(Policy):
         tip_world = self._plug_tip_world(desired_gripper_xyz, q_new, self._task.port_type)
         return float(tip_world[2] - X[2])
 
+    def _apply_scene_sac_action(self, move_robot, obs, action):
+        js = getattr(obs, "joint_states", None)
+        positions = getattr(js, "position", []) if js is not None else []
+        if len(positions) < 6:
+            raise TransformException("Missing joint positions for SB3 scene final insertion")
+        q_current = np.asarray(positions[:6], dtype=np.float64)
+        if self._final_insert_joint_target is None:
+            self._final_insert_joint_target = q_current.copy()
+        if self._final_insert_joint_handoff is None:
+            self._final_insert_joint_handoff = q_current.copy()
+
+        scale = float(os.environ.get("AIC_FINAL_INSERT_JOINT_SCALE_RAD", "0.01"))
+        limit = float(os.environ.get("AIC_FINAL_INSERT_JOINT_LIMIT_RAD", "0.35"))
+        raw_target = self._final_insert_joint_target + np.asarray(action[:6], dtype=np.float64) * scale
+        low = self._final_insert_joint_handoff - limit
+        high = self._final_insert_joint_handoff + limit
+        target = np.clip(raw_target, low, high)
+        self._final_insert_joint_target = target
+        self._last_final_insert_action = np.asarray(action, dtype=np.float32)
+
+        stiffness = np.fromstring(
+            os.environ.get("AIC_FINAL_INSERT_JOINT_STIFFNESS", "200,200,200,50,50,50"),
+            sep=",",
+            dtype=np.float64,
+        )
+        damping = np.fromstring(
+            os.environ.get("AIC_FINAL_INSERT_JOINT_DAMPING", "40,40,40,15,15,15"),
+            sep=",",
+            dtype=np.float64,
+        )
+        if stiffness.size != 6:
+            stiffness = np.asarray([200.0, 200.0, 200.0, 50.0, 50.0, 50.0])
+        if damping.size != 6:
+            damping = np.asarray([40.0, 40.0, 40.0, 15.0, 15.0, 15.0])
+
+        joint_motion_update = JointMotionUpdate(
+            target_stiffness=stiffness.tolist(),
+            target_damping=damping.tolist(),
+            trajectory_generation_mode=TrajectoryGenerationMode(
+                mode=TrajectoryGenerationMode.MODE_POSITION
+            ),
+        )
+        joint_motion_update.target_state.positions = target.tolist()
+        move_robot(joint_motion_update=joint_motion_update)
+
     def _final_insert_pose_metrics(self, task, X, port_transform):
         gripper_xyz, q_gripper = self._gripper_pose_from_tf()
         if gripper_xyz is None or q_gripper is None:
@@ -2138,20 +2309,43 @@ class PerceptionInsert(Policy):
         }
 
     def _rl_handoff_gate(self, task, X, port_transform, fts_baseline):
-        metrics = self._final_insert_pose_metrics(task, X, port_transform)
-        if task.port_type != "sc":
-            return False, "non_sc_target", metrics
         if X is None:
-            return False, "perception_invalid", metrics
+            return False, "perception_invalid", None
+        ports_env = os.environ.get("AIC_FINAL_INSERT_PORTS", "").strip()
+        if ports_env:
+            enabled_ports = {p.strip().lower() for p in ports_env.split(",") if p.strip()}
+        elif self._final_insert_policy_kind == "sb3_scene":
+            enabled_ports = {"sfp"}
+        else:
+            enabled_ports = {"sc"}
+        if task.port_type not in enabled_ports:
+            return False, f"{task.port_type}_target_not_enabled", None
+        metrics = self._final_insert_pose_metrics(task, X, port_transform)
         if self._last_port_quat_wxyz is None:
             return False, "missing_port_orientation", metrics
         if metrics is None:
             return False, "missing_tip_pose_orientation", metrics
         if abs(fts_baseline) > 50.0:
             return False, "fts_baseline_unsane", metrics
-        if metrics["xy"] > 0.0035:
+
+        if task.port_type == "sc":
+            xy_gate = 0.0035
+            depth_low = -0.006
+            depth_high = 0.008
+        else:
+            xy_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_XY_GATE_M", "0.012"))
+            depth_low = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_LOW_M", "-0.030"))
+            depth_high = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_HIGH_M", "0.012"))
+            axis_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_AXIS_GATE", "0.90"))
+            twist_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_TWIST_GATE", "0.75"))
+            if metrics["axis"] < axis_gate:
+                return False, "axis_outside_sfp_gate", metrics
+            if metrics["twist"] < twist_gate:
+                return False, "twist_outside_sfp_gate", metrics
+
+        if metrics["xy"] > xy_gate:
             return False, "xy_outside_rl_gate", metrics
-        if metrics["depth"] < -0.006 or metrics["depth"] > 0.008:
+        if metrics["depth"] < depth_low or metrics["depth"] > depth_high:
             return False, "depth_outside_handoff_gate", metrics
         return True, "ok", metrics
 
@@ -2224,7 +2418,12 @@ class PerceptionInsert(Policy):
         self._final_insert_target_tip_quat = None
         self._final_insert_handoff_tip_xyz = None
         self._final_insert_handoff_tip_quat = None
-        depth_target = 0.0145 if task.port_type == "sc" else INSERTION_DEPTH[task.port_type] - 0.0015
+        self._final_insert_joint_target = None
+        self._final_insert_joint_handoff = None
+        if task.port_type == "sc":
+            depth_target = float(os.environ.get("AIC_FINAL_INSERT_SC_DEPTH_TARGET_M", "0.0145"))
+        else:
+            depth_target = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_TARGET_M", "0.045"))
         z_limit = -0.095 if task.port_type == "sc" else -0.168
         gate_ok, gate_reason, handoff_metrics = self._rl_handoff_gate(task, X, port_transform, fts_baseline)
         if not gate_ok and gate_reason == "xy_outside_rl_gate" and handoff_metrics is not None and handoff_metrics["xy"] <= 0.008:
@@ -2313,10 +2512,13 @@ class PerceptionInsert(Policy):
                     f"depth={insertion_depth*1000:.1f}mm best={best_depth*1000:.1f}mm"
                 )
                 return False
-            obs_vec = self._build_final_insert_observation(obs, X, port_transform)
-            if obs_vec is None:
+            if self._final_insert_policy_kind == "sb3_scene":
+                policy_obs = self._build_scene_sac_observation(obs)
+            else:
+                policy_obs = self._build_final_insert_observation(obs, X, port_transform)
+            if policy_obs is None:
                 return False
-            action = self._infer_final_insert_action(obs_vec)
+            action = self._infer_final_insert_action(policy_obs)
             if action is None:
                 return False
             base_z_offset = float(metrics["tip"][2] - X[2])
@@ -2327,7 +2529,11 @@ class PerceptionInsert(Policy):
                 )
                 return False
             try:
-                self._apply_final_insert_action(move_robot, port_transform, X, action, base_z_offset)
+                if self._final_insert_policy_kind == "sb3_scene":
+                    self._apply_scene_sac_action(move_robot, obs, action)
+                    self._publish_port_tf(X, port_transform)
+                else:
+                    self._apply_final_insert_action(move_robot, port_transform, X, action, base_z_offset)
             except TransformException as exc:
                 self.get_logger().warn(f"TF fail learned final insertion: {exc}")
                 return False

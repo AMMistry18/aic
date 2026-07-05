@@ -79,9 +79,15 @@ class MetricsLogger(BaseCallback):
                 "f_z_mean": float(info.get("f_z_mean", float("nan"))),
                 "f_z_max": float(info.get("f_z_max", float("nan"))),
                 "plug_axis_error_rad": float(info.get("plug_axis_error_rad", float("nan"))),
+                "plug_roll_error_rad": float(info.get("plug_roll_error_rad", float("nan"))),
                 "plug_port_penetration_m": float(info.get("plug_port_penetration_m", float("nan"))),
                 "plug_port_penetration_excess_m": float(
                     info.get("plug_port_penetration_excess_m", float("nan"))),
+                "port_stop_contacts": int(info.get("port_stop_contacts", 0)),
+                "port_stop_penetration_m": float(info.get("port_stop_penetration_m", float("nan"))),
+                "insertion_depth_m": float(info.get("insertion_depth_m", float("nan"))),
+                "approach_gap_m": float(info.get("approach_gap_m", float("nan"))),
+                "overinsert_m": float(info.get("overinsert_m", float("nan"))),
                 "curriculum_level": float(info.get("curriculum_level", float("nan"))),
                 "off_limit_contacts": int(info.get("off_limit_contacts", 0)),
                 "score_success": bool(info.get("score_success", False)),
@@ -98,12 +104,22 @@ class MetricsLogger(BaseCallback):
                 "score_duration_s": float(info.get("score_duration_s", float("nan"))),
                 "score_path_length_m": float(info.get("score_path_length_m", float("nan"))),
                 "score_force_over_s": float(info.get("score_force_over_s", float("nan"))),
+                "score_roll_error_rad": float(info.get("score_roll_error_rad", float("nan"))),
                 "score_jerk_mps3": float(info.get("score_jerk_mps3", float("nan"))),
                 "score_in_port_box": bool(info.get("score_in_port_box", False)),
                 "score_force_over_limit": bool(info.get("score_force_over_limit", False)),
                 "score_off_limit_contact": bool(info.get("score_off_limit_contact", False)),
                 "t_start": float(info.get("wallclock", 0.0)),
             }
+            if "action_mode" in info:
+                rec["action_mode"] = str(info["action_mode"])
+            for k, v in info.items():
+                # cartesian_residual controller diagnostics (absent in joint mode)
+                if k.startswith("cart_"):
+                    try:
+                        rec[k] = float(v)
+                    except (TypeError, ValueError):
+                        pass
             b = info.get("breakdown")
             if b is not None:
                 rec.update({
@@ -115,6 +131,8 @@ class MetricsLogger(BaseCallback):
                     "lateral": float(b.lateral),
                     "axis": float(getattr(b, "axis", 0.0)),
                     "collision": float(getattr(b, "collision", 0.0)),
+                    "off_limit": float(getattr(b, "off_limit", 0.0)),
+                    "force_sustain": float(getattr(b, "force_sustain", 0.0)),
                     "done": float(b.done),
                 })
             self._f.write(json.dumps(rec) + "\n")
@@ -259,10 +277,22 @@ class WandbVideoRecorder(BaseCallback):
 
     `make_eval_env` must return `(vec_env, render_env)`: a VecEnv matching the
     model observation preprocessing, plus the underlying renderable env.
+
+    Scheduling is in ENV STEPS (`every_steps`), not episode counts: with a
+    SubprocVecEnv the episode counter jumps by several completions per vec
+    step, so a `(count - 1) % N == 0` episode gate fires essentially never
+    (the old behaviour: one clip at episode 1, then silence). A step
+    threshold fires reliably throughout training.
+
+    The eval env is built ONCE (lazily) and reused across recordings —
+    `SceneInsertEnv` construction costs seconds (model load + goal-image
+    renders), which previously made every clip pay that price.
     """
 
-    def __init__(self, make_eval_env, every_n_episodes: int = 25,
+    def __init__(self, make_eval_env, every_steps: int = 20_000,
                  max_steps: int = 200, fps: int = 20,
+                 episodes_per_video: int = 2,
+                 episode_levels=None,
                  key: str = "eval/rollout_video",
                  render_camera: str = "center_camera",
                  render_height: int = 688,
@@ -274,9 +304,17 @@ class WandbVideoRecorder(BaseCallback):
                  verbose: int = 1):
         super().__init__(verbose=verbose)
         self.make_eval_env = make_eval_env
-        self.every_n = max(int(every_n_episodes), 1)
+        self.every_steps = int(every_steps)
+        self._step_schedule_enabled = self.every_steps > 0
+        self.every_steps = max(self.every_steps, 1)
         self.max_steps = int(max_steps)
         self.fps = int(fps)
+        self.episodes_per_video = max(int(episodes_per_video), 1)
+        # per-episode curriculum levels: None entry = mirror the live training
+        # level (via the env's level file), float = fixed level for that
+        # episode. e.g. (None, 1.0) shows "current curriculum" then "full task"
+        # in the same clip. Empty/None = leave the env's own level alone.
+        self.episode_levels = tuple(episode_levels) if episode_levels else ()
         self.key = key
         self.render_camera = render_camera
         self.render_height = int(render_height)
@@ -285,25 +323,51 @@ class WandbVideoRecorder(BaseCallback):
         self.record_on_training_end = bool(record_on_training_end)
         self.deterministic = bool(deterministic)
         self.enabled = bool(enabled)
-        self._ep_count = 0
-        self._recorded_steps: set[int] = set()
+        self._next_video_step = 0
+        self._vec_env = None
+        self._render_env = None
+        self._train_level_file = None
+
+    def _ensure_env(self):
+        if self._vec_env is None:
+            self._vec_env, self._render_env = self.make_eval_env()
+            self._train_level_file = getattr(self._render_env, "_level_file", None)
+        return self._vec_env, self._render_env
+
+    def _apply_level(self, render_env, level) -> None:
+        if not hasattr(render_env, "set_curriculum_level"):
+            return
+        if level is None:
+            # mirror training: restore the level file so reset() re-reads it
+            if self._train_level_file is not None and hasattr(render_env, "set_level_file"):
+                render_env.set_level_file(str(self._train_level_file))
+            return
+        if hasattr(render_env, "set_level_file"):
+            render_env.set_level_file(None)   # a level file overrides on reset
+        render_env.set_curriculum_level(float(level))
+
+    def _close_env(self) -> None:
+        if self._vec_env is not None:
+            try:
+                self._vec_env.close()
+            except Exception:
+                pass
+        self._vec_env = None
+        self._render_env = None
 
     def _on_step(self) -> bool:
-        if not self.enabled:
+        if (not self.enabled
+                or not self._step_schedule_enabled
+                or int(self.num_timesteps) < self._next_video_step):
             return True
-        dones = np.asarray(self.locals.get("dones", [False])).astype(bool)
-        new_completions = int(np.sum(dones))
-        if new_completions == 0:
-            return True
-        prev = self._ep_count
-        self._ep_count += new_completions
-        if prev == 0 or (self._ep_count - 1) % self.every_n == 0:
-            self._record_one(tag=f"episode_{self._ep_count:06d}")
+        self._next_video_step = int(self.num_timesteps) + self.every_steps
+        self._record_one(tag=f"step_{int(self.num_timesteps):09d}")
         return True
 
     def _on_training_end(self) -> None:
         if self.enabled and self.record_on_training_end:
             self._record_one(tag="final")
+        self._close_env()
 
     @staticmethod
     def _overlay(frame: np.ndarray, lines: list[str]) -> np.ndarray:
@@ -324,9 +388,25 @@ class WandbVideoRecorder(BaseCallback):
             draw.text((6, 6 + i * 18), line, fill=(255, 255, 255), font=font)
         return np.asarray(im)
 
-    def _record_one(self, tag: str) -> None:
-        if int(self.num_timesteps) in self._recorded_steps and tag != "final":
+    def record_now(self, tag: str, level: Optional[float] = None,
+                   episodes_per_video: Optional[int] = None,
+                   key: Optional[str] = None,
+                   extra_metrics: Optional[dict[str, Any]] = None) -> None:
+        """Synchronously record one W&B video at an explicit curriculum level."""
+        if not self.enabled:
             return
+        self._record_one(
+            tag=tag,
+            level_override=level,
+            episodes_per_video=episodes_per_video,
+            key=key,
+            extra_metrics=extra_metrics,
+        )
+
+    def _record_one(self, tag: str, level_override: Optional[float] = None,
+                    episodes_per_video: Optional[int] = None,
+                    key: Optional[str] = None,
+                    extra_metrics: Optional[dict[str, Any]] = None) -> None:
         try:
             import wandb
         except Exception as exc:
@@ -338,62 +418,99 @@ class WandbVideoRecorder(BaseCallback):
                 print("[wandb-video] no live wandb run yet; skipping", flush=True)
             return
 
-        vec_env = None
-        render_env = None
         frames: list[np.ndarray] = []
         last_info: dict[str, Any] = {}
-        last_reward = 0.0
         term_status = None
+        n_success = 0
+        n_eps = max(int(episodes_per_video or self.episodes_per_video), 1)
+        upload_key = key or self.key
+        restore_state = None
+        record_failed = False
         try:
-            vec_env, render_env = self.make_eval_env()
-            obs = vec_env.reset()
-            for step in range(self.max_steps):
-                try:
-                    if hasattr(render_env, "render_camera"):
-                        frame = render_env.render_camera(
-                            camera=self.render_camera,
-                            height=self.render_height,
-                            width=self.render_width)
-                    else:
-                        frame = render_env.render()
-                except Exception:
-                    frame = None
-                if frame is not None:
-                    if frame.dtype != np.uint8:
-                        frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
-                    if frame.ndim == 2:
-                        frame = np.stack([frame] * 3, axis=-1)
-                    axis_deg = np.degrees(float(last_info.get("plug_axis_error_rad", 0.0)))
-                    excess_mm = 1000.0 * float(last_info.get("plug_port_penetration_excess_m", 0.0))
-                    depth = float(last_info.get("depth_norm", 0.0))
-                    score = float(last_info.get("score_total", 0.0))
-                    tier3 = float(last_info.get("score_tier3", 0.0))
-                    score_success = bool(last_info.get("score_success", False))
-                    lines = [
-                        f"{tag} train_step={int(self.num_timesteps)} eval_step={step}",
-                        f"term={term_status} reward={last_reward:.2f}",
-                        f"depth={depth:.3f} axis={axis_deg:.1f}deg excess={excess_mm:.2f}mm",
-                        f"score={score:.1f} tier3={tier3:.1f} score_success={score_success}",
-                    ]
-                    frames.append(self._overlay(frame[:, :, :3], lines))
+            vec_env, render_env = self._ensure_env()
+            if level_override is not None:
+                prev_level_file = getattr(render_env, "_level_file", None)
+                prev_level = (
+                    float(render_env.get_curriculum_level())
+                    if hasattr(render_env, "get_curriculum_level") else None
+                )
+                restore_state = (render_env, prev_level_file, prev_level)
+            for ep in range(n_eps):
+                if level_override is not None:
+                    self._apply_level(render_env, float(level_override))
+                elif self.episode_levels:
+                    self._apply_level(
+                        render_env, self.episode_levels[ep % len(self.episode_levels)])
+                obs = vec_env.reset()
+                last_reward = 0.0
+                ep_term = None
+                for step in range(self.max_steps):
+                    try:
+                        if hasattr(render_env, "render_camera"):
+                            frame = render_env.render_camera(
+                                camera=self.render_camera,
+                                height=self.render_height,
+                                width=self.render_width)
+                        else:
+                            frame = render_env.render()
+                    except Exception:
+                        frame = None
+                    if frame is not None:
+                        if frame.dtype != np.uint8:
+                            frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+                        if frame.ndim == 2:
+                            frame = np.stack([frame] * 3, axis=-1)
+                        axis_deg = np.degrees(float(last_info.get("plug_axis_error_rad", 0.0)))
+                        roll_deg = np.degrees(float(last_info.get("plug_roll_error_rad", 0.0)))
+                        excess_mm = 1000.0 * float(last_info.get("plug_port_penetration_excess_m", 0.0))
+                        ins_mm = 1000.0 * float(last_info.get("insertion_depth_m", 0.0))
+                        over_mm = 1000.0 * float(last_info.get("overinsert_m", 0.0))
+                        depth = float(last_info.get("depth_norm", 0.0))
+                        score = float(last_info.get("score_total", 0.0))
+                        tier3 = float(last_info.get("score_tier3", 0.0))
+                        score_success = bool(last_info.get("score_success", False))
+                        level = float(last_info.get("curriculum_level", float("nan")))
+                        lines = [
+                            f"{tag} ep={ep + 1}/{n_eps} "
+                            f"eval_step={step} level={level:.2f}",
+                            f"term={ep_term} reward={last_reward:.2f}",
+                            f"depth={depth:.3f} ins={ins_mm:.1f}mm over={over_mm:.2f}mm excess={excess_mm:.2f}mm",
+                            f"axis={axis_deg:.1f}deg roll={roll_deg:.1f}deg",
+                            f"score={score:.1f} tier3={tier3:.1f} score_success={score_success}",
+                        ]
+                        frames.append(self._overlay(frame[:, :, :3], lines))
 
-                action, _ = self.model.predict(obs, deterministic=self.deterministic)
-                obs, reward, done, infos = vec_env.step(action)
-                last_reward = float(np.asarray(reward).reshape(-1)[0])
-                last_info = dict(infos[0]) if infos else {}
-                term_status = last_info.get("term_status", term_status)
-                if bool(np.asarray(done).reshape(-1)[0]):
-                    break
+                    action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                    obs, reward, done, infos = vec_env.step(action)
+                    last_reward = float(np.asarray(reward).reshape(-1)[0])
+                    last_info = dict(infos[0]) if infos else {}
+                    ep_term = last_info.get("term_status", ep_term)
+                    if bool(np.asarray(done).reshape(-1)[0]):
+                        break
+                term_status = ep_term
+                if ep_term == "success" or bool(last_info.get("score_success", False)):
+                    n_success += 1
+                # hold the terminal frame briefly so episode boundaries are visible
+                if frames:
+                    frames.extend([frames[-1].copy()] * min(self.fps // 2, 10))
         except Exception as exc:
             if self.verbose:
                 print(f"[wandb-video] record failed: {exc}", flush=True)
-            return
+            record_failed = True
         finally:
-            if vec_env is not None:
+            if restore_state is not None:
+                render_env, prev_level_file, prev_level = restore_state
                 try:
-                    vec_env.close()
+                    if hasattr(render_env, "set_level_file"):
+                        render_env.set_level_file(
+                            str(prev_level_file) if prev_level_file is not None else None)
+                    if prev_level is not None and hasattr(render_env, "set_curriculum_level"):
+                        render_env.set_curriculum_level(prev_level)
                 except Exception:
                     pass
+        if record_failed:
+            self._close_env()   # rebuild next time rather than reuse a broken env
+            return
 
         if not frames:
             if self.verbose:
@@ -408,24 +525,23 @@ class WandbVideoRecorder(BaseCallback):
                 path = Path(td) / f"{tag}.mp4"
                 imageio.mimsave(str(path), frames, fps=self.fps, codec="libx264", quality=7)
                 payload = {
-                    self.key: wandb.Video(str(path), fps=self.fps, format="mp4"),
+                    upload_key: wandb.Video(str(path), fps=self.fps, format="mp4"),
                     "eval/video_frames": len(frames),
                     "eval/video_term_status": str(term_status),
                     "eval/video_score_total": float(last_info.get("score_total", 0.0)),
                     "eval/video_tier3": float(last_info.get("score_tier3", 0.0)),
                     "eval/video_score_success": float(bool(last_info.get("score_success", False))),
-                    "eval/score_total": float(last_info.get("score_total", 0.0)),
-                    "eval/tier3": float(last_info.get("score_tier3", 0.0)),
-                    "eval/success_rate": float(bool(last_info.get("score_success", False))),
+                    "eval/video_success_eps": float(n_success) / float(n_eps),
                 }
+                if extra_metrics:
+                    payload.update(extra_metrics)
                 wandb.log(payload, step=int(self.num_timesteps))
         except Exception as exc:
             if self.verbose:
                 print(f"[wandb-video] upload failed: {exc}", flush=True)
             return
-        self._recorded_steps.add(int(self.num_timesteps))
         if self.verbose:
-            print(f"[wandb-video] logged {tag} ({len(frames)} frames) to {self.key}",
+            print(f"[wandb-video] logged {tag} ({len(frames)} frames) to {upload_key}",
                   flush=True)
 
 
@@ -438,15 +554,39 @@ class WandbScoreEvaluator(BaseCallback):
     """
 
     def __init__(self, make_eval_env, every_steps: int = 500,
-                 max_steps: int = 200, deterministic: bool = True,
+                 max_steps: int = 200, n_episodes: int = 2,
+                 fixed_level=None,
+                 deterministic: bool = True,
                  enabled: bool = True, verbose: int = 1):
         super().__init__(verbose=verbose)
         self.make_eval_env = make_eval_env
         self.every_steps = max(int(every_steps), 1)
         self.max_steps = int(max_steps)
+        self.n_episodes = max(int(n_episodes), 1)
+        # pin the eval env to one curriculum level so eval/* curves keep a
+        # fixed-difficulty meaning even when the video env mirrors training
+        self.fixed_level = None if fixed_level is None else float(fixed_level)
         self.deterministic = bool(deterministic)
         self.enabled = bool(enabled)
         self._next_eval_step = 0
+        self._vec_env = None
+
+    def _ensure_env(self):
+        if self._vec_env is None:
+            self._vec_env, render_env = self.make_eval_env()
+            if self.fixed_level is not None and hasattr(render_env, "set_curriculum_level"):
+                if hasattr(render_env, "set_level_file"):
+                    render_env.set_level_file(None)
+                render_env.set_curriculum_level(self.fixed_level)
+        return self._vec_env
+
+    def _close_env(self) -> None:
+        if self._vec_env is not None:
+            try:
+                self._vec_env.close()
+            except Exception:
+                pass
+        self._vec_env = None
 
     def _on_step(self) -> bool:
         if not self.enabled or int(self.num_timesteps) < self._next_eval_step:
@@ -454,6 +594,9 @@ class WandbScoreEvaluator(BaseCallback):
         self._next_eval_step = int(self.num_timesteps) + self.every_steps
         self._run_eval()
         return True
+
+    def _on_training_end(self) -> None:
+        self._close_env()
 
     def _run_eval(self) -> None:
         try:
@@ -467,51 +610,62 @@ class WandbScoreEvaluator(BaseCallback):
                 print("[wandb-eval] no live wandb run yet; skipping", flush=True)
             return
 
-        vec_env = None
-        total_return = 0.0
-        last_info: dict[str, Any] = {}
-        term_status = None
-        steps = 0
+        finals: list[dict[str, Any]] = []
+        returns: list[float] = []
+        lengths: list[int] = []
         try:
-            vec_env, _render_env = self.make_eval_env()
-            obs = vec_env.reset()
-            for steps in range(1, self.max_steps + 1):
-                action, _ = self.model.predict(obs, deterministic=self.deterministic)
-                obs, reward, done, infos = vec_env.step(action)
-                total_return += float(np.asarray(reward).reshape(-1)[0])
-                last_info = dict(infos[0]) if infos else {}
-                term_status = last_info.get("term_status", term_status)
-                if bool(np.asarray(done).reshape(-1)[0]):
-                    break
+            vec_env = self._ensure_env()
+            for _ep in range(self.n_episodes):
+                obs = vec_env.reset()
+                total_return = 0.0
+                last_info: dict[str, Any] = {}
+                steps = 0
+                for steps in range(1, self.max_steps + 1):
+                    action, _ = self.model.predict(obs, deterministic=self.deterministic)
+                    obs, reward, done, infos = vec_env.step(action)
+                    total_return += float(np.asarray(reward).reshape(-1)[0])
+                    last_info = dict(infos[0]) if infos else {}
+                    if bool(np.asarray(done).reshape(-1)[0]):
+                        break
+                finals.append(last_info)
+                returns.append(total_return)
+                lengths.append(steps)
         except Exception as exc:
             if self.verbose:
                 print(f"[wandb-eval] eval failed: {exc}", flush=True)
+            self._close_env()
             return
-        finally:
-            if vec_env is not None:
-                try:
-                    vec_env.close()
-                except Exception:
-                    pass
 
-        if not last_info:
+        finals = [f for f in finals if f]
+        if not finals:
             return
+
+        def _mean(key: str, default: float = 0.0) -> float:
+            return float(np.mean([float(f.get(key, default)) for f in finals]))
+
+        def _mean_bool(key: str) -> float:
+            return float(np.mean([float(bool(f.get(key, False))) for f in finals]))
+
         payload = {
-            "eval/score_total": float(last_info.get("score_total", 0.0)),
-            "eval/tier2": float(last_info.get("score_tier2", 0.0)),
-            "eval/tier3": float(last_info.get("score_tier3", 0.0)),
-            "eval/success_rate": float(bool(last_info.get("score_success", False))),
-            "eval/partial": float(bool(last_info.get("score_partial", False))),
-            "eval/return": float(total_return),
-            "eval/steps": int(steps),
-            "eval/level": float(last_info.get("curriculum_level", float("nan"))),
-            "eval/depth_norm": float(last_info.get("depth_norm", 0.0)),
-            "eval/axis_error_deg": float(np.degrees(last_info.get("plug_axis_error_rad", 0.0))),
-            "eval/lateral_error_mm": float(1000.0 * last_info.get("lateral_error_m", 0.0)),
-            "eval/penetration_excess_mm": float(
-                1000.0 * last_info.get("plug_port_penetration_excess_m", 0.0)),
-            "eval/off_limit_contacts": int(last_info.get("off_limit_contacts", 0)),
-            "eval/force_over_s": float(last_info.get("score_force_over_s", 0.0)),
+            "eval/score_total": _mean("score_total"),
+            "eval/tier2": _mean("score_tier2"),
+            "eval/tier3": _mean("score_tier3"),
+            "eval/success_rate": _mean_bool("score_success"),
+            "eval/partial": _mean_bool("score_partial"),
+            "eval/return": float(np.mean(returns)),
+            "eval/steps": float(np.mean(lengths)),
+            "eval/episodes": len(finals),
+            "eval/level": _mean("curriculum_level", float("nan")),
+            "eval/depth_norm": _mean("depth_norm"),
+            "eval/insertion_depth_mm": 1000.0 * _mean("insertion_depth_m"),
+            "eval/overinsert_mm": 1000.0 * _mean("overinsert_m"),
+            "eval/axis_error_deg": float(np.degrees(_mean("plug_axis_error_rad"))),
+            "eval/roll_error_deg": float(np.degrees(_mean("plug_roll_error_rad"))),
+            "eval/lateral_error_mm": 1000.0 * _mean("lateral_error_m"),
+            "eval/penetration_excess_mm": 1000.0 * _mean("plug_port_penetration_excess_m"),
+            "eval/port_stop_contacts": _mean("port_stop_contacts"),
+            "eval/off_limit_contacts": _mean("off_limit_contacts"),
+            "eval/force_over_s": _mean("score_force_over_s"),
         }
         try:
             wandb.log(payload, step=int(self.num_timesteps))
@@ -522,8 +676,8 @@ class WandbScoreEvaluator(BaseCallback):
         if self.verbose:
             print(f"[wandb-eval] score={payload['eval/score_total']:.1f} "
                   f"tier3={payload['eval/tier3']:.1f} "
-                  f"success={payload['eval/success_rate']:.0f} "
-                  f"steps={steps}", flush=True)
+                  f"success={payload['eval/success_rate']:.2f} "
+                  f"eps={len(finals)}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -596,7 +750,7 @@ def plot_dashboard(metrics_path: Path, out_path: Optional[Path] = None) -> Optio
 
     ax = axes[1, 1]
     components = ["image", "force", "depth", "xy", "action", "lateral",
-                  "axis", "collision", "done"]
+                  "axis", "collision", "off_limit", "force_sustain", "done"]
     means = [df[c].mean() if c in df.columns else 0.0 for c in components]
     ax.bar(components, means)
     ax.set_title("mean per-component reward")
@@ -623,9 +777,11 @@ class CurriculumScheduler(BaseCallback):
     Level 0   = near the goal (small jitter, easy).
     Level 1   = full last-inch envelope (hard).
     Advance when the success rate over the last `--curriculum-eval-window`
-    episodes exceeds `--curriculum-advance-threshold`. Retreat when it
-    falls below `--curriculum-retreat-threshold`. The level is also
-    written to a file so `--resume` keeps it.
+    episodes exceeds `--curriculum-advance-threshold` AND the recent
+    force-abort + bad-collision rate is within the guard. Retreat ONLY when
+    success falls below `--curriculum-retreat-threshold` (`force_abort_retreat`
+    is kept for signature compat but no longer triggers retreats). The level
+    is also written to a file so `--resume` keeps it.
     """
 
     def __init__(self, env=None, eval_window: int = 100,
@@ -634,8 +790,12 @@ class CurriculumScheduler(BaseCallback):
                  force_abort_guard: float = 0.25,
                  force_abort_retreat: float = 0.50,
                  step_size: float = 0.05,
-                 level_path: Optional[Path] = None):
-        super().__init__()
+                 level_path: Optional[Path] = None,
+                 pre_advance_hook=None,
+                 ent_reheat: float = 0.0,
+                 target_entropy_schedule: bool = False,
+                 verbose: int = 1):
+        super().__init__(verbose=verbose)
         self._env = env  # may be None when running with SubprocVecEnv
         self.eval_window = int(eval_window)
         self.advance_thr = float(advance_threshold)
@@ -644,6 +804,14 @@ class CurriculumScheduler(BaseCallback):
         self.force_abort_retreat = float(force_abort_retreat)
         self.step_size = float(step_size)
         self.level_path = Path(level_path) if level_path is not None else None
+        self.pre_advance_hook = pre_advance_hook
+        # entropy re-heat on advance (TES-SAC-style target/temperature
+        # scheduling keyed to curriculum progress instead of wall clock): a
+        # level advance is a known start-distribution shift, so bump alpha
+        # back up to `ent_reheat` and let auto-temperature re-anneal.
+        # Expected healthy ent_coef curve = sawtooth synced to advances.
+        self.ent_reheat = float(ent_reheat)
+        self.target_entropy_schedule = bool(target_entropy_schedule)
         self._current_level: float = 0.0
         self._recent: list[dict[str, Any]] = []
         # restore prior level if present
@@ -689,14 +857,33 @@ class CurriculumScheduler(BaseCallback):
         unsafe_rate = force_abort_rate + bad_collision_rate
         cur = self._current_level
         new = cur
-        if unsafe_rate >= self.force_abort_retreat:
-            new = max(0.0, cur - self.step_size)
-        elif success_rate >= self.advance_thr and unsafe_rate <= self.force_abort_guard:
+        # Retreat ONLY on low success. Unsafe terminations gate ADVANCEMENT but
+        # never drag the level down: collision/force episodes are the policy's
+        # learning signal at the frontier, not a property of the level — the
+        # unsafe-retreat rule caused a permanent 0.05<->0.10 oscillation while
+        # success sat near 0.5 (2026-07-04 run analysis).
+        if success_rate >= self.advance_thr and unsafe_rate <= self.force_abort_guard:
             new = min(1.0, cur + self.step_size)
         elif success_rate <= self.retreat_thr:
             new = max(0.0, cur - self.step_size)
         if new != cur:
+            stats = {
+                "success_rate": success_rate,
+                "force_abort_rate": force_abort_rate,
+                "bad_collision_rate": bad_collision_rate,
+                "unsafe_rate": unsafe_rate,
+                "eval_window": self.eval_window,
+            }
+            if new > cur and self.pre_advance_hook is not None:
+                try:
+                    self.pre_advance_hook(cur, new, stats)
+                except Exception as exc:
+                    if self.verbose:
+                        print(f"[curriculum] pre-advance hook failed: {exc}",
+                              flush=True)
             self._current_level = new
+            if new > cur:
+                self._reheat_entropy(new)
             # best-effort: tell the (in-process) env if we have one
             if self._env is not None and hasattr(self._env, "set_curriculum_level"):
                 self._env.set_curriculum_level(new)
@@ -714,6 +901,39 @@ class CurriculumScheduler(BaseCallback):
                       f"bad_collision_rate={bad_collision_rate:.2f} "
                       f"over fresh window={self.eval_window})",
                       flush=True)
+
+    def _reheat_entropy(self, new_level: float) -> None:
+        """On curriculum advance: re-heat SAC's temperature / anneal its target.
+
+        TES-SAC-style entropy scheduling keyed to curriculum progress: alpha is
+        floored back to `ent_reheat` so the policy re-explores the shifted
+        start distribution, and (optionally) the target entropy anneals from
+        -1.5 at level 0 to -3.0 at level 1. No-op when ent_coef is a fixed
+        float (no `log_ent_coef`) or when both knobs are off.
+        """
+        model = getattr(self, "model", None)
+        if model is None:
+            return
+        try:
+            import math
+            import torch as th
+            if self.ent_reheat > 0.0 and getattr(model, "log_ent_coef", None) is not None:
+                with th.no_grad():
+                    alpha = float(model.log_ent_coef.detach().exp().item())
+                    if alpha < self.ent_reheat:
+                        model.log_ent_coef.fill_(math.log(self.ent_reheat))
+                        if self.verbose:
+                            print(f"[curriculum] entropy re-heat: alpha "
+                                  f"{alpha:.4f} -> {self.ent_reheat:.4f} "
+                                  f"(level {new_level:.3f})", flush=True)
+            if self.target_entropy_schedule:
+                model.target_entropy = float(-(1.5 + 1.5 * float(new_level)))
+                if self.verbose:
+                    print(f"[curriculum] target entropy -> "
+                          f"{model.target_entropy:.2f}", flush=True)
+        except Exception as exc:
+            if self.verbose:
+                print(f"[curriculum] entropy re-heat failed: {exc}", flush=True)
 
     def get_current_level(self) -> float:
         return float(self._current_level)
@@ -964,6 +1184,10 @@ class WandbLogger(BaseCallback):
         self._recent_score_total: list[float] = []
         self._recent_score_tier3: list[float] = []
         self._next_log_step = 0
+        self._level_path = (
+            self.out_dir / "curriculum_level.txt"
+            if self.out_dir is not None else None
+        )
         # optional checkpoint-artifact hook (kept OFF by default; see method)
         self._upload_checkpoints = False
 
@@ -1029,6 +1253,12 @@ class WandbLogger(BaseCallback):
             return False
 
         self._initialised = True
+        try:
+            _wandb.define_metric("train/global_step")
+            _wandb.define_metric("curriculum/level_by_step",
+                                step_metric="train/global_step")
+        except Exception:
+            pass
         # explicit reminder so the run URL is obvious in stdout
         try:
             url = getattr(self._run, "url", None) or _wandb.run.url
@@ -1052,6 +1282,16 @@ class WandbLogger(BaseCallback):
         finally:
             self._initialised = False
             self._run = None
+
+    def _current_curriculum_level(self) -> float:
+        if self._level_path is None:
+            return 0.0
+        try:
+            if self._level_path.exists():
+                return float(self._level_path.read_text().strip())
+        except Exception:
+            pass
+        return 0.0
 
     def _on_training_end(self) -> None:
         # train.py owns finalization so other callbacks can still log media at
@@ -1102,16 +1342,37 @@ class WandbLogger(BaseCallback):
             if "plug_axis_error_rad" in info:
                 log_payload["geometry/plug_axis_error_deg"] = float(
                     np.degrees(info["plug_axis_error_rad"]))
+            if "plug_roll_error_rad" in info:
+                log_payload["geometry/plug_roll_error_deg"] = float(
+                    np.degrees(info["plug_roll_error_rad"]))
             if "plug_port_penetration_m" in info:
                 log_payload["geometry/plug_port_penetration_mm"] = float(
                     1000.0 * info["plug_port_penetration_m"])
             if "plug_port_penetration_excess_m" in info:
                 log_payload["geometry/plug_port_penetration_excess_mm"] = float(
                     1000.0 * info["plug_port_penetration_excess_m"])
+            if "insertion_depth_m" in info:
+                log_payload["geometry/insertion_depth_mm"] = float(
+                    1000.0 * info["insertion_depth_m"])
+            if "overinsert_m" in info:
+                log_payload["geometry/overinsert_mm"] = float(
+                    1000.0 * info["overinsert_m"])
+            if "port_stop_contacts" in info:
+                log_payload["collision/port_stop_contacts"] = int(info["port_stop_contacts"])
+            if "port_stop_penetration_m" in info:
+                log_payload["geometry/port_stop_penetration_mm"] = float(
+                    1000.0 * info["port_stop_penetration_m"])
             if "off_limit_contacts" in info:
                 log_payload["collision/off_limit_contacts"] = int(info["off_limit_contacts"])
             if "curriculum_level" in info:
                 log_payload["train/curriculum_level"] = float(info["curriculum_level"])
+            for k, v in info.items():
+                # cartesian_residual controller diagnostics (absent in joint mode)
+                if k.startswith("cart_"):
+                    try:
+                        log_payload[f"cart/{k[5:]}"] = float(v)
+                    except (TypeError, ValueError):
+                        pass
             if "score_total" in info:
                 log_payload["train_score/total"] = float(info["score_total"])
                 log_payload["train_score/tier2"] = float(info.get("score_tier2", 0.0))
@@ -1124,6 +1385,8 @@ class WandbLogger(BaseCallback):
                 log_payload["train_score/force_penalty"] = float(info.get("score_force_penalty", 0.0))
                 log_payload["train_score/off_limit_penalty"] = float(info.get("score_off_limit_penalty", 0.0))
                 log_payload["train_score/proximity_points"] = float(info.get("score_proximity_points", 0.0))
+                log_payload["train_score/roll_error_deg"] = float(
+                    np.degrees(info.get("score_roll_error_rad", 0.0)))
                 log_payload["train_score/path_length_m"] = float(info.get("score_path_length_m", 0.0))
                 log_payload["train_score/force_over_s"] = float(info.get("score_force_over_s", 0.0))
                 log_payload["train_score/jerk_mps3"] = float(info.get("score_jerk_mps3", 0.0))
@@ -1151,6 +1414,7 @@ class WandbLogger(BaseCallback):
         if self.num_timesteps >= self._next_log_step:
             self._next_log_step = self.num_timesteps + self.log_every_steps
             n2v = self.model.logger.name_to_value
+            log_payload["curriculum/level_by_step"] = self._current_curriculum_level()
 
             actor = n2v.get("train/actor_loss")
             if actor is not None:

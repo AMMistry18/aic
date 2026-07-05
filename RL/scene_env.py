@@ -16,13 +16,14 @@ Design (v0.5, 2026-07-03 — port-frame last inch):
     `last_inch_m` (default 4 cm) along the insertion axis (+ lateral/yaw jitter).
     So training stays focused on the last inch even though the port is ~21 cm from
     the cable's home spawn (the robot transports it there in the real task).
-  * IMAGE-SAC reward from `RL/reward.py:compute_reward` (image L1 + force + potential
-    depth + xy + action smoothness + terminal). The image *observation* is 256x256x9
-    (3 wrist cams); the image *distance reward* is rendered at native camera res
-    (1152x1024, center cam) for last-inch pixel accuracy.
+  * Geometry-first reward from `RL/reward.py:compute_reward` (depth progress +
+    sparse success, with small alignment/contact/action safety costs). The image
+    observation is still available to the policy, but the image-distance reward
+    is optional and defaults off.
   * SUCCESS = plug tip near the seated pose, depth at the bottom of the last-inch
-    envelope, and seating contact force > `success_force_n` (contact force = FT
-    minus the ~10 N gripped-plug baseline, captured at reset).
+    envelope, keyed roll aligned, and collision-clean. A seating force check is
+    available via `success_force_n` but defaults off because the exported SFP cage
+    can have valid clearance with zero active contact at the seated pose.
   * ACTION = incremental 6-D UR5e joint residual on a bounded, gravity-
     compensated PD target.
 
@@ -93,17 +94,38 @@ class SceneEnvConfig:
     randomize_target_body: bool = False
     plug_tip_body: str = "sfp_tip_link"
     plug_axis_tail_body: str = "sfp_module_link"
-    # Keep the TCP offset reachable; the reset IK below aligns the actual plug axis.
+    # Keep the TCP offset reachable; the reset IK below aligns the actual plug axis
+    # and keyed roll. SFP insertion is not defined by axis alone: a 90 deg roll
+    # can still report a tiny axis error while the module is sideways in the cage.
     align_plug_axis_to_port: bool = False
+    align_plug_roll_to_port: bool = True
+    plug_roll_body: str = "sfp_tip_link"
+    plug_roll_axis_index: int = 0        # local +X of the tip/module cross-section
+    plug_roll_target_axis: str = "x"     # port-frame lateral axis: x, y, -x, -y
     insert_goal_offset: tuple = (0.0, 0.0, 0.0)   # world offset for fine-tuning
     insertion_axis_world: Optional[tuple] = None   # default: target body local +Z
-    seated_depth_m: float = 0.046       # full-depth tip target inside the SFP entrance frame
+    # Gazebo NIC Card Mount defines sfp_port_X_link_entrance at z=-45.8 mm
+    # relative to sfp_port_X_link. The entrance is the mouth; sfp_port_X_link is
+    # the fully seated target frame.
+    seated_depth_m: float = 0.0458
     # --- last-inch reverse curriculum (relative to the port) ---
-    last_inch_m: float = 0.04            # curriculum spans the last 4 cm of insertion
+    # The retract span now gives a real free-space approach. With seated depth
+    # ~45.8 mm and span 90 mm, level 0.8 starts the plug tip ~26 mm (~1 inch)
+    # outside the entrance plane; level 1 is farther back. This better matches
+    # the AIC last-inch task, where pose estimation is imperfect and the policy
+    # must acquire the port from above/nearby rather than start already nicked
+    # into the cage.
+    last_inch_m: float = 0.090
     curriculum_level: float = 0.0        # 0 = seated, 1 = retracted last_inch_m
-    jitter_xy_m: float = 0.003           # lateral jitter at level 1
+    curriculum_band: float = 0.25        # frontier band width (fraction of level)
+    curriculum_easy_frac: float = 0.2    # prob of an easy replay start in [0, level]
+    # two-phase jitter: tight while the tip is inside the cage, wide outside
+    jitter_xy_inport_m: float = 0.0008   # lateral jitter while inside the port
+    jitter_yaw_inport_rad: float = 0.03  # yaw jitter while inside the port
+    jitter_tilt_inport_rad: float = 0.01 # tilt jitter while inside the port
+    jitter_xy_m: float = 0.006           # lateral jitter at level 1, fully outside
     jitter_yaw_rad: float = 0.12         # yaw about insertion axis at level 1
-    jitter_tilt_rad: float = 0.04        # small port-frame x/y tilt at level 1
+    jitter_tilt_rad: float = 0.04        # port-frame x/y tilt at level 1, fully outside
     reset_max_attempts: int = 12
     reset_contact_abort_n: float = 35.0
     reset_max_plug_port_penetration_m: float = 0.004
@@ -118,6 +140,8 @@ class SceneEnvConfig:
     ik_tip_step_max: float = 0.12
     ik_axis_weight_m: float = 0.06
     ik_axis_tol_rad: float = 0.06
+    ik_roll_weight_m: float = 0.04
+    ik_roll_tol_rad: float = 0.12
     # --- observation ---
     include_images: bool = True
     cameras: tuple = CAMERAS
@@ -132,24 +156,84 @@ class SceneEnvConfig:
     success_pos_tol_m: float = 0.006
     success_axial_tol_m: float = 0.003
     success_lateral_tol_m: float = 0.005
-    success_depth_norm: float = 0.995
+    success_depth_norm: float = 0.99
     success_axis_tol_rad: float = 0.035
-    success_force_n: float = 0.5
+    success_roll_tol_rad: float = 0.15
+    success_force_n: float = 0.0          # <= 0 disables optional seating-force gate
     success_max_plug_port_penetration_excess_m: float = 0.001
-    bad_collision_axis_rad: float = 0.20
-    bad_collision_depth_gate: float = 0.20
-    bad_collision_penetration_excess_m: float = 0.003
-    force_abort_n: float = 60.0          # hard abort on |contact force| (safety)
+    success_max_overinsert_m: float = 0.001
+    success_require_port_contact: bool = True
+    # mid-episode kill bounds are RECOVERY bounds, not quality bounds (success
+    # strictness is separate and unchanged). At 0.20 rad / 3 mm the exploring
+    # policy died exactly AT the bounds after ~145-step drifts (metrics
+    # 2026-07-04) instead of learning to re-align — the dense axis/collision
+    # costs already penalize those states continuously.
+    bad_collision_axis_rad: float = 0.35
+    bad_collision_roll_rad: float = 0.35
+    # axis-bend abort only applies once the tip is actually inside the cage.
+    bad_collision_depth_gate: float = 0.45
+    bad_collision_penetration_excess_m: float = 0.0015
+    bad_collision_overinsert_m: float = 0.002
+    # penetration baseline vs depth: the exported cage's soft-contact overlap is
+    # depth-dependent (~5.4 mm mid-cage vs 3.4 mm seated), so a single seated
+    # baseline reads ~2 mm phantom "excess" mid-insertion and the collision term
+    # taxes the whole traversal. Calibrated at construction along the axis.
+    pen_baseline_points: int = 9
+    pen_baseline_margin_m: float = 0.0005
+    # force abort: transient FT spikes (PD contact) were ending 43% of episodes
+    # at level 0.1; abort only on SUSTAINED force, with a high instant bound.
+    force_abort_n: float = 60.0          # sustained-force abort threshold
+    force_abort_dwell_steps: int = 3     # consecutive steps over force_abort_n
+    force_abort_hard_n: float = 120.0    # instant abort (true safety bound)
+    # reject settled in-cage starts wedged beyond the port clearance (the
+    # 6 mm reset IK tolerance otherwise seeds unrecoverable lateral jams)
+    reset_inport_lateral_tol_m: float = 0.003
     # --- score-style diagnostics (local estimator of the published rubric) ---
     score_lateral_tol_m: float = 0.005
     score_axial_tol_m: float = 0.003
-    score_full_depth_norm: float = 0.995
+    score_full_depth_norm: float = 0.99
     score_axis_tol_rad: float = 0.035
+    score_roll_tol_rad: float = 0.15
     score_max_penetration_excess_m: float = 0.001
     score_force_threshold_n: float = 20.0
     score_force_duration_s: float = 1.0
     score_wrong_port_penalty: float = -12.0
     score_off_limit_penalty: float = -24.0
+    # --- action mode ------------------------------------------------------
+    # 'joint_residual'     = original behavior (6-D joint residual -> joint PD)
+    # 'cartesian_residual' = SAC action is a small Cartesian TCP residual in the
+    #   PORT frame [dx, dy, dz(=deeper), droll(about lat_x), dpitch(about lat_y),
+    #   dyaw(about insert axis)], tracked by a Jacobian-transpose Cartesian
+    #   impedance controller that mirrors aic_controller's
+    #   CartesianImpedanceAction (tau = J^T (K dx + D dv) + gravity comp).
+    action_mode: str = "joint_residual"
+    cart_action_dims: int = 6            # 6 = [dx,dy,dz,droll,dpitch,dyaw]; 5 drops dyaw
+    cart_trans_scale_m: float = 0.001    # 1 mm per policy step at |action|=1
+    cart_rot_scale_rad: float = 0.0175   # ~1 deg per policy step at |action|=1
+    # hard safety envelope for the ACCUMULATED residual around the reset TCP
+    # pose (per port-frame axis). z must cover the full last-inch travel.
+    cart_pos_limit_m: float = 0.10
+    cart_rot_limit_rad: float = 0.35
+    # impedance gains: mirror aic_bringup/config/aic_ros2_controllers.yaml
+    # cartesian_impedance defaults (stiffness [100,100,100,50,50,50],
+    # damping [40,40,40,15,15,15], maximum_wrench 10)
+    cart_kp_pos: float = 100.0           # N/m
+    cart_kd_pos: float = 40.0            # N/(m/s)
+    cart_kp_rot: float = 50.0            # Nm/rad
+    cart_kd_rot: float = 15.0            # Nm/(rad/s)
+    cart_max_wrench: tuple = (10.0, 10.0, 10.0, 10.0, 10.0, 10.0)
+    cart_joint_damping: float = 1.0      # extra joint-space damping Nm/(rad/s)
+    # the <general> actuators are force-unlimited, so clip here (UR5e efforts)
+    cart_torque_limit: tuple = (150.0, 150.0, 150.0, 28.0, 28.0, 28.0)
+    # --- optional scripted base insertion (residual-on-script) -------------
+    # When enabled (cartesian_residual only), the BASE target pose advances
+    # along +insert_axis by base_script_step_m per policy step (clamped at the
+    # seated goal); the SAC residual rides on top with a TIGHTER envelope, so
+    # the policy learns the correction, not the transport.
+    base_script_enabled: bool = False
+    base_script_step_m: float = 0.0005   # 0.5 mm per policy step
+    base_script_residual_limit_m: float = 0.01
+    base_script_residual_limit_rad: float = 0.10
 
 
 class SceneInsertEnv(gym.Env):
@@ -158,6 +242,16 @@ class SceneInsertEnv(gym.Env):
     def __init__(self, cfg: SceneEnvConfig = SceneEnvConfig()):
         super().__init__()
         self.cfg = cfg
+        if cfg.action_mode not in ("joint_residual", "cartesian_residual"):
+            raise ValueError(f"unknown action_mode: {cfg.action_mode!r}")
+        self._cart_mode = cfg.action_mode == "cartesian_residual"
+        if self._cart_mode and int(cfg.cart_action_dims) not in (5, 6):
+            raise ValueError(f"cart_action_dims must be 5 or 6, got {cfg.cart_action_dims}")
+        if cfg.base_script_enabled and not self._cart_mode:
+            raise ValueError("base_script_enabled requires action_mode='cartesian_residual'")
+        self._action_dim = int(cfg.cart_action_dims) if self._cart_mode else 6
+        self._cart_max_wrench = np.asarray(cfg.cart_max_wrench, dtype=np.float64)
+        self._cart_tau_limit = np.asarray(cfg.cart_torque_limit, dtype=np.float64)
         self.model = mujoco.MjModel.from_xml_path(cfg.scene_path)
         self.data = mujoco.MjData(self.model)
 
@@ -171,9 +265,13 @@ class SceneInsertEnv(gym.Env):
         self._plug_axis_tail_id = bid(cfg.plug_axis_tail_body)
         if self._plug_axis_tail_id < 0:
             self._plug_axis_tail_id = self._plug_id
-        self._manipulated_body_ids = self._find_manipulated_body_ids()
+        self._plug_roll_id = bid(cfg.plug_roll_body)
+        if self._plug_roll_id < 0:
+            self._plug_roll_id = self._plug_tip_id
         self._cend_id = bid("cable_end_0")
         self._cfree_adr = self.model.jnt_qposadr[jid("cable_end_0_free")]
+        self._plug_body_ids = self._body_subtree_ids(self._plug_id)
+        self._manipulated_body_ids = self._find_manipulated_body_ids()
         self._tcp_sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "gripper_tcp")
         target_names = tuple(cfg.insert_target_bodies) or (cfg.insert_target_body,)
         self._target_names = target_names
@@ -194,23 +292,28 @@ class SceneInsertEnv(gym.Env):
         self._curriculum_level = float(cfg.curriculum_level)
         self._level_file: Optional[Path] = None
         self._step_count = 0
-        self._last_action = np.zeros(6, np.float32)
+        self._last_action = np.zeros(self._action_dim, np.float32)
         self._arm_target = self._home.copy()
         self._prev_depth_norm = 0.0
 
         # obs renderer (3 wrist cams) + reward renderer (center cam, native res)
         self._renderer, self._cams = None, []
         self._reward_renderer = None
+        self._image_reward_enabled = (
+            abs(float(getattr(cfg.reward, "w_image", 0.0))) > 0.0
+            or abs(float(getattr(cfg.reward, "beta_s", 0.0))) > 0.0
+        )
         self._debug_renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         if cfg.include_images:
             self._renderer = mujoco.Renderer(self.model, height=cfg.image_h, width=cfg.image_w)
             self._cams = [c for c in cfg.cameras
                           if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, c) >= 0]
-            cam0 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "center_camera")
-            native = self.model.cam_resolution[cam0] if cam0 >= 0 else (1152, 1024)
-            rw = int(cfg.reward_image_res) or int(native[0])
-            rh = int(cfg.reward_image_res) or int(native[1])
-            self._reward_renderer = mujoco.Renderer(self.model, height=rh, width=rw)
+            if self._image_reward_enabled:
+                cam0 = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "center_camera")
+                native = self.model.cam_resolution[cam0] if cam0 >= 0 else (1152, 1024)
+                rw = int(cfg.reward_image_res) or int(native[0])
+                rh = int(cfg.reward_image_res) or int(native[1])
+                self._reward_renderer = mujoco.Renderer(self.model, height=rh, width=rw)
 
         # --- home & goal poses (FK at home, welded plug settled) ---
         self._rigid_home(self._home)
@@ -232,13 +335,13 @@ class SceneInsertEnv(gym.Env):
         self._ft_baseline = self._raw_ft()[:3].copy()
 
         # spaces
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(6,), dtype=np.float32)
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(self._action_dim,), dtype=np.float32)
         obs_spaces = {
             "arm_qpos": spaces.Box(-np.pi, np.pi, (6,), np.float32),
             "arm_qvel": spaces.Box(-50.0, 50.0, (6,), np.float32),
             "tcp_pose": spaces.Box(-3.0, 3.0, (7,), np.float32),
             "ft": spaces.Box(-500.0, 500.0, (6,), np.float32),
-            "last_action": spaces.Box(-1.0, 1.0, (6,), np.float32),
+            "last_action": spaces.Box(-1.0, 1.0, (self._action_dim,), np.float32),
         }
         if self._renderer is not None and self._cams:
             obs_spaces["image"] = spaces.Box(
@@ -262,6 +365,7 @@ class SceneInsertEnv(gym.Env):
         goal_diag = self._geometry_diag()
         self._goal_plug_port_penetration_m = float(goal_diag["plug_port_penetration_m"])
         self._goal_axis_error_rad = float(goal_diag["plug_axis_error_rad"])
+        self._calibrate_pen_baseline()
 
     # ------------------------------------------------------------------ #
     def _sensor_adr(self, name):
@@ -311,6 +415,21 @@ class SceneInsertEnv(gym.Env):
             return np.asarray(fallback, dtype=np.float64)
         return v / n
 
+    def _project_to_insert_plane(self, v, fallback):
+        v = np.asarray(v, dtype=np.float64)
+        v = v - np.dot(v, self._insert_axis) * self._insert_axis
+        return self._unit(v, fallback)
+
+    def _target_roll_axis(self):
+        name = str(self.cfg.plug_roll_target_axis).strip().lower()
+        sign = -1.0 if name.startswith("-") else 1.0
+        key = name[1:] if sign < 0 else name
+        if key in ("y", "lat_y", "port_y"):
+            axis = self._lat_y
+        else:
+            axis = self._lat_x
+        return sign * axis
+
     @classmethod
     def _quat_between(cls, a, b):
         """Quaternion rotating unit-ish vector `a` onto unit-ish vector `b`."""
@@ -333,6 +452,17 @@ class SceneInsertEnv(gym.Env):
         tail = self.data.xpos[self._plug_axis_tail_id]
         tip = self.data.xpos[self._plug_tip_id]
         return self._unit(tip - tail, self._insert_axis)
+
+    def _plug_roll_axis(self):
+        """Projected keyed cross-section axis for SFP roll/orientation checks."""
+        idx = int(np.clip(int(self.cfg.plug_roll_axis_index), 0, 2))
+        xmat = self.data.xmat[self._plug_roll_id].reshape(3, 3)
+        return self._project_to_insert_plane(xmat[:, idx], self._target_roll_axis())
+
+    def _plug_roll_error(self) -> float:
+        target = self._target_roll_axis()
+        roll = self._plug_roll_axis()
+        return float(np.arccos(np.clip(np.dot(roll, target), -1.0, 1.0)))
 
     def _aligned_goal_quat(self):
         if not self.cfg.align_plug_axis_to_port:
@@ -360,6 +490,18 @@ class SceneInsertEnv(gym.Env):
                           + np.asarray(self.cfg.insert_goal_offset, dtype=np.float64))
         self._inserted_tip = self._port_pos + self.cfg.seated_depth_m * self._insert_axis
         self._goal_tcp = self._tcp_for_tip(self._inserted_tip, self._goal_quat)
+
+    def _insertion_depth_m(self, tip=None) -> float:
+        """Signed tip depth from the port mouth toward the seated frame."""
+        tip = self.data.xpos[self._plug_tip_id] if tip is None else np.asarray(tip)
+        return float(np.dot(tip - self._port_pos, self._insert_axis))
+
+    def _insertion_depth_norm(self, tip=None) -> float:
+        depth = self._insertion_depth_m(tip)
+        return float(np.clip(depth / max(self.cfg.seated_depth_m, 1e-6), 0.0, 1.0))
+
+    def _overinsert_m(self, tip=None) -> float:
+        return float(max(0.0, self._insertion_depth_m(tip) - self.cfg.seated_depth_m))
 
     def _tcp_for_tip(self, tip_pos, tcp_quat):
         return np.asarray(tip_pos, dtype=np.float64) - self._qrot(tcp_quat, self._tip_rel_pos_tcp)
@@ -446,6 +588,14 @@ class SceneInsertEnv(gym.Env):
         self._rigid_home(q_arm)
         return self.data.xpos[self._plug_tip_id].copy(), self._plug_axis()
 
+    def _tip_axis_roll_at_arm(self, q_arm):
+        self._rigid_home(q_arm)
+        return (
+            self.data.xpos[self._plug_tip_id].copy(),
+            self._plug_axis(),
+            self._plug_roll_axis(),
+        )
+
     def _ik_tip_position(self, target_tip, q_init):
         """Finite-difference IK on the welded SFP tip position.
 
@@ -480,54 +630,71 @@ class SceneInsertEnv(gym.Env):
         return best_q, float(np.linalg.norm(target_tip - final_tip))
 
     def _ik_tip_axis(self, target_tip, target_axis, q_init):
-        """Finite-difference reset IK on welded tip position + plug axis.
+        """Finite-difference reset IK on welded tip position + plug axis + roll.
 
         The old reset matched the tip position but left the plug attitude mostly
         inherited from the arm home posture. For the SFP cage that can look like
-        a diagonal pass through the port. This reset-only solve aligns the actual
-        module->tip direction with the port inward axis.
+        a diagonal or 90-degree rolled pass through the port. This reset-only
+        solve aligns the actual module->tip direction with the port inward axis
+        and aligns the keyed plug cross-section in the port plane.
         """
         q = np.array(q_init, dtype=np.float64)
         target_tip = np.asarray(target_tip, dtype=np.float64)
         target_axis = self._unit(target_axis, self._insert_axis)
+        target_roll = self._target_roll_axis()
         eps = float(self.cfg.ik_fd_eps)
-        weight = float(self.cfg.ik_axis_weight_m)
+        axis_weight = float(self.cfg.ik_axis_weight_m)
+        roll_weight = (float(self.cfg.ik_roll_weight_m)
+                       if self.cfg.align_plug_roll_to_port else 0.0)
         best_q = q.copy()
         best_score = float("inf")
         best_pos = float("inf")
         best_axis = float("inf")
+        best_roll = float("inf")
 
         for _ in range(self.cfg.ik_tip_iters):
-            tip, axis = self._tip_axis_at_arm(q)
+            tip, axis, roll_axis = self._tip_axis_roll_at_arm(q)
             pos_err = target_tip - tip
             axis_delta = target_axis - axis
+            roll_delta = target_roll - roll_axis
             axis_angle = float(np.arccos(np.clip(np.dot(axis, target_axis), -1.0, 1.0)))
+            roll_angle = float(np.arccos(np.clip(np.dot(roll_axis, target_roll), -1.0, 1.0)))
             pos_norm = float(np.linalg.norm(pos_err))
-            score = pos_norm + weight * axis_angle
+            score = pos_norm + axis_weight * axis_angle + roll_weight * roll_angle
             if score < best_score:
                 best_q, best_score = q.copy(), score
-                best_pos, best_axis = pos_norm, axis_angle
-            if pos_norm < self.cfg.ik_tol and axis_angle < self.cfg.ik_axis_tol_rad:
+                best_pos, best_axis, best_roll = pos_norm, axis_angle, roll_angle
+            roll_ok = (not self.cfg.align_plug_roll_to_port
+                       or roll_angle < self.cfg.ik_roll_tol_rad)
+            if (pos_norm < self.cfg.ik_tol
+                    and axis_angle < self.cfg.ik_axis_tol_rad
+                    and roll_ok):
                 break
 
-            err = np.concatenate([pos_err, weight * axis_delta])
-            J = np.zeros((6, 6), dtype=np.float64)
+            err = np.concatenate([
+                pos_err,
+                axis_weight * axis_delta,
+                roll_weight * roll_delta,
+            ])
+            J = np.zeros((9, 6), dtype=np.float64)
             for k in range(6):
                 q_eps = q.copy()
                 q_eps[k] += eps
-                tip_eps, axis_eps = self._tip_axis_at_arm(q_eps)
+                tip_eps, axis_eps, roll_eps = self._tip_axis_roll_at_arm(q_eps)
                 J[:3, k] = (tip_eps - tip) / eps
-                J[3:, k] = weight * (axis_eps - axis) / eps
-            dq = J.T @ np.linalg.solve(J @ J.T + self.cfg.ik_tip_damping * np.eye(6), err)
+                J[3:6, k] = axis_weight * (axis_eps - axis) / eps
+                J[6:, k] = roll_weight * (roll_eps - roll_axis) / eps
+            dq = J.T @ np.linalg.solve(J @ J.T + self.cfg.ik_tip_damping * np.eye(9), err)
             n = np.linalg.norm(dq)
             if n > self.cfg.ik_tip_step_max:
                 dq *= self.cfg.ik_tip_step_max / n
             q = self._clip_arm(q + dq)
 
-        tip, axis = self._tip_axis_at_arm(best_q)
+        tip, axis, roll_axis = self._tip_axis_roll_at_arm(best_q)
         best_pos = float(np.linalg.norm(target_tip - tip))
         best_axis = float(np.arccos(np.clip(np.dot(axis, target_axis), -1.0, 1.0)))
-        return best_q, best_pos, best_axis
+        best_roll = float(np.arccos(np.clip(np.dot(roll_axis, target_roll), -1.0, 1.0)))
+        return best_q, best_pos, best_axis, best_roll
 
     def _clip_arm(self, q):
         q = np.asarray(q, dtype=np.float64).copy()
@@ -539,19 +706,51 @@ class SceneInsertEnv(gym.Env):
         return q
 
     def _sample_start_tcp(self, level, jitter=True, rng=None):
-        """Last-inch curriculum in the port frame."""
+        """Last-inch reverse curriculum in the port frame.
+
+        Retraction depth: sampled from the FRONTIER BAND
+        [(level - curriculum_band) * span, level * span] so the start
+        distribution actually tracks the level (uniform-over-[0, level]
+        sampling kept half the starts trivially easy at every level). A small
+        `curriculum_easy_frac` of starts replay the full easy range to guard
+        against forgetting.
+
+        Lateral/orientation jitter: two-phase. While the sampled tip is still
+        inside the cage (retract < seated_depth_m) the SFP clearance is
+        sub-millimetre, so jitter stays at the `*_inport` values; once outside
+        the entrance, jitter widens linearly with how far outside the tip is,
+        up to the full level-1 values. This is what makes level growth read as
+        "seated -> slides out of the port -> approach pose varies in x/y/z".
+        """
         rng = rng or np.random
         level = float(np.clip(level, 0.0, 1.0))
-        max_retract = level * self.cfg.last_inch_m
-        retract = rng.uniform(0.0, max_retract) if (jitter and max_retract > 0) else max_retract
+        span = float(self.cfg.last_inch_m)
+        hi = level * span
+        if jitter and hi > 0:
+            lo = max(0.0, (level - self.cfg.curriculum_band)) * span
+            if rng.uniform() < self.cfg.curriculum_easy_frac:
+                retract = rng.uniform(0.0, hi)
+            else:
+                retract = rng.uniform(lo, hi)
+        else:
+            retract = hi
         tip = self._inserted_tip + retract * self._retract_dir
         quat = self._goal_quat.copy()
         if jitter and level > 0:
-            tip = tip + self._lat_x * rng.uniform(-1, 1) * self.cfg.jitter_xy_m * level
-            tip = tip + self._lat_y * rng.uniform(-1, 1) * self.cfg.jitter_xy_m * level
-            yaw = rng.uniform(-1, 1) * self.cfg.jitter_yaw_rad * level
-            tilt_x = rng.uniform(-1, 1) * self.cfg.jitter_tilt_rad * level
-            tilt_y = rng.uniform(-1, 1) * self.cfg.jitter_tilt_rad * level
+            in_port_travel = min(self.cfg.seated_depth_m, span)
+            out_frac = float(np.clip(
+                (retract - in_port_travel) / max(span - in_port_travel, 1e-6), 0.0, 1.0))
+            xy_amp = (self.cfg.jitter_xy_inport_m
+                      + (self.cfg.jitter_xy_m - self.cfg.jitter_xy_inport_m) * out_frac)
+            yaw_amp = (self.cfg.jitter_yaw_inport_rad
+                       + (self.cfg.jitter_yaw_rad - self.cfg.jitter_yaw_inport_rad) * out_frac)
+            tilt_amp = (self.cfg.jitter_tilt_inport_rad
+                        + (self.cfg.jitter_tilt_rad - self.cfg.jitter_tilt_inport_rad) * out_frac)
+            tip = tip + self._lat_x * rng.uniform(-1, 1) * xy_amp * level
+            tip = tip + self._lat_y * rng.uniform(-1, 1) * xy_amp * level
+            yaw = rng.uniform(-1, 1) * yaw_amp * level
+            tilt_x = rng.uniform(-1, 1) * tilt_amp * level
+            tilt_y = rng.uniform(-1, 1) * tilt_amp * level
             dq = self._qmul(self._axis_angle(self._insert_axis, yaw),
                             self._qmul(self._axis_angle(self._lat_x, tilt_x),
                                        self._axis_angle(self._lat_y, tilt_y)))
@@ -566,26 +765,40 @@ class SceneInsertEnv(gym.Env):
         n_settle = self.cfg.settle_steps if settle is None else settle
         for attempt in range(attempts):
             tcp, quat, target_tip = self._sample_start_tcp(level, jitter=jitter, rng=self.np_random)
+            in_port = (float(np.dot(np.asarray(target_tip) - self._inserted_tip,
+                                    self._retract_dir)) < self.cfg.seated_depth_m)
             q_seed = self._ik(tcp, quat, self._home)
             q_seed = self._ik_tcp_position(tcp, q_seed)
-            q_arm, ik_tip_err, ik_axis_err = self._ik_tip_axis(target_tip, self._insert_axis, q_seed)
+            q_arm, ik_tip_err, ik_axis_err, ik_roll_err = self._ik_tip_axis(
+                target_tip, self._insert_axis, q_seed)
             self._rigid_home(q_arm)
             for _ in range(n_settle):
                 self.data.ctrl[:6] = self._base_torque(q_arm)
                 self.data.ctrl[6] = self.cfg.gripper_ctrl
                 mujoco.mj_step(self.model, self.data)
             diag = self._geometry_diag(target_tip=target_tip, ik_tip_err=ik_tip_err,
-                                       ik_axis_err=ik_axis_err)
+                                       ik_axis_err=ik_axis_err, ik_roll_err=ik_roll_err)
             score = (diag["tip_error_m"]
                      + 0.02 * diag["plug_axis_error_rad"]
+                     + 0.02 * diag["plug_roll_error_rad"]
                      + 2.0 * diag["plug_port_penetration_m"]
-                     + 0.001 * diag["contact_force_norm"])
+                     + 0.001 * diag["contact_force_norm"]
+                     + (1.0 * diag["lateral_error_m"] if in_port else 0.0))
             if best is None or score < best[0]:
                 best = (score, q_arm.copy(), diag)
+            # in-cage starts additionally require the SETTLED lateral error to be
+            # within the port clearance: the 6 mm IK tip tolerance otherwise seeds
+            # wedged starts the +/-0.01 rad/step residual policy cannot recover
+            lateral_ok = (not in_port
+                          or diag["lateral_error_m"] <= self.cfg.reset_inport_lateral_tol_m)
+            roll_ok = (not self.cfg.align_plug_roll_to_port
+                       or diag["plug_roll_error_rad"] <= self.cfg.ik_roll_tol_rad)
             if (diag["tip_error_m"] <= self.cfg.reset_ik_tip_tol_m
                     and diag["plug_axis_error_rad"] <= self.cfg.ik_axis_tol_rad
+                    and roll_ok
                     and diag["plug_port_penetration_m"] <= self.cfg.reset_max_plug_port_penetration_m
-                    and diag["contact_force_norm"] <= self.cfg.reset_contact_abort_n):
+                    and diag["contact_force_norm"] <= self.cfg.reset_contact_abort_n
+                    and lateral_ok):
                 self._last_reset_diag = diag
                 break
         else:
@@ -598,6 +811,50 @@ class SceneInsertEnv(gym.Env):
             self._last_reset_diag = diag
         self._reset_arm_target = q_arm.copy()
         self._arm_target = q_arm.copy()
+        self._cart_init_from_state()
+
+    def _calibrate_pen_baseline(self) -> None:
+        """Measure resting plug-port penetration vs depth along the axis.
+
+        The collision cost then charges only the EXCESS over this curve, so
+        traversing the cage is free while genuine wedging still registers.
+        """
+        n = max(2, int(self.cfg.pen_baseline_points))
+        depths, pens = [], []
+        # use the SAME reset pipeline episodes use (3-stage IK + settle), so the
+        # baseline is measured exactly at the states resets actually produce
+        for lvl in np.linspace(0.0, 1.0, n):
+            self._reset_to_level(float(lvl), jitter=False)
+            depths.append(self._depth_norm())
+            pens.append(self._resting_penetration())
+        order = np.argsort(depths)
+        self._pen_baseline_depths = np.asarray(depths, dtype=np.float64)[order]
+        self._pen_baseline_vals = np.asarray(pens, dtype=np.float64)[order]
+
+    def _resting_penetration(self) -> float:
+        plug_bodies = set(getattr(
+            self, "_plug_body_ids",
+            {int(self._plug_id), int(self._plug_tip_id), int(self._plug_axis_tail_id)},
+        ))
+        target_tokens = ("nic_card", "sfp_port", "sfp", "mount")
+        worst = 0.0
+        for k in range(self.data.ncon):
+            c = self.data.contact[k]
+            b1 = int(self.model.geom_bodyid[int(c.geom1)])
+            b2 = int(self.model.geom_bodyid[int(c.geom2)])
+            one_plug = (b1 in plug_bodies) ^ (b2 in plug_bodies)
+            other = self._body_name(b2 if b1 in plug_bodies else b1).lower()
+            if one_plug and any(t in other for t in target_tokens):
+                worst = max(worst, -float(c.dist))
+        return worst
+
+    def _pen_baseline_at(self, depth_norm: float) -> float:
+        depths = getattr(self, "_pen_baseline_depths", None)
+        if depths is None:
+            # pre-calibration (during construction): fall back to the seated value
+            return float(getattr(self, "_goal_plug_port_penetration_m", 0.0))
+        base = float(np.interp(depth_norm, depths, self._pen_baseline_vals))
+        return base + float(self.cfg.pen_baseline_margin_m)
 
     def _base_torque(self, target):
         q = self.data.qpos[self._arm_qadr]; qd = self.data.qvel[self._arm_vadr]
@@ -607,6 +864,149 @@ class SceneInsertEnv(gym.Env):
         lo = self._reset_arm_target - self.cfg.action_joint_limit
         hi = self._reset_arm_target + self.cfg.action_joint_limit
         return self._clip_arm(np.clip(target, lo, hi))
+
+    # ---------------- cartesian_residual mode ------------------------- #
+    def _cart_init_from_state(self):
+        """Anchor the Cartesian base/residual targets at the settled reset pose."""
+        self._cart_base_pos = self.data.site_xpos[self._tcp_sid].copy()
+        self._cart_base_quat = self._site_quat()
+        # port frame: columns = [lat_x, lat_y, insert_axis]; fixed per episode
+        self._cart_frame_R = np.column_stack(
+            [self._lat_x, self._lat_y, self._insert_axis])
+        self._cart_resid_pos = np.zeros(3)     # accumulated, port frame
+        self._cart_resid_rotvec = np.zeros(3)  # accumulated, port frame
+        self._cart_clip_events = 0
+        self._cart_wrench_sat_events = 0
+        self._cart_tau_sat_events = 0
+        self._cart_base_progress_m = 0.0
+        self._cart_base_travel_max = float(max(
+            0.0, np.dot(self._goal_tcp - self._cart_base_pos, self._insert_axis)))
+        self._cart_diag = {}
+
+    @staticmethod
+    def _quat_to_rotvec(q):
+        q = q if q[0] >= 0.0 else -q   # short way around
+        s = float(np.linalg.norm(q[1:]))
+        if s < 1e-12:
+            return np.zeros(3)
+        angle = 2.0 * float(np.arctan2(s, q[0]))
+        return (q[1:] / s) * angle
+
+    def _cart_desired_pose(self):
+        R = self._cart_frame_R
+        des_pos = self._cart_base_pos + R @ self._cart_resid_pos
+        rot_world = R @ self._cart_resid_rotvec
+        angle = float(np.linalg.norm(rot_world))
+        dq = self._axis_angle(rot_world, angle)
+        des_quat = self._qmul(dq, self._cart_base_quat)
+        return des_pos, des_quat
+
+    def _cart_impedance_torque(self, des_pos, des_quat):
+        """Mirror of aic_controller CartesianImpedanceAction in MuJoCo:
+        wrench = K*pose_err - D*vel (clamped), tau = J^T wrench + gravity comp.
+        """
+        cfg = self.cfg
+        Jp = np.zeros((3, self.model.nv))
+        Jr = np.zeros((3, self.model.nv))
+        mujoco.mj_jacSite(self.model, self.data, Jp, Jr, self._tcp_sid)
+        v = Jp @ self.data.qvel
+        w = Jr @ self.data.qvel
+        pos_err = np.asarray(des_pos) - self.data.site_xpos[self._tcp_sid]
+        q_diff = self._qmul(des_quat, self._qinv(self._site_quat()))
+        rot_err = self._quat_to_rotvec(q_diff)   # world frame (matches Jr)
+        force = cfg.cart_kp_pos * pos_err - cfg.cart_kd_pos * v
+        torque = cfg.cart_kp_rot * rot_err - cfg.cart_kd_rot * w
+        wrench = np.concatenate([force, torque])
+        wrench_sat = bool(np.any(np.abs(wrench) > self._cart_max_wrench))
+        wrench = np.clip(wrench, -self._cart_max_wrench, self._cart_max_wrench)
+        tau = (Jp[:, self._arm_vadr].T @ wrench[:3]
+               + Jr[:, self._arm_vadr].T @ wrench[3:]
+               + self.data.qfrc_bias[self._arm_vadr]
+               - cfg.cart_joint_damping * self.data.qvel[self._arm_vadr])
+        tau_sat = bool(np.any(np.abs(tau) > self._cart_tau_limit))
+        tau = np.clip(tau, -self._cart_tau_limit, self._cart_tau_limit)
+        return tau, wrench, wrench_sat, tau_sat, pos_err, rot_err
+
+    def _apply_cartesian_action(self, action):
+        """Integrate the policy's Cartesian residual and track it for one
+        policy step (control_substeps sim steps) with the impedance controller."""
+        cfg = self.cfg
+        dpos = action[:3] * cfg.cart_trans_scale_m
+        drot = np.zeros(3)
+        drot[:2] = action[3:5] * cfg.cart_rot_scale_rad
+        if self._action_dim == 6:
+            drot[2] = action[5] * cfg.cart_rot_scale_rad
+        if cfg.base_script_enabled:
+            adv = float(np.clip(cfg.base_script_step_m, 0.0,
+                                self._cart_base_travel_max - self._cart_base_progress_m))
+            self._cart_base_pos = self._cart_base_pos + adv * self._insert_axis
+            self._cart_base_progress_m += adv
+            pos_lim = cfg.base_script_residual_limit_m
+            rot_lim = cfg.base_script_residual_limit_rad
+        else:
+            pos_lim = cfg.cart_pos_limit_m
+            rot_lim = cfg.cart_rot_limit_rad
+        raw_pos = self._cart_resid_pos + dpos
+        raw_rot = self._cart_resid_rotvec + drot
+        new_pos = np.clip(raw_pos, -pos_lim, pos_lim)
+        new_rot = np.clip(raw_rot, -rot_lim, rot_lim)
+        clipped = bool(np.any(new_pos != raw_pos) or np.any(new_rot != raw_rot))
+        self._cart_clip_events += int(clipped)
+        self._cart_resid_pos = new_pos
+        self._cart_resid_rotvec = new_rot
+
+        des_pos, des_quat = self._cart_desired_pose()
+        tcp_before = self.data.site_xpos[self._tcp_sid].copy()
+        wrench_f_max = wrench_t_max = tau_max = 0.0
+        for _ in range(cfg.control_substeps):
+            tau, wrench, wrench_sat, tau_sat, _, _ = (
+                self._cart_impedance_torque(des_pos, des_quat))
+            self.data.ctrl[:6] = tau
+            self.data.ctrl[6] = cfg.gripper_ctrl
+            mujoco.mj_step(self.model, self.data)
+            wrench_f_max = max(wrench_f_max, float(np.linalg.norm(wrench[:3])))
+            wrench_t_max = max(wrench_t_max, float(np.linalg.norm(wrench[3:])))
+            tau_max = max(tau_max, float(np.max(np.abs(tau))))
+            self._cart_wrench_sat_events += int(wrench_sat)
+            self._cart_tau_sat_events += int(tau_sat)
+        tcp_delta = self.data.site_xpos[self._tcp_sid] - tcp_before
+        pos_err = np.asarray(des_pos) - self.data.site_xpos[self._tcp_sid]
+        rot_err = self._quat_to_rotvec(
+            self._qmul(des_quat, self._qinv(self._site_quat())))
+        tcp_delta_port = self._cart_frame_R.T @ tcp_delta
+        pos_err_port = self._cart_frame_R.T @ pos_err
+        self._cart_diag = {
+            "cart_cmd_dpos_mm": float(np.linalg.norm(dpos)) * 1e3,
+            "cart_cmd_dx_mm": float(dpos[0]) * 1e3,
+            "cart_cmd_dy_mm": float(dpos[1]) * 1e3,
+            "cart_cmd_dz_mm": float(dpos[2]) * 1e3,
+            "cart_cmd_drot_deg": float(np.degrees(np.linalg.norm(drot))),
+            "cart_cmd_droll_deg": float(np.degrees(drot[0])),
+            "cart_cmd_dpitch_deg": float(np.degrees(drot[1])),
+            "cart_cmd_dyaw_deg": float(np.degrees(drot[2])),
+            "cart_resid_x_mm": float(self._cart_resid_pos[0]) * 1e3,
+            "cart_resid_y_mm": float(self._cart_resid_pos[1]) * 1e3,
+            "cart_resid_z_mm": float(self._cart_resid_pos[2]) * 1e3,
+            "cart_resid_roll_deg": float(np.degrees(self._cart_resid_rotvec[0])),
+            "cart_resid_pitch_deg": float(np.degrees(self._cart_resid_rotvec[1])),
+            "cart_resid_yaw_deg": float(np.degrees(self._cart_resid_rotvec[2])),
+            "cart_tcp_dpos_mm": float(np.linalg.norm(tcp_delta)) * 1e3,
+            "cart_tcp_dx_mm": float(tcp_delta_port[0]) * 1e3,
+            "cart_tcp_dy_mm": float(tcp_delta_port[1]) * 1e3,
+            "cart_tcp_dz_mm": float(tcp_delta_port[2]) * 1e3,
+            "cart_pos_err_mm": float(np.linalg.norm(pos_err)) * 1e3,
+            "cart_pos_err_x_mm": float(pos_err_port[0]) * 1e3,
+            "cart_pos_err_y_mm": float(pos_err_port[1]) * 1e3,
+            "cart_pos_err_z_mm": float(pos_err_port[2]) * 1e3,
+            "cart_rot_err_deg": float(np.degrees(np.linalg.norm(rot_err))),
+            "cart_wrench_force_n": wrench_f_max,
+            "cart_wrench_torque_nm": wrench_t_max,
+            "cart_tau_max_nm": tau_max,
+            "cart_clip_events": int(self._cart_clip_events),
+            "cart_wrench_sat_events": int(self._cart_wrench_sat_events),
+            "cart_tau_sat_events": int(self._cart_tau_sat_events),
+            "cart_base_progress_mm": float(self._cart_base_progress_m) * 1e3,
+        }
 
     # ------------------------------------------------------------------ #
     def set_curriculum_level(self, level: float):
@@ -631,11 +1031,18 @@ class SceneInsertEnv(gym.Env):
                 pass
         lvl = getattr(self, "_reset_mode", "curriculum")
         level = 1.0 if lvl == "random" else 0.0 if lvl == "near_goal" else self._curriculum_level
-        self._reset_to_level(level, jitter=True)
+        jitter = True
+        if options:   # optional deterministic overrides (used by smoke tests)
+            level = float(options.get("level", level))
+            jitter = bool(options.get("jitter", jitter))
+        self._reset_to_level(level, jitter=jitter)
         self._step_count = 0
-        self._last_action = np.zeros(6, np.float32)
+        self._last_action = np.zeros(self._action_dim, np.float32)
         self._prev_depth_norm = self._depth_norm()
         self._f_ax_buf: list[float] = []
+        self._off_limit_event_fired = False
+        self._force_sustain_event_fired = False
+        self._force_over_count = 0
         self._reset_score_state()
         return self._obs(), {
             "curriculum_level": self._curriculum_level,
@@ -643,13 +1050,16 @@ class SceneInsertEnv(gym.Env):
         }
 
     def step(self, action):
-        action = np.clip(np.asarray(action, np.float64).reshape(6), -1.0, 1.0)
-        self._arm_target = self._clip_action_target(
-            self._arm_target + action * self.cfg.action_joint_scale)
-        for _ in range(self.cfg.control_substeps):
-            self.data.ctrl[:6] = self._base_torque(self._arm_target)
-            self.data.ctrl[6] = self.cfg.gripper_ctrl
-            mujoco.mj_step(self.model, self.data)
+        action = np.clip(np.asarray(action, np.float64).reshape(self._action_dim), -1.0, 1.0)
+        if self._cart_mode:
+            self._apply_cartesian_action(action)
+        else:
+            self._arm_target = self._clip_action_target(
+                self._arm_target + action * self.cfg.action_joint_scale)
+            for _ in range(self.cfg.control_substeps):
+                self.data.ctrl[:6] = self._base_torque(self._arm_target)
+                self.data.ctrl[6] = self.cfg.gripper_ctrl
+                mujoco.mj_step(self.model, self.data)
         self._step_count += 1
         self._update_score_path()
         obs = self._obs()
@@ -666,15 +1076,25 @@ class SceneInsertEnv(gym.Env):
             "f_z_mean": float(np.mean(self._f_ax_buf)) if self._f_ax_buf else float("nan"),
             "f_z_max": float(np.max(np.abs(self._f_ax_buf))) if self._f_ax_buf else float("nan"),
             "depth_norm": float(self._prev_depth_norm),
+            "insertion_depth_m": float(self._insertion_depth_m()),
+            "approach_gap_m": float(max(
+                0.0,
+                float(getattr(self, "_axial_error", 0.0)) - self.cfg.seated_depth_m,
+            )),
+            "overinsert_m": float(self._overinsert_m()),
             "axial_error_m": float(getattr(self, "_axial_error", float("nan"))),
             "lateral_error_m": float(getattr(self, "_lateral_error", float("nan"))),
             **{k: v for k, v in self._contact_summary().items()
                if not isinstance(v, str)},
             "plug_axis_error_rad": float(self._plug_axis_error()),
+            "plug_roll_error_rad": float(self._plug_roll_error()),
             "wallclock": float(self._step_count) * 0.05,
             "curriculum_level": float(self._curriculum_level),
+            "action_mode": self.cfg.action_mode,
             **score_info,
         }
+        if self._cart_mode:
+            info.update(self._cart_diag)
         return obs, total, terminated, truncated, info
 
     # ------------------------------------------------------------------ #
@@ -688,9 +1108,27 @@ class SceneInsertEnv(gym.Env):
     def _geom_name(self, gid: int) -> str:
         return mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, int(gid)) or f"geom_{gid}"
 
+    def _body_subtree_ids(self, root_bid: int) -> set[int]:
+        if root_bid < 0:
+            return set()
+        root_bid = int(root_bid)
+        ids: set[int] = set()
+        stack = [root_bid]
+        while stack:
+            bid = int(stack.pop())
+            ids.add(bid)
+            children = np.flatnonzero(self.model.body_parentid == bid)
+            stack.extend(int(child) for child in children if int(child) not in ids)
+        return ids
+
     def _find_manipulated_body_ids(self) -> set[int]:
-        ids = {int(self._plug_tip_id), int(self._plug_axis_tail_id)}
-        tokens = ("sfp_module", "sfp_tip")
+        ids = set(getattr(self, "_plug_body_ids", set()))
+        ids.update(int(i) for i in (self._plug_id, self._plug_tip_id, self._plug_axis_tail_id)
+                   if int(i) >= 0)
+        # The full cable subtree also contains the far SC plug/cable, which is
+        # already close to the enclosure in the exported scene. Off-limit events
+        # here should describe the gripped plug assembly that the policy moves.
+        tokens = ("lc_plug", "sfp_module", "sfp_tip")
         for bid in range(self.model.nbody):
             name = self._body_name(bid).lower()
             if any(tok in name for tok in tokens):
@@ -698,15 +1136,22 @@ class SceneInsertEnv(gym.Env):
         return {i for i in ids if i >= 0}
 
     def _contact_summary(self):
-        plug_bodies = {int(self._plug_id), int(self._plug_tip_id), int(self._plug_axis_tail_id)}
+        plug_bodies = set(getattr(
+            self, "_plug_body_ids",
+            {int(self._plug_id), int(self._plug_tip_id), int(self._plug_axis_tail_id)},
+        ))
         target_tokens = ("nic_card", "sfp_port", "sfp", "mount")
+        stop_tokens = ("backstop",)
         off_limit_tokens = ("enclosure", "task_board")
         manipulated_bodies = set(getattr(self, "_manipulated_body_ids", plug_bodies))
         min_dist = float("inf")
         plug_port_min = float("inf")
+        port_stop_min = float("inf")
+        off_limit_min = float("inf")
         worst_pair = ""
         plug_port_worst = ""
         plug_port_contacts = 0
+        port_stop_contacts = 0
         off_limit_contacts = 0
         off_limit_worst = ""
         for k in range(self.data.ncon):
@@ -721,27 +1166,36 @@ class SceneInsertEnv(gym.Env):
                 worst_pair = f"{n1}:{ge1} <-> {n2}:{ge2}"
 
             one_plug = (b1 in plug_bodies) ^ (b2 in plug_bodies)
-            other_name = n2 if b1 in plug_bodies else n1
+            other_name = (n2 if b1 in plug_bodies else n1).lower()
             is_portish = any(tok in other_name for tok in target_tokens)
             if one_plug and is_portish:
                 plug_port_contacts += 1
                 if dist < plug_port_min:
                     plug_port_min = dist
                     plug_port_worst = f"{n1}:{ge1} <-> {n2}:{ge2}"
+            other_geom_name = (ge2 if b1 in plug_bodies else ge1).lower()
+            if one_plug and any(tok in other_geom_name for tok in stop_tokens):
+                port_stop_contacts += 1
+                if dist < port_stop_min:
+                    port_stop_min = dist
 
             one_manipulated = (b1 in manipulated_bodies) ^ (b2 in manipulated_bodies)
-            other_manip_name = n2 if b1 in manipulated_bodies else n1
+            other_manip_name = (n2 if b1 in manipulated_bodies else n1).lower()
             if one_manipulated and any(tok in other_manip_name for tok in off_limit_tokens):
                 off_limit_contacts += 1
-                if not off_limit_worst or dist < min_dist:
+                if dist < off_limit_min:
+                    off_limit_min = dist
                     off_limit_worst = f"{n1}:{ge1} <-> {n2}:{ge2}"
 
         if not np.isfinite(min_dist):
             min_dist = 0.0
         if not np.isfinite(plug_port_min):
             plug_port_min = 0.0
+        if not np.isfinite(port_stop_min):
+            port_stop_min = 0.0
         plug_port_pen = float(max(0.0, -plug_port_min))
-        goal_pen = float(getattr(self, "_goal_plug_port_penetration_m", plug_port_pen))
+        port_stop_pen = float(max(0.0, -port_stop_min))
+        goal_pen = float(self._pen_baseline_at(self._depth_norm()))
         return {
             "ncon": int(self.data.ncon),
             "min_contact_dist_m": float(min_dist),
@@ -752,15 +1206,15 @@ class SceneInsertEnv(gym.Env):
             "plug_port_penetration_m": plug_port_pen,
             "plug_port_penetration_excess_m": float(max(0.0, plug_port_pen - goal_pen)),
             "plug_port_worst_pair": plug_port_worst,
+            "port_stop_contacts": int(port_stop_contacts),
+            "port_stop_penetration_m": port_stop_pen,
             "off_limit_contacts": int(off_limit_contacts),
             "off_limit_worst_pair": off_limit_worst,
         }
 
     def _depth_norm(self) -> float:
-        """Insertion fraction in [0,1]: 1 seated, 0 retracted by last_inch_m."""
-        tip = self.data.xpos[self._plug_tip_id]
-        retract = float(np.dot(tip - self._inserted_tip, self._retract_dir))
-        return float(np.clip(1.0 - retract / max(self.cfg.last_inch_m, 1e-6), 0.0, 1.0))
+        """Insertion fraction in [0,1]: 0 at mouth, 1 at the seated frame."""
+        return self._insertion_depth_norm()
 
     def _reset_score_state(self) -> None:
         tcp = self.data.site_xpos[self._tcp_sid].copy()
@@ -820,24 +1274,30 @@ class SceneInsertEnv(gym.Env):
         tip = self.data.xpos[self._plug_tip_id]
         axial_err, lat_vec = self._tip_port_errors(tip)
         lateral_err = float(np.linalg.norm(lat_vec))
+        insertion_depth_m = self._insertion_depth_m(tip)
         depth_norm = self._depth_norm()
+        overinsert_m = self._overinsert_m(tip)
         axis_err = self._plug_axis_error()
+        roll_err = self._plug_roll_error()
         contact_summary = self._contact_summary()
         pen_excess = float(contact_summary["plug_port_penetration_excess_m"])
-        plug_port_contacts = int(contact_summary["plug_port_contacts"])
         off_limit_contacts = int(contact_summary.get("off_limit_contacts", 0))
+        port_contact_ok = int(contact_summary.get("plug_port_contacts", 0)) > 0
 
         in_port_box = (
-            -self.cfg.score_axial_tol_m <= axial_err <= self.cfg.seated_depth_m + 0.002
+            -self.cfg.score_axial_tol_m <= insertion_depth_m <= (
+                self.cfg.seated_depth_m + self.cfg.success_max_overinsert_m)
             and lateral_err <= self.cfg.score_lateral_tol_m
         )
         full_insert = (
             in_port_box
+            and port_contact_ok
             and depth_norm >= self.cfg.score_full_depth_norm
             and abs(axial_err) <= self.cfg.score_axial_tol_m
+            and overinsert_m <= self.cfg.success_max_overinsert_m
             and axis_err <= self.cfg.score_axis_tol_rad
+            and roll_err <= self.cfg.score_roll_tol_rad
             and pen_excess <= self.cfg.score_max_penetration_excess_m
-            and plug_port_contacts > 0
         )
         if full_insert:
             tier3 = 75.0
@@ -893,6 +1353,7 @@ class SceneInsertEnv(gym.Env):
             "score_force_over_limit": bool(force_penalty < 0.0),
             "score_off_limit_contact": bool(off_limit_contacts > 0),
             "score_term_success": bool(term_status == "success"),
+            "score_roll_error_rad": float(roll_err),
         }
 
     def _tip_port_errors(self, tip=None):
@@ -917,29 +1378,66 @@ class SceneInsertEnv(gym.Env):
         lat_err = float(np.linalg.norm(lat_vec))
         self._axial_error = axial_err
         self._lateral_error = lat_err
+        insertion_depth_m = self._insertion_depth_m(tip)
         depth_norm = self._depth_norm()
+        overinsert_m = self._overinsert_m(tip)
         contact_summary = self._contact_summary()
         axis_error = self._plug_axis_error()
+        roll_error = self._plug_roll_error()
         pen_excess = float(contact_summary["plug_port_penetration_excess_m"])
+        port_contact_ok = (
+            not self.cfg.success_require_port_contact
+            or int(contact_summary.get("plug_port_contacts", 0)) > 0
+        )
 
         # success = bottomed depth + seated pose + straight, collision-clean seating contact
         term_status = None
         if (depth_norm >= self.cfg.success_depth_norm
+                and insertion_depth_m >= self.cfg.seated_depth_m - self.cfg.success_axial_tol_m
                 and abs(axial_err) < self.cfg.success_axial_tol_m
                 and lat_err < self.cfg.success_lateral_tol_m
                 and axis_error <= self.cfg.success_axis_tol_rad
+                and roll_error <= self.cfg.success_roll_tol_rad
+                and overinsert_m <= self.cfg.success_max_overinsert_m
                 and pen_excess <= self.cfg.success_max_plug_port_penetration_excess_m
-                and int(contact_summary["plug_port_contacts"]) > 0
-                and abs(f_axial) > self.cfg.success_force_n):
+                and port_contact_ok
+                and (self.cfg.success_force_n <= 0.0
+                     or abs(f_axial) > self.cfg.success_force_n)):
             term_status = "success"
         elif (pen_excess > self.cfg.bad_collision_penetration_excess_m
+              or overinsert_m > self.cfg.bad_collision_overinsert_m
               or (depth_norm >= self.cfg.bad_collision_depth_gate
-                  and axis_error > self.cfg.bad_collision_axis_rad)):
+                  and (axis_error > self.cfg.bad_collision_axis_rad
+                       or roll_error > self.cfg.bad_collision_roll_rad))):
             term_status = "bad_collision"
-        elif (abs(f_axial) > self.cfg.force_abort_n
-              or f_lat > self.cfg.force_abort_n
-              or np.linalg.norm(fc) > self.cfg.force_abort_n):
-            term_status = "force_abort"
+        else:
+            # force abort: sustained (dwell) over force_abort_n, or instant only
+            # past the hard bound — single-step PD contact transients don't kill
+            # the episode (they were 43% of level-0.1 terminations)
+            f_norm = float(np.linalg.norm(fc))
+            f_peak = max(abs(f_axial), f_lat, f_norm)
+            if f_peak > self.cfg.force_abort_n:
+                self._force_over_count = int(getattr(self, "_force_over_count", 0)) + 1
+            else:
+                self._force_over_count = 0
+            if (f_peak > self.cfg.force_abort_hard_n
+                    or self._force_over_count >= max(1, int(self.cfg.force_abort_dwell_steps))):
+                term_status = "force_abort"
+        if term_status is None and self._step_count >= self.cfg.max_episode_steps:
+            term_status = "timeout"
+
+        # scoring-rubric one-shot events (each fires at most once per episode,
+        # mirroring the one-time -24 / -12 point deductions; neither is terminal)
+        off_limit_event = False
+        if (int(contact_summary.get("off_limit_contacts", 0)) > 0
+                and not self._off_limit_event_fired):
+            self._off_limit_event_fired = True
+            off_limit_event = True
+        force_sustain_event = False
+        if (float(getattr(self, "_score_force_over_s", 0.0)) > self.cfg.score_force_duration_s
+                and not self._force_sustain_event_fired):
+            self._force_sustain_event_fired = True
+            force_sustain_event = True
 
         img_curr = self._render_reward_image()
         total, breakdown = compute_reward(
@@ -951,7 +1449,11 @@ class SceneInsertEnv(gym.Env):
             bonus_eligible=(term_status == "success"),
             depth_norm=depth_norm, prev_depth_norm=self._prev_depth_norm,
             axis_error_rad=axis_error,
-            penetration_excess_m=pen_excess,
+            roll_error_rad=roll_error,
+            penetration_excess_m=max(pen_excess, overinsert_m),
+            off_limit_event=off_limit_event,
+            force_sustain_event=force_sustain_event,
+            success_time_frac=float(self._step_count) / max(self.cfg.max_episode_steps, 1),
         )
         self._prev_depth_norm = depth_norm
         return float(total), breakdown, term_status
@@ -969,20 +1471,25 @@ class SceneInsertEnv(gym.Env):
         self._reward_renderer.update_scene(self.data, camera="center_camera")
         return self._reward_renderer.render()
 
-    def _geometry_diag(self, target_tip=None, ik_tip_err=None, ik_axis_err=None):
+    def _geometry_diag(self, target_tip=None, ik_tip_err=None, ik_axis_err=None,
+                       ik_roll_err=None):
         tip = self.data.xpos[self._plug_tip_id].copy()
         target = self._inserted_tip if target_tip is None else np.asarray(target_tip, dtype=np.float64)
         axial_err, lat_vec = self._tip_port_errors(tip)
+        approach_gap = max(0.0, float(axial_err) - self.cfg.seated_depth_m)
         fc = self._contact_force()
         f_axial = float(np.dot(fc, self._insert_axis))
         f_lat = float(np.linalg.norm(fc - f_axial * self._insert_axis))
         axis_err = self._plug_axis_error()
+        roll_err = self._plug_roll_error()
         out = {
             "target_body": self._target_name,
             "entrance": self._port_pos.copy(),
             "seated_tip": self._inserted_tip.copy(),
             "insert_axis": self._insert_axis.copy(),
             "plug_axis": self._plug_axis().copy(),
+            "target_roll_axis": self._target_roll_axis().copy(),
+            "plug_roll_axis": self._plug_roll_axis().copy(),
             "tip": tip,
             "target_tip": target.copy(),
             "tip_error_m": float(np.linalg.norm(tip - target)),
@@ -990,9 +1497,15 @@ class SceneInsertEnv(gym.Env):
             "plug_axis_error_rad": axis_err,
             "plug_axis_error_deg": float(np.degrees(axis_err)),
             "ik_axis_error_rad": float(ik_axis_err if ik_axis_err is not None else axis_err),
+            "plug_roll_error_rad": roll_err,
+            "plug_roll_error_deg": float(np.degrees(roll_err)),
+            "ik_roll_error_rad": float(ik_roll_err if ik_roll_err is not None else roll_err),
             "axial_error_m": float(axial_err),
+            "approach_gap_m": float(approach_gap),
             "lateral_error_m": float(np.linalg.norm(lat_vec)),
             "depth_norm": float(self._depth_norm()),
+            "insertion_depth_m": float(self._insertion_depth_m(tip)),
+            "overinsert_m": float(self._overinsert_m(tip)),
             "contact_force_norm": float(np.linalg.norm(fc)),
             "f_axial": f_axial,
             "f_lateral": f_lat,
@@ -1066,6 +1579,7 @@ if __name__ == "__main__":
           "seated_tip:", np.round(env._inserted_tip, 5),
           "axis:", np.round(env._insert_axis, 5),
           "goal_plug_axis_err_deg:", round(float(np.degrees(env._plug_axis_error())), 2),
+          "goal_plug_roll_err_deg:", round(float(np.degrees(env._plug_roll_error())), 2),
           "goal_tcp:", np.round(env._goal_tcp, 5),
           "ft_baseline:", np.round(env._ft_baseline, 2))
     last_obs = None
@@ -1078,6 +1592,7 @@ if __name__ == "__main__":
               f"lat_err={diag['lateral_error_m']:.4f} "
               f"depth={diag['depth_norm']:.2f} "
               f"axis_deg={diag['plug_axis_error_deg']:.1f} "
+              f"roll_deg={diag['plug_roll_error_deg']:.1f} "
               f"pen={diag['plug_port_penetration_m']*1000:.1f}mm "
               f"excess={diag['plug_port_penetration_excess_m']*1000:.1f}mm "
               f"contact={diag['contact_force_norm']:.2f} "
@@ -1088,6 +1603,7 @@ if __name__ == "__main__":
               f"axial_err={i_hold['axial_error_m']:.4f} "
               f"lat_err={i_hold['lateral_error_m']:.4f} "
               f"axis_deg={np.degrees(i_hold['plug_axis_error_rad']):.1f} "
+              f"roll_deg={np.degrees(i_hold['plug_roll_error_rad']):.1f} "
               f"pen={i_hold['plug_port_penetration_m']*1000:.1f}mm "
               f"excess={i_hold['plug_port_penetration_excess_m']*1000:.1f}mm "
               f"reward={r_hold:.3f} term={i_hold['term_status']}")
@@ -1102,6 +1618,7 @@ if __name__ == "__main__":
               f"f_z={i['f_z']:.2f} depth={i['depth_norm']:.2f} "
               f"axial_err={i['axial_error_m']:.4f} lat_err={i['lateral_error_m']:.4f} "
               f"axis_deg={np.degrees(i['plug_axis_error_rad']):.1f} "
+              f"roll_deg={np.degrees(i['plug_roll_error_rad']):.1f} "
               f"pen={i['plug_port_penetration_m']*1000:.1f}mm "
               f"excess={i['plug_port_penetration_excess_m']*1000:.1f}mm "
               f"reward={r:.3f} term={i['term_status']} "

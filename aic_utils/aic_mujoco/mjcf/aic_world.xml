@@ -238,12 +238,14 @@
           <site name="sfp_port_sensor" class="world_default" pos="0 0 0"/>
           <body name="sfp_port_0_link" pos="0.01295 -0.031572 0.00501" quat="0.702339 -0.711842 0 0">
             <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+            <geom name="sfp_port_0_backstop_collision" class="world_default" type="box" pos="0 0 0" size="0.008 0.006 0.0004" group="3"/>
             <body name="sfp_port_0_link_entrance" pos="0 0 -0.0458">
               <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
             </body>
           </body>
           <body name="sfp_port_1_link" pos="-0.01025 -0.031572 0.00501" quat="0.702339 -0.711842 0 0">
             <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
+            <geom name="sfp_port_1_backstop_collision" class="world_default" type="box" pos="0 0 0" size="0.008 0.006 0.0004" group="3"/>
             <body name="sfp_port_1_link_entrance" pos="0 0 -0.0458">
               <inertial pos="0 0 0" mass="1" diaginertia="1 1 1"/>
             </body>

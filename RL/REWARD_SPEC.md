@@ -1,6 +1,11 @@
 # Reward Function Spec — Residual SAC for Last-Inch Cable Insertion
 
-**Status:** v0.3 (2026-07-03) — recalibrated to the **fixed** MuJoCo scene.
+**Status:** historical. `RL/reward.py` now uses the simpler geometry-first
+reward described in `RL/README.md` §3.3: depth progress + sparse success, with
+small alignment/contact/action safety costs and image distance default-off. The
+older spec below is kept only as design history.
+
+**Previous status:** v0.3 (2026-07-03) — recalibrated to the **fixed** MuJoCo scene.
 v0.2 → v0.3 changes (these SUPERSEDE the older numbers below where they conflict):
 - **Scene was broken** (solid brick, no cavity, force always 0 → success could
   never fire). Now a real open-top socket; contact force reads **0–8 N**

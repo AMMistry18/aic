@@ -8,18 +8,22 @@ This script:
     1. Builds the MuJoCo env(s) (RL/env.py) as a SubprocVecEnv.
     2. Wraps a Dict obs space with a CombinedImageState extractor (image CNN
        + state MLP fused to 256-d).
-    3. Trains SAC (stable-baselines3, batch 4096) with the reward in
+    3. Trains SAC (stable-baselines3) with the reward in
        RL/reward.py and a reverse curriculum.
     4. Checkpoints a single canonical resume point (model.zip + replay_buffer
        + curriculum_level.txt) so a killed run continues instead of starting
        over — re-run the SAME command and it auto-resumes.
     5. Exports a TorchScript policy for deployment.
 
-Batch-4096 SAC scaling (see the tuning notes in the header table below):
-    num_envs=16, train_freq=1 (vec step = 16 env steps), gradient_steps=2
-    → UTD≈0.125 (512 samples consumed per env step, 2× SAC default). Do NOT
-    use gradient_steps=-1 (that is UTD=1 at batch 4096 → critic overfit +
-    ~16× slower). buffer_size=500k (~9.5 GB, uint8 image obs is mandatory).
+SAC scaling defaults (retuned 2026-07-03 for exploration + adaptation speed):
+    batch_size=1024, num_envs=16, train_freq=1, gradient_steps=4
+    → UTD=0.25 (4096 samples consumed per vec step — same data throughput as
+    the old batch-4096/grad-2 config, but 4 distinct smaller updates: noisier
+    gradients + faster policy adaptation as the curriculum moves the start
+    distribution). Do NOT use gradient_steps=-1 (UTD=1 → critic overfit +
+    ~16× slower). target_entropy defaults to -3.0 (SAC's auto = -6 collapses
+    the exploration noise early on a 6-D residual action). buffer_size=500k
+    (uint8 image obs is mandatory).
 """
 
 from __future__ import annotations
@@ -101,26 +105,60 @@ def main():
                    help="total env steps (default 500k; ~45-90 min on a 5090)")
     p.add_argument("--port-type", choices=["sc", "sfp"], default="sc")
     p.add_argument("--seed", type=int, default=42)
-    # ---- SAC / batch-4096 hyperparameters ----
+    # ---- SAC hyperparameters (retuned: batch 1024 / UTD 0.25 / target-H -3) ----
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--batch-size", type=int, default=4096)
-    p.add_argument("--buffer-size", type=int, default=500_000)
-    p.add_argument("--warmup-steps", type=int, default=20_000,
-                   help="learning_starts (random-action steps before training)")
-    p.add_argument("--tau", type=float, default=0.01,
-                   help="target-net Polyak rate (raised to compensate for the "
-                        "lower update-to-data ratio at batch 4096)")
+    p.add_argument("--batch-size", type=int, default=1024,
+                   help="SAC minibatch. 1024 x 4 grad steps consumes the same "
+                        "4096 samples/vec-step as the old batch-4096 x 2, but "
+                        "adapts the policy 2x more often with noisier gradients "
+                        "(better exploration as the curriculum shifts starts)")
+    p.add_argument("--buffer-size", type=int, default=50_000,
+                   help="replay transitions. RAM = buffer * channels*H*W * 2 "
+                        "(obs + next_obs, uint8): 256^2x9 = 1.18 MB/transition "
+                        "(50k = 59 GB!), 128^2x9 = 295 KB (50k = 14.7 GB). "
+                        "Size to fit RAM — the old 500k default needed 590 GB.")
+    p.add_argument("--warmup-steps", type=int, default=10_000,
+                   help="learning_starts (random-action steps before training). "
+                        "Curriculum level-0 starts are seated, so long random "
+                        "warmups mostly log 1-step force aborts — keep it short.")
+    p.add_argument("--tau", type=float, default=0.005,
+                   help="target-net Polyak rate (SAC standard; the old 0.01 "
+                        "compensated for the lower UTD of the batch-4096 config)")
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--ent-coef", type=str, default="auto",
                    help="SAC entropy coef ('auto', 'auto_0.1', or a float)")
-    p.add_argument("--target-entropy", type=str, default="auto",
-                   help="'auto' (=-dim(A)=-6) or a float")
+    p.add_argument("--target-entropy", type=str, default="-3.0",
+                   help="target policy entropy for auto alpha. SAC's 'auto' is "
+                        "-dim(A)=-6, which drives alpha (exploration noise) to "
+                        "near-zero early on this task; -3.0 keeps exploring. "
+                        "Pass 'auto' to restore the SB3 default.")
+    p.add_argument("--ent-reheat", type=float, default=0.15,
+                   help="on every curriculum ADVANCE, floor SAC's alpha back up "
+                        "to this value and let auto-temperature re-anneal "
+                        "(TES-SAC-style scheduling keyed to the curriculum; the "
+                        "healthy ent_coef curve becomes a sawtooth). 0 = off.")
+    p.add_argument("--target-entropy-schedule", action="store_true",
+                   help="also anneal target entropy with the curriculum level: "
+                        "-1.5 at level 0 -> -3.0 at level 1 (overrides "
+                        "--target-entropy at each advance)")
+    p.add_argument("--success-mix", type=float, default=0.25,
+                   help="fraction of every SAC minibatch drawn from a side "
+                        "buffer of SUCCESSFUL-episode transitions (SIL/DDPGfD-"
+                        "style exploitation; keeps wins alive after the main "
+                        "ring overwrites them). 0 = plain uniform replay.")
+    p.add_argument("--success-buffer-size", type=int, default=4000,
+                   help="capacity (transitions) of the success side buffer "
+                        "(~295 KB each at 128^2x9 obs -> 4000 = ~1.2 GB)")
     p.add_argument("--train-freq", type=int, default=1,
                    help="vec steps between training phases (1 = every vec step)")
-    p.add_argument("--gradient-steps", type=int, default=2,
-                   help="grad steps per training phase. NEVER -1 at batch 4096.")
+    p.add_argument("--gradient-steps", type=int, default=4,
+                   help="grad steps per training phase (UTD = grad_steps/num_envs "
+                        "= 0.25 at defaults). NEVER -1 (UTD=1 -> critic overfit).")
     p.add_argument("--num-envs", type=int, default=16,
                    help="SubprocVecEnv workers (= physical cores). 1 = DummyVecEnv.")
+    p.add_argument("--max-episode-steps", type=int, default=300,
+                   help="episode cap. Median success takes ~18 steps; 600-step "
+                        "wandering timeouts were 30x that in wasted env budget.")
     # ---- checkpointing / resume ----
     p.add_argument("--ckpt-every", type=int, default=20_000,
                    help="env steps between model.zip checkpoints")
@@ -155,6 +193,38 @@ def main():
     p.add_argument("--reward-image-res", type=int, default=0,
                    help="[--scene] image-distance reward render res (0 = native "
                         "1152x1024 center cam; e.g. 256 for faster smoke runs)")
+    p.add_argument("--image-reward-weight", type=float, default=0.0,
+                   help="weight for the image-L1 reward term. Set to 0 for "
+                        "geometry/force-only reward shaping while still keeping "
+                        "camera images in the policy observation.")
+    p.add_argument("--no-image-reward", action="store_true",
+                   help="shortcut for --image-reward-weight 0. Also skips the "
+                        "expensive reward-image renderer in the scene env.")
+    # ---- action mode (default joint_residual = original behavior) ----
+    p.add_argument("--action-mode", choices=["joint_residual", "cartesian_residual"],
+                   default="joint_residual",
+                   help="[--scene] 'joint_residual' (default, unchanged): 6-D "
+                        "joint residual on the joint PD target. "
+                        "'cartesian_residual': SAC action is a small Cartesian "
+                        "TCP residual in the port frame, tracked by a Jacobian-"
+                        "transpose Cartesian impedance controller that mirrors "
+                        "aic_controller's CartesianImpedanceAction.")
+    p.add_argument("--cart-action-dims", type=int, choices=[5, 6], default=6,
+                   help="[cartesian_residual] 6 = [dx,dy,dz,droll,dpitch,dyaw]; "
+                        "5 drops dyaw (no correction about the insertion axis)")
+    p.add_argument("--cart-trans-scale-mm", type=float, default=1.0,
+                   help="[cartesian_residual] translation residual per policy "
+                        "step at |action|=1, in mm")
+    p.add_argument("--cart-rot-scale-deg", type=float, default=1.0,
+                   help="[cartesian_residual] rotation residual per policy "
+                        "step at |action|=1, in degrees")
+    p.add_argument("--base-script", action="store_true",
+                   help="[cartesian_residual] scripted base motion slowly pushes "
+                        "the target pose along the port insertion axis (clamped "
+                        "at the seated goal); the SAC residual rides on top with "
+                        "a tighter envelope, learning the correction only.")
+    p.add_argument("--base-script-step-mm", type=float, default=0.5,
+                   help="[--base-script] base target advance per policy step, mm")
     # ---- curriculum ----
     p.add_argument("--reset-mode", choices=["curriculum", "random", "near_goal"],
                    default="curriculum")
@@ -164,7 +234,8 @@ def main():
     p.add_argument("--curriculum-force-abort-guard", type=float, default=0.25,
                    help="do not advance curriculum if recent force-abort rate exceeds this")
     p.add_argument("--curriculum-force-abort-retreat", type=float, default=0.50,
-                   help="retreat curriculum if recent force-abort rate reaches this")
+                   help="DEPRECATED, ignored: retreats are success-based only "
+                        "(unsafe terminations gate advancement, never retreat)")
     p.add_argument("--curriculum-step", type=float, default=0.05)
     # ---- W&B ----
     p.add_argument("--wandb", dest="wandb", action="store_true", default=None)
@@ -172,19 +243,36 @@ def main():
     p.add_argument("--wandb-run-name", type=str, default=None)
     p.add_argument("--wandb-log-every", type=int, default=1_000)
     p.add_argument("--wandb-success-window", type=int, default=100)
-    p.add_argument("--wandb-eval-every", type=int, default=0,
+    p.add_argument("--wandb-eval-every", type=int, default=10_000,
                    help="[--scene] run a no-video W&B score eval every N env steps "
                         "(0 = off; uses --wandb-video-level)")
     p.add_argument("--wandb-eval-steps", type=int, default=200,
                    help="[--scene] max steps for no-video W&B score eval")
+    p.add_argument("--wandb-eval-episodes", type=int, default=2,
+                   help="[--scene] episodes averaged per W&B score eval")
     p.add_argument("--wandb-video-every", type=int, default=0,
-                   help="log a W&B rollout video every N completed episodes (0 = off)")
-    p.add_argument("--wandb-video-steps", type=int, default=120,
-                   help="max eval steps per W&B rollout video")
+                   help="DEPRECATED (episode-based gating fired ~once with vec "
+                        "envs). Any value > 0 just enables the step-based "
+                        "recorder below.")
+    p.add_argument("--wandb-video-every-steps", type=int, default=5_000,
+                   help="log a W&B rollout video every N env steps (0 = off)")
+    p.add_argument("--wandb-video-episodes", type=int, default=2,
+                   help="eval episodes stitched into each W&B video clip")
+    p.add_argument("--wandb-video-steps", type=int, default=200,
+                   help="max eval steps per episode in a W&B rollout video")
     p.add_argument("--wandb-video-fps", type=int, default=20)
-    p.add_argument("--wandb-video-level", type=float, default=1.0,
-                   help="[--scene] curriculum level used for W&B eval videos. "
-                        "Use a negative value to mirror the training reset mode.")
+    p.add_argument("--wandb-video-level", type=float, default=-1.0,
+                   help="[--scene] curriculum level for W&B videos. Negative "
+                        "(default): every episode mirrors the CURRENT training "
+                        "level, so clips show the actual training distribution "
+                        "(full-task competence is tracked numerically by the "
+                        "level-1.0 score eval). A value >= 0 pins every episode "
+                        "to that fixed level.")
+    p.add_argument("--no-wandb-video-on-advance",
+                   dest="wandb_video_on_advance",
+                   action="store_false",
+                   help="[--scene] disable the current-level W&B video that is "
+                        "recorded immediately before a curriculum advance.")
     p.add_argument("--wandb-video-camera", type=str, default="center_camera",
                    help="[--scene] camera used for W&B videos")
     p.add_argument("--wandb-video-width", type=int, default=768,
@@ -201,8 +289,18 @@ def main():
                    help="local W&B credential/config file; API key is never logged")
     args = p.parse_args()
 
+    if args.no_image_reward:
+        args.image_reward_weight = 0.0
+
+    if args.action_mode != "joint_residual" and not args.scene:
+        raise SystemExit("--action-mode cartesian_residual requires --scene")
+    if args.base_script and args.action_mode != "cartesian_residual":
+        raise SystemExit("--base-script requires --action-mode cartesian_residual")
+
     if args.out is None:
         run_name = f"residual_sac_{args.port_type}_{args.reset_mode}"
+        if args.action_mode == "cartesian_residual":
+            run_name += "_cart_basescript" if args.base_script else "_cart"
         if args.recorded:
             run_name += "_recorded"
         args.out = Path(__file__).resolve().parent / "output" / run_name
@@ -236,20 +334,28 @@ def main():
     cfg_dict = dict(vars(args))
     cfg_dict.pop("force", None)
     cfg_dict.pop("resume", None)
+    if args.action_mode == "joint_residual":
+        # keep cache keys byte-identical to pre-cartesian-mode runs so existing
+        # checkpoints still auto-resume (the new keys only hash when used)
+        for k in ("action_mode", "cart_action_dims", "cart_trans_scale_mm",
+                  "cart_rot_scale_deg", "base_script", "base_script_step_mm"):
+            cfg_dict.pop(k, None)
     cache_key = make_cache_key(cfg_dict)
     print(f"[train] cache_key={cache_key}", flush=True)
 
     completed_marker = args.out / "COMPLETED"
     model_zip = args.out / "model.zip"
     rb_pkl = args.out / "replay_buffer.pkl"
+    level_file = args.out / "curriculum_level.txt"
     key_file = args.out / "cache_key.txt"
 
     prior_key = key_file.read_text().strip() if key_file.exists() else None
     is_completed = completed_marker.exists() and prior_key == cache_key
 
     if args.force:
-        # wipe resumable state so we truly start fresh
-        for f in (completed_marker, model_zip, rb_pkl):
+        # wipe resumable state so we truly start fresh (incl. the curriculum
+        # level — a stale level file makes a "fresh" run start mid-curriculum)
+        for f in (completed_marker, model_zip, rb_pkl, level_file):
             try:
                 f.unlink()
             except FileNotFoundError:
@@ -270,6 +376,14 @@ def main():
         print(f"[train] WARNING: existing checkpoint has a different cache_key "
               f"({prior_key}); starting fresh. Use --resume to force-continue it.",
               flush=True)
+    if not resume and level_file.exists():
+        # fresh start (no resumable checkpoint) must not inherit a curriculum
+        # level from an older run in the same out dir
+        try:
+            level_file.unlink()
+            print("[train] removed stale curriculum_level.txt (fresh start)", flush=True)
+        except FileNotFoundError:
+            pass
 
     write_config(args.out, cfg_dict, cache_key)
 
@@ -289,6 +403,16 @@ def main():
     from RL.env import EnvConfig, LastInchInsertEnv
 
     env_cfg = EnvConfig()
+    reward_cfg = dataclasses.replace(
+        env_cfg.reward,
+        w_image=float(args.image_reward_weight),
+        beta_s=0.0 if float(args.image_reward_weight) == 0.0 else env_cfg.reward.beta_s,
+    )
+    env_cfg = dataclasses.replace(env_cfg, reward=reward_cfg)
+    if args.max_episode_steps > 0:
+        env_cfg = dataclasses.replace(
+            env_cfg, term=dataclasses.replace(env_cfg.term,
+                                              max_steps=int(args.max_episode_steps)))
     n_envs = int(args.num_envs)
 
     # ------------------------------------------------------------------ #
@@ -300,12 +424,22 @@ def main():
     if use_scene:
         from RL.scene_env import SceneInsertEnv, SceneEnvConfig
 
+        scene_kwargs = dict(
+            image_h=args.image_size, image_w=args.image_size,
+            reward_image_res=args.reward_image_res,
+            reward=reward_cfg,
+            max_episode_steps=env_cfg.term.max_steps,
+            action_mode=args.action_mode,
+            cart_action_dims=args.cart_action_dims,
+            cart_trans_scale_m=args.cart_trans_scale_mm * 1e-3,
+            cart_rot_scale_rad=float(np.radians(args.cart_rot_scale_deg)),
+            base_script_enabled=bool(args.base_script),
+            base_script_step_m=args.base_script_step_mm * 1e-3,
+        )
+
         def _make_env(rank: int = 0):
             def _thunk():
-                e = SceneInsertEnv(SceneEnvConfig(
-                    image_h=args.image_size, image_w=args.image_size,
-                    reward_image_res=args.reward_image_res,
-                    max_episode_steps=env_cfg.term.max_steps))
+                e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
                 e.set_reset_mode(args.reset_mode)
                 if args.reset_mode == "curriculum":
                     e.set_level_file(str(args.out / "curriculum_level.txt"))
@@ -317,10 +451,7 @@ def main():
             holder = {}
 
             def _thunk():
-                e = SceneInsertEnv(SceneEnvConfig(
-                    image_h=args.image_size, image_w=args.image_size,
-                    reward_image_res=args.reward_image_res,
-                    max_episode_steps=env_cfg.term.max_steps))
+                e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
                 if args.wandb_video_level >= 0.0:
                     e.set_reset_mode("curriculum")
                     e.set_curriculum_level(float(args.wandb_video_level))
@@ -486,6 +617,19 @@ def main():
     except ValueError:
         pass
 
+    replay_buffer_class = None
+    replay_buffer_kwargs = None
+    if args.success_mix > 0.0:
+        from RL.success_buffer import SuccessMixDictReplayBuffer
+        replay_buffer_class = SuccessMixDictReplayBuffer
+        replay_buffer_kwargs = dict(
+            success_mix=args.success_mix,
+            success_buffer_size=args.success_buffer_size,
+        )
+        print(f"[train] success-mix replay: {args.success_mix:.0%} of each "
+              f"minibatch from the success side buffer "
+              f"(cap {args.success_buffer_size})", flush=True)
+
     def _build_model():
         return SAC(
             "MultiInputPolicy", env,
@@ -500,6 +644,8 @@ def main():
             target_entropy=target_entropy,
             train_freq=args.train_freq,
             gradient_steps=args.gradient_steps,
+            replay_buffer_class=replay_buffer_class,
+            replay_buffer_kwargs=replay_buffer_kwargs,
             seed=args.seed,
             verbose=1,
             device="auto",
@@ -578,7 +724,11 @@ def main():
         "algorithm": "SAC", "batch_size": args.batch_size,
         "train_freq": args.train_freq, "gradient_steps": args.gradient_steps,
     })
-    run_name = args.wandb_run_name or f"{args.port_type}-sac-b{args.batch_size}-seed{args.seed}"
+    _mode_tag = ""
+    if args.action_mode == "cartesian_residual":
+        _mode_tag = "-cart-basescript" if args.base_script else "-cart"
+    run_name = args.wandb_run_name or (
+        f"{args.port_type}-sac{_mode_tag}-b{args.batch_size}-seed{args.seed}")
     wandb_cb = WandbLogger(
         run_name=run_name if wandb_enabled else None,
         config=wandb_config, log_every_steps=args.wandb_log_every,
@@ -587,26 +737,71 @@ def main():
         project=args.wandb_project or os.environ.get("WANDB_PROJECT"),
         enabled=wandb_enabled)
     callbacks.append(wandb_cb)
+    mirror_video = args.wandb_video_level < 0.0
     if wandb_enabled and args.wandb_eval_every > 0 and make_wandb_video_env is not None:
         callbacks.append(WandbScoreEvaluator(
             make_eval_env=make_wandb_video_env,
             every_steps=args.wandb_eval_every,
             max_steps=args.wandb_eval_steps,
+            n_episodes=args.wandb_eval_episodes,
+            fixed_level=1.0 if mirror_video else None,
             deterministic=True,
             enabled=True))
-    if wandb_enabled and args.wandb_video_every > 0 and make_wandb_video_env is not None:
-        callbacks.append(WandbVideoRecorder(
+    video_every_steps = int(args.wandb_video_every_steps)
+    if video_every_steps <= 0 and args.wandb_video_every > 0:
+        video_every_steps = 20_000   # legacy episode flag -> step-based recorder
+    transition_video_enabled = (
+        wandb_enabled
+        and bool(args.wandb_video_on_advance)
+        and args.reset_mode == "curriculum"
+        and make_wandb_video_env is not None
+    )
+    step_video_enabled = (
+        wandb_enabled and video_every_steps > 0 and make_wandb_video_env is not None
+    )
+    wandb_video_recorder = None
+    if step_video_enabled or transition_video_enabled:
+        wandb_video_recorder = WandbVideoRecorder(
             make_eval_env=make_wandb_video_env,
-            every_n_episodes=args.wandb_video_every,
+            every_steps=video_every_steps if step_video_enabled else 0,
             max_steps=args.wandb_video_steps,
+            episodes_per_video=args.wandb_video_episodes,
+            episode_levels=(None,) if mirror_video else None,
             fps=args.wandb_video_fps,
             render_camera=args.wandb_video_camera,
             render_width=args.wandb_video_width,
             render_height=args.wandb_video_height,
             min_frames=args.wandb_video_min_frames,
             key="eval/rollout_video",
-            record_on_training_end=True,
-            enabled=True))
+            record_on_training_end=step_video_enabled,
+            enabled=True)
+        callbacks.append(wandb_video_recorder)
+
+    def _record_curriculum_advance_video(cur_level, new_level, stats):
+        if wandb_video_recorder is None:
+            return
+        cur = float(cur_level)
+        new = float(new_level)
+        tag = (
+            f"advance_{cur:.3f}_to_{new:.3f}_"
+            f"step_{int(wandb_video_recorder.num_timesteps):09d}"
+        ).replace(".", "p")
+        extra = {
+            "eval/curriculum_advance_from": cur,
+            "eval/curriculum_advance_to": new,
+            "eval/curriculum_advance_success_rate": float(stats["success_rate"]),
+            "eval/curriculum_advance_force_abort_rate": float(stats["force_abort_rate"]),
+            "eval/curriculum_advance_bad_collision_rate": float(stats["bad_collision_rate"]),
+            "eval/curriculum_advance_unsafe_rate": float(stats["unsafe_rate"]),
+            "eval/curriculum_advance_window": int(stats["eval_window"]),
+        }
+        wandb_video_recorder.record_now(
+            tag=tag,
+            level=cur,
+            episodes_per_video=1,
+            key="eval/curriculum_advance_video",
+            extra_metrics=extra,
+        )
 
     if args.reset_mode == "curriculum":
         callbacks.append(CurriculumScheduler(
@@ -617,7 +812,13 @@ def main():
             force_abort_guard=args.curriculum_force_abort_guard,
             force_abort_retreat=args.curriculum_force_abort_retreat,
             step_size=args.curriculum_step,
-            level_path=args.out / "curriculum_level.txt"))
+            level_path=args.out / "curriculum_level.txt",
+            ent_reheat=args.ent_reheat,
+            target_entropy_schedule=args.target_entropy_schedule,
+            pre_advance_hook=(
+                _record_curriculum_advance_video
+                if transition_video_enabled else None
+            )))
     if not args.no_video and args.video_every > 0:
         callbacks.append(VideoRecorder(env, args.out / "videos",
                                        every_n_episodes=args.video_every,

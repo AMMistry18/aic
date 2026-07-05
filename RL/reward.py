@@ -1,30 +1,13 @@
-"""
-Reward function for image-SAC on the last-inch cable insertion task.
+"""Simple reward for last-inch insertion.
 
-Implements the spec in REWARD_SPEC.md §2-§6, recalibrated for the *corrected*
-MuJoCo scene (v0.3). All components are additive; the caller combines them with
-the weights in RewardConfig (§3).
+The training reward is intentionally small now:
 
-The reward is intentionally framework-agnostic: it consumes plain numpy arrays /
-floats, so it works for SB3, RLlib, skrl, CleanRL, or hand-rolled SAC. No
-PyTorch / Gym dependency at import time.
+    depth progress + sparse success
+    - light pose/contact/action safety costs
 
-v0.2 → v0.3 (after the scene fix that made insertion + contact force real):
-  - Killed the DOUBLE +50 success bonus: `beta_s` (image bonus) is now 0; the
-    single terminal success bonus lives in `r_done` (+50). Previously the agent
-    got +100 at the success step.
-  - Recalibrated the force band to the MEASURED sim contact force (0-8 N,
-    seating 3-5 N) instead of the old 2-20 N (which was never realized, so the
-    term was a flat constant). f_low/f_optimal/f_max = 0.5/4.0/8.0 N.
-  - Added `r_depth`: a POTENTIAL-BASED insertion-depth progress term
-    (Ng et al. 1999). Telescopes to ~+w_depth over a full insertion, is
-    policy-invariant, and gives a low-variance last-inch signal that survives
-    the image term's near-goal plateau / wrist-cam occlusion.
-  - Fixed the numerically-dead scaling of `r_xy` and `r_lateral` (distances
-    were in metres, so the old terms were ~1e-4 — effectively off). Both are
-    now normalised to O(1).
-  - Terminal penalties softened (-10 not -30) since contact is now REQUIRED for
-    success and large abort spikes teach contact-phobia.
+Image distance is optional and defaults off. The scene env can still render and
+log score-style diagnostics, but SAC no longer optimizes a long hand-built
+rubric proxy.
 """
 
 from __future__ import annotations
@@ -43,63 +26,67 @@ import numpy as np
 
 @dataclasses.dataclass(frozen=True)
 class RewardConfig:
-    """All reward hyperparameters in one place. Defaults from REWARD_SPEC §8."""
+    """Reward knobs kept deliberately few and interpretable."""
 
-    # §2.1 image
-    alpha: float = 1.0           # image L1 coefficient (primary dense signal)
-    beta_s: float = 0.0          # image success bonus — 0: the +50 lives in r_done
-    eps: float = 0.02            # image-L1 success threshold (guard only)
+    # Optional image distance. Keep default at zero for geometry-only reward.
+    alpha: float = 1.0
+    beta_s: float = 0.0
+    eps: float = 0.02
+    w_image: float = 0.0
 
-    # §2.2 force piecewise log — calibrated to the MEASURED 0-8 N sim band
-    f_low: float = 0.5           # below = no meaningful contact
-    f_optimal: float = 4.0       # middle of the measured 3-5 N seating band
-    f_max: float = 8.0           # top of the normal seating band; penalise beyond
-    beta_low: float = 0.5
-    gamma: float = 0.5           # force ramp slope (NOT the RL discount)
-    force_depth_gate: float = 0.3  # positive force branch only when depth_norm>gate
+    # Main dense signal: positive only for inserting deeper, negative for backing out.
+    w_depth: float = 30.0
 
-    # §2.2b insertion-depth progress (potential-based)
-    w_depth: float = 8.0         # depth dominates Tier-3 partial insertion
-    disc_gamma: float = 0.99     # discount used for potential shaping (match SAC's)
+    # Small per-step shaping/safety costs. These should guide, not dominate.
+    xy_ref: float = 0.006
+    w_xy: float = 0.35
 
-    # §2.3 tip–port xy progress (normalised)
-    delta_xy: float = 0.5
-    xy_ref: float = 0.005        # 5 mm normaliser so the term is O(1), not O(1e-3)
+    axis_free_rad: float = 0.05
+    axis_ref_rad: float = 0.15
+    w_axis: float = 0.15
 
-    # §2.4 action smoothness
-    delta_a: float = 0.1
-
-    # §2.5 lateral force penalty (per Newton)
-    delta_lat: float = 0.05
-
-    # §2.7 geometry validity penalties (scene env only; 0 when signals omitted)
-    axis_free_rad: float = 0.03       # ~1.7 deg: straight enough is free
-    axis_ref_rad: float = 0.12        # ~6.9 deg beyond free => O(1) penalty
-    collision_ref_m: float = 0.002    # 2 mm excess penetration => O(1) penalty
-
-    # §3 component weights in total
-    w_image: float = 1.0
+    force_free_n: float = 12.0
+    force_ref_n: float = 20.0
     w_force: float = 0.20
-    w_xy: float = 0.20
-    w_action: float = 0.5        # eff. smoothness coef = w_action*delta_a = 0.05
-    w_lateral: float = 1.0       # eff. lateral coef = w_lateral*delta_lat = 0.05
-    w_axis: float = 3.0
-    w_collision: float = 12.0
+
+    lateral_free_n: float = 3.0
+    lateral_ref_n: float = 10.0
+    w_lateral: float = 0.20
+
+    collision_ref_m: float = 0.002
+    w_collision: float = 6.0
+
+    w_action: float = 0.02
+
+    # One-shot terms.
+    success_bonus: float = 50.0
+    bad_collision_penalty: float = 25.0
+    force_abort_penalty: float = 25.0
+    off_limit_penalty: float = 20.0
+    timeout_penalty: float = 15.0
+    off_limit_event_penalty: float = 15.0
+    force_sustain_event_penalty: float = 15.0
 
 
 @dataclasses.dataclass(frozen=True)
 class TerminationConfig:
-    """Termination thresholds for the env wrapper. Calibrated to the 0-8 N band."""
+    """Legacy toy-env termination thresholds; scene_env uses its own richer checks."""
 
-    f_abort_n: float = 15.0      # instant force abort (well above 8 N seating)
-    f_linger_n: float = 10.0     # sustained-force threshold
-    f_linger_sec: float = 0.5    # sustained-force dwell time
-    max_steps: int = 600         # 30 s at 20 Hz
+    f_abort_n: float = 15.0
+    f_linger_n: float = 10.0
+    f_linger_sec: float = 0.5
+    max_steps: int = 600
 
 
 # --------------------------------------------------------------------------- #
 # components
 # --------------------------------------------------------------------------- #
+
+
+def _cap01(x: float, cap: float = 3.0) -> float:
+    if not math.isfinite(x):
+        return 0.0
+    return float(np.clip(x, 0.0, cap))
 
 
 def r_image(
@@ -108,60 +95,24 @@ def r_image(
     cfg: RewardConfig,
     bonus_eligible: bool = True,
 ) -> tuple[float, np.ndarray]:
-    """Dense image reward. Returns (scalar, l1_normalised) so the caller can
-    re-use the L1 for termination checks.
-
-    The `+β_s` bonus defaults to 0 (the success bonus now lives in r_done). If
-    a non-zero β_s is configured, it is only added when `bonus_eligible` — set
-    by the env only at the true geometric-success step.
-    """
+    """Optional L1 image term. Normally weighted by zero."""
     if image_curr.shape != image_goal.shape:
         raise ValueError(
             f"image_curr {image_curr.shape} != image_goal {image_goal.shape}"
         )
     a = image_curr.astype(np.float32)
     b = image_goal.astype(np.float32)
-    l1 = float(np.sum(np.abs(a - b)))
-    # Average absolute pixel difference, normalised to [0, 1]. The scene
-    # renderer returns uint8 images; using raw 0-255 averages made long
-    # non-terminal episodes dominate every scoring-aligned term.
-    norm = l1 / max(a.size * 255.0, 1.0)
+    norm = float(np.mean(np.abs(a - b)) / 255.0) if a.size else 0.0
     bonus = cfg.beta_s if (bonus_eligible and norm < cfg.eps) else 0.0
-    scalar = -cfg.alpha * norm + bonus
-    return scalar, np.array(norm, dtype=np.float32)
+    return -cfg.alpha * norm + bonus, np.array(norm, dtype=np.float32)
 
 
 def r_force(f_z: float, cfg: RewardConfig, depth_norm: float = 1.0) -> float:
-    """Piecewise-logarithmic force reward from §2.2, calibrated to 0-8 N.
-
-    f_z is signed; we use |f_z| because contact along the insertion axis (in
-    either sign convention) counts. `depth_norm` gates the *positive* (contact-
-    reward) branch: below `force_depth_gate` only the penalty branch applies, so
-    the agent cannot farm the force bonus by leaning on the port entrance
-    without inserting.
-    """
+    """Axial force is only a safety cost; no force farming bonus."""
     if not math.isfinite(f_z):
         return 0.0
-    f = abs(float(f_z))
-
-    log_low = cfg.beta_low * math.log1p(cfg.f_low)
-    peak = log_low + cfg.gamma * (cfg.f_optimal - cfg.f_low)
-    gated = depth_norm >= cfg.force_depth_gate
-
-    if f < cfg.f_low:
-        val = cfg.beta_low * math.log1p(f)
-    elif f <= cfg.f_optimal:
-        val = log_low + cfg.gamma * (f - cfg.f_low)
-    elif f < cfg.f_max:
-        val = peak - cfg.gamma * (f - cfg.f_optimal)
-    else:
-        delta = f - cfg.f_max
-        val = peak - cfg.gamma * (cfg.f_max - cfg.f_optimal) - math.log1p(delta) ** 2
-
-    if not gated:
-        # suppress any positive (bonus) contribution before real insertion
-        val = min(val, 0.0)
-    return val
+    excess = max(0.0, abs(float(f_z)) - cfg.force_free_n)
+    return -_cap01(excess / max(cfg.force_ref_n, 1e-6))
 
 
 def r_depth(
@@ -169,76 +120,78 @@ def r_depth(
     prev_depth_norm: Optional[float],
     cfg: RewardConfig,
 ) -> float:
-    """Potential-based insertion-depth progress (Ng et al. 1999).
-
-    Φ(s) = clip(depth_norm, 0, 1), reward = w_depth * (γ·Φ(s') − Φ(s)).
-    Telescopes to ~+w_depth over a full insertion, is policy-invariant, and
-    penalises backing out. Returns 0 if depth info is unavailable (keeps the
-    standalone unit test working without depth signals).
-    """
+    """Dense insertion progress. Full seated progress is worth about w_depth."""
     if depth_norm is None or prev_depth_norm is None:
         return 0.0
-    phi_next = float(np.clip(depth_norm, 0.0, 1.0))
-    phi_prev = float(np.clip(prev_depth_norm, 0.0, 1.0))
-    return cfg.w_depth * (cfg.disc_gamma * phi_next - phi_prev)
+    cur = float(np.clip(depth_norm, 0.0, 1.0))
+    prev = float(np.clip(prev_depth_norm, 0.0, 1.0))
+    return cfg.w_depth * (cur - prev)
 
 
 def r_xy(tip_xy: np.ndarray, port_xy: np.ndarray, cfg: RewardConfig) -> float:
-    """Tip-XY minus port-entrance XY, normalised by `xy_ref` so it is O(1).
-
-    A small centring nudge; the heavy lifting is done by the image term and
-    the depth potential, so this stays a minor auxiliary.
-    """
+    """Small centering cost in the port entrance plane."""
     diff = np.asarray(tip_xy, dtype=np.float32) - np.asarray(port_xy, dtype=np.float32)
     dist = float(np.linalg.norm(diff))
-    return float(-cfg.delta_xy * min(dist / cfg.xy_ref, 1.0))
+    return -_cap01(dist / max(cfg.xy_ref, 1e-6), cap=6.0)
 
 
 def r_action(a_t: np.ndarray, a_prev: Optional[np.ndarray], cfg: RewardConfig) -> float:
-    """Smoothness penalty on residual action difference (jerk is scored)."""
+    """Small smoothness cost on residual action changes."""
     if a_prev is None:
         return 0.0
     diff = np.asarray(a_t, dtype=np.float32) - np.asarray(a_prev, dtype=np.float32)
-    return float(-cfg.delta_a * float(np.linalg.norm(diff)))
+    return -_cap01(float(np.linalg.norm(diff)), cap=4.0)
 
 
 def r_lateral(f_xy: np.ndarray, cfg: RewardConfig) -> float:
-    """Linear penalty on lateral force magnitude (side-loading bends cables)."""
+    """Small side-load cost."""
     if f_xy is None or len(f_xy) == 0:
         return 0.0
     mag = float(np.linalg.norm(np.asarray(f_xy, dtype=np.float32)))
-    return float(-cfg.delta_lat * mag)
+    excess = max(0.0, mag - cfg.lateral_free_n)
+    return -_cap01(excess / max(cfg.lateral_ref_n, 1e-6))
 
 
 def r_axis(axis_error_rad: Optional[float], cfg: RewardConfig) -> float:
-    """Penalty for inserting with the plug axis bent away from the port axis."""
+    """Small cost for a bent plug axis."""
     if axis_error_rad is None or not math.isfinite(axis_error_rad):
         return 0.0
     excess = max(0.0, float(axis_error_rad) - cfg.axis_free_rad)
-    return -min(excess / max(cfg.axis_ref_rad, 1e-6), 3.0)
+    return -_cap01(excess / max(cfg.axis_ref_rad, 1e-6), cap=2.0)
 
 
 def r_collision(penetration_excess_m: Optional[float], cfg: RewardConfig) -> float:
-    """Penalty for excess plug-port penetration beyond the calibrated seated baseline."""
+    """Sharper cost for plug-port interpenetration beyond the calibrated baseline."""
     if penetration_excess_m is None or not math.isfinite(penetration_excess_m):
         return 0.0
     excess = max(0.0, float(penetration_excess_m))
-    return -min(excess / max(cfg.collision_ref_m, 1e-6), 4.0)
+    return -_cap01(excess / max(cfg.collision_ref_m, 1e-6), cap=4.0)
 
 
-def r_done(term_status: Optional[str]) -> float:
-    """One-shot termination bonus/penalty (§2.6). This IS the success bonus."""
+def r_done(term_status: Optional[str],
+           cfg: Optional[RewardConfig] = None,
+           time_frac: Optional[float] = None) -> float:
+    """Sparse terminal outcome."""
+    c = cfg or RewardConfig()
     if term_status == "success":
-        return 50.0
+        return c.success_bonus
     if term_status == "bad_collision":
-        return -25.0
+        return -c.bad_collision_penalty
     if term_status == "force_abort":
-        return -10.0
+        return -c.force_abort_penalty
     if term_status == "off_limit":
-        return -10.0
+        return -c.off_limit_penalty
     if term_status == "timeout":
-        return 0.0
+        return -c.timeout_penalty
     return 0.0
+
+
+def r_events(off_limit_event: bool, force_sustain_event: bool,
+             cfg: RewardConfig) -> tuple[float, float]:
+    """One-shot non-terminal safety events."""
+    off = -cfg.off_limit_event_penalty if off_limit_event else 0.0
+    force = -cfg.force_sustain_event_penalty if force_sustain_event else 0.0
+    return off, force
 
 
 # --------------------------------------------------------------------------- #
@@ -248,9 +201,7 @@ def r_done(term_status: Optional[str]) -> float:
 
 @dataclasses.dataclass
 class RewardBreakdown:
-    """Per-component reward for the step (post-weight). Sum into reward_total
-    is done by compute_reward; each field is the WEIGHTED contribution so the
-    logger can show what actually moved the total."""
+    """Weighted per-component contributions."""
 
     image: float = 0.0
     force: float = 0.0
@@ -260,6 +211,8 @@ class RewardBreakdown:
     lateral: float = 0.0
     axis: float = 0.0
     collision: float = 0.0
+    off_limit: float = 0.0
+    force_sustain: float = 0.0
     done: float = 0.0
     image_l1_norm: float = 0.0
 
@@ -280,38 +233,38 @@ def compute_reward(
     depth_norm: Optional[float] = None,
     prev_depth_norm: Optional[float] = None,
     axis_error_rad: Optional[float] = None,
+    roll_error_rad: Optional[float] = None,
     penetration_excess_m: Optional[float] = None,
+    off_limit_event: bool = False,
+    force_sustain_event: bool = False,
+    success_time_frac: Optional[float] = None,
 ) -> tuple[float, RewardBreakdown]:
-    """Compute every component and return the weighted total + breakdown.
-
-    `bonus_eligible` gates the (now default-off) +β_s image bonus.
-    `depth_norm` / `prev_depth_norm` (insertion fraction in [0,1], current and
-    previous step) drive the potential-based depth term and the force gate;
-    pass both from the env. If omitted, r_depth is 0 and the force gate opens.
-
-    NOTE on breakdown: fields store the WEIGHTED contribution (component ×
-    weight), so `sum(fields) == total`. This differs from v0.2 where fields
-    were pre-weight; the logger/dashboard sums these directly.
-    """
+    """Compute the simple reward and a weighted breakdown."""
     b = RewardBreakdown()
     img_raw, b.image_l1_norm = r_image(image_curr, image_goal, cfg,
                                        bonus_eligible=bonus_eligible)
+
     dnorm = 1.0 if depth_norm is None else float(depth_norm)
-    force_raw = r_force(f_z, cfg, depth_norm=dnorm)
-
+    align_error = axis_error_rad
+    if roll_error_rad is not None and math.isfinite(float(roll_error_rad)):
+        if align_error is None or not math.isfinite(float(align_error)):
+            align_error = float(roll_error_rad)
+        else:
+            align_error = max(float(align_error), float(roll_error_rad))
     b.image = cfg.w_image * img_raw
-    b.force = cfg.w_force * force_raw
-    b.depth = r_depth(depth_norm, prev_depth_norm, cfg)   # already weighted
+    b.depth = r_depth(depth_norm, prev_depth_norm, cfg)
     b.xy = cfg.w_xy * r_xy(tip_xy, port_xy, cfg)
-    b.action = cfg.w_action * r_action(a_t, a_prev, cfg)
+    b.axis = cfg.w_axis * r_axis(align_error, cfg)
+    b.force = cfg.w_force * r_force(f_z, cfg, depth_norm=dnorm)
     b.lateral = cfg.w_lateral * r_lateral(f_xy, cfg)
-    b.axis = cfg.w_axis * r_axis(axis_error_rad, cfg)
     b.collision = cfg.w_collision * r_collision(penetration_excess_m, cfg)
-    b.done = r_done(term_status)                          # unweighted one-shot
+    b.action = cfg.w_action * r_action(a_t, a_prev, cfg)
+    b.off_limit, b.force_sustain = r_events(off_limit_event, force_sustain_event, cfg)
+    b.done = r_done(term_status, cfg, success_time_frac)
 
-    total = (b.image + b.force + b.depth + b.xy + b.action + b.lateral
-             + b.axis + b.collision + b.done)
-    return total, b
+    total = (b.image + b.depth + b.xy + b.axis + b.force + b.lateral
+             + b.collision + b.action + b.off_limit + b.force_sustain + b.done)
+    return float(total), b
 
 
 # --------------------------------------------------------------------------- #
@@ -330,12 +283,7 @@ def check_termination(
     f_linger_dwell_s: float = 0.0,
     bypass_image_success: bool = False,
 ) -> Optional[str]:
-    """§6 termination rules. Returns one of the status strings or None.
-
-    `bypass_image_success=True` skips the image-L1 success check (the env uses
-    the more reliable geometric seated-and-in-contact criterion). Keep it True
-    for the last-inch env — the goal image also matches an empty cavity.
-    """
+    """Legacy toy-env termination helper."""
     if not bypass_image_success and image_l1_norm < cfg_rew.eps:
         return "success"
     if abs(f_z) > cfg_term.f_abort_n:
@@ -361,6 +309,7 @@ __all__ = [
     "r_lateral",
     "r_axis",
     "r_collision",
+    "r_events",
     "r_done",
     "compute_reward",
     "check_termination",

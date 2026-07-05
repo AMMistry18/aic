@@ -1,5 +1,12 @@
 # RL — AIC Last-Inch Insertion (Image-SAC + Reverse Curriculum)
 
+> **UPDATE (2026-07-03, curriculum/reward/video rework).** Curriculum span now
+> exits the cage (`last_inch_m` 0.072: seated → entrance → 26 mm approach) with
+> frontier-band sampling + two-phase x/y/z jitter (§3.5); reward is now simple
+> geometry-first shaping with image distance default-off (§3.3); W&B videos are
+> step-scheduled and repeat reliably (§7.1); SAC defaults retuned to batch 1024
+> / UTD 0.25 / target-entropy −3 (§4).
+
 Residual reinforcement learning for the **final ~1 inch** of fiber-optic cable
 insertion into the AIC task board. The learned policy takes over the contact-rich
 seating that the hand-coded macro controller does worst.
@@ -63,7 +70,7 @@ Notes:
         ▲                                                                 │
         └───────── action (6,) joint residual ◀───────────────────────────┘
                                      │
-             RL/train.py --scene : SAC(MultiInputPolicy, batch 4096)
+             RL/train.py --scene : SAC(MultiInputPolicy, batch 1024, UTD 0.25)
              CombinedImageState (image CNN + generic state MLP)
              CurriculumScheduler + CheckpointManager (atomic, auto-resume)
                                      │
@@ -127,18 +134,33 @@ All paths relative to the repo root `/home/Anshul/AIC_Phase_1/aic_0/aic/`.
 `Box(-1, 1, (6,))` → a **6-DoF UR5e joint residual** (`action * action_joint_scale`,
 default 0.03 rad) added to a gravity-compensated PD hold of the reset pose.
 
-### 3.3 Reward (`RL/reward.py:compute_reward`, weighted sum)
+### 3.3 Reward (`RL/reward.py:compute_reward`, simple geometry-first shaping)
 | term | intent |
 |---|---|
-| `r_image` (w=1.0) | dense image-L1 to the seated goal image, computed at **native 1152×1024** (center cam) for last-inch pixel accuracy |
-| `r_depth` (w=2.0) | **potential-based** insertion-depth progress (Ng 1999); telescopes to +2 over a full seat |
-| `r_force` (w=0.05) | seating-force shaping, calibrated band; positive branch gated on `depth_norm>0.3` |
-| `r_xy` / `r_lateral` / `r_action` | centring nudge / side-load penalty / jerk penalty |
-| `r_axis` / `r_collision` | straight-insertion penalty / excess plug-port penetration penalty |
-| `r_done` | **+50 success / −25 bad_collision / −10 force_abort / −10 off_limit / 0 timeout** |
+| `r_depth` (w=20) | main dense term: `depth_norm - prev_depth_norm`; positive for inserting deeper, negative for backing out, zero for just sitting still |
+| `r_done` | sparse task result: `+50` success, `-10` bad collision / force abort, `0` timeout |
+| `r_xy` / `r_axis` | tiny per-step alignment costs for being off-center or angled |
+| `r_force` / `r_lateral` / `r_collision` | safety costs only; there is no positive force reward to farm |
+| `r_action` | tiny smoothness cost on residual action changes |
+| `r_events` | one-shot non-terminal safety costs for off-limit contact or sustained high force |
+| `r_image` | optional image-L1 term; default weight is `0`, so the reward renderer is skipped unless `--image-reward-weight > 0` |
 
 Contact force = **raw FT − baseline** (the ~−10.5 N gripped-plug weight, captured
 at reset). `f_z` = force along the insertion axis; `f_xy` = lateral.
+
+**Penetration baseline is depth-dependent** (2026-07-04): the exported cage's
+soft-contact overlap varies with depth (~5.4 mm mid-cage vs 3.4 mm seated), so
+`SceneInsertEnv._calibrate_pen_baseline()` sweeps 9 jitter-free resets along
+the axis at construction and `plug_port_penetration_excess_m` charges only the
+excess over that curve (+0.5 mm margin). Before this, a single seated baseline
+made the collision term tax the whole mid-cage traversal ~−1.7/step (and up to
+−12/step under the pre-2026-07-04 weights) for merely existing there.
+
+The published-style score diagnostics are still logged separately from
+`SceneInsertEnv._score_diag`; they are not mirrored term-by-term in the training
+reward anymore. Validation: `RL/scripts/validate_reward_geometry.py` (22 unit +
+in-sim probes, all PASS 2026-07-04: depth telescopes exactly, nothing farmable,
+scripted outside-in insertion nets +65.5 with success, sit-still ≈ −0.03/step).
 
 ### 3.4 Success / termination
 - **success** = plug tip near the seated pose (`success_axial_tol_m` 6 mm,
@@ -148,18 +170,40 @@ at reset). `f_z` = force along the insertion axis; `f_xy` = lateral.
   `|axial contact force| > success_force_n` (2 N).
 - **bad_collision** = excess plug-port penetration beyond 3 mm, or a bent plug
   axis beyond ~11 deg once the plug has entered the last-inch corridor.
-- **force_abort** = `|force| > force_abort_n` (safety).
+- **force_abort** = contact force over `force_abort_n` (60 N) for
+  `force_abort_dwell_steps` (3) **consecutive** steps, or instantly past
+  `force_abort_hard_n` (120 N). Single-step PD contact transients no longer end
+  episodes — instantaneous 60 N aborts were 43% of level-0.1 terminations in
+  the 80k run and pinned the curriculum at the 0.05↔0.1 boundary.
+- **reset acceptance**: in-cage starts additionally require the settled lateral
+  error ≤ `reset_inport_lateral_tol_m` (3 mm), so the 6 mm reset-IK tolerance
+  cannot seed wedged starts the residual policy can't recover from.
 - **timeout** = `max_episode_steps` (200). SB3 `TimeLimit` bootstraps Q on truncation.
 
 ### 3.5 Reverse curriculum (last-inch, relative to the port)
-Level 0 = plug **seated** at the SFP entrance frame; as level→1, reset samples
-retract up to `last_inch_m` (4 cm) along the port-frame insertion axis plus
-port-frame lateral/yaw/tilt jitter. `CurriculumScheduler` advances the level
-when success rate crosses the threshold and the recent force-abort rate stays
-below the guard; after every level change it clears the window so the next
-decision uses fresh episodes. The level is written to
+Retract span `last_inch_m = 0.072 m`: **seated (0) → cage entrance (0.046) →
+~26 mm of free-space approach**. (The old 0.04 span never exited the cage —
+seated depth 0.046 > 0.04 — so "level 1" still started 6 mm *inside* the
+entrance and the policy never saw the approach.)
+
+Start sampling (`_sample_start_tcp`) is **frontier-band**: retraction is drawn
+from `[(level − curriculum_band) · span, level · span]` (band 0.25) so the
+start distribution tracks the level instead of staying half-trivial, with a
+`curriculum_easy_frac` (0.2) chance of an easy replay start in `[0, level]`
+against forgetting. Jitter is **two-phase**: while the sampled tip is inside
+the cage, lateral/yaw/tilt stay at sub-mm `*_inport` values (SFP clearance);
+once outside the entrance they widen linearly to the full level-1 values
+(±6 mm x/y, ±0.12 rad yaw, ±0.04 rad tilt). Net effect: level growth reads as
+*seated → slides out of the port → approach pose varies in x/y/z*.
+
+`CurriculumScheduler` advances when the success rate over a **fresh**
+`eval_window` crosses the threshold and the recent force-abort+bad-collision
+rate stays below the guard; it retreats on low success or high unsafe rate,
+and clears the window after every change. The level is written to
 `outputs/<run>/curriculum_level.txt` (env re-reads on reset → works across
-`SubprocVecEnv` workers).
+`SubprocVecEnv` workers). `train.py` deletes a stale level file on any fresh
+(non-resume) start — previously a leftover file silently started a "fresh"
+run mid-curriculum.
 
 ---
 
@@ -169,10 +213,20 @@ decision uses fresh episodes. The level is written to
 # via crun.sh inside the container:
 pixi run python RL/train.py --scene --port-type sfp --steps 500000
 ```
-Defaults (batch-4096 Image-SAC, reasoned for a single 5090):
-`--num-envs 16 --batch-size 4096 --train-freq 1 --gradient-steps 2`
-(UTD≈0.125; never `-1`), `--buffer-size 500000` (uint8 image obs is mandatory),
-`--warmup-steps 20000 --tau 0.01 --gamma 0.99 --ent-coef auto`,
+Defaults (retuned 2026-07-03 for exploration; reasoned for a single 5090):
+`--num-envs 16 --batch-size 1024 --train-freq 1 --gradient-steps 4`
+(UTD=0.25 — same 4096 samples consumed per vec step as the old batch-4096
+config, but 4 distinct smaller updates: noisier gradients + 2× faster policy
+adaptation as the curriculum shifts the start distribution; never `-1`),
+`--buffer-size 50000` (uint8 image obs is mandatory; RAM = buffer ×
+channels·H·W × 2 for obs+next_obs → 128²×9 ≈ 295 KB/transition, 256²×9 ≈
+1.18 MB/transition. **On this 30 GB box use `--image-size 128
+--buffer-size 40000`** — 256² obs + any useful buffer does not fit; the
+reward image stays native-res either way since it is never stored),
+`--warmup-steps 10000` (level-0 starts are seated, long random warmups just
+log 1-step aborts), `--tau 0.005 --gamma 0.99 --ent-coef auto`,
+`--target-entropy -3.0` (SB3's auto = −dim(A) = −6 collapses exploration noise
+early on this 6-D residual task; pass `auto` to restore),
 `--image-size 256 --reward-image-res 0` (0 = native reward distance).
 
 > **Scene env is heavy to construct/reset** (IK + settle). For big `--num-envs`,
@@ -281,6 +335,31 @@ renders.
 when present, sets `WANDB_API_KEY` for the process, and resolves the target as:
 CLI `--wandb-entity/--wandb-project` → env `WANDB_ENTITY/WANDB_PROJECT` →
 `wandb/info.txt`. The API key is not written to run configs.
+
+**Videos** (`eval/rollout_video`) are recorded every
+`--wandb-video-every-steps` env steps (default **5000**, on whenever W&B is),
+each clip stitching `--wandb-video-episodes` (2) deterministic eval episodes of
+up to `--wandb-video-steps` (200) steps with a metric overlay, on a persistent
+eval env. With the default `--wandb-video-level -1`, **every episode mirrors
+the CURRENT training curriculum level** (clips show the actual training
+distribution); full-task competence is tracked numerically by the score eval,
+which stays pinned at level 1.0. Pass `--wandb-video-level 1.0` to pin video
+episodes to the full task instead. The old `--wandb-video-every` (episodes)
+gate is deprecated: with a vec env the episode counter jumps in batches, so its
+`% N == 0` check fired once at episode 1 and then ~never — that was the "one
+4-second video" symptom.
+Score curves (`eval/*`) come from `--wandb-eval-every` (default 10000), each
+point averaging `--wandb-eval-episodes` (2) no-video eval episodes at level 1.0.
+
+### 7.2 Image-distance reward validation
+`RL/scripts/validate_image_reward.py` sweeps controlled port-frame placements
+(axial 0→7.2 cm, lateral ±6 mm) and checks the image-L1 signal:
+2026-07-03 result — axial Spearman **+0.989** (native) / **+0.984** (256²),
+dynamic range 1.0, PASS; but the curve is basin-shaped (0→0.23 within the
+first 6 mm, then nearly flat) and the lateral gradient at 10 mm standoff is
+slightly *misleading* (wrist-cam parallax). Consequence: the image term is the
+sharp near-goal basin; `r_depth`/`r_xy` (true port-frame geometry) own the
+approach and centring gradients. Plot: `RL/tests/new_image_reward_validation.png`.
 
 ---
 
