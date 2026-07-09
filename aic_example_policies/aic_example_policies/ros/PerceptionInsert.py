@@ -70,6 +70,7 @@ FINAL_INSERT_OBS_LEN = 69
 FINAL_INSERT_ACTION_MODE = "bounded_tip_pose_delta"
 FINAL_INSERT_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)
 FINAL_INSERT_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
+DEFAULT_SFP_FINAL_INSERT_POLICY = "final_insert_sfp_085.zip"
 
 # SC descent compliance: high XY stiffness keeps the plug tip locked onto
 # the perceived port XY against cable tension, plug-boot weight, and side
@@ -313,12 +314,22 @@ class PerceptionInsert(Policy):
             target_frame, source_frame, Time(), Duration(seconds=timeout_sec)
         )
 
+    def _final_insert_default_policy_path(self):
+        bundled_sfp = Path(__file__).parent / "weights" / DEFAULT_SFP_FINAL_INSERT_POLICY
+        if bundled_sfp.exists():
+            return str(bundled_sfp)
+        bundled_sc = Path(__file__).parent / "weights" / "final_insert_sc_model73.ts"
+        if bundled_sc.exists():
+            return str(bundled_sc)
+        return None
+
     def _load_final_insert_policy(self):
-        # The learned final-insertion RL hook is disabled by default. The
-        # deterministic spiral seating (SC) and hand-coded SFP search own
-        # the last mm. To re-enable the RL residual / handoff, set
-        # AIC_FINAL_INSERT_DISABLE=0 (and optionally AIC_FINAL_INSERT_MODE).
-        if os.environ.get("AIC_FINAL_INSERT_DISABLE", "1").strip().lower() not in (
+        # SFP now defaults to the saved SAC .85 checkpoint for the final
+        # seating/insertion handoff. Env vars still provide an escape hatch:
+        # set AIC_FINAL_INSERT_DISABLE=1 to force hand-coded seating only, or
+        # AIC_FINAL_INSERT_POLICY to point at a different .zip/.onnx/.ts policy.
+        disable_default = "0" if self._final_insert_default_policy_path() else "1"
+        if os.environ.get("AIC_FINAL_INSERT_DISABLE", disable_default).strip().lower() not in (
             "0", "false", "no", "off", ""
         ):
             self.get_logger().info(
@@ -328,10 +339,8 @@ class PerceptionInsert(Policy):
             return
         policy_path = os.environ.get("AIC_FINAL_INSERT_POLICY")
         if not policy_path:
-            bundled_policy = Path(__file__).parent / "weights" / "final_insert_sc_model73.ts"
-            if bundled_policy.exists():
-                policy_path = str(bundled_policy)
-            else:
+            policy_path = self._final_insert_default_policy_path()
+            if not policy_path:
                 return
         policy_path = str(Path(policy_path).expanduser().resolve())
         if not os.path.exists(policy_path):
@@ -2333,9 +2342,12 @@ class PerceptionInsert(Policy):
             depth_low = -0.006
             depth_high = 0.008
         else:
-            xy_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_XY_GATE_M", "0.012"))
-            depth_low = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_LOW_M", "-0.030"))
-            depth_high = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_HIGH_M", "0.012"))
+            # The bundled .85 SAC checkpoint is a contact-zone skill. Keep
+            # scripted controls responsible for approach and seating; only hand
+            # off once the tip is inside the port and needs final settling.
+            xy_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_XY_GATE_M", "0.008"))
+            depth_low = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_LOW_M", "0.020"))
+            depth_high = float(os.environ.get("AIC_FINAL_INSERT_SFP_DEPTH_HIGH_M", "0.080"))
             axis_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_AXIS_GATE", "0.90"))
             twist_gate = float(os.environ.get("AIC_FINAL_INSERT_SFP_TWIST_GATE", "0.75"))
             if metrics["axis"] < axis_gate:
@@ -2440,6 +2452,27 @@ class PerceptionInsert(Policy):
         )
         if not gate_ok:
             return False
+
+        obs0 = get_observation()
+        if obs0 is not None:
+            fts0 = self._fts_z(obs0)
+            fts_delta0 = fts0 - fts_baseline
+            pre_seated_margin = float(os.environ.get("AIC_FINAL_INSERT_PRESEATED_MARGIN_M", "0.0015"))
+            pre_seated_xy = float(os.environ.get("AIC_FINAL_INSERT_PRESEATED_XY_M", "0.006"))
+            if (
+                handoff_metrics["depth"] >= depth_target - pre_seated_margin
+                and handoff_metrics["xy"] <= pre_seated_xy
+                and fts_delta0 <= 24.0
+                and abs(fts0) <= 80.0
+            ):
+                self.get_logger().info(
+                    "Scripted controller already reached final insertion depth; "
+                    "skipping learned actions | "
+                    f"depth={handoff_metrics['depth']*1000:.1f}mm "
+                    f"xy={handoff_metrics['xy']*1000:.1f}mm "
+                    f"force_delta={fts_delta0:.1f}N"
+                )
+                return True
 
         self._final_insert_target_tip_xyz = handoff_metrics["tip"].copy()
         self._final_insert_target_tip_quat = handoff_metrics["tip_quat"]
@@ -3313,14 +3346,17 @@ class PerceptionInsert(Policy):
                     f"y={self._tip_y_error_integrator:.4f})"
                 )
                 if insertion_depth >= INSERTION_DEPTH[task.port_type] - 0.003: # give margin for noise / impedance lag
+                    seated_in_descent = True
                     if task.port_type == "sc":
-                        seated_in_descent = True
                         self.get_logger().info(
                             f"Full insertion depth reached at {insertion_depth*1000:.1f}mm during SC descent; "
                             "skipping SC seating search"
                         )
                     else:
-                        self.get_logger().info(f"Full insertion depth reached at {insertion_depth*1000:.1f}mm!")
+                        self.get_logger().info(
+                            f"Full insertion depth reached at {insertion_depth*1000:.1f}mm during SFP descent; "
+                            "skipping learned handoff and seating search"
+                        )
                     break
 
                 if task.port_type == "sfp":
@@ -3510,11 +3546,21 @@ class PerceptionInsert(Policy):
         self.get_logger().info(f"Descent CSV: {csv_path}")
 
         learned_seated = False
-        final_insert_mode = os.environ.get("AIC_FINAL_INSERT_MODE", "assisted").strip().lower()
+        default_final_insert_mode = "handoff" if task.port_type == "sfp" else "assisted"
+        final_insert_mode = os.environ.get(
+            "AIC_FINAL_INSERT_MODE",
+            default_final_insert_mode,
+        ).strip().lower()
+        sfp_pre_seating_handoff = os.environ.get(
+            "AIC_FINAL_INSERT_SFP_PRE_SEATING_HANDOFF",
+            "0",
+        ).strip().lower() in ("1", "true", "yes", "on")
         if (
             not fts_stop
+            and not seated_in_descent
             and self._final_insert_policy is not None
             and final_insert_mode in ("handoff", "handoff_owner", "owner")
+            and (task.port_type != "sfp" or sfp_pre_seating_handoff)
         ):
             learned_seated = self._run_final_insert_policy(
                 task, get_observation, move_robot, X, port_transform, fts_baseline
@@ -3523,14 +3569,26 @@ class PerceptionInsert(Policy):
                 self.get_logger().info("Learned final-insertion policy succeeded; skipping hand-coded seating search")
             else:
                 self.get_logger().info("Learned final-insertion policy did not confirm success; falling back to hand-coded seating search")
+        elif (
+            task.port_type == "sfp"
+            and not fts_stop
+            and not seated_in_descent
+            and self._final_insert_policy is not None
+            and final_insert_mode in ("handoff", "handoff_owner", "owner")
+        ):
+            self.get_logger().info(
+                "Deferring learned SFP final-insertion handoff until after deterministic seating search"
+            )
         elif not fts_stop and self._final_insert_policy is not None and task.port_type == "sc":
             self.get_logger().info(
                 "Using assisted final-insertion mode: deterministic SC seating owns the motion, "
                 "RL supplies bounded residuals"
             )
 
-        if task.port_type == "sfp" and not fts_stop and not learned_seated:
+        sfp_seating_ran = False
+        if task.port_type == "sfp" and not fts_stop and not learned_seated and not seated_in_descent:
             self.get_logger().info("Starting SFP seating search at port lip")
+            sfp_seating_ran = True
             small_offsets = [
                 (0.0, 0.0),
                 # These two residuals have been the useful "key jiggle" in
@@ -3703,6 +3761,25 @@ class PerceptionInsert(Policy):
                 except TransformException as ex:
                     self.get_logger().warn(f"TF fail final SFP settle: {ex}")
                 self.sleep_for(2.0)
+
+        if (
+            task.port_type == "sfp"
+            and sfp_seating_ran
+            and not fts_stop
+            and not learned_seated
+            and self._final_insert_policy is not None
+            and final_insert_mode in ("handoff", "handoff_owner", "owner")
+        ):
+            self.get_logger().info(
+                "Trying learned SFP final-insertion policy after deterministic seating search"
+            )
+            learned_seated = self._run_final_insert_policy(
+                task, get_observation, move_robot, X, port_transform, fts_baseline
+            )
+            if learned_seated:
+                self.get_logger().info("Post-seating learned SFP policy confirmed final insertion")
+            else:
+                self.get_logger().info("Post-seating learned SFP policy did not confirm final insertion")
 
         if (
             task.port_type == "sc"

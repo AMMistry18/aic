@@ -24,3 +24,8 @@ wandb/info.txt
 
 # Ignore my-testing folder in testing folder
 testing/my-testing/*
+
+# student_teacher distillation dataset (large, regenerable via distill_dataset.py)
+RL/student_teacher/dataset/
+# RL runtime outputs (checkpoints, replay buffers, rollouts)
+RL/output/
