@@ -7,7 +7,8 @@ A "run" is uniquely identified by a SHA256 hash of:
     - all env hyperparameters (start-pose distribution, dt, etc.)
     - the observation spec (image H/W/n_cams)
     - the training hyperparameters (lr, batch size, buffer size, warmup)
-    - the git rev of the RL folder (so any code change invalidates)
+    - the committed Git revision and runtime environment sources (so both
+      committed and uncommitted control/reward changes invalidate)
     - the contents of the MJCF XML (so scene changes invalidate)
 
 `cache_hit(out_dir, key)` returns the existing checkpoint path if a prior
@@ -58,6 +59,23 @@ def _mjcf_xml() -> str:
         return ""
 
 
+def _runtime_sources() -> str:
+    """Return source files that define rollout dynamics and rewards.
+
+    Git revision alone does not see an uncommitted edit. These files are part
+    of the environment contract, so a checkpoint trained before any of them
+    changes must never be resumed automatically.
+    """
+    try:
+        root = _rl_root()
+        return "::".join(
+            (root / name).read_text(encoding="utf-8")
+            for name in ("scene_env.py", "reward.py")
+        )
+    except OSError:
+        return ""
+
+
 def make_cache_key(cfg: Mapping[str, Any]) -> str:
     """Compute a stable SHA256 hash over the config dict.
 
@@ -67,6 +85,7 @@ def make_cache_key(cfg: Mapping[str, Any]) -> str:
     enriched = dict(cfg)
     enriched["_git_rev"] = _git_rev(_rl_root())
     enriched["_mjcf_xml"] = _mjcf_xml()
+    enriched["_runtime_sources"] = _runtime_sources()
     payload = json.dumps(enriched, sort_keys=True, default=str).encode()
     return hashlib.sha256(payload).hexdigest()[:16]
 

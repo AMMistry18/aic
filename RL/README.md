@@ -33,3 +33,8 @@ pixi run python RL/residual_sac/trainer.py --steps 500000 --reset-mode curriculu
 ```
 
 The real scene is the only supported environment. Historical procedural, recorded-rollout, and placeholder wrappers were removed.
+
+The GPU-vectorized port of this same task lives in
+`aic_utils/aic_isaac_sim/`. Read its `HANDOFF.md` before generating USD assets
+or launching Isaac SAC; it records the physics-parity gates that cannot be
+validated on a machine without Isaac Sim and an NVIDIA GPU.

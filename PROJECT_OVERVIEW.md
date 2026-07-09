@@ -1,8 +1,8 @@
 # AIC Phase 1 — Project Overview
 
-*Last updated: 2026-07-03. Top-level map of this repo and the overall strategy.
-Deep dives live in `RL/README.md` and the official docs in
-`../aic_1/aic-phase-1/docs/`.*
+*Last updated: 2026-07-09. Top-level map of this repo and the overall strategy.
+Deep dives live in `RL/README.md`, `aic_utils/aic_isaac_sim/HANDOFF.md`, and
+the official docs in `../aic_1/aic-phase-1/docs/`.*
 
 ---
 
@@ -57,9 +57,11 @@ Flowstate (cloud portal)                          this repo
 1. **Macro (Flowstate)** — built-in perception/grasp/motion-plan skill blocks
    get the plug near the port. Custom perception (YOLO-pose port detection,
    below) supports adapting to the randomized layout.
-2. **Micro (this repo, `RL/`)** — image-based **SAC residual policy** takes
-   over for the final ~1 inch: wrist-camera images + F/T + proprio in, 6-DoF
-   pose deltas out, on top of the hand controller's impedance command.
+2. **Micro (this repo, `RL/`)** — a **SAC residual policy** takes over for the
+   final approach: proprioception + TCP pose + F/T in, six incremental UR5e
+   joint targets out, on top of the hand controller's impedance command. The
+   MuJoCo environment can expose wrist images, but the active reward and Isaac
+   GPU port are state based.
 
 ---
 
@@ -127,6 +129,7 @@ Fork of the official `intrinsic-dev/aic` toolkit. **Bold = our additions.**
 | Path | What |
 | :--- | :--- |
 | **`RL/`** | Last-inch insertion RL: real MuJoCo scene, reward, compact SB3 SAC, and full residual-SAC training. See `RL/README.md`. |
+| **`aic_utils/aic_isaac_sim/`** | GPU-vectorized Isaac Lab `DirectRLEnv`, MJCF-to-USD bridge, skrl SAC config, smoke/training launchers, and the runtime-validation handoff. |
 | **`train_sc.py`** | YOLO-pose training for **SC port** detection (4 keypoints; NIC recipe tuned for tiny ports). Weights → `~/bestSC.pt`. |
 | **`perception_core.py`** | Standalone (no-ROS) perception helpers: NIC/SC detection + multi-camera triangulation. |
 | **`eval_sc_pose_model.py`, `eval_color_sc.py`, `sc_pose_sanity_check.py`, `sc_policy_eval_summary.py`** | Perception/policy eval + sanity-check scripts. |

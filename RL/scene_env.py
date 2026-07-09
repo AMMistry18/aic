@@ -80,11 +80,18 @@ class SceneEnvConfig:
     scene_path: str = _DEFAULT_SCENE
     home_qpos: tuple = AIC_HOME
     settle_steps: int = 120
-    control_substeps: int = 5
+    # AIC runs its impedance controller at 500 Hz. Keep one policy action for
+    # 50 ms (20 Hz), matching the final-insertion policy cadence and score
+    # timing used by the AIC/Gazebo stack.
+    policy_dt_s: float = 0.05
+    control_substeps: int = 25
     max_episode_steps: int = 200
-    # base PD controller (torque motors) + residual action scaling
-    kp: float = 200.0
-    kd: float = 25.0
+    # Joint impedance defaults from aic_bringup/config/aic_ros2_controllers.yaml.
+    # MuJoCo's general actuators accept torque commands, so this is the same
+    # K(q_des-q) + D(dq_des-dq) + gravity-compensation form as AIC.
+    joint_stiffness: tuple = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0)
+    joint_damping: tuple = (40.0, 40.0, 40.0, 15.0, 15.0, 15.0)
+    joint_torque_limit: tuple = (150.0, 150.0, 150.0, 28.0, 28.0, 28.0)
     action_joint_scale: float = 0.01   # rad per policy step at |action|=1
     action_joint_limit: float = 0.35   # rad envelope around the reset arm target
     gripper_ctrl: float = 0.0
@@ -214,15 +221,15 @@ class SceneEnvConfig:
     # pose (per port-frame axis). z must cover the full last-inch travel.
     cart_pos_limit_m: float = 0.10
     cart_rot_limit_rad: float = 0.35
-    # impedance gains: mirror aic_bringup/config/aic_ros2_controllers.yaml
-    # cartesian_impedance defaults (stiffness [100,100,100,50,50,50],
-    # damping [40,40,40,15,15,15], maximum_wrench 10)
-    cart_kp_pos: float = 100.0           # N/m
-    cart_kd_pos: float = 40.0            # N/(m/s)
-    cart_kp_rot: float = 50.0            # Nm/rad
-    cart_kd_rot: float = 15.0            # Nm/(rad/s)
+    # Cartesian impedance defaults from aic_ros2_controllers.yaml:
+    # stiffness [75]*6, damping [35]*6, maximum_wrench [10]*6, and a
+    # damping-only nullspace term of [10]*6.
+    cart_kp_pos: float = 75.0             # N/m
+    cart_kd_pos: float = 35.0             # N/(m/s)
+    cart_kp_rot: float = 75.0             # Nm/rad
+    cart_kd_rot: float = 35.0             # Nm/(rad/s)
     cart_max_wrench: tuple = (10.0, 10.0, 10.0, 10.0, 10.0, 10.0)
-    cart_joint_damping: float = 1.0      # extra joint-space damping Nm/(rad/s)
+    cart_nullspace_damping: float = 10.0
     # the <general> actuators are force-unlimited, so clip here (UR5e efforts)
     cart_torque_limit: tuple = (150.0, 150.0, 150.0, 28.0, 28.0, 28.0)
     # --- optional scripted base insertion (residual-on-script) -------------
@@ -252,8 +259,26 @@ class SceneInsertEnv(gym.Env):
         self._action_dim = int(cfg.cart_action_dims) if self._cart_mode else 6
         self._cart_max_wrench = np.asarray(cfg.cart_max_wrench, dtype=np.float64)
         self._cart_tau_limit = np.asarray(cfg.cart_torque_limit, dtype=np.float64)
+        self._joint_stiffness = np.asarray(cfg.joint_stiffness, dtype=np.float64)
+        self._joint_damping = np.asarray(cfg.joint_damping, dtype=np.float64)
+        self._joint_tau_limit = np.asarray(cfg.joint_torque_limit, dtype=np.float64)
+        if any(v.shape != (6,) for v in (
+                self._cart_max_wrench, self._cart_tau_limit,
+                self._joint_stiffness, self._joint_damping, self._joint_tau_limit)):
+            raise ValueError("all arm impedance vectors must contain six values")
         self.model = mujoco.MjModel.from_xml_path(cfg.scene_path)
         self.data = mujoco.MjData(self.model)
+        if int(cfg.control_substeps) < 1:
+            raise ValueError("control_substeps must be positive")
+        self._physics_dt_s = float(self.model.opt.timestep)
+        self._policy_dt_s = self._physics_dt_s * int(cfg.control_substeps)
+        if not np.isclose(self._policy_dt_s, cfg.policy_dt_s, rtol=0.0,
+                          atol=self._physics_dt_s * 0.5):
+            raise ValueError(
+                "policy_dt_s must equal scene timestep * control_substeps; "
+                f"got {cfg.policy_dt_s:g} != {self._physics_dt_s:g} * "
+                f"{cfg.control_substeps} ({self._policy_dt_s:g})"
+            )
 
         jid = lambda n: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, n)
         bid = lambda n: mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, n)
@@ -858,7 +883,10 @@ class SceneInsertEnv(gym.Env):
 
     def _base_torque(self, target):
         q = self.data.qpos[self._arm_qadr]; qd = self.data.qvel[self._arm_vadr]
-        return self.cfg.kp * (target - q) - self.cfg.kd * qd + self.data.qfrc_bias[self._arm_vadr]
+        tau = (self._joint_stiffness * (target - q)
+               - self._joint_damping * qd
+               + self.data.qfrc_bias[self._arm_vadr])
+        return np.clip(tau, -self._joint_tau_limit, self._joint_tau_limit)
 
     def _clip_action_target(self, target):
         lo = self._reset_arm_target - self.cfg.action_joint_limit
@@ -919,10 +947,15 @@ class SceneInsertEnv(gym.Env):
         wrench = np.concatenate([force, torque])
         wrench_sat = bool(np.any(np.abs(wrench) > self._cart_max_wrench))
         wrench = np.clip(wrench, -self._cart_max_wrench, self._cart_max_wrench)
-        tau = (Jp[:, self._arm_vadr].T @ wrench[:3]
-               + Jr[:, self._arm_vadr].T @ wrench[3:]
-               + self.data.qfrc_bias[self._arm_vadr]
-               - cfg.cart_joint_damping * self.data.qvel[self._arm_vadr])
+        J = np.vstack((Jp[:, self._arm_vadr], Jr[:, self._arm_vadr]))
+        qd_arm = self.data.qvel[self._arm_vadr]
+        # AIC applies its damping-only nullspace controller after the Cartesian
+        # wrench. Project it into the joint nullspace so it does not fight the
+        # commanded TCP motion.
+        nullspace = np.eye(6) - J.T @ np.linalg.pinv(J.T)
+        tau = (J.T @ wrench
+               + nullspace @ (-cfg.cart_nullspace_damping * qd_arm)
+               + self.data.qfrc_bias[self._arm_vadr])
         tau_sat = bool(np.any(np.abs(tau) > self._cart_tau_limit))
         tau = np.clip(tau, -self._cart_tau_limit, self._cart_tau_limit)
         return tau, wrench, wrench_sat, tau_sat, pos_err, rot_err
@@ -1065,6 +1098,10 @@ class SceneInsertEnv(gym.Env):
         obs = self._obs()
         total, breakdown, term_status = self._reward_and_term(obs, action)
         self._last_action = action.astype(np.float32)
+        # The post-step observation consumed by the next policy call must carry
+        # the action that produced it. Reward computation above still sees the
+        # prior action for the action-delta penalty.
+        obs["last_action"] = self._last_action.copy()
         terminated = term_status in ("success", "force_abort", "bad_collision", "off_limit")
         truncated = (term_status == "timeout") or (self._step_count >= self.cfg.max_episode_steps)
         score_info = self._score_diag(term_status)
@@ -1088,7 +1125,10 @@ class SceneInsertEnv(gym.Env):
                if not isinstance(v, str)},
             "plug_axis_error_rad": float(self._plug_axis_error()),
             "plug_roll_error_rad": float(self._plug_roll_error()),
-            "wallclock": float(self._step_count) * 0.05,
+            "wallclock": float(self._step_count) * self._policy_dt_s,
+            "physics_dt_s": self._physics_dt_s,
+            "policy_dt_s": self._policy_dt_s,
+            "policy_hz": 1.0 / self._policy_dt_s,
             "curriculum_level": float(self._curriculum_level),
             "action_mode": self.cfg.action_mode,
             **score_info,
@@ -1264,7 +1304,7 @@ class SceneInsertEnv(gym.Env):
         approximates the official evaluator with geometry/contact signals we can
         observe inside this single-ended last-inch environment.
         """
-        dt = 0.05
+        dt = self._policy_dt_s
         duration_s = float(self._step_count) * dt
         fc = self._contact_force()
         force_norm = float(np.linalg.norm(fc))

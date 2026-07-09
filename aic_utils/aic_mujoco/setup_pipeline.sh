@@ -289,9 +289,29 @@ step_mjcf() {
 }
 
 # ============================================================================
-# STEP 6: pixi env with mujoco-warp / mujoco.mjx
+# STEP 6: Pixi environment with classic MuJoCo
 # ============================================================================
-step_mjx() {
+step_pixi() {
+  log "STEP 6: Pixi environment with classic MuJoCo"
+  cd "$REPO_ROOT"
+
+  log "  pixi install (locked project environment)"
+  pixi install 2>&1 | tail -20
+
+  log "  verifying classic MuJoCo"
+  pixi run python - <<'PY'
+import sys
+import mujoco
+print("python:", sys.version.split()[0])
+print("mujoco:", mujoco.__version__)
+PY
+  ok "classic MuJoCo installed and verified"
+}
+
+# Retained only as a compatibility entrypoint. The RL setup uses classic
+# MuJoCo; GPU acceleration belongs to the separate Isaac Sim port.
+step_mjx_legacy() {
+  fail "MJX is no longer part of the MuJoCo RL setup; use the Isaac Sim port for GPU acceleration."
   log "STEP 6: pixi env with mujoco.mjx (GPU-backed)"
 
   cd "$REPO_ROOT"
@@ -345,8 +365,8 @@ step_smoke() {
   log "STEP 7: smoke tests"
   cd "$REPO_ROOT"
 
-  log "  7.1 mujoco scene loads"
-  pixi run python RL/scripts/setup_mujoco.py --steps 50 \
+  log "  7.1 real scene + Cartesian controller smoke test"
+  MUJOCO_GL=${MUJOCO_GL:-egl} pixi run python RL/scripts/cartesian_smoke.py --steps 3 --settle 20 \
       || warn "scene.xml failed to load — run step 5 (mjcf) first"
 
   log "  7.2 wandb connectivity"
@@ -371,7 +391,7 @@ case "$PHASE" in
     step_workspace
     step_sdf
     step_mjcf
-    step_mjx
+    step_pixi
     step_smoke
     ;;
   deps)      step_deps ;;
@@ -379,10 +399,11 @@ case "$PHASE" in
   workspace) step_workspace ;;
   sdf)       step_sdf ;;
   mjcf)      step_mjcf ;;
-  mjx)       step_mjx ;;
+  pixi)      step_pixi ;;
+  mjx)       step_mjx_legacy ;;
   smoke)     step_smoke ;;
   *)
-    echo "Usage: $0 {all|deps|ros|workspace|sdf|mjcf|mjx|smoke}"
+    echo "Usage: $0 {all|deps|ros|workspace|sdf|mjcf|pixi|mjx|smoke}"
     exit 2
     ;;
 esac

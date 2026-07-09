@@ -14,9 +14,8 @@ RL/scene_env.py without any training:
                along the insertion axis -> insertion depth must increase with
                no force_abort/bad_collision termination.
 
-Run inside the aic_eval container:
-    distrobox enter aic_eval-latest -- bash /home/Anshul/AIC_Phase_1/crun.sh \
-        RL/scripts/cartesian_smoke.py
+Run from the repository's Pixi environment:
+    MUJOCO_GL=egl pixi run python RL/scripts/cartesian_smoke.py
 
 Exit code 0 = all checks passed.
 """
