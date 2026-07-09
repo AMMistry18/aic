@@ -40,7 +40,7 @@ except ImportError:  # pragma: no cover
     from gym import spaces  # type: ignore
 
 from .observation import ObsConfig, build_obs_dict_from_arrays
-from .reward import (
+from .reward_legacy import (
     RewardConfig,
     TerminationConfig,
     check_termination,

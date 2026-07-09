@@ -22,5 +22,10 @@ aic_utils/aic_isaac/aic_isaaclab/source/aic_task/aic_task/tasks/manager_based/ai
 # local credentials
 wandb/info.txt
 
+# generated RL/evaluation artifacts
+RL/output/
+aic_results/
+wandb/
+
 # Ignore my-testing folder in testing folder
 testing/my-testing/*

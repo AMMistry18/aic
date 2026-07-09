@@ -17,6 +17,7 @@ without needing TensorBoard.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -111,6 +112,12 @@ class MetricsLogger(BaseCallback):
                 "score_off_limit_contact": bool(info.get("score_off_limit_contact", False)),
                 "t_start": float(info.get("wallclock", 0.0)),
             }
+            for k, v in info.items():
+                if k.startswith("start_") or k.startswith("rew_sum_") or k.startswith("rew_mean_"):
+                    try:
+                        rec[k] = float(v)
+                    except (TypeError, ValueError):
+                        rec[k] = bool(v) if isinstance(v, (bool, np.bool_)) else v
             if "action_mode" in info:
                 rec["action_mode"] = str(info["action_mode"])
             for k, v in info.items():
@@ -122,19 +129,17 @@ class MetricsLogger(BaseCallback):
                         pass
             b = info.get("breakdown")
             if b is not None:
-                rec.update({
-                    "image": float(b.image),
-                    "force": float(b.force),
-                    "depth": float(getattr(b, "depth", 0.0)),
-                    "xy": float(b.xy),
-                    "action": float(b.action),
-                    "lateral": float(b.lateral),
-                    "axis": float(getattr(b, "axis", 0.0)),
-                    "collision": float(getattr(b, "collision", 0.0)),
-                    "off_limit": float(getattr(b, "off_limit", 0.0)),
-                    "force_sustain": float(getattr(b, "force_sustain", 0.0)),
-                    "done": float(b.done),
-                })
+                # generic over the RewardBreakdown dataclass (works for both
+                # the legacy and the redesigned residual reward)
+                try:
+                    fields = dataclasses.asdict(b)
+                except TypeError:
+                    fields = dict(getattr(b, "__dict__", {}))
+                for k, v in fields.items():
+                    try:
+                        rec[f"rew_{k}"] = float(v)
+                    except (TypeError, ValueError):
+                        pass
             self._f.write(json.dumps(rec) + "\n")
         return True
 
@@ -790,6 +795,10 @@ class CurriculumScheduler(BaseCallback):
                  force_abort_guard: float = 0.25,
                  force_abort_retreat: float = 0.50,
                  step_size: float = 0.05,
+                 frontier_level: float = 0.85,
+                 frontier_advance_threshold: float = 0.50,
+                 frontier_step_size: float = 0.025,
+                 frontier_retreat_patience: int = 4,
                  level_path: Optional[Path] = None,
                  pre_advance_hook=None,
                  ent_reheat: float = 0.0,
@@ -803,6 +812,10 @@ class CurriculumScheduler(BaseCallback):
         self.force_abort_guard = float(force_abort_guard)
         self.force_abort_retreat = float(force_abort_retreat)
         self.step_size = float(step_size)
+        self.frontier_level = float(frontier_level)
+        self.frontier_advance_thr = float(frontier_advance_threshold)
+        self.frontier_step_size = float(frontier_step_size)
+        self.frontier_retreat_patience = max(1, int(frontier_retreat_patience))
         self.level_path = Path(level_path) if level_path is not None else None
         self.pre_advance_hook = pre_advance_hook
         # entropy re-heat on advance (TES-SAC-style target/temperature
@@ -814,6 +827,7 @@ class CurriculumScheduler(BaseCallback):
         self.target_entropy_schedule = bool(target_entropy_schedule)
         self._current_level: float = 0.0
         self._recent: list[dict[str, Any]] = []
+        self._frontier_low_success_windows = 0
         # restore prior level if present
         if self.level_path is not None and self.level_path.exists():
             try:
@@ -857,15 +871,34 @@ class CurriculumScheduler(BaseCallback):
         unsafe_rate = force_abort_rate + bad_collision_rate
         cur = self._current_level
         new = cur
+        at_frontier = cur >= self.frontier_level
+        advance_thr = self.frontier_advance_thr if at_frontier else self.advance_thr
+        step_size = self.frontier_step_size if at_frontier else self.step_size
         # Retreat ONLY on low success. Unsafe terminations gate ADVANCEMENT but
         # never drag the level down: collision/force episodes are the policy's
         # learning signal at the frontier, not a property of the level — the
         # unsafe-retreat rule caused a permanent 0.05<->0.10 oscillation while
         # success sat near 0.5 (2026-07-04 run analysis).
-        if success_rate >= self.advance_thr and unsafe_rate <= self.force_abort_guard:
-            new = min(1.0, cur + self.step_size)
+        if success_rate >= advance_thr and unsafe_rate <= self.force_abort_guard:
+            new = min(1.0, cur + step_size)
+            self._frontier_low_success_windows = 0
         elif success_rate <= self.retreat_thr:
-            new = max(0.0, cur - self.step_size)
+            if at_frontier and self._frontier_low_success_windows < self.frontier_retreat_patience - 1:
+                self._frontier_low_success_windows += 1
+                self._recent.clear()
+                if self.verbose:
+                    print(f"[curriculum] holding frontier level {cur:.3f} "
+                          f"(low-success window "
+                          f"{self._frontier_low_success_windows}/"
+                          f"{self.frontier_retreat_patience}; "
+                          f"success_rate={success_rate:.2f}, "
+                          f"bad_collision_rate={bad_collision_rate:.2f})",
+                          flush=True)
+                return
+            new = max(0.0, cur - step_size)
+            self._frontier_low_success_windows = 0
+        else:
+            self._frontier_low_success_windows = 0
         if new != cur:
             stats = {
                 "success_rate": success_rate,
@@ -937,6 +970,91 @@ class CurriculumScheduler(BaseCallback):
 
     def get_current_level(self) -> float:
         return float(self._current_level)
+
+
+class StartCurriculumScheduler(BaseCallback):
+    """Ramp free-space reset difficulty from close/easy to the full distribution."""
+
+    def __init__(self, level_path: Path, eval_window: int = 50,
+                 advance_threshold: float = 0.45,
+                 retreat_threshold: float = 0.10,
+                 step_size: float = 0.10,
+                 verbose: int = 1):
+        super().__init__(verbose=verbose)
+        self.level_path = Path(level_path)
+        self.eval_window = max(1, int(eval_window))
+        self.advance_thr = float(advance_threshold)
+        self.retreat_thr = float(retreat_threshold)
+        self.step_size = float(step_size)
+        self._current_level = self._read_level(default=0.0)
+        self._recent: list[dict[str, Any]] = []
+
+    def _read_level(self, default: float) -> float:
+        try:
+            if self.level_path.exists():
+                return float(np.clip(float(self.level_path.read_text().strip()), 0.0, 1.0))
+        except Exception:
+            pass
+        return float(np.clip(default, 0.0, 1.0))
+
+    def _write_level(self, level: float) -> None:
+        self.level_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.level_path.with_suffix(self.level_path.suffix + ".tmp")
+        tmp.write_text(f"{float(level):.4f}\n")
+        os.replace(tmp, self.level_path)
+
+    def _push_level_to_envs(self, level: float) -> None:
+        try:
+            self.training_env.env_method("set_start_curriculum_level", float(level))
+        except Exception:
+            pass
+
+    def _on_training_start(self) -> None:
+        self._write_level(self._current_level)
+        self._push_level_to_envs(self._current_level)
+        if self.verbose:
+            print(f"[start-curriculum] level={self._current_level:.2f}", flush=True)
+
+    def _on_step(self) -> bool:
+        for info in self.locals.get("infos", []) or []:
+            ep = info.get("episode")
+            if ep is None:
+                continue
+            term = str(info.get("term_status", "unknown"))
+            self._recent.append({
+                "term": term,
+                "score_success": bool(info.get("score_success", term == "success")),
+            })
+            if len(self._recent) > self.eval_window:
+                self._recent = self._recent[-self.eval_window:]
+            self._maybe_update()
+        return True
+
+    def _maybe_update(self) -> None:
+        if len(self._recent) < self.eval_window:
+            return
+        success_rate = sum(1 for r in self._recent if r["score_success"]) / len(self._recent)
+        cur = self._current_level
+        new = cur
+        direction = "hold"
+        if success_rate >= self.advance_thr:
+            new = min(1.0, cur + self.step_size)
+            direction = "harder"
+        elif success_rate <= self.retreat_thr:
+            new = max(0.0, cur - 0.5 * self.step_size)
+            direction = "easier"
+        self._recent.clear()
+        if new == cur:
+            return
+        self._current_level = new
+        self._write_level(new)
+        self._push_level_to_envs(new)
+        self.logger.record("start_curriculum/level", float(new))
+        self.logger.record("start_curriculum/success_rate", float(success_rate))
+        if self.verbose:
+            print(f"[start-curriculum] level {cur:.2f} -> {new:.2f} "
+                  f"({direction}, success_rate={success_rate:.2f}, "
+                  f"window={self.eval_window})", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1366,6 +1484,30 @@ class WandbLogger(BaseCallback):
                 log_payload["collision/off_limit_contacts"] = int(info["off_limit_contacts"])
             if "curriculum_level" in info:
                 log_payload["train/curriculum_level"] = float(info["curriculum_level"])
+            if "start_curriculum_level" in info:
+                log_payload["start/curriculum_level"] = float(info["start_curriculum_level"])
+            if "start_free_gap_m" in info:
+                log_payload["start/free_gap_mm"] = float(1000.0 * info["start_free_gap_m"])
+            if "start_lateral_error_m" in info:
+                log_payload["start/lateral_error_mm"] = float(
+                    1000.0 * info["start_lateral_error_m"])
+            if "start_plug_axis_error_rad" in info:
+                log_payload["start/axis_error_deg"] = float(
+                    np.degrees(info["start_plug_axis_error_rad"]))
+            if "start_plug_roll_error_rad" in info:
+                log_payload["start/roll_error_deg"] = float(
+                    np.degrees(info["start_plug_roll_error_rad"]))
+            for k, v in info.items():
+                if k.startswith("rew_sum_"):
+                    try:
+                        log_payload[f"reward_sum/{k[8:]}"] = float(v)
+                    except (TypeError, ValueError):
+                        pass
+                elif k.startswith("rew_mean_"):
+                    try:
+                        log_payload[f"reward_mean/{k[9:]}"] = float(v)
+                    except (TypeError, ValueError):
+                        pass
             for k, v in info.items():
                 # cartesian_residual controller diagnostics (absent in joint mode)
                 if k.startswith("cart_"):
@@ -1485,6 +1627,7 @@ __all__ = [
     "WandbVideoRecorder",
     "WandbScoreEvaluator",
     "CurriculumScheduler",
+    "StartCurriculumScheduler",
     "CheckpointManager",
     "ProgressPrinter",
     "plot_dashboard",

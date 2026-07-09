@@ -31,6 +31,13 @@ RUN cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/PerceptionI
     cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/final_insert_sc_model73.ts \
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/
 
+# RLInsert policy + its TorchScript net (kept after the pixi layer so model
+# swaps don't rebuild the env)
+RUN cp /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/
+COPY models/final_insert_sfp_contractA_v1.ts /models/final_insert_sfp_contractA_v1.ts
+ENV RL_INSERT_MODEL=/models/final_insert_sfp_contractA_v1.ts
+
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
 #!/bin/bash
@@ -70,4 +77,4 @@ exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["--ros-args", "-p", "policy:=aic_example_policies.ros.PerceptionInsert", "-p", "use_sim_time:=true"]
+CMD ["--ros-args", "-p", "policy:=aic_model.RLInsert", "-p", "use_sim_time:=true"]

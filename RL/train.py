@@ -1,29 +1,32 @@
 """
-Train image-SAC for the last-inch insertion policy.
+Train residual SAC for the last-inch insertion policy.
 
-Usage (full run):
-    MUJOCO_GL=egl pixi run python RL/train.py --port-type sc --steps 500000
+Usage (residual pipeline, real scene, state obs — the default path):
+    MUJOCO_GL=egl pixi run python RL/train.py --scene --port-type sfp --steps 500000
 
 This script:
-    1. Builds the MuJoCo env(s) (RL/env.py) as a SubprocVecEnv.
-    2. Wraps a Dict obs space with a CombinedImageState extractor (image CNN
-       + state MLP fused to 256-d).
-    3. Trains SAC (stable-baselines3) with the reward in
-       RL/reward.py and a reverse curriculum.
-    4. Checkpoints a single canonical resume point (model.zip + replay_buffer
-       + curriculum_level.txt) so a killed run continues instead of starting
-       over — re-run the SAME command and it auto-resumes.
-    5. Exports a TorchScript policy for deployment.
+    1. Builds the MuJoCo env(s) as a SubprocVecEnv. With --scene (recommended):
+       RL/scene_env.py on the real exported scene, cartesian_residual action
+       mode + scripted base advance, privileged flat-state obs, RSI-mix starts
+       (~1 inch out + in-port reference-state inits). Without --scene: the
+       legacy procedural env (RL/env.py, legacy reward).
+    2. Trains SAC (stable-baselines3) with the redesigned residual-insertion
+       reward in RL/reward.py (potential-based aligned approach, predicted-miss
+       penalty, >20 N force cost, smoothness terms).
+    3. Checkpoints a single canonical resume point (model.zip + replay_buffer)
+       so a killed run continues instead of starting over — re-run the SAME
+       command and it auto-resumes.
+    4. Exports a TorchScript policy for deployment.
 
 SAC scaling defaults (retuned 2026-07-03 for exploration + adaptation speed):
     batch_size=1024, num_envs=16, train_freq=1, gradient_steps=4
     → UTD=0.25 (4096 samples consumed per vec step — same data throughput as
     the old batch-4096/grad-2 config, but 4 distinct smaller updates: noisier
-    gradients + faster policy adaptation as the curriculum moves the start
-    distribution). Do NOT use gradient_steps=-1 (UTD=1 → critic overfit +
-    ~16× slower). target_entropy defaults to -3.0 (SAC's auto = -6 collapses
-    the exploration noise early on a 6-D residual action). buffer_size=500k
-    (uint8 image obs is mandatory).
+    gradients + faster policy adaptation). Do NOT use gradient_steps=-1
+    (UTD=1 → critic overfit + ~16× slower). target_entropy defaults to -3.0
+    (SAC's auto = -6 collapses the exploration noise early on a 6-D residual
+    action). With state obs the replay buffer is tiny — raise --buffer-size
+    (e.g. 300k) for image-free runs.
 """
 
 from __future__ import annotations
@@ -99,7 +102,9 @@ def _read_local_wandb_info(path: Path) -> dict[str, str]:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Train image-SAC for last-inch insertion")
+    p = argparse.ArgumentParser(
+        description="Train residual SAC for last-inch insertion "
+                    "(scripted base advance + Cartesian residual, RSI-mix starts)")
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--steps", type=int, default=500_000,
                    help="total env steps (default 500k; ~45-90 min on a 5090)")
@@ -111,7 +116,7 @@ def main():
                    help="SAC minibatch. 1024 x 4 grad steps consumes the same "
                         "4096 samples/vec-step as the old batch-4096 x 2, but "
                         "adapts the policy 2x more often with noisier gradients "
-                        "(better exploration as the curriculum shifts starts)")
+                        "(better exploration)")
     p.add_argument("--buffer-size", type=int, default=50_000,
                    help="replay transitions. RAM = buffer * channels*H*W * 2 "
                         "(obs + next_obs, uint8): 256^2x9 = 1.18 MB/transition "
@@ -132,15 +137,6 @@ def main():
                         "-dim(A)=-6, which drives alpha (exploration noise) to "
                         "near-zero early on this task; -3.0 keeps exploring. "
                         "Pass 'auto' to restore the SB3 default.")
-    p.add_argument("--ent-reheat", type=float, default=0.15,
-                   help="on every curriculum ADVANCE, floor SAC's alpha back up "
-                        "to this value and let auto-temperature re-anneal "
-                        "(TES-SAC-style scheduling keyed to the curriculum; the "
-                        "healthy ent_coef curve becomes a sawtooth). 0 = off.")
-    p.add_argument("--target-entropy-schedule", action="store_true",
-                   help="also anneal target entropy with the curriculum level: "
-                        "-1.5 at level 0 -> -3.0 at level 1 (overrides "
-                        "--target-entropy at each advance)")
     p.add_argument("--success-mix", type=float, default=0.25,
                    help="fraction of every SAC minibatch drawn from a side "
                         "buffer of SUCCESSFUL-episode transitions (SIL/DDPGfD-"
@@ -168,6 +164,14 @@ def main():
     p.add_argument("--resume", action="store_true",
                    help="force-resume from <out>/model.zip. NOTE: an incomplete "
                         "run auto-resumes even without this flag.")
+    p.add_argument("--no-resume-replay", action="store_true",
+                   help="when resuming, load model.zip but skip replay_buffer.pkl "
+                        "and re-warm under the current reward. Useful after reward "
+                        "shaping changes or when the buffer came from a bad run.")
+    p.add_argument("--actor-only-resume", action="store_true",
+                   help="when resuming, copy only the actor from model.zip into a "
+                        "fresh SAC model, resetting critic/target critic/optimizers "
+                        "and rebuilding replay under the current reward.")
     p.add_argument("--force", action="store_true",
                    help="ignore any existing checkpoint and start fresh")
     p.add_argument("--no-skip-if-cached", dest="skip_if_cached", action="store_false",
@@ -189,26 +193,22 @@ def main():
                         "gripper + cable + task board + NIC/SFP/SC ports) instead "
                         "of the procedural box env. This is the deployment-faithful path.")
     p.add_argument("--image-size", type=int, default=256,
-                   help="[--scene] wrist-cam obs resolution (HxW, square)")
-    p.add_argument("--reward-image-res", type=int, default=0,
-                   help="[--scene] image-distance reward render res (0 = native "
-                        "1152x1024 center cam; e.g. 256 for faster smoke runs)")
-    p.add_argument("--image-reward-weight", type=float, default=0.0,
-                   help="weight for the image-L1 reward term. Set to 0 for "
-                        "geometry/force-only reward shaping while still keeping "
-                        "camera images in the policy observation.")
-    p.add_argument("--no-image-reward", action="store_true",
-                   help="shortcut for --image-reward-weight 0. Also skips the "
-                        "expensive reward-image renderer in the scene env.")
-    # ---- action mode (default joint_residual = original behavior) ----
+                   help="[--scene, images only] wrist-cam obs resolution (HxW, square)")
+    p.add_argument("--no-state-obs", dest="state_obs", action="store_false",
+                   default=True,
+                   help="[--scene] use wrist-camera image observations instead "
+                        "of the default privileged flat-state obs (state obs "
+                        "trains ~10x faster and matches the perception-estimated "
+                        "state available to the deployed LastInchInsert hook)")
+    # ---- action mode (default: the residual pipeline) ----
     p.add_argument("--action-mode", choices=["joint_residual", "cartesian_residual"],
-                   default="joint_residual",
-                   help="[--scene] 'joint_residual' (default, unchanged): 6-D "
-                        "joint residual on the joint PD target. "
-                        "'cartesian_residual': SAC action is a small Cartesian "
-                        "TCP residual in the port frame, tracked by a Jacobian-"
-                        "transpose Cartesian impedance controller that mirrors "
-                        "aic_controller's CartesianImpedanceAction.")
+                   default="cartesian_residual",
+                   help="[--scene] 'cartesian_residual' (default): SAC action is "
+                        "a small Cartesian TCP residual in the port frame, "
+                        "tracked by a Jacobian-transpose Cartesian impedance "
+                        "controller that mirrors aic_controller's "
+                        "CartesianImpedanceAction. 'joint_residual': legacy 6-D "
+                        "joint residual on the joint PD target.")
     p.add_argument("--cart-action-dims", type=int, choices=[5, 6], default=6,
                    help="[cartesian_residual] 6 = [dx,dy,dz,droll,dpitch,dyaw]; "
                         "5 drops dyaw (no correction about the insertion axis)")
@@ -218,25 +218,40 @@ def main():
     p.add_argument("--cart-rot-scale-deg", type=float, default=1.0,
                    help="[cartesian_residual] rotation residual per policy "
                         "step at |action|=1, in degrees")
-    p.add_argument("--base-script", action="store_true",
-                   help="[cartesian_residual] scripted base motion slowly pushes "
-                        "the target pose along the port insertion axis (clamped "
-                        "at the seated goal); the SAC residual rides on top with "
-                        "a tighter envelope, learning the correction only.")
+    p.add_argument("--no-base-script", dest="base_script", action="store_false",
+                   default=True,
+                   help="[cartesian_residual] disable the scripted base advance "
+                        "(default ON: the base target pose slowly pushes along "
+                        "the port insertion axis, clamped at the seated goal; "
+                        "the SAC residual rides on top with a tighter envelope, "
+                        "learning the correction, not the transport).")
     p.add_argument("--base-script-step-mm", type=float, default=0.5,
                    help="[--base-script] base target advance per policy step, mm")
-    # ---- curriculum ----
-    p.add_argument("--reset-mode", choices=["curriculum", "random", "near_goal"],
-                   default="curriculum")
-    p.add_argument("--curriculum-eval-window", type=int, default=100)
-    p.add_argument("--curriculum-advance-threshold", type=float, default=0.6)
-    p.add_argument("--curriculum-retreat-threshold", type=float, default=0.15)
-    p.add_argument("--curriculum-force-abort-guard", type=float, default=0.25,
-                   help="do not advance curriculum if recent force-abort rate exceeds this")
-    p.add_argument("--curriculum-force-abort-retreat", type=float, default=0.50,
-                   help="DEPRECATED, ignored: retreats are success-based only "
-                        "(unsafe terminations gate advancement, never retreat)")
-    p.add_argument("--curriculum-step", type=float, default=0.05)
+    # ---- start-state distribution (fixed; replaces the level curriculum) ----
+    p.add_argument("--reset-mode", choices=["mix", "random", "near_goal"],
+                   default="mix",
+                   help="'mix' = RSI-mix (default), 'random' = free 1-inch "
+                        "starts only, 'near_goal' = RSI in-port starts only")
+    p.add_argument("--rsi-frac", type=float, default=0.30,
+                   help="fraction of episodes starting INSIDE the port "
+                        "(reference-state initialization)")
+    p.add_argument("--start-gap-in", type=float, default=1.0,
+                   help="mean start distance outside the entrance plane, inches")
+    p.add_argument("--start-gap-jitter-in", type=float, default=0.5,
+                   help="+- axial start-distance jitter, inches")
+    p.add_argument("--start-lat-jitter-in", type=float, default=0.5,
+                   help="+- lateral start jitter per port axis, inches")
+    p.add_argument("--no-start-curriculum", dest="start_curriculum",
+                   action="store_false", default=True,
+                   help="[--scene] disable the lightweight start distribution ramp")
+    p.add_argument("--start-curriculum-window", type=int, default=50,
+                   help="[--scene] completed episodes per reset-difficulty window")
+    p.add_argument("--start-curriculum-advance-threshold", type=float, default=0.45,
+                   help="[--scene] score-success rate needed to move starts back")
+    p.add_argument("--start-curriculum-retreat-threshold", type=float, default=0.10,
+                   help="[--scene] low success rate that eases starts slightly")
+    p.add_argument("--start-curriculum-step", type=float, default=0.10,
+                   help="[--scene] reset-difficulty level step in [0,1]")
     # ---- W&B ----
     p.add_argument("--wandb", dest="wandb", action="store_true", default=None)
     p.add_argument("--no-wandb", dest="wandb", action="store_false")
@@ -248,7 +263,7 @@ def main():
                         "(0 = off; uses --wandb-video-level)")
     p.add_argument("--wandb-eval-steps", type=int, default=200,
                    help="[--scene] max steps for no-video W&B score eval")
-    p.add_argument("--wandb-eval-episodes", type=int, default=2,
+    p.add_argument("--wandb-eval-episodes", type=int, default=16,
                    help="[--scene] episodes averaged per W&B score eval")
     p.add_argument("--wandb-video-every", type=int, default=0,
                    help="DEPRECATED (episode-based gating fired ~once with vec "
@@ -262,17 +277,8 @@ def main():
                    help="max eval steps per episode in a W&B rollout video")
     p.add_argument("--wandb-video-fps", type=int, default=20)
     p.add_argument("--wandb-video-level", type=float, default=-1.0,
-                   help="[--scene] curriculum level for W&B videos. Negative "
-                        "(default): every episode mirrors the CURRENT training "
-                        "level, so clips show the actual training distribution "
-                        "(full-task competence is tracked numerically by the "
-                        "level-1.0 score eval). A value >= 0 pins every episode "
-                        "to that fixed level.")
-    p.add_argument("--no-wandb-video-on-advance",
-                   dest="wandb_video_on_advance",
-                   action="store_false",
-                   help="[--scene] disable the current-level W&B video that is "
-                        "recorded immediately before a curriculum advance.")
+                   help="DEPRECATED (curriculum levels are gone): videos always "
+                        "use the training reset mode. Kept for CLI compat.")
     p.add_argument("--wandb-video-camera", type=str, default="center_camera",
                    help="[--scene] camera used for W&B videos")
     p.add_argument("--wandb-video-width", type=int, default=768,
@@ -289,13 +295,12 @@ def main():
                    help="local W&B credential/config file; API key is never logged")
     args = p.parse_args()
 
-    if args.no_image_reward:
-        args.image_reward_weight = 0.0
-
     if args.action_mode != "joint_residual" and not args.scene:
-        raise SystemExit("--action-mode cartesian_residual requires --scene")
+        raise SystemExit("--action-mode cartesian_residual requires --scene "
+                         "(pass --scene: the residual pipeline trains on the "
+                         "real exported scene)")
     if args.base_script and args.action_mode != "cartesian_residual":
-        raise SystemExit("--base-script requires --action-mode cartesian_residual")
+        args.base_script = False   # base script only exists for cartesian mode
 
     if args.out is None:
         run_name = f"residual_sac_{args.port_type}_{args.reset_mode}"
@@ -334,6 +339,8 @@ def main():
     cfg_dict = dict(vars(args))
     cfg_dict.pop("force", None)
     cfg_dict.pop("resume", None)
+    cfg_dict.pop("no_resume_replay", None)
+    cfg_dict.pop("actor_only_resume", None)
     if args.action_mode == "joint_residual":
         # keep cache keys byte-identical to pre-cartesian-mode runs so existing
         # checkpoints still auto-resume (the new keys only hash when used)
@@ -346,16 +353,15 @@ def main():
     completed_marker = args.out / "COMPLETED"
     model_zip = args.out / "model.zip"
     rb_pkl = args.out / "replay_buffer.pkl"
-    level_file = args.out / "curriculum_level.txt"
     key_file = args.out / "cache_key.txt"
+    start_level_file = args.out / "start_curriculum_level.txt"
 
     prior_key = key_file.read_text().strip() if key_file.exists() else None
     is_completed = completed_marker.exists() and prior_key == cache_key
 
     if args.force:
-        # wipe resumable state so we truly start fresh (incl. the curriculum
-        # level — a stale level file makes a "fresh" run start mid-curriculum)
-        for f in (completed_marker, model_zip, rb_pkl, level_file):
+        # wipe resumable state so we truly start fresh
+        for f in (completed_marker, model_zip, rb_pkl, start_level_file):
             try:
                 f.unlink()
             except FileNotFoundError:
@@ -376,14 +382,6 @@ def main():
         print(f"[train] WARNING: existing checkpoint has a different cache_key "
               f"({prior_key}); starting fresh. Use --resume to force-continue it.",
               flush=True)
-    if not resume and level_file.exists():
-        # fresh start (no resumable checkpoint) must not inherit a curriculum
-        # level from an older run in the same out dir
-        try:
-            level_file.unlink()
-            print("[train] removed stale curriculum_level.txt (fresh start)", flush=True)
-        except FileNotFoundError:
-            pass
 
     write_config(args.out, cfg_dict, cache_key)
 
@@ -402,13 +400,9 @@ def main():
 
     from RL.env import EnvConfig, LastInchInsertEnv
 
+    # procedural/recorded envs keep the legacy reward; the scene env uses the
+    # redesigned residual-insertion reward (RL/reward.py) below
     env_cfg = EnvConfig()
-    reward_cfg = dataclasses.replace(
-        env_cfg.reward,
-        w_image=float(args.image_reward_weight),
-        beta_s=0.0 if float(args.image_reward_weight) == 0.0 else env_cfg.reward.beta_s,
-    )
-    env_cfg = dataclasses.replace(env_cfg, reward=reward_cfg)
     if args.max_episode_steps > 0:
         env_cfg = dataclasses.replace(
             env_cfg, term=dataclasses.replace(env_cfg.term,
@@ -422,12 +416,15 @@ def main():
     use_scene = bool(args.scene)
     make_wandb_video_env = None
     if use_scene:
+        from RL.reward import RewardConfig as SceneRewardConfig
         from RL.scene_env import SceneInsertEnv, SceneEnvConfig
 
+        inch = 0.0254
         scene_kwargs = dict(
             image_h=args.image_size, image_w=args.image_size,
-            reward_image_res=args.reward_image_res,
-            reward=reward_cfg,
+            include_images=not args.state_obs,
+            privileged_obs=bool(args.state_obs),
+            reward=SceneRewardConfig(),
             max_episode_steps=env_cfg.term.max_steps,
             action_mode=args.action_mode,
             cart_action_dims=args.cart_action_dims,
@@ -435,14 +432,18 @@ def main():
             cart_rot_scale_rad=float(np.radians(args.cart_rot_scale_deg)),
             base_script_enabled=bool(args.base_script),
             base_script_step_m=args.base_script_step_mm * 1e-3,
+            rsi_frac=float(args.rsi_frac),
+            start_gap_m=float(args.start_gap_in) * inch,
+            start_gap_jitter_m=float(args.start_gap_jitter_in) * inch,
+            start_lat_jitter_m=float(args.start_lat_jitter_in) * inch,
+            start_curriculum_enabled=bool(args.start_curriculum),
+            start_curriculum_level_file=str(args.out / "start_curriculum_level.txt"),
         )
 
         def _make_env(rank: int = 0):
             def _thunk():
                 e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
                 e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
                 e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
                 return Monitor(e)
             return _thunk
@@ -451,19 +452,15 @@ def main():
             holder = {}
 
             def _thunk():
+                # videos need camera rendering regardless of the policy obs
                 e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
-                if args.wandb_video_level >= 0.0:
-                    e.set_reset_mode("curriculum")
-                    e.set_curriculum_level(float(args.wandb_video_level))
-                else:
-                    e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum" and args.wandb_video_level < 0.0:
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
+                e.set_reset_mode(args.reset_mode)
                 holder["render_env"] = e
                 return Monitor(TimeLimit(e, max_episode_steps=env_cfg.term.max_steps))
 
             venv = DummyVecEnv([_thunk])
-            venv = VecTransposeImage(venv)
+            if not args.state_obs:
+                venv = VecTransposeImage(venv)
             return venv, holder["render_env"]
 
         make_wandb_video_env = _make_scene_video_env
@@ -487,9 +484,9 @@ def main():
             def _thunk():
                 shard = paths[rank::n_envs]
                 e = RecordedRolloutEnv(shard, rec_cfg)
-                e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
+                # legacy env: 'mix' maps onto its 'curriculum' reset mode
+                e.set_reset_mode(
+                    "curriculum" if args.reset_mode == "mix" else args.reset_mode)
                 e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
                 return Monitor(e)
             return _thunk
@@ -497,9 +494,9 @@ def main():
         def _make_env(rank: int = 0):
             def _thunk():
                 e = LastInchInsertEnv(env_cfg, port_type=args.port_type)
-                e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
+                # legacy env: 'mix' maps onto its 'curriculum' reset mode
+                e.set_reset_mode(
+                    "curriculum" if args.reset_mode == "mix" else args.reset_mode)
                 e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
                 return Monitor(e)
             return _thunk
@@ -509,8 +506,12 @@ def main():
     else:
         env = SubprocVecEnv([_make_env(i) for i in range(n_envs)],
                             start_method="fork" if os.name == "posix" else "spawn")
-    env = VecTransposeImage(env)   # image Dict subspace → channels-first (C,H,W)
-    print(f"[train] obs_space={list(env.observation_space.spaces)} "
+    flat_obs = not hasattr(env.observation_space, "spaces")
+    if not flat_obs:
+        env = VecTransposeImage(env)   # image Dict subspace → channels-first (C,H,W)
+    obs_desc = (env.observation_space.shape if flat_obs
+                else list(env.observation_space.spaces))
+    print(f"[train] obs_space={obs_desc} "
           f"num_envs={n_envs} reset_mode={args.reset_mode} resume={resume}", flush=True)
 
     # ------------------------------------------------------------------ #
@@ -582,11 +583,16 @@ def main():
             z_state = self.state_mlp(state / self._state_scale.clamp_min(1e-6))
             return self.fuse(torch.cat([z_img, z_state], dim=1))
 
-    policy_kwargs = dict(
-        features_extractor_class=SceneImageStateExtractor,
-        features_extractor_kwargs=dict(features_dim=256),
-        net_arch=dict(pi=[256, 256], qf=[256, 256]),
-    )
+    if flat_obs:
+        policy_name = "MlpPolicy"
+        policy_kwargs = dict(net_arch=dict(pi=[256, 256], qf=[256, 256]))
+    else:
+        policy_name = "MultiInputPolicy"
+        policy_kwargs = dict(
+            features_extractor_class=SceneImageStateExtractor,
+            features_extractor_kwargs=dict(features_dim=256),
+            net_arch=dict(pi=[256, 256], qf=[256, 256]),
+        )
 
     class ComponentRewardLogger(BaseCallback):
         def __init__(self, log_every: int = 100):
@@ -599,8 +605,8 @@ def main():
             if self._i % self.log_every == 0 and self.model.ep_info_buffer:
                 last = self.model.ep_info_buffer[-1]
                 self.logger.record("rollout/term_status", str(last.get("term_status", "")))
-                self.logger.record("rollout/image_l1_norm", float(last.get("image_l1_norm", 0.0)))
                 self.logger.record("rollout/f_z", float(last.get("f_z", 0.0)))
+                self.logger.record("rollout/f_peak", float(last.get("f_peak", 0.0)))
             return True
 
     # ------------------------------------------------------------------ #
@@ -620,8 +626,10 @@ def main():
     replay_buffer_class = None
     replay_buffer_kwargs = None
     if args.success_mix > 0.0:
-        from RL.success_buffer import SuccessMixDictReplayBuffer
-        replay_buffer_class = SuccessMixDictReplayBuffer
+        from RL.success_buffer import (
+            SuccessMixDictReplayBuffer, SuccessMixReplayBuffer)
+        replay_buffer_class = (
+            SuccessMixReplayBuffer if flat_obs else SuccessMixDictReplayBuffer)
         replay_buffer_kwargs = dict(
             success_mix=args.success_mix,
             success_buffer_size=args.success_buffer_size,
@@ -632,7 +640,7 @@ def main():
 
     def _build_model():
         return SAC(
-            "MultiInputPolicy", env,
+            policy_name, env,
             policy_kwargs=policy_kwargs,
             learning_rate=args.lr,
             buffer_size=args.buffer_size,
@@ -652,21 +660,38 @@ def main():
             tensorboard_log=str(args.out / "tb") if _has_tensorboard() else None,
         )
 
-    if resume and model_zip.exists():
+    if resume and model_zip.exists() and args.actor_only_resume:
+        print(f"[train] actor-only resume from {model_zip}", flush=True)
+        teacher = SAC.load(str(model_zip), env=env, device="auto")
+        teacher_steps = int(teacher.num_timesteps)
+        model = _build_model()
+        model.policy.actor.load_state_dict(teacher.policy.actor.state_dict())
+        model.num_timesteps = teacher_steps
+        if hasattr(teacher, "_episode_num"):
+            model._episode_num = int(getattr(teacher, "_episode_num", 0))
+        del teacher
+        model.learning_starts = model.num_timesteps + args.warmup_steps
+        print("[train] copied actor only; critic/replay/optimizers are fresh "
+              f"(learning_starts={model.learning_starts})", flush=True)
+        remaining = max(int(args.steps) - int(model.num_timesteps), 0)
+        print(f"[train] resumed actor at {model.num_timesteps} steps; "
+              f"{remaining} remaining of {args.steps}", flush=True)
+    elif resume and model_zip.exists():
         print(f"[train] resuming from {model_zip}", flush=True)
         model = SAC.load(str(model_zip), env=env, device="auto")
         # re-apply the CLI learning rate (in case it changed on resume)
         from stable_baselines3.common.utils import get_schedule_fn
         model.learning_rate = args.lr
         model.lr_schedule = get_schedule_fn(args.lr)
-        if rb_pkl.exists():
+        if rb_pkl.exists() and not args.no_resume_replay:
             model.load_replay_buffer(str(rb_pkl))
             print(f"[train] loaded replay buffer "
                   f"({model.replay_buffer.size()} transitions)", flush=True)
         else:
             # no buffer to resume from → re-warm before training on empty buffer
             model.learning_starts = model.num_timesteps + args.warmup_steps
-            print("[train] no replay_buffer.pkl — re-warming "
+            reason = "--no-resume-replay" if args.no_resume_replay else "no replay_buffer.pkl"
+            print(f"[train] {reason} — re-warming "
                   f"(learning_starts={model.learning_starts})", flush=True)
         remaining = max(int(args.steps) - int(model.num_timesteps), 0)
         print(f"[train] resumed at {model.num_timesteps} steps; "
@@ -684,8 +709,9 @@ def main():
     # callbacks
     # ------------------------------------------------------------------ #
     from RL.logging_utils import (
-        MetricsLogger, VideoRecorder, CurriculumScheduler, CheckpointManager,
-        ProgressPrinter, WandbLogger, WandbVideoRecorder, WandbScoreEvaluator)
+        MetricsLogger, VideoRecorder, CheckpointManager,
+        ProgressPrinter, StartCurriculumScheduler, WandbLogger,
+        WandbVideoRecorder, WandbScoreEvaluator)
 
     ckpt = CheckpointManager(
         args.out,
@@ -699,6 +725,14 @@ def main():
         ProgressPrinter(log_every_steps=args.log_every),
         ckpt,
     ]
+    if use_scene and args.start_curriculum:
+        callbacks.append(StartCurriculumScheduler(
+            level_path=args.out / "start_curriculum_level.txt",
+            eval_window=args.start_curriculum_window,
+            advance_threshold=args.start_curriculum_advance_threshold,
+            retreat_threshold=args.start_curriculum_retreat_threshold,
+            step_size=args.start_curriculum_step,
+        ))
 
     # W&B enable decision
     wandb_env_off = os.environ.get("WANDB_MODE", "").strip().lower() in (
@@ -713,14 +747,15 @@ def main():
 
     wandb_config = dict(cfg_dict)
     try:
-        wandb_config["reward"] = dataclasses.asdict(env_cfg.reward)
-        wandb_config["termination"] = dataclasses.asdict(env_cfg.term)
+        if use_scene:
+            wandb_config["reward"] = dataclasses.asdict(scene_kwargs["reward"])
+        else:
+            wandb_config["reward"] = dataclasses.asdict(env_cfg.reward)
+            wandb_config["termination"] = dataclasses.asdict(env_cfg.term)
     except Exception:
         pass
     wandb_config.update({
         "env/port_type": args.port_type,
-        "env/pos_scale": list(env_cfg.pos_scale),
-        "env/rot_scale": list(env_cfg.rot_scale),
         "algorithm": "SAC", "batch_size": args.batch_size,
         "train_freq": args.train_freq, "gradient_steps": args.gradient_steps,
     })
@@ -750,20 +785,14 @@ def main():
     video_every_steps = int(args.wandb_video_every_steps)
     if video_every_steps <= 0 and args.wandb_video_every > 0:
         video_every_steps = 20_000   # legacy episode flag -> step-based recorder
-    transition_video_enabled = (
-        wandb_enabled
-        and bool(args.wandb_video_on_advance)
-        and args.reset_mode == "curriculum"
-        and make_wandb_video_env is not None
-    )
     step_video_enabled = (
         wandb_enabled and video_every_steps > 0 and make_wandb_video_env is not None
     )
     wandb_video_recorder = None
-    if step_video_enabled or transition_video_enabled:
+    if step_video_enabled:
         wandb_video_recorder = WandbVideoRecorder(
             make_eval_env=make_wandb_video_env,
-            every_steps=video_every_steps if step_video_enabled else 0,
+            every_steps=video_every_steps,
             max_steps=args.wandb_video_steps,
             episodes_per_video=args.wandb_video_episodes,
             episode_levels=(None,) if mirror_video else None,
@@ -777,48 +806,6 @@ def main():
             enabled=True)
         callbacks.append(wandb_video_recorder)
 
-    def _record_curriculum_advance_video(cur_level, new_level, stats):
-        if wandb_video_recorder is None:
-            return
-        cur = float(cur_level)
-        new = float(new_level)
-        tag = (
-            f"advance_{cur:.3f}_to_{new:.3f}_"
-            f"step_{int(wandb_video_recorder.num_timesteps):09d}"
-        ).replace(".", "p")
-        extra = {
-            "eval/curriculum_advance_from": cur,
-            "eval/curriculum_advance_to": new,
-            "eval/curriculum_advance_success_rate": float(stats["success_rate"]),
-            "eval/curriculum_advance_force_abort_rate": float(stats["force_abort_rate"]),
-            "eval/curriculum_advance_bad_collision_rate": float(stats["bad_collision_rate"]),
-            "eval/curriculum_advance_unsafe_rate": float(stats["unsafe_rate"]),
-            "eval/curriculum_advance_window": int(stats["eval_window"]),
-        }
-        wandb_video_recorder.record_now(
-            tag=tag,
-            level=cur,
-            episodes_per_video=1,
-            key="eval/curriculum_advance_video",
-            extra_metrics=extra,
-        )
-
-    if args.reset_mode == "curriculum":
-        callbacks.append(CurriculumScheduler(
-            env=None,
-            eval_window=args.curriculum_eval_window,
-            advance_threshold=args.curriculum_advance_threshold,
-            retreat_threshold=args.curriculum_retreat_threshold,
-            force_abort_guard=args.curriculum_force_abort_guard,
-            force_abort_retreat=args.curriculum_force_abort_retreat,
-            step_size=args.curriculum_step,
-            level_path=args.out / "curriculum_level.txt",
-            ent_reheat=args.ent_reheat,
-            target_entropy_schedule=args.target_entropy_schedule,
-            pre_advance_hook=(
-                _record_curriculum_advance_video
-                if transition_video_enabled else None
-            )))
     if not args.no_video and args.video_every > 0:
         callbacks.append(VideoRecorder(env, args.out / "videos",
                                        every_n_episodes=args.video_every,
@@ -863,10 +850,15 @@ def main():
             ts_path = args.out / "policy.pt"
             policy = model.policy
             policy.eval()
-            dummy = {}
-            for k, sp in env.observation_space.spaces.items():
-                dtype = torch.uint8 if "image" in k else torch.float32
-                dummy[k] = torch.zeros(1, *sp.shape, dtype=dtype)
+            device = policy.device
+            if flat_obs:
+                dummy = torch.zeros(1, *env.observation_space.shape,
+                                    dtype=torch.float32, device=device)
+            else:
+                dummy = {}
+                for k, sp in env.observation_space.spaces.items():
+                    dtype = torch.uint8 if "image" in k else torch.float32
+                    dummy[k] = torch.zeros(1, *sp.shape, dtype=dtype, device=device)
             with torch.no_grad():
                 traced = torch.jit.trace(policy, dummy, strict=False)
             traced.save(str(ts_path))
