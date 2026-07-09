@@ -1,24 +1,30 @@
 """Image-SAC trainer for last-inch insertion on the real MuJoCo scene.
 
 MVP plumbing (per user, 2026-07-02): get the reverse-curriculum initial-position
-setting training, connected to W&B, writing rollout videos to RL/outputs/ so the
+setting training, connected to W&B, writing rollout videos to RL/output/sb3_sac/ so the
 pipeline can be verified. Reward is the placeholder image-distance in scene_env.py;
 reward shaping comes next.
 
 Run (short smoke):
-    pixi run python RL/train_sac.py --timesteps 2000 --run-name smoke
+    pixi run python RL/sb3_sac/trainer.py --timesteps 2000 --run-name smoke
 W&B: set WANDB_API_KEY for online logging; otherwise runs offline (synced later with
-`wandb sync RL/outputs/wandb/offline-*`).
+`wandb sync RL/output/sb3_sac/wandb/offline-*`).
 """
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 
 os.environ.setdefault("MUJOCO_GL", "egl")
+
+_RL_ROOT = Path(__file__).resolve().parents[1]
+_REPO = _RL_ROOT.parent
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback, CallbackList
@@ -26,7 +32,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 from RL.scene_env import SceneEnvConfig, SceneInsertEnv
 
-OUT_DIR = Path(__file__).resolve().parent / "outputs"
+OUT_DIR = _RL_ROOT / "output" / "sb3_sac"
 CURRICULUM_FILE = OUT_DIR / "curriculum_level.txt"
 
 
@@ -59,7 +65,7 @@ class CurriculumCallback(BaseCallback):
 
 
 class VideoCallback(BaseCallback):
-    """Every `freq` steps, roll out one greedy episode and save an mp4 to RL/outputs/."""
+    """Every `freq` steps, roll out one greedy episode and save an mp4 to the run directory."""
     def __init__(self, eval_env, freq=1000, max_len=120, verbose=0):
         super().__init__(verbose)
         self.eval_env = eval_env
@@ -158,24 +164,28 @@ class WandbCallback(BaseCallback):
             self._wandb.finish()
 
 
-def make_env(port="sfp", images=True):
+def make_env(images=True):
     cams = ("center_camera",)  # single cam -> 3ch image -> clean SB3 CNN
-    target = "sfp_module_link" if port == "sfp" else "sc_tip_link"
-    cfg = SceneEnvConfig(include_images=images, cameras=cams, insert_target_body=target)
+    cfg = SceneEnvConfig(
+        include_images=images,
+        cameras=cams,
+        insert_target_body="sfp_port_1_link_entrance",
+    )
     return SceneInsertEnv(cfg)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--timesteps", type=int, default=2000)
-    ap.add_argument("--port", choices=["sfp", "sc"], default="sfp")
+    ap.add_argument("--port", choices=["sfp"], default="sfp",
+                    help="the retained MuJoCo scene trains the welded SFP connector")
     ap.add_argument("--run-name", default="scene_sac_smoke")
     ap.add_argument("--video-freq", type=int, default=1000)
     args = ap.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    train_env = DummyVecEnv([lambda: make_env(args.port)])
-    eval_env = make_env(args.port)
+    train_env = DummyVecEnv([make_env])
+    eval_env = make_env()
 
     model = SAC(
         "MultiInputPolicy", train_env,

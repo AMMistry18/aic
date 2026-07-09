@@ -153,7 +153,7 @@ class MetricsLogger(BaseCallback):
 class VideoRecorder(BaseCallback):
     """Record a full episode roll-out every N episodes and save as MP4.
 
-    Uses the env's own `render()` method (which our LastInchInsertEnv
+    Uses the environment's own `render()` method.
     returns a (H, W, 3) uint8 frame from). Frames are stacked into an
     MP4 via imageio if available, else saved as a .npz of frames.
     """
@@ -212,7 +212,7 @@ class VideoRecorder(BaseCallback):
         #     -> DummyVecEnv / SubprocVecEnv
         #        -> envs[0] (a Monitor)
         #           -> env (a TimeLimit)
-        #              -> env (RecordedRolloutEnv / LastInchInsertEnv)
+        #              -> environment
         env = self._env
         for _ in range(12):
             if hasattr(env, "envs") and len(env.envs) > 0:

@@ -46,7 +46,7 @@ def main() -> int:
     print(f"[wandb] target entity={WANDB_ENTITY!r} project={WANDB_PROJECT!r}",
           flush=True)
 
-    # Reuse the same WandbLogger that's wired into RL/train.py.
+    # Reuse the same WandbLogger wired into the full residual trainer.
     cb = WandbLogger(
         run_name=args.run_name,
         config={

@@ -3,7 +3,7 @@ Run caching for the last-inch residual-SAC trainer.
 
 A "run" is uniquely identified by a SHA256 hash of:
     - port type
-    - all reward weights (REWARD_SPEC §3, §7b)
+    - all reward weights
     - all env hyperparameters (start-pose distribution, dt, etc.)
     - the observation spec (image H/W/n_cams)
     - the training hyperparameters (lr, batch size, buffer size, warmup)
@@ -48,11 +48,13 @@ def _mjcf_xml() -> str:
     """Return the current MJCF XML content for both port types so the
     cache key tracks per-port scene changes.
     """
+    scene_dir = _rl_root().parent / "aic_utils" / "aic_mujoco" / "mjcf"
     try:
-        from RL.env import _PORT_GEOMETRY, _build_mjcf  # type: ignore
-        return (_build_mjcf("sc", "", 32) + "::" + _build_mjcf("sfp", "", 32) +
-                "::" + str(sorted(_PORT_GEOMETRY.items())))
-    except Exception:
+        return "::".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted(scene_dir.glob("*.xml"))
+        )
+    except OSError:
         return ""
 
 

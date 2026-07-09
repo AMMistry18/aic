@@ -4,7 +4,7 @@ Sim-side backend for last-inch insertion RL on the Gazebo->MuJoCo pipeline scene
 (UR5e + Robotiq Hand-E + welded LC/SFP plug + elastic cable + task board + the
 **real receptacle ports**: NIC card SFP cage `nic_card_mount_2` + `sc_port_0/1`).
 
-This replaces the procedural box env (`RL/env.py`) with the actual robot/scene.
+This is the maintained environment for the actual robot/scene.
 
 Design (v0.5, 2026-07-03 — port-frame last inch):
   * INSERT TARGET = the exported SFP entrance frame (`sfp_port_1_link_entrance`

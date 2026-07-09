@@ -1,7 +1,7 @@
 # AIC Phase 1 — Project Overview
 
 *Last updated: 2026-07-03. Top-level map of this repo and the overall strategy.
-Deep dives live in `RL/README.md`, `RL/REWARD_SPEC.md`, and the official docs in
+Deep dives live in `RL/README.md` and the official docs in
 `../aic_1/aic-phase-1/docs/`.*
 
 ---
@@ -126,7 +126,7 @@ Fork of the official `intrinsic-dev/aic` toolkit. **Bold = our additions.**
 
 | Path | What |
 | :--- | :--- |
-| **`RL/`** | Last-inch insertion RL: MuJoCo scene env, reward, SAC training, curriculum, W&B logging. See `RL/README.md` (setup/run) and `RL/REWARD_SPEC.md` (reward design). |
+| **`RL/`** | Last-inch insertion RL: real MuJoCo scene, reward, compact SB3 SAC, and full residual-SAC training. See `RL/README.md`. |
 | **`train_sc.py`** | YOLO-pose training for **SC port** detection (4 keypoints; NIC recipe tuned for tiny ports). Weights → `~/bestSC.pt`. |
 | **`perception_core.py`** | Standalone (no-ROS) perception helpers: NIC/SC detection + multi-camera triangulation. |
 | **`eval_sc_pose_model.py`, `eval_color_sc.py`, `sc_pose_sanity_check.py`, `sc_policy_eval_summary.py`** | Perception/policy eval + sanity-check scripts. |
@@ -154,11 +154,9 @@ Related, outside this repo:
 
 - **Env**: `RL/scene_env.py` `SceneInsertEnv` — real exported AIC scene
   (UR5e + Hand-E + welded LC/SFP plug + elastic cable + NIC/SC ports),
-  targeting `sfp_port_1_link_entrance`. The older `RL/env.py` box scene is a
-  unit-test toy only.
-- **Reward**: `RL/reward.py` — sparse goal-image L1 (main) + log-shaped force +
-  depth potential + xy progress + smoothness/lateral penalties + terminal
-  bonus. Spec/rationale in `RL/REWARD_SPEC.md`.
+  targeting `sfp_port_1_link_entrance`.
+- **Reward**: `RL/reward.py` provides geometry-first depth progress, success,
+  alignment, force, collision, and smoothness terms.
 - **Curriculum**: reverse curriculum (Florensa-style) — start seated
   (level 0), back the start pose out toward the full last-inch envelope
   (level 1) as the success rate over a window clears a threshold.

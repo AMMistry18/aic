@@ -2,10 +2,10 @@
 Train image-SAC for the last-inch insertion policy.
 
 Usage (full run):
-    MUJOCO_GL=egl pixi run python RL/train.py --port-type sc --steps 500000
+    MUJOCO_GL=egl pixi run python RL/residual_sac/trainer.py --port-type sc --steps 500000
 
 This script:
-    1. Builds the MuJoCo env(s) (RL/env.py) as a SubprocVecEnv.
+    1. Builds the real MuJoCo scene env as a SubprocVecEnv.
     2. Wraps a Dict obs space with a CombinedImageState extractor (image CNN
        + state MLP fused to 256-d).
     3. Trains SAC (stable-baselines3) with the reward in
@@ -38,7 +38,8 @@ from pathlib import Path
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
-_REPO = _HERE.parent
+_RL_ROOT = _HERE.parent
+_REPO = _RL_ROOT.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
@@ -103,7 +104,8 @@ def main():
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--steps", type=int, default=500_000,
                    help="total env steps (default 500k; ~45-90 min on a 5090)")
-    p.add_argument("--port-type", choices=["sc", "sfp"], default="sc")
+    p.add_argument("--port-type", choices=["sfp"], default="sfp",
+                   help="the retained MuJoCo scene trains the welded SFP connector")
     p.add_argument("--seed", type=int, default=42)
     # ---- SAC hyperparameters (retuned: batch 1024 / UTD 0.25 / target-H -3) ----
     p.add_argument("--lr", type=float, default=3e-4)
@@ -180,14 +182,7 @@ def main():
                         "video is expensive during long runs)")
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--plot", action="store_true")
-    p.add_argument("--recorded", action="store_true")
-    p.add_argument("--dataset-dir", type=Path, default=None)
-    p.add_argument("--last-inch-start-frame", type=int, default=80)
-    # ---- REAL scene (scene_env.py on the exported scene.xml with real ports) ----
-    p.add_argument("--scene", action="store_true",
-                   help="train on the REAL AIC scene (RL/scene_env.py: UR5e + "
-                        "gripper + cable + task board + NIC/SFP/SC ports) instead "
-                        "of the procedural box env. This is the deployment-faithful path.")
+    # ---- Real scene (scene_env.py on the exported scene.xml with real ports) ----
     p.add_argument("--image-size", type=int, default=256,
                    help="[--scene] wrist-cam obs resolution (HxW, square)")
     p.add_argument("--reward-image-res", type=int, default=0,
@@ -227,7 +222,7 @@ def main():
                    help="[--base-script] base target advance per policy step, mm")
     # ---- curriculum ----
     p.add_argument("--reset-mode", choices=["curriculum", "random", "near_goal"],
-                   default="curriculum")
+                   default="random")
     p.add_argument("--curriculum-eval-window", type=int, default=100)
     p.add_argument("--curriculum-advance-threshold", type=float, default=0.6)
     p.add_argument("--curriculum-retreat-threshold", type=float, default=0.15)
@@ -292,8 +287,6 @@ def main():
     if args.no_image_reward:
         args.image_reward_weight = 0.0
 
-    if args.action_mode != "joint_residual" and not args.scene:
-        raise SystemExit("--action-mode cartesian_residual requires --scene")
     if args.base_script and args.action_mode != "cartesian_residual":
         raise SystemExit("--base-script requires --action-mode cartesian_residual")
 
@@ -301,9 +294,7 @@ def main():
         run_name = f"residual_sac_{args.port_type}_{args.reset_mode}"
         if args.action_mode == "cartesian_residual":
             run_name += "_cart_basescript" if args.base_script else "_cart"
-        if args.recorded:
-            run_name += "_recorded"
-        args.out = Path(__file__).resolve().parent / "output" / run_name
+        args.out = _RL_ROOT / "output" / "residual_sac" / run_name
     args.out.mkdir(parents=True, exist_ok=True)
     print(f"[train] saving to {args.out.resolve()}", flush=True)
 
@@ -400,109 +391,64 @@ def main():
         DummyVecEnv, SubprocVecEnv, VecTransposeImage)
     from gymnasium.wrappers import TimeLimit
 
-    from RL.env import EnvConfig, LastInchInsertEnv
+    from RL.reward import RewardConfig
+    from RL.scene_env import SceneInsertEnv, SceneEnvConfig
 
-    env_cfg = EnvConfig()
+    base_reward_cfg = RewardConfig()
     reward_cfg = dataclasses.replace(
-        env_cfg.reward,
+        base_reward_cfg,
         w_image=float(args.image_reward_weight),
-        beta_s=0.0 if float(args.image_reward_weight) == 0.0 else env_cfg.reward.beta_s,
+        beta_s=0.0 if float(args.image_reward_weight) == 0.0 else base_reward_cfg.beta_s,
     )
-    env_cfg = dataclasses.replace(env_cfg, reward=reward_cfg)
-    if args.max_episode_steps > 0:
-        env_cfg = dataclasses.replace(
-            env_cfg, term=dataclasses.replace(env_cfg.term,
-                                              max_steps=int(args.max_episode_steps)))
+    max_episode_steps = int(args.max_episode_steps)
     n_envs = int(args.num_envs)
 
     # ------------------------------------------------------------------ #
     # env factory
     # ------------------------------------------------------------------ #
-    use_recorded = bool(args.recorded)
-    use_scene = bool(args.scene)
-    make_wandb_video_env = None
-    if use_scene:
-        from RL.scene_env import SceneInsertEnv, SceneEnvConfig
+    scene_kwargs = dict(
+        insert_target_body="sfp_port_1_link_entrance",
+        image_h=args.image_size, image_w=args.image_size,
+        reward_image_res=args.reward_image_res,
+        reward=reward_cfg,
+        max_episode_steps=max_episode_steps,
+        action_mode=args.action_mode,
+        cart_action_dims=args.cart_action_dims,
+        cart_trans_scale_m=args.cart_trans_scale_mm * 1e-3,
+        cart_rot_scale_rad=float(np.radians(args.cart_rot_scale_deg)),
+        base_script_enabled=bool(args.base_script),
+        base_script_step_m=args.base_script_step_mm * 1e-3,
+    )
 
-        scene_kwargs = dict(
-            image_h=args.image_size, image_w=args.image_size,
-            reward_image_res=args.reward_image_res,
-            reward=reward_cfg,
-            max_episode_steps=env_cfg.term.max_steps,
-            action_mode=args.action_mode,
-            cart_action_dims=args.cart_action_dims,
-            cart_trans_scale_m=args.cart_trans_scale_mm * 1e-3,
-            cart_rot_scale_rad=float(np.radians(args.cart_rot_scale_deg)),
-            base_script_enabled=bool(args.base_script),
-            base_script_step_m=args.base_script_step_mm * 1e-3,
-        )
+    def _make_env(rank: int = 0):
+        def _thunk():
+            e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
+            e.set_reset_mode(args.reset_mode)
+            if args.reset_mode == "curriculum":
+                e.set_level_file(str(args.out / "curriculum_level.txt"))
+            return Monitor(TimeLimit(e, max_episode_steps=max_episode_steps))
+        return _thunk
 
-        def _make_env(rank: int = 0):
-            def _thunk():
-                e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
+    def _make_scene_video_env():
+        holder = {}
+
+        def _thunk():
+            e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
+            if args.wandb_video_level >= 0.0:
+                e.set_reset_mode("curriculum")
+                e.set_curriculum_level(float(args.wandb_video_level))
+            else:
                 e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
-                e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
-                return Monitor(e)
-            return _thunk
+            if args.reset_mode == "curriculum" and args.wandb_video_level < 0.0:
+                e.set_level_file(str(args.out / "curriculum_level.txt"))
+            holder["render_env"] = e
+            return Monitor(TimeLimit(e, max_episode_steps=max_episode_steps))
 
-        def _make_scene_video_env():
-            holder = {}
+        venv = DummyVecEnv([_thunk])
+        venv = VecTransposeImage(venv)
+        return venv, holder["render_env"]
 
-            def _thunk():
-                e = SceneInsertEnv(SceneEnvConfig(**scene_kwargs))
-                if args.wandb_video_level >= 0.0:
-                    e.set_reset_mode("curriculum")
-                    e.set_curriculum_level(float(args.wandb_video_level))
-                else:
-                    e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum" and args.wandb_video_level < 0.0:
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
-                holder["render_env"] = e
-                return Monitor(TimeLimit(e, max_episode_steps=env_cfg.term.max_steps))
-
-            venv = DummyVecEnv([_thunk])
-            venv = VecTransposeImage(venv)
-            return venv, holder["render_env"]
-
-        make_wandb_video_env = _make_scene_video_env
-    elif use_recorded:
-        from RL.recorded_env import (
-            RecordedEnvConfig, RecordedRolloutEnv, discover_dataset)
-        if args.dataset_dir is None or not Path(args.dataset_dir).exists():
-            raise SystemExit(
-                f"--recorded requires --dataset-dir (got {args.dataset_dir})")
-        paths = discover_dataset(str(args.dataset_dir), port_type=args.port_type)
-        if not paths:
-            raise SystemExit(f"no rollouts under {args.dataset_dir} "
-                             f"for port_type={args.port_type!r}")
-        print(f"[train] recorded env: {len(paths)} rollouts", flush=True)
-        rec_cfg = RecordedEnvConfig(
-            obs=env_cfg.obs, reward=env_cfg.reward, term=env_cfg.term,
-            port_type=args.port_type,
-            last_inch_start_frame=int(args.last_inch_start_frame))
-
-        def _make_env(rank: int = 0):
-            def _thunk():
-                shard = paths[rank::n_envs]
-                e = RecordedRolloutEnv(shard, rec_cfg)
-                e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
-                e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
-                return Monitor(e)
-            return _thunk
-    else:
-        def _make_env(rank: int = 0):
-            def _thunk():
-                e = LastInchInsertEnv(env_cfg, port_type=args.port_type)
-                e.set_reset_mode(args.reset_mode)
-                if args.reset_mode == "curriculum":
-                    e.set_level_file(str(args.out / "curriculum_level.txt"))
-                e = TimeLimit(e, max_episode_steps=env_cfg.term.max_steps)
-                return Monitor(e)
-            return _thunk
+    make_wandb_video_env = _make_scene_video_env
 
     if n_envs == 1:
         env = DummyVecEnv([_make_env(0)])
@@ -541,8 +487,7 @@ def main():
                 dummy = torch.zeros(1, *img_shape)
                 cnn_out = self.cnn(dummy).shape[1]
 
-            # generic: every non-image obs key feeds the state MLP (works for both
-            # RL/env.py and RL/scene_env.py obs schemas).
+            # Every non-image scene observation feeds the state MLP.
             state_keys = tuple(sorted(k for k in observation_space.spaces if k != "image"))
             state_dim = sum(int(np.prod(observation_space[k].shape)) for k in state_keys)
             self._state_keys = state_keys
@@ -713,14 +658,11 @@ def main():
 
     wandb_config = dict(cfg_dict)
     try:
-        wandb_config["reward"] = dataclasses.asdict(env_cfg.reward)
-        wandb_config["termination"] = dataclasses.asdict(env_cfg.term)
+        wandb_config["reward"] = dataclasses.asdict(reward_cfg)
     except Exception:
         pass
     wandb_config.update({
         "env/port_type": args.port_type,
-        "env/pos_scale": list(env_cfg.pos_scale),
-        "env/rot_scale": list(env_cfg.rot_scale),
         "algorithm": "SAC", "batch_size": args.batch_size,
         "train_freq": args.train_freq, "gradient_steps": args.gradient_steps,
     })
@@ -822,7 +764,7 @@ def main():
     if not args.no_video and args.video_every > 0:
         callbacks.append(VideoRecorder(env, args.out / "videos",
                                        every_n_episodes=args.video_every,
-                                       max_steps=env_cfg.term.max_steps))
+                                       max_steps=max_episode_steps))
 
     # ------------------------------------------------------------------ #
     # learn — with crash-safe final checkpoint on ANY exit
@@ -880,7 +822,7 @@ def main():
         f"warmup_steps={args.warmup_steps}\ntrain_freq={args.train_freq}\n"
         f"gradient_steps={args.gradient_steps}\nnum_envs={n_envs}\n"
         f"elapsed_s={elapsed:.1f}\ncache_key={cache_key}\n"
-        f"policy_class=aic_example_policies.ros.LastInchInsert\n")
+        "policy_type=residual_sac\n")
     print(f"[train] wrote {args.out / 'train_meta.txt'}", flush=True)
 
     if args.plot:
