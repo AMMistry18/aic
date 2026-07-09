@@ -876,7 +876,7 @@ environments:
         build: hb0f4dca_0
       - conda: aic_utils/aic_teleoperation
         build: hb0f4dca_0
-      - conda: aic_utils/lerobot_robot_aic
+      - conda: student_teacher_policy/lerobot_robot_aic
         build: hb0f4dca_0
       - pypi: https://files.pythonhosted.org/packages/18/a6/907a406bb7d359e6a63f99c313846d9eec4f7e6f7437809e03aa00fa3074/absl_py-2.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl
@@ -1760,7 +1760,7 @@ environments:
         build: h60d57d3_0
       - conda: aic_utils/aic_teleoperation
         build: h60d57d3_0
-      - conda: aic_utils/lerobot_robot_aic
+      - conda: student_teacher_policy/lerobot_robot_aic
         build: h60d57d3_0
       - pypi: https://files.pythonhosted.org/packages/18/a6/907a406bb7d359e6a63f99c313846d9eec4f7e6f7437809e03aa00fa3074/absl_py-2.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl
@@ -20699,7 +20699,7 @@ packages:
   license: Apache-2.0
   size: 26781
   timestamp: 1775548458911
-- conda: aic_utils/lerobot_robot_aic
+- conda: student_teacher_policy/lerobot_robot_aic
   name: ros-kilted-lerobot-robot-aic
   version: 0.0.1
   build: h60d57d3_0
@@ -20719,7 +20719,7 @@ packages:
   - python_abi 3.12.* *_cp312
   - numpy >=1.25,<3
   license: LicenseRef-Apache-2.0
-- conda: aic_utils/lerobot_robot_aic
+- conda: student_teacher_policy/lerobot_robot_aic
   name: ros-kilted-lerobot-robot-aic
   version: 0.0.1
   build: hb0f4dca_0

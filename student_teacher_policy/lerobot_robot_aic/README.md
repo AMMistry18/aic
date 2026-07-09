@@ -1,4 +1,4 @@
-# lerobot_robot_aic
+# Student Teacher Policy: LeRobot Imitation Learning
 
 This package contains a [LeRobot](https://huggingface.co/lerobot) interface for the AIC robot.
 
