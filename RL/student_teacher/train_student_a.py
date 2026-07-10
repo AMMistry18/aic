@@ -58,9 +58,17 @@ def parse_args():
     p.add_argument("--num-envs", type=int, default=12,
                    help="parallel rollout workers for dataset gen (CPU-bound)")
     p.add_argument("--perception-noise", type=float, default=1.0)
+    p.add_argument("--grasp-noise", type=float, default=1.0,
+                   help="scale for per-episode hidden TCP-to-tip calibration error")
     p.add_argument("--level", type=float, default=1.0)
     p.add_argument("--action-convention", type=str, default="deploy",
                    choices=["deploy", "sim"])
+    p.add_argument("--wrench-mode", type=str, default="zero",
+                   choices=["zero", "baseline", "raw"],
+                   help="student wrench contract; zero is the verified Gazebo-safe default")
+    p.add_argument("--feature-mode", type=str, default="gazebo_v1",
+                   choices=["gazebo_v1", "legacy"],
+                   help="gazebo_v1 masks sim/world-specific absolute pose fields in-model")
     p.add_argument("--residual-scale", type=float, default=RESIDUAL_SCALE_DEFAULT)
     p.add_argument("--teacher-zip", type=str, default=TEACHER_ZIP_DEFAULT)
     p.add_argument("--out", type=str, default="RL/output/student_teacher/student_a_distill")
@@ -86,13 +94,21 @@ def parse_args():
 # --------------------------------------------------------------------------- #
 # student policy: MLP(69) -> tanh 6-D
 # --------------------------------------------------------------------------- #
-def build_policy(obs_dim=OBS_DIM, act_dim=ACT_DIM, hidden=256):
+def build_policy(obs_dim=OBS_DIM, act_dim=ACT_DIM, hidden=256,
+                 feature_mode="legacy"):
     import torch
     import torch.nn as nn
 
     class StudentMLP(nn.Module):
         def __init__(self):
             super().__init__()
+            if feature_mode not in ("legacy", "gazebo_v1"):
+                raise ValueError(f"unknown feature_mode {feature_mode!r}")
+            input_mask = torch.ones(obs_dim, dtype=torch.float32)
+            if feature_mode == "gazebo_v1":
+                input_mask[12:19] = 0.0   # absolute TCP xyz + quaternion
+                input_mask[25:32] = 0.0   # absolute port xyz + quaternion
+            self.register_buffer("input_mask", input_mask, persistent=False)
             self.net = nn.Sequential(
                 nn.Linear(obs_dim, hidden), nn.ReLU(),
                 nn.Linear(hidden, hidden), nn.ReLU(),
@@ -100,7 +116,7 @@ def build_policy(obs_dim=OBS_DIM, act_dim=ACT_DIM, hidden=256):
                 nn.Linear(hidden, act_dim))
 
         def forward(self, obs):
-            return torch.tanh(self.net(obs))
+            return torch.tanh(self.net(obs * self.input_mask))
 
     return StudentMLP()
 
@@ -131,21 +147,25 @@ def _teacher_target(env, funnel, teacher, residual_scale, convention):
 # dataset generation (state-only; light CPU env, no GL)
 # --------------------------------------------------------------------------- #
 def _rollout_worker(*, worker, n_transitions, out_dir, perception_noise, level,
-                    action_convention, residual_scale, teacher_zip, seed,
-                    shard_size, student_state_dict=None, hidden=256):
+                    action_convention, wrench_mode, grasp_noise,
+                    residual_scale, teacher_zip, seed,
+                    shard_size, student_state_dict=None, hidden=256,
+                    shard_prefix="", feature_mode="gazebo_v1"):
     from stable_baselines3 import SAC
     from RL.student_teacher.student_env_a import make_student_env_a
     from RL.student_teacher.scripted_teacher_funnel import ScriptedTeacher
 
     env = make_student_env_a(perception_noise=perception_noise, level=level,
-                             action_convention=action_convention, seed=seed)
+                             action_convention=action_convention,
+                             wrench_mode=wrench_mode,
+                             grasp_noise=grasp_noise, seed=seed)
     funnel = ScriptedTeacher(action_dim=ACT_DIM)
     teacher = SAC.load(teacher_zip, device="cpu")
 
     student = None
     if student_state_dict is not None:
         import torch
-        student = build_policy(hidden=hidden)
+        student = build_policy(hidden=hidden, feature_mode=feature_mode)
         student.load_state_dict(student_state_dict)
         student.eval()
 
@@ -159,7 +179,7 @@ def _rollout_worker(*, worker, n_transitions, out_dir, perception_noise, level,
         if not buf_obs:
             return
         np.savez_compressed(
-            out / f"shard_w{worker:02d}_{shard_k:04d}.npz",
+            out / f"shard_{shard_prefix}w{worker:02d}_{shard_k:04d}.npz",
             obs=np.asarray(buf_obs, dtype=np.float32),
             action=np.asarray(buf_act, dtype=np.float32))
         shard_k += 1
@@ -199,8 +219,10 @@ def _worker_entry(kw):
 
 
 def generate(*, transitions, num_envs, out, perception_noise, level,
-             action_convention, residual_scale, teacher_zip, seed, shard_size,
-             student_state_dict=None, hidden=256):
+             action_convention, wrench_mode, grasp_noise,
+             residual_scale, teacher_zip, seed, shard_size,
+             student_state_dict=None, hidden=256, shard_prefix="",
+             feature_mode="gazebo_v1"):
     dataset_dir = Path(out) / "dataset"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     if student_state_dict is not None:       # DAgger is single-process (torch/CUDA)
@@ -211,9 +233,11 @@ def generate(*, transitions, num_envs, out, perception_noise, level,
         per[i] += 1
     common = dict(out_dir=str(dataset_dir), perception_noise=perception_noise,
                   level=level, action_convention=action_convention,
+                  wrench_mode=wrench_mode, grasp_noise=grasp_noise,
                   residual_scale=residual_scale, teacher_zip=teacher_zip,
                   shard_size=shard_size, student_state_dict=student_state_dict,
-                  hidden=hidden)
+                  hidden=hidden, shard_prefix=shard_prefix,
+                  feature_mode=feature_mode)
 
     t0 = time.time()
     if num_envs == 1:
@@ -252,12 +276,15 @@ def load_dataset(dataset_dir: str):
 # eval (deploy obs, level 1.0, success from term_status)
 # --------------------------------------------------------------------------- #
 def eval_student(policy, *, episodes, perception_noise, level, action_convention,
+                 wrench_mode, grasp_noise,
                  seed, device):
     import torch
     from RL.student_teacher.student_env_a import make_student_env_a
 
     env = make_student_env_a(perception_noise=perception_noise, level=level,
-                             action_convention=action_convention, seed=seed)
+                             action_convention=action_convention,
+                             wrench_mode=wrench_mode,
+                             grasp_noise=grasp_noise, seed=seed)
     policy.eval()
 
     def act(obs):
@@ -295,7 +322,8 @@ def _wandb_log(data):
 
 def fit_bc(policy, dataset_dir, *, epochs, batch_size, lr, device, seed, out,
            metrics_path, eval_every, eval_episodes, perception_noise, level,
-           action_convention, name="student_a", epoch_offset=0):
+           action_convention, wrench_mode, grasp_noise, feature_mode,
+           name="student_a", epoch_offset=0):
     import torch
 
     obs, action = load_dataset(dataset_dir)
@@ -328,18 +356,38 @@ def fit_bc(policy, dataset_dir, *, epochs, batch_size, lr, device, seed, out,
             sr, counts = eval_student(
                 policy, episodes=eval_episodes, perception_noise=perception_noise,
                 level=level, action_convention=action_convention,
+                wrench_mode=wrench_mode, grasp_noise=grasp_noise,
                 seed=4321, device=device)
             print(f"[student_a] epoch {gep} eval success_rate={sr:.3f} {counts}",
                   flush=True)
             rec.update({"eval_success_rate": sr, "eval_counts": counts})
             _wandb_log({"eval/success_rate": sr, "epoch": gep})
-            torch.save({"model": policy.state_dict(), "epoch": gep},
+            torch.save({
+                "model": policy.state_dict(),
+                "epoch": gep,
+                "config": {
+                    "hidden": policy.net[0].out_features,
+                    "feature_mode": feature_mode,
+                    "wrench_mode": wrench_mode,
+                    "grasp_noise": grasp_noise,
+                    "action_convention": action_convention,
+                },
+            },
                        Path(out) / f"{name}_ep{gep:03d}.pt")
 
         with open(metrics_path, "a") as f:
             f.write(json.dumps(rec) + "\n")
 
-    torch.save({"model": policy.state_dict()}, Path(out) / f"{name}.pt")
+    torch.save({
+        "model": policy.state_dict(),
+        "config": {
+            "hidden": policy.net[0].out_features,
+            "feature_mode": feature_mode,
+            "wrench_mode": wrench_mode,
+            "grasp_noise": grasp_noise,
+            "action_convention": action_convention,
+        },
+    }, Path(out) / f"{name}.pt")
 
 
 # --------------------------------------------------------------------------- #
@@ -353,10 +401,17 @@ def main():
 
     # 1) dataset -- BEFORE any CUDA init (fork-based workers)
     have = bool(sorted(Path(dataset_dir).glob("shard_*.npz")))
+    if args.regen:
+        for shard in Path(dataset_dir).glob("shard_*.npz"):
+            shard.unlink()
+        have = False
     if args.regen or not have:
         generate(transitions=args.transitions, num_envs=args.num_envs, out=args.out,
                  perception_noise=args.perception_noise, level=args.level,
                  action_convention=args.action_convention,
+                 wrench_mode=args.wrench_mode,
+                 grasp_noise=args.grasp_noise,
+                 feature_mode=args.feature_mode,
                  residual_scale=args.residual_scale, teacher_zip=args.teacher_zip,
                  seed=args.seed, shard_size=args.shard_size, hidden=args.hidden)
     else:
@@ -378,7 +433,7 @@ def main():
     # 2) build policy
     import torch  # noqa: F401
     device = _resolve_device(args.device)
-    policy = build_policy(hidden=args.hidden).to(device)
+    policy = build_policy(hidden=args.hidden, feature_mode=args.feature_mode).to(device)
     n_params = sum(p.numel() for p in policy.parameters())
     print(f"[student_a] MLP on {device}: obs={OBS_DIM} -> act={ACT_DIM} "
           f"hidden={args.hidden} params={n_params/1e6:.3f}M", flush=True)
@@ -386,7 +441,10 @@ def main():
     with open(out / "train_meta.txt", "w") as f:
         f.write(f"transitions={args.transitions}\nepochs={args.epochs}\n"
                 f"num_envs={args.num_envs}\nperception_noise={args.perception_noise}\n"
+                f"grasp_noise={args.grasp_noise}\n"
                 f"action_convention={args.action_convention}\n"
+                f"wrench_mode={args.wrench_mode}\n"
+                f"feature_mode={args.feature_mode}\n"
                 f"residual_scale={args.residual_scale}\nteacher_zip={args.teacher_zip}\n"
                 f"seed={args.seed}\nbatch_size={args.batch_size}\nlr={args.lr}\n"
                 f"hidden={args.hidden}\nobs_dim={OBS_DIM}\nparams={n_params}\n")
@@ -397,7 +455,9 @@ def main():
            lr=args.lr, device=device, seed=args.seed, out=args.out,
            metrics_path=metrics_path, eval_every=args.eval_every,
            eval_episodes=args.eval_episodes, perception_noise=args.perception_noise,
-           level=args.level, action_convention=args.action_convention)
+           level=args.level, action_convention=args.action_convention,
+           wrench_mode=args.wrench_mode, grasp_noise=args.grasp_noise,
+           feature_mode=args.feature_mode)
 
     # 4) optional DAgger rounds (default 0 = pure BC)
     for r in range(int(args.dagger_iters)):
@@ -406,15 +466,22 @@ def main():
         generate(transitions=args.dagger_transitions, num_envs=1, out=args.out,
                  perception_noise=args.perception_noise, level=args.level,
                  action_convention=args.action_convention,
+                 wrench_mode=args.wrench_mode,
+                 grasp_noise=args.grasp_noise,
+                 feature_mode=args.feature_mode,
                  residual_scale=args.residual_scale, teacher_zip=args.teacher_zip,
                  seed=args.seed + 7000 + r, shard_size=args.shard_size,
-                 student_state_dict=sd, hidden=args.hidden)
+                 student_state_dict=sd, hidden=args.hidden,
+                 shard_prefix=f"dagger_r{r + 1:02d}_")
         fit_bc(policy, dataset_dir, epochs=args.dagger_epochs,
                batch_size=args.batch_size, lr=args.lr, device=device,
                seed=args.seed, out=args.out, metrics_path=metrics_path,
                eval_every=args.eval_every, eval_episodes=args.eval_episodes,
                perception_noise=args.perception_noise, level=args.level,
                action_convention=args.action_convention,
+               wrench_mode=args.wrench_mode,
+               grasp_noise=args.grasp_noise,
+               feature_mode=args.feature_mode,
                epoch_offset=args.epochs + r * args.dagger_epochs)
 
     print(f"[student_a] DONE elapsed={time.time()-t0:.1f}s -> {out/'student_a.pt'}",

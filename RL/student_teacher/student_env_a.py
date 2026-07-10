@@ -37,14 +37,16 @@ tip = plug-tip body world pose (xpos/xquat); X = perceived port entrance positio
   38:44    hint                  [clip(-6 dx,-6 dy,-8 dz, ..), clip(-3*rot_err,..)]
   44:50    scripted_hint         == hint (deploy sets scripted_hint = hint.copy())
   50:51    [1.0]                 constant bias term
-  51:57    wrench                scene._raw_ft() * 0.1     [fx,fy,fz,tx,ty,tz]
+  51:57    wrench                configurable; Gazebo-v1 default is six zeros
   57:63    last_action           previous 6-D action (DEPLOY convention, [-1,1])
   63:69    tip_axes_port         [R_rel @ x_hat, R_rel @ z_hat]  (R_rel = mat(q_rel))
                                                                          total = 69
 =========================================================================
 
-Only PRIVILEGED leak (identical to student_env.py): the *noised* perceived port
-pose. Everything else is a measurable-at-deploy quantity. delta_port / rot_err_port
+The student sees only the *noised* perceived port pose. The plug-tip observation
+is reconstructed from robot TCP plus the calibrated fixed transform, with an
+optional per-episode hidden grasp perturbation; MuJoCo GT is reserved for the
+teacher label. delta_port / rot_err_port
 / hint / tcp_vel all use the PERCEIVED (noised) port frame, so the perception error
 propagates through the whole obs exactly as it does on the real robot (where X and
 q_port come from the same YOLO/perception estimate).
@@ -64,25 +66,49 @@ per-axis scale is LARGER than the sim scale, deploy-convention targets shrink in
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
+from pathlib import Path
 
 import numpy as np
 import gymnasium as gym
 import mujoco
+
+try:
+    from aic_model.rl_insert_contract import (
+        DEPLOY_POS_SCALE,
+        DEPLOY_ROT_SCALE,
+        HOME_QPOS as DEPLOY_HOME,
+        build_observation69,
+        canonicalize_quaternion,
+        sfp_tip_pose_from_tcp,
+    )
+except ImportError:  # source-tree import before the ROS package is rebuilt
+    _contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "aic_model" / "aic_model" / "rl_insert_contract.py"
+    )
+    _spec = importlib.util.spec_from_file_location(
+        "_aic_rl_insert_contract_source", _contract_path
+    )
+    if _spec is None or _spec.loader is None:
+        raise ImportError(f"cannot load deploy contract from {_contract_path}")
+    _contract = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_contract)
+    DEPLOY_POS_SCALE = _contract.DEPLOY_POS_SCALE
+    DEPLOY_ROT_SCALE = _contract.DEPLOY_ROT_SCALE
+    DEPLOY_HOME = _contract.HOME_QPOS
+    build_observation69 = _contract.build_observation69
+    canonicalize_quaternion = _contract.canonicalize_quaternion
+    sfp_tip_pose_from_tcp = _contract.sfp_tip_pose_from_tcp
 
 # --------------------------------------------------------------------------- #
 # deploy contract constants (verified against PerceptionInsert.py, lines 69-72)
 # --------------------------------------------------------------------------- #
 FINAL_INSERT_OBS_LEN = 69
 FINAL_INSERT_ACTION_DIM = 6
-DEPLOY_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)   # m  (FINAL_INSERT_POS_SCALE)
-DEPLOY_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)        # rad (FINAL_INSERT_ROT_SCALE)
-
 # sim cartesian_residual scale (matches teacher / residual_env.py)
 SIM_TRANS_SCALE_M = 1.0e-3
 SIM_ROT_SCALE_RAD = float(np.radians(1.0))
-
-# near-home arm seed used by the deploy obs ("minus home"); identical to sim AIC_HOME.
-DEPLOY_HOME = np.array([-0.16, -1.35, -1.66, -1.69, 1.57, 1.41], dtype=np.float64)
 
 # --------------------------------------------------------------------------- #
 # perception-noise model (base 1-sigma; scaled by `perception_noise`)
@@ -90,6 +116,10 @@ DEPLOY_HOME = np.array([-0.16, -1.35, -1.66, -1.69, 1.57, 1.41], dtype=np.float6
 # --------------------------------------------------------------------------- #
 PERCEPTION_POS_SIGMA = np.array([1.5e-3, 1.5e-3, 3.5e-3], dtype=np.float64)          # m
 PERCEPTION_ROT_SIGMA = np.array([1.745e-2, 1.745e-2, 2.618e-2], dtype=np.float64)   # rad
+# Hidden grasp/calibration error observed between the nominal TCP->tip transform
+# and Gazebo scoring GT.  Drawn once per episode in the TCP frame.
+GRASP_POS_SIGMA = np.array([2.0e-3, 2.0e-3, 4.0e-3], dtype=np.float64)
+GRASP_ROT_SIGMA = np.array([2.618e-2, 2.618e-2, 2.618e-2], dtype=np.float64)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,25 +197,31 @@ class StudentObsWrapperA(gym.Wrapper):
     """Emit the EXACT 69-dim Contract-A obs; 6-D cartesian residual action."""
 
     def __init__(self, env: gym.Env, perception_noise: float = 1.0,
-                 action_convention: str = "deploy", seed: int | None = None):
+                 action_convention: str = "deploy", wrench_mode: str = "zero",
+                 grasp_noise: float = 1.0,
+                 seed: int | None = None):
         super().__init__(env)
         self.scene = env.unwrapped                 # SceneInsertEnv (GT, read-only)
-        if self.scene.cfg.privileged_obs:
-            raise ValueError("StudentObsWrapperA needs privileged_obs=False "
-                             "(it consumes the ft/tcp_pose/last_action dict obs).")
         if action_convention not in ("deploy", "sim"):
             raise ValueError("action_convention must be 'deploy' or 'sim'")
         self.action_convention = action_convention
+        if wrench_mode not in ("raw", "zero", "baseline"):
+            raise ValueError("wrench_mode must be raw, zero, or baseline")
+        self.wrench_mode = wrench_mode
 
         self.action_space = gym.spaces.Box(-1.0, 1.0, (FINAL_INSERT_ACTION_DIM,), np.float32)
         self.observation_space = gym.spaces.Box(
             -np.inf, np.inf, (FINAL_INSERT_OBS_LEN,), np.float32)
 
         self.perception_noise = float(perception_noise)
+        self.grasp_noise = float(grasp_noise)
         self._rng = np.random.default_rng(seed)
         self._pos_bias = np.zeros(3)
         self._rot_bias = np.zeros(3)
+        self._grasp_pos_bias = np.zeros(3)
+        self._grasp_rot_bias = np.zeros(3)
         self._last_deploy_action = np.zeros(FINAL_INSERT_ACTION_DIM, np.float32)
+        self._wrench_baseline = np.zeros(6, dtype=np.float64)
         self._home = np.asarray(getattr(self.scene, "_home", DEPLOY_HOME),
                                 dtype=np.float64)[:6]
 
@@ -198,16 +234,16 @@ class StudentObsWrapperA(gym.Wrapper):
         s = self.perception_noise
         self._pos_bias = self._rng.normal(0.0, PERCEPTION_POS_SIGMA * s)
         self._rot_bias = self._rng.normal(0.0, PERCEPTION_ROT_SIGMA * s)
+        g = self.grasp_noise
+        self._grasp_pos_bias = self._rng.normal(0.0, GRASP_POS_SIGMA * g)
+        self._grasp_rot_bias = self._rng.normal(0.0, GRASP_ROT_SIGMA * g)
 
     def _perceived_port(self):
         """Perceived (GT + per-episode bias) port entrance pos + orientation quat."""
         X = self.scene._port_pos.astype(np.float64) + self._pos_bias
         q_gt = _mat_to_quat(self.scene._cart_frame_R)
         q = _qmul(_axisangle_to_quat(self._rot_bias), q_gt)
-        n = np.linalg.norm(q)
-        if n > 1e-9:
-            q = q / n
-        return X, q
+        return X, canonicalize_quaternion(q)
 
     # -- 69-dim obs assembly ------------------------------------------------ #
     def _build_obs69(self, raw: dict) -> np.ndarray:
@@ -215,7 +251,6 @@ class StudentObsWrapperA(gym.Wrapper):
         model = self.scene.model
 
         # [0:6] joint pos minus home, [6:12] joint vel
-        joint_pos = np.asarray(raw["arm_qpos"], dtype=np.float64)[:6] - self._home
         joint_vel = np.asarray(raw["arm_qvel"], dtype=np.float64)[:6]
 
         # [12:19] gripper (tcp) world pose
@@ -225,61 +260,46 @@ class StudentObsWrapperA(gym.Wrapper):
 
         # perceived port frame
         X, q_port = self._perceived_port()
-        R_port = _quat_to_mat(q_port)
 
         # [19:25] tcp velocity in perceived port frame (world twist -> port frame)
         mujoco.mj_jacSite(model, d, self._Jp, self._Jr, self.scene._tcp_sid)
         v_world = self._Jp @ d.qvel
         w_world = self._Jr @ d.qvel
-        tcp_vel = np.concatenate([R_port.T @ v_world, R_port.T @ w_world])
 
-        # plug tip world pose (GT body)
-        tip_xyz = d.xpos[self.scene._plug_tip_id].astype(np.float64)
-        q_tip = d.xquat[self.scene._plug_tip_id].astype(np.float64)
+        # Reconstruct the plug tip from the measurable TCP using the exact same
+        # calibrated transform as Gazebo deployment.  GT tip pose remains
+        # available only through priv_obs() for teacher labels.
+        tip_xyz, R_tip = sfp_tip_pose_from_tcp(gripper_xyz, q_gripper)
+        R_tcp = _quat_to_mat(q_gripper)
+        tip_xyz = tip_xyz + R_tcp @ self._grasp_pos_bias
+        R_tip = (
+            R_tcp @ _quat_to_mat(_axisangle_to_quat(self._grasp_rot_bias))
+            @ R_tcp.T @ R_tip
+        )
 
-        # [32:35] delta_port, [35:38] rot_err_port  (perceived port frame)
-        delta_port = R_port.T @ (tip_xyz - X)
-        q_rel = _qmul(_qconj(q_port), q_tip)
-        rot_err_port = _quat_to_rotvec(q_rel)
-
-        # [38:44] hint, [44:50] scripted_hint (identical)
-        hint = np.zeros(6, dtype=np.float64)
-        hint[0] = np.clip(-6.0 * delta_port[0], -1.0, 1.0)
-        hint[1] = np.clip(-6.0 * delta_port[1], -1.0, 1.0)
-        hint[2] = np.clip(-8.0 * delta_port[2], -1.0, 1.0)
-        hint[3:] = np.clip(-3.0 * rot_err_port, -1.0, 1.0)
-        scripted_hint = hint.copy()
-
-        # [51:57] wrench * 0.1
-        wrench = np.asarray(raw["ft"], dtype=np.float64)[:6] * 0.1
-
-        # [63:69] tip axes expressed in perceived port frame
-        R_rel = _quat_to_mat(q_rel)
-        tip_axes_port = np.concatenate(
-            [R_rel @ np.array([1.0, 0.0, 0.0]), R_rel @ np.array([0.0, 0.0, 1.0])])
-
-        obs_vec = np.concatenate([
-            joint_pos,                                            # 0:6
-            joint_vel,                                            # 6:12
-            np.asarray([*gripper_xyz, *q_gripper]),              # 12:19
-            tcp_vel,                                              # 19:25
-            np.asarray([X[0], X[1], X[2], *q_port]),             # 25:32
-            np.asarray([*delta_port, *rot_err_port]),            # 32:38
-            hint,                                                # 38:44
-            scripted_hint,                                        # 44:50
-            np.asarray([1.0]),                                   # 50:51
-            wrench,                                               # 51:57
-            self._last_deploy_action.astype(np.float64),         # 57:63
-            tip_axes_port,                                        # 63:69
-        ]).astype(np.float32)
-
-        assert obs_vec.size == FINAL_INSERT_OBS_LEN, obs_vec.size
-        return obs_vec
+        return build_observation69(
+            joint_pos=np.asarray(raw["arm_qpos"], dtype=np.float64)[:6],
+            joint_vel=joint_vel,
+            tcp_pos=gripper_xyz,
+            tcp_quat=q_gripper,
+            tcp_linear_velocity_world=v_world,
+            tcp_angular_velocity_world=w_world,
+            port_pos=X,
+            port_quat=q_port,
+            tip_pos=tip_xyz,
+            tip_rotation=R_tip,
+            wrench=np.asarray(raw["ft"], dtype=np.float64)[:6],
+            last_action=self._last_deploy_action,
+            home_qpos=self._home,
+            wrench_mode=self.wrench_mode,
+            wrench_baseline=self._wrench_baseline,
+        )
 
     # -- privileged teacher obs (distillation only; read-only GT) ----------- #
     def priv_obs(self) -> np.ndarray:
         """The 21-D PRIVILEGED flat-state vector the frozen teacher consumes."""
-        return self.scene._privileged_obs().astype(np.float32)
+        from RL.student_teacher.teacher_contract import build_teacher_obs21
+        return build_teacher_obs21(self.scene)
 
     def perceived_port_pose(self) -> np.ndarray:
         X, q = self._perceived_port()
@@ -290,6 +310,7 @@ class StudentObsWrapperA(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self._draw_bias()
         self._last_deploy_action = np.zeros(FINAL_INSERT_ACTION_DIM, np.float32)
+        self._wrench_baseline = np.asarray(obs["ft"], dtype=np.float64)[:6].copy()
         return self._build_obs69(obs), info
 
     def _to_sim(self, action):
@@ -308,6 +329,8 @@ class StudentObsWrapperA(gym.Wrapper):
         info = dict(info)
         info["perceived_port_pos_bias"] = self._pos_bias.copy()
         info["perceived_port_rot_bias"] = self._rot_bias.copy()
+        info["perceived_grasp_pos_bias"] = self._grasp_pos_bias.copy()
+        info["perceived_grasp_rot_bias"] = self._grasp_rot_bias.copy()
         return self._build_obs69(obs), r, term, trunc, info
 
     def step_sim(self, a_sim):
@@ -328,6 +351,8 @@ class StudentObsWrapperA(gym.Wrapper):
 def make_student_env_a(perception_noise: float = 1.0,
                        level: float = 1.0,
                        action_convention: str = "deploy",
+                       wrench_mode: str = "zero",
+                       grasp_noise: float = 1.0,
                        max_episode_steps: int | None = None,
                        seed: int | None = None) -> StudentObsWrapperA:
     """Build the Contract-A state-student env, pinned at `level` (default 1.0).
@@ -354,13 +379,14 @@ def make_student_env_a(perception_noise: float = 1.0,
         cart_pos_limit_m=0.20,
         cart_rot_limit_rad=0.35,
         include_images=False,       # state-only -> no renderer, no GL
-        privileged_obs=False,
     )
     scene = SceneInsertEnv(cfg)
     scene.set_reset_mode("curriculum")     # + fixed level, NO level file -> pinned
     scene.set_curriculum_level(float(level))
     wrapped = StudentObsWrapperA(scene, perception_noise=perception_noise,
-                                 action_convention=action_convention, seed=seed)
+                                 action_convention=action_convention,
+                                 wrench_mode=wrench_mode,
+                                 grasp_noise=grasp_noise, seed=seed)
     if seed is not None:
         wrapped.reset(seed=int(seed))
     return wrapped
@@ -377,4 +403,6 @@ __all__ = [
     "DEPLOY_ROT_SCALE",
     "PERCEPTION_POS_SIGMA",
     "PERCEPTION_ROT_SIGMA",
+    "GRASP_POS_SIGMA",
+    "GRASP_ROT_SIGMA",
 ]

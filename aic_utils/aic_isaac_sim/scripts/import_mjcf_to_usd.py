@@ -89,14 +89,19 @@ def _import_asset(source: Path, output_dir: Path, merge_mesh: bool, fix_base: bo
     # baseline without reviving deprecated importer calls here.
     from isaaclab.sim.converters import MjcfConverter, MjcfConverterCfg
 
-    config = MjcfConverterCfg(
+    config_kwargs = dict(
         asset_path=str(source),
         usd_dir=str(output_dir),
         usd_file_name=f"{source.stem}.usd",
         force_usd_conversion=True,
         make_instanceable=False,
-        fix_base=fix_base,
     )
+    # Isaac Lab 3 / Isaac Sim 6 removed ``fix_base`` from MjcfConverterCfg.
+    # The committed AIC robot and world already have their bases authored as
+    # fixed in the source MJCF, so omitting it preserves the intended result.
+    if "fix_base" in getattr(MjcfConverterCfg, "__annotations__", {}):
+        config_kwargs["fix_base"] = fix_base
+    config = MjcfConverterCfg(**config_kwargs)
     if hasattr(config, "merge_mesh"):
         config.merge_mesh = merge_mesh
     elif merge_mesh:

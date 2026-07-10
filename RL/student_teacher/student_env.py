@@ -96,9 +96,6 @@ class StudentObsWrapper(gym.Wrapper):
                  obs_cfg: ObsConfig | None = None, seed: int | None = None):
         super().__init__(env)
         self.scene = env.unwrapped                 # SceneInsertEnv (GT, read-only)
-        if self.scene.cfg.privileged_obs:
-            raise ValueError("StudentObsWrapper needs privileged_obs=False "
-                             "(it consumes the image/ft/tcp_pose dict obs).")
         if getattr(self.scene, "_renderer", None) is None or not self.scene._cams:
             raise ValueError("StudentObsWrapper needs include_images=True "
                              "(the student obs carries the wrist-cam image).")
@@ -157,7 +154,8 @@ class StudentObsWrapper(gym.Wrapper):
     # -- teacher priv obs (distillation only; read-only GT) ----------------- #
     def priv_obs(self) -> np.ndarray:
         """The 21-D PRIVILEGED flat-state vector the frozen teacher consumes."""
-        return self.scene._privileged_obs().astype(np.float32)
+        from RL.student_teacher.teacher_contract import build_teacher_obs21
+        return build_teacher_obs21(self.scene)
 
     def perceived_port_pose(self) -> np.ndarray:
         p, q = self._perceived_port()
@@ -218,7 +216,6 @@ def make_student_env(perception_noise: float = 1.0,
         include_images=True,
         image_h=int(image_size),
         image_w=int(image_size),
-        privileged_obs=False,
     )
     scene = SceneInsertEnv(cfg)
     scene.set_reset_mode("curriculum")     # + fixed level, NO level file -> pinned

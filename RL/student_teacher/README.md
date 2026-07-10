@@ -44,6 +44,9 @@ student_teacher/
   train_student.py             stage 3: BC trainer for the deployable student
   student_env_a.py             stage 3: alternate student obs/action formulation
   train_student_a.py           stage 3: BC trainer for the "_a" student
+  teacher_contract.py          recovered frozen-teacher 21-D observation adapter
+  export_student_a.py          checkpoint -> verified 69x6 TorchScript exporter
+  REDISTILL_GAZEBO.md          Gazebo-v1 contract, validation, and remote commands
   TEACHER_OBS_INTERFACE.md     privileged/deployable observation contract
   weights/                     committed trained weights (see below)
   dataset/                     distillation shards — GITIGNORED (1.6 GB, regenerable)

@@ -1474,6 +1474,7 @@ class PerceptionInsert(Policy):
     def perceive_port_position(self, task, obs):
         self._last_port_quat_wxyz = None
         self._last_port_yaw = None
+        self._last_port_reproj_px = None
         self._sc_slot_axis_xy = None
         self._sc_yaw_flip_allowed = False
         self._last_sc_slot_selected_from_multi = False
@@ -1659,6 +1660,7 @@ class PerceptionInsert(Policy):
                     q_wxyz = chosen["q_wxyz"]
                     yaw = chosen["yaw"]
                     reproj_error = chosen["reproj_px"]
+                    self._last_port_reproj_px = float(reproj_error)
                     if q_wxyz is not None:
                         self._last_port_quat_wxyz = q_wxyz
                         self._last_port_yaw = yaw
@@ -1681,6 +1683,7 @@ class PerceptionInsert(Policy):
             kp_3d = chosen["kp_3d"]
             q_wxyz = chosen["q_wxyz"]
             yaw = chosen["yaw"]
+            self._last_port_reproj_px = float(chosen["reproj_px"])
             if q_wxyz is not None:
                 self._last_port_quat_wxyz = q_wxyz
                 self._last_port_yaw = yaw

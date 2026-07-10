@@ -31,27 +31,32 @@ class ResidualTeacherWrapper(gym.Wrapper):
         adim = int(self._scene.action_space.shape[0])
         self._teacher = ScriptedTeacher(action_dim=adim)
         self.residual_scale = float(residual_scale)
-        # policy action = residual in [-1, 1]^adim; obs passes through (privileged Box)
+        # policy action = residual in [-1, 1]^adim; observation is the frozen
+        # teacher's recovered 21-D contract, built read-only from the scene.
         self.action_space = gym.spaces.Box(-1.0, 1.0, (adim,), np.float32)
-        self.observation_space = env.observation_space
+        self.observation_space = gym.spaces.Box(-np.inf, np.inf, (21,), np.float32)
         self._last_obs = None
 
+    def _teacher_obs(self):
+        from RL.student_teacher.teacher_contract import build_teacher_obs21
+        return build_teacher_obs21(self._scene)
+
     def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
+        _raw, info = self.env.reset(**kwargs)
         self._teacher.reset()
-        self._last_obs = obs
-        return obs, info
+        self._last_obs = self._teacher_obs()
+        return self._last_obs, info
 
     def step(self, residual):
         base = self._teacher.act(self._scene, self._last_obs)          # scripted funnel base
         residual = np.asarray(residual, dtype=np.float64).reshape(-1)
         effective = np.clip(base.astype(np.float64) + residual * self.residual_scale,
                             -1.0, 1.0).astype(np.float32)
-        obs, r, term, trunc, info = self.env.step(effective)
-        self._last_obs = obs
+        _raw, r, term, trunc, info = self.env.step(effective)
+        self._last_obs = self._teacher_obs()
         info = dict(info)
         info["teacher_base_action"] = np.asarray(base, dtype=np.float32)
-        return obs, r, term, trunc, info
+        return self._last_obs, r, term, trunc, info
 
 
 def make_residual_teacher_env(residual_scale: float = RESIDUAL_SCALE_DEFAULT,
@@ -79,8 +84,7 @@ def make_residual_teacher_env(residual_scale: float = RESIDUAL_SCALE_DEFAULT,
         base_script_enabled=False,
         cart_pos_limit_m=0.20,        # matches the funnel-teacher eval envelope
         cart_rot_limit_rad=0.35,
-        include_images=False,         # privileged state obs -> no renderer (fast, no GL)
-        privileged_obs=True,
+        include_images=False,         # teacher contract is built by the wrapper
     )
     scene = SceneInsertEnv(cfg)
     scene.set_reset_mode("curriculum")     # + fixed level, NO level file -> pinned
