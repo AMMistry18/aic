@@ -34,6 +34,8 @@ RUN cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/PerceptionI
 # RLInsert policy + its TorchScript net (kept after the pixi layer so model
 # swaps don't rebuild the env)
 RUN cp /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/ && \
+    cp /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py \
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/
 COPY models/final_insert_sfp_contractA_v1.ts /models/final_insert_sfp_contractA_v1.ts
 ENV RL_INSERT_MODEL=/models/final_insert_sfp_contractA_v1.ts

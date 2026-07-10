@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -31,6 +32,31 @@ def _make_world_variant(source: Path, destination: Path) -> None:
         file_name = element.get("file")
         if file_name and not Path(file_name).is_absolute():
             element.set("file", str((source.parent / file_name).resolve()))
+    tree.write(destination, encoding="utf-8", xml_declaration=True)
+
+
+def _make_robot_variant(source: Path, destination: Path) -> None:
+    """Copy robot meshes without legacy OBJ materials rejected by Isaac Sim 6."""
+    tree = ET.parse(source)
+    mesh_dir = destination.parent / "robot_meshes"
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    for element in tree.getroot().iter("mesh"):
+        file_name = element.get("file")
+        if not file_name:
+            continue
+        original = (source.parent / file_name).resolve()
+        if original.suffix.lower() != ".obj":
+            continue
+        sanitized = mesh_dir / original.name
+        text = original.read_text(encoding="utf-8", errors="ignore")
+        sanitized.write_text(
+            "\n".join(
+                line for line in text.splitlines()
+                if not line.startswith(("mtllib ", "usemtl "))
+            ) + "\n",
+            encoding="utf-8",
+        )
+        element.set("file", str(sanitized))
     tree.write(destination, encoding="utf-8", xml_declaration=True)
 
 
@@ -107,6 +133,19 @@ def _import_asset(source: Path, output_dir: Path, merge_mesh: bool, fix_base: bo
     elif merge_mesh:
         raise RuntimeError("--merge-mesh is not supported by this Isaac Lab MJCF converter")
     result = Path(MjcfConverter(config).usd_path).resolve()
+    # Isaac Sim 6 schedules MJCF file emission on Kit's update loop.  Advance
+    # it explicitly when running headless so import completion is observable.
+    import omni.kit.app
+    for _ in range(30):
+        omni.kit.app.get_app().update()
+    # Sim 6's MJCFImporter authors the converted prims into the active stage
+    # but does not always persist the stage when driven through Lab's wrapper.
+    # Persist that authored stage explicitly for headless conversion.
+    if not result.is_file():
+        import omni.usd
+        result.parent.mkdir(parents=True, exist_ok=True)
+        if not omni.usd.get_context().save_as_stage(str(result)):
+            raise RuntimeError(f"Isaac Sim did not save imported stage to {result}")
     if not result.is_file():
         raise RuntimeError(f"MJCF importer did not produce a USD file: {result}")
     return result
@@ -131,14 +170,16 @@ def main() -> int:
     output_dir = args.usd_dir.expanduser().resolve()
     intermediate = output_dir / "intermediate"
     intermediate.mkdir(parents=True, exist_ok=True)
+    robot_variant = intermediate / "aic_robot_isaac.xml"
     world_variant = intermediate / "aic_world_isaac.xml"
+    _make_robot_variant(robot_xml, robot_variant)
     _make_world_variant(world_xml, world_variant)
 
     from isaacsim import SimulationApp
 
     app = SimulationApp({"headless": True})
     try:
-        robot_usd = _import_asset(robot_xml, output_dir, args.merge_mesh, fix_base=True)
+        robot_usd = _import_asset(robot_variant, output_dir, args.merge_mesh, fix_base=True)
         world_usd = _import_asset(world_variant, output_dir, args.merge_mesh, fix_base=True)
         tcp_pos, tcp_quat = _site_pose(robot_xml, "gripper_tcp")
         manifest = {
