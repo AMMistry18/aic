@@ -67,8 +67,8 @@ def parse_args():
                    choices=["zero", "baseline", "raw"],
                    help="student wrench contract; zero is the verified Gazebo-safe default")
     p.add_argument("--feature-mode", type=str, default="gazebo_v1",
-                   choices=["gazebo_v1", "legacy"],
-                   help="gazebo_v1 masks sim/world-specific absolute pose fields in-model")
+                   choices=["gazebo_v1", "flowstate_v1", "legacy"],
+                   help="flowstate_v1 also masks simulator-specific IK joint offsets")
     p.add_argument("--residual-scale", type=float, default=RESIDUAL_SCALE_DEFAULT)
     p.add_argument("--teacher-zip", type=str, default=TEACHER_ZIP_DEFAULT)
     p.add_argument("--out", type=str, default="RL/output/student_teacher/student_a_distill")
@@ -102,12 +102,17 @@ def build_policy(obs_dim=OBS_DIM, act_dim=ACT_DIM, hidden=256,
     class StudentMLP(nn.Module):
         def __init__(self):
             super().__init__()
-            if feature_mode not in ("legacy", "gazebo_v1"):
+            if feature_mode not in ("legacy", "gazebo_v1", "flowstate_v1"):
                 raise ValueError(f"unknown feature_mode {feature_mode!r}")
             input_mask = torch.ones(obs_dim, dtype=torch.float32)
-            if feature_mode == "gazebo_v1":
+            if feature_mode in ("gazebo_v1", "flowstate_v1"):
                 input_mask[12:19] = 0.0   # absolute TCP xyz + quaternion
                 input_mask[25:32] = 0.0   # absolute port xyz + quaternion
+            if feature_mode == "flowstate_v1":
+                # Equivalent Cartesian handoffs can use different valid IK
+                # branches in MuJoCo and Flowstate. The parity audit showed
+                # that these six offsets alone caused the saturated action.
+                input_mask[0:6] = 0.0
             self.register_buffer("input_mask", input_mask, persistent=False)
             self.net = nn.Sequential(
                 nn.Linear(obs_dim, hidden), nn.ReLU(),

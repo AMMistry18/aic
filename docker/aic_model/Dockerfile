@@ -37,10 +37,10 @@ RUN cp /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/ && \
     cp /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py \
        /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/
-COPY models/final_insert_sfp_gazebo_v1.ts /models/final_insert_sfp_gazebo_v1.ts
-COPY models/final_insert_sfp_gazebo_v1.ts.contract.json /models/final_insert_sfp_gazebo_v1.ts.contract.json
-ENV RL_INSERT_MODEL=/models/final_insert_sfp_gazebo_v1.ts
-ENV RL_INSERT_WRENCH_MODE=zero
+COPY models/final_insert_sfp_flowstate_v1.ts /models/final_insert_sfp_flowstate_v1.ts
+COPY models/final_insert_sfp_flowstate_v1.ts.contract.json /models/final_insert_sfp_flowstate_v1.ts.contract.json
+ENV RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
+ENV RL_INSERT_WRENCH_MODE=baseline
 
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh

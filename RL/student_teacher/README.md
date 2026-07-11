@@ -46,6 +46,8 @@ student_teacher/
   train_student_a.py           stage 3: BC trainer for the "_a" student
   teacher_contract.py          recovered frozen-teacher 21-D observation adapter
   export_student_a.py          checkpoint -> verified 69x6 TorchScript exporter
+  parity/                      Flowstate/MuJoCo handoff capture and field audit
+  tacc/                        TACC preflight, training, and held-out evaluation jobs
   REDISTILL_GAZEBO.md          Gazebo-v1 contract, validation, and remote commands
   TEACHER_OBS_INTERFACE.md     privileged/deployable observation contract
   weights/                     committed trained weights (see below)
@@ -98,3 +100,18 @@ python -m RL.student_teacher.train_student \
 
 Runtime outputs go under `RL/output/student_teacher/` (scratch; not the committed
 `weights/`).
+
+## Flowstate parity mode
+
+`flowstate_v1` keeps the 69-value deploy contract but masks three fields that
+are simulator-specific rather than task-specific:
+
+- joint offsets `obs[0:6]`
+- absolute TCP pose `obs[12:19]`
+- absolute port pose `obs[25:32]`
+
+The evidence and reproduction tools are in `parity/`. The captured Flowstate
+handoff and matched MuJoCo handoffs showed that equivalent Cartesian plug poses
+can use different valid IK branches. Substituting only `obs[0:6]` removed most
+of the old model's action mismatch, so `flowstate_v1` masks those values in the
+model instead of synthesizing fake MuJoCo joint angles at deployment.

@@ -1,0 +1,47 @@
+{
+  "checkpoint": "/scratch/11590/satya_a/aic/student_flowstate_v1_seed0_5900b41/student_a.pt",
+  "wrench_mode": "baseline",
+  "episodes_per_seed": 100,
+  "per_seed": [
+    {
+      "seed": 10001,
+      "success_rate": 0.71,
+      "counts": {
+        "success": 71,
+        "timeout": 27,
+        "bad_collision": 2
+      }
+    },
+    {
+      "seed": 20002,
+      "success_rate": 0.75,
+      "counts": {
+        "success": 75,
+        "timeout": 25
+      }
+    },
+    {
+      "seed": 30003,
+      "success_rate": 0.69,
+      "counts": {
+        "timeout": 29,
+        "success": 69,
+        "bad_collision": 2
+      }
+    }
+  ],
+  "total_episodes": 300,
+  "overall_success_rate": 0.7166666666666667,
+  "combined_counts": {
+    "success": 215,
+    "timeout": 81,
+    "bad_collision": 4
+  },
+  "directional_sanity": {
+    "samples": 100,
+    "positive_axial_fraction": 1.0,
+    "median_axial_action": 0.09523051977157593,
+    "lateral_opposition_fraction": 0.88,
+    "median_lateral_action_dot_error": -0.0016346403517021224
+  }
+}

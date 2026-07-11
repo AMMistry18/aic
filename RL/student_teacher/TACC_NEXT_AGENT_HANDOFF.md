@@ -1,5 +1,50 @@
 # TACC continuation handoff
 
+## 2026-07-11 Flowstate parity continuation
+
+The Flowstate failure was reproduced from an exact 69-value handoff fixture and
+matched MuJoCo states. The dominant mismatch is `obs[0:6]`: equivalent
+Cartesian handoffs use different valid IK branches in Flowstate and MuJoCo.
+See `docs/FLOWSTATE_MUJOCO_PARITY_20260711.md` and
+`RL/student_teacher/parity/` for the evidence and reproduction scripts.
+
+New TACC state:
+
+| Purpose | Path/job |
+| --- | --- |
+| Source snapshot | `/work2/11590/satya_a/stampede3/aic-flowstate-v1-5900b41` |
+| Run output | `/scratch/11590/satya_a/aic/student_flowstate_v1_seed0_5900b41` |
+| Parity fixtures | `/scratch/11590/satya_a/aic/flowstate_parity_20260711` |
+| Training and epoch-40 evaluation | Slurm `3296109` |
+| Epoch-25 held-out evaluation | Slurm `3296154` |
+| Epoch-10 held-out evaluation | Slurm `3296172` |
+
+Job `3296109` trained `feature_mode=flowstate_v1` for 40 epochs on the
+preserved 310,000-transition baseline-wrench dataset. It intentionally did not
+regenerate or modify the dataset or frozen teacher. The strict held-out reports
+so far are:
+
+```text
+epoch 40: 215/300 success, 81 timeout, 4 bad_collision
+epoch 25: 210/300 success, 88 timeout, 2 bad_collision
+epoch 10: 187/300 success, 111 timeout, 2 bad_collision
+```
+
+All failed the zero-collision gate. Epoch 25 is the deployed checkpoint because
+it halves epoch 40's collision count for only a 1.67-point success reduction.
+Do not describe the epoch-40 periodic 44/50 result as the final score; the fixed
+300-episode evaluation is the selection evidence. Runtime deployment for any
+`flowstate_v1` artifact must use `RL_INSERT_WRENCH_MODE=baseline`.
+
+Flowstate deployment snapshot:
+
+```text
+solution: 582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH
+cluster: vmp-f5ed-08hc5dz6
+service: aic_model
+asset: ai.intrinsic.aic_model.0.0.1+732d52e2a62e9aaffe07abc65e256a7ec03ddd82154cd1b574eb4a176bf190c2
+```
+
 ## Authentication
 
 - TACC user: `satya_a`
@@ -9,9 +54,9 @@
 - Do **not** store or request credentials in files, shell history, or source
   control.
 
-The previous Codex session used an SSH ControlMaster socket at
-`/tmp/codex-tacc-%r@%h:%p`.  It is not usable from this session, so assume the
-next session must authenticate again.  After login, confirm access with:
+This run used an SSH ControlMaster socket at
+`/tmp/codex-tacc-%r@%h:%p`. Assume a future session must authenticate again.
+After login, confirm access with:
 
 ```bash
 printf 'WORK=%s\nSCRATCH=%s\n' "$WORK" "$SCRATCH"

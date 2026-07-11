@@ -1,25 +1,30 @@
 # Flowstate student policy handoff
 
-Updated: 2026-07-10
+Updated: 2026-07-11
 
 ## Current state
 
-The SFP student policy loads and runs in Flowstate. It perceives SFP sockets,
-publishes Cartesian commands, and has produced visible robot motion. It is not
-yet a reliable insertion policy.
+The `flowstate_v1` SFP student is installed in the running Flowstate solution.
+The service started and loaded `aic_model.RLInsert` successfully. Its exact
+captured handoff fixture now produces a moderate inward action instead of the
+old saturated lateral action.
 
 The latest deployed build changes nearest-target selection to consider both
 SFP keypoint groups (`sfp_port_0` and `sfp_port_1`) on every detected NIC. It
 also enables a deterministic perception-guided handoff: retract, align to the
 selected socket, then approach to 26 mm before starting the student.
 
-This latest target-selection/preposition build was deployed but had not been
-run and scored when this handoff was written.
+The new model has not yet been run through the Flowstate behavior tree. The CLI
+can install and inspect services but cannot execute that UI-owned process, so
+there is no Flowstate insertion score yet. MuJoCo held-out results are below.
 
 ## Repository artifacts
 
 | Artifact | SHA-256 |
 | --- | --- |
+| `models/final_insert_sfp_flowstate_v1.pt` | `2da20284ffc713ee4cb4048a0cebee6531509ae3487c24ab217cc510269b9908` |
+| `models/final_insert_sfp_flowstate_v1.ts` | `64d4726eb7b6d4b25df2d4a3b4d7d1af5a4bc2522081cd5b4fda451bc1282cf6` |
+| `models/final_insert_sfp_flowstate_v1.ts.contract.json` | `6d5105f72a2051c08dfe86ef32da898295c3edf650f4548dec8f8bf597b4d894` |
 | `models/final_insert_sfp_gazebo_v1.ts` | `79c511587dfa6289a801a51d9c5283e11dc6c047bb5c8f77dd93581c122edbf0` |
 | `models/final_insert_sfp_gazebo_v1.ts.contract.json` | `3cd416feb260b07b98d586711f5b51b051eed308c7acede44e00b0897ea23eb3` |
 
@@ -36,38 +41,42 @@ Important code:
 - `RL/student_teacher/TACC_NEXT_AGENT_HANDOFF.md`: TACC paths, training job,
   held-out results, and authentication procedure.
 - `RL/student_teacher/tacc/`: preflight, Slurm, and held-out evaluation tools.
+- `RL/student_teacher/parity/`: exact Flowstate fixture, matched MuJoCo
+  handoffs, field substitution audit, candidate gate, and evaluation reports.
+- `docs/FLOWSTATE_MUJOCO_PARITY_20260711.md`: failure diagnosis and permanent
+  adapter rationale.
 
 ## Training provenance
 
-The artifact contract points to:
+The selected epoch-25 checkpoint is:
 
 ```text
-/scratch/11590/satya_a/aic/student_gazebo_v1_seed0_5465a5c_baseline/student_a.pt
+/scratch/11590/satya_a/aic/student_flowstate_v1_seed0_5900b41/student_a_ep025.pt
 ```
 
-The MuJoCo held-out evaluation was 252/300 successes (0.84):
+Its fixed-seed MuJoCo held-out evaluation was:
 
 ```text
-seed 10001: 0.86
-seed 20002: 0.90
-seed 30003: 0.76
+210/300 success (70.00%)
+88 timeout
+2 bad_collision
 ```
 
-`gazebo_v1` is the observation contract name. This result was produced in
-MuJoCo, not in Gazebo or Flowstate. The 0.95 export gate failed, so the original
-Slurm script stopped before its normal export step. Preserve the checked-in
-TorchScript hash above; the exact later manual export command was not captured.
+This did not pass the strict zero-collision gate. Epoch 40 reached 215/300
+success but had four bad collisions; epoch 10 reached 187/300 with two. Epoch
+25 was selected as the best measured success/safety tradeoff. These results are
+MuJoCo results, not Flowstate or Gazebo scores.
 
 ## Flowstate deployment snapshot
 
-Snapshot-sensitive values from 2026-07-10:
+Snapshot-sensitive values from 2026-07-11:
 
 ```text
 organization: tar-2@xfa-prod-aic-us
-VM/cluster: vmp-f5ed-iea4i2cn
+VM/cluster: vmp-f5ed-08hc5dz6
 solution: 582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH
 service instance: aic_model
-asset: ai.intrinsic.aic_model.0.0.1+62df6b7111bdcddabc5848af6b2156ef6d70c2c70c5ab0ba9c087f87c2ea7e62
+asset: ai.intrinsic.aic_model.0.0.1+732d52e2a62e9aaffe07abc65e256a7ec03ddd82154cd1b574eb4a176bf190c2
 ```
 
 The lifecycle node must remain named `aic_model`. Do not rename it to the asset
@@ -94,7 +103,8 @@ duplicate `/insert_cable` action server.
 The thin Flowstate image sets:
 
 ```text
-RL_INSERT_WRENCH_MODE=zero
+RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
+RL_INSERT_WRENCH_MODE=baseline
 AIC_SFP_TARGET_MODE=nearest_tip
 RL_INSERT_PREPOSITION=1
 RL_INSERT_HANDOFF_GAP_M=0.026
@@ -103,16 +113,17 @@ RL_INSERT_HANDOFF_AXIAL_SIGMA_M=0
 RL_INSERT_HANDOFF_ROT_SIGMA_RAD=0
 ```
 
-There is an unresolved contract mismatch: the artifact contract records
-`wrench_mode=baseline`, while the deployed image forces `zero`. Baseline and
-zero are identical at the first sample but differ after contact. This is a
-high-priority experiment, not a settled choice.
+The runtime and training wrench contracts now match. Baseline subtraction is
+initialized once per insertion and preserves contact-force changes.
 
-The thin Dockerfile depends on the machine-local AMD64 image
-`my-solution:v8`. A clean clone cannot reproduce the Flowstate image until that
-base is exported/shared or the full `docker/aic_model/Dockerfile` build is
-fixed. The full build previously stopped because `pixi.lock` was out of sync.
-The 7.1 GB Flowstate bundle is intentionally not checked into Git.
+The thin Dockerfile was built from the preserved prior AMD64 service image
+`flowstate:aic_model-student-79c51158`. The new bundle is intentionally not
+checked into Git:
+
+```text
+/private/tmp/aic-flowstate-v1-64d4726e/images/aic_model/aic_model.bundle.tar
+sha256=491ad222442d64c2f7fd298f88c34fee72b91da76a175abea72b025c258cc55b
+```
 
 ## Closest-port behavior
 
@@ -150,20 +161,19 @@ Its first raw action was approximately:
 ```
 
 The lateral error grew to 12.5 mm and triggered the 12 mm contract safety
-abort after about three seconds. Do not raise that safety limit merely to keep
-the run alive. Determine whether deterministic prepositioning fixes the
-distribution shift. If not, compare Flowstate observations and actions with a
-MuJoCo rollout at the same `delta_port` and orientation.
+abort after about three seconds. The parity audit identified `obs[0:6]` joint
+offsets as the dominant cause. `flowstate_v1` masks those simulator-specific IK
+values inside the model; it does not weaken the safety limit.
 
 Priority checks:
 
 1. Confirm only one `/insert_cable` action server responds.
 2. Confirm the latest logs include candidates for both SFP port slots.
 3. Confirm prepositioning reaches near-zero lateral/rotation error at 26 mm.
-4. Compare `obs[32:38]`, `obs[38:50]`, and action direction against MuJoCo.
-5. Test `RL_INSERT_WRENCH_MODE=baseline` with force-frame verification.
-6. If the student still drives laterally outward, retrain or add a justified
-   residual safety projection; do not hide it by weakening collision guards.
+4. Confirm the log reports `RL_INSERT_WRENCH_MODE=baseline` behavior and the
+   first action is close to the fixture direction, not the old saturated one.
+5. Record success, timeout, safety abort, and insertion depth for the Flowstate
+   run; do not report the MuJoCo score as a Flowstate score.
 
 ## Flowstate process requirements
 
@@ -201,12 +211,14 @@ python3 -m py_compile \
   aic_example_policies/aic_example_policies/ros/PerceptionInsert.py
 
 shasum -a 256 \
-  models/final_insert_sfp_gazebo_v1.ts \
-  models/final_insert_sfp_gazebo_v1.ts.contract.json
+  models/final_insert_sfp_flowstate_v1.pt \
+  models/final_insert_sfp_flowstate_v1.ts \
+  models/final_insert_sfp_flowstate_v1.ts.contract.json
 
 docker build --platform linux/amd64 \
+  --build-arg BASE_IMAGE=flowstate:aic_model-student-79c51158 \
   -f docker/aic_model/Dockerfile.student_flowstate \
-  -t my-solution:student-gazebo-v1-debug .
+  -t my-solution:student-flowstate-v1-64d4726e .
 ```
 
 Do not commit Flowstate login state, access tokens, `/private/tmp` bundles, TACC

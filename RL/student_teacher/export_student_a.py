@@ -15,8 +15,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--feature-mode", choices=["auto", "legacy", "gazebo_v1"],
-                        default="auto")
+    parser.add_argument(
+        "--feature-mode",
+        choices=["auto", "legacy", "gazebo_v1", "flowstate_v1"],
+        default="auto",
+    )
     parser.add_argument("--hidden", type=int, default=0,
                         help="0 reads checkpoint config or infers the first layer")
     return parser.parse_args()
@@ -56,7 +59,7 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.jit.save(traced, str(out))
     metadata = {
-        "contract": "sfp_gazebo_v1_69x6",
+        "contract": f"sfp_{feature_mode}_69x6",
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "feature_mode": feature_mode,
         "hidden": hidden,
