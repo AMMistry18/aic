@@ -122,6 +122,9 @@ SFP_PARTIAL_EARLY_XY_M = float(os.environ.get("AIC_SFP_PARTIAL_EARLY_XY_M", "0.0
 SC_MIN_POSE_AREA = 80
 
 SFP_RAIL_LOCAL_Y = np.array([-0.1745 + 0.04 * i for i in range(5)], dtype=np.float64)
+SFP_TARGET_MODE = os.environ.get("AIC_SFP_TARGET_MODE", "task").strip().lower()
+if SFP_TARGET_MODE not in ("task", "nearest_tip"):
+    raise ValueError("AIC_SFP_TARGET_MODE must be task or nearest_tip")
 
 # SFP corner keypoints in the port entrance frame. This matches
 # DataCollectorPose2.LOCAL_PORT_KPS and the YOLO-pose keypoint order.
@@ -923,6 +926,34 @@ class PerceptionInsert(Policy):
             key=lambda c: abs(float(np.dot(c["X"], best_fit["axis"])) - target_proj)
         )
 
+    def _select_sfp_candidate(self, candidates, target_idx, label):
+        if SFP_TARGET_MODE != "nearest_tip":
+            return self._select_by_task_slot(
+                candidates, target_idx, SFP_RAIL_LOCAL_Y, label)
+
+        unique = self._dedupe_spatial_candidates(candidates)
+        try:
+            # RLInsert owns the calibrated SFP tip transform used by its
+            # observation contract. Use that same transform for target choice.
+            tcp_pos, tcp_quat = self._tcp()
+            tip_pos, _ = self._tip_from_tcp(tcp_pos, tcp_quat, "sfp")
+        except Exception as ex:
+            self.get_logger().warn(
+                f"{label}: nearest-tip selection unavailable ({ex}); "
+                "falling back to task slot"
+            )
+            return self._select_by_task_slot(
+                unique, target_idx, SFP_RAIL_LOCAL_Y, label)
+
+        chosen = min(unique, key=lambda c: float(np.linalg.norm(c["X"] - tip_pos)))
+        distance = float(np.linalg.norm(chosen["X"] - tip_pos))
+        self.get_logger().info(
+            f"{label}: nearest-tip mode selected candidate at "
+            f"{np.round(chosen['X'], 5).tolist()} distance={distance*1000:.1f}mm "
+            f"(requested_slot={target_idx})"
+        )
+        return chosen
+
     def _pixel_to_world_on_z_plane(self, uv, K, T_cam_from_base, z_world):
         """Back-project one pixel ray to world and intersect z=z_world plane."""
         uv_h = np.array([uv[0], uv[1], 1.0], dtype=np.float64)
@@ -1611,50 +1642,64 @@ class PerceptionInsert(Policy):
                     )
 
         elif task.port_type == "sfp":
-            kp_slice = slice(0, 4) if task.port_name == "sfp_port_0" else slice(4, 8)
-            per_cam = {}
+            requested_port_slot = 0 if task.port_name == "sfp_port_0" else 1
+            port_slots = (0, 1) if SFP_TARGET_MODE == "nearest_tip" else (requested_port_slot,)
+            per_slot_cam = {slot: {} for slot in port_slots}
             for cam, (bgr, K, T) in views.items():
                 nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
                 if not nics:
                     self.get_logger().warn(f"{cam}: no NIC")
                     continue
-                per_cam[cam] = [{
-                    "kps": det["kps"][kp_slice],
-                    "bbox": det["bbox"],
-                    "conf": det["conf"],
-                    "cls": det.get("cls", "unknown"),
-                    "P": self._pc.build_projection_matrix(K, T),
-                    "K": K,
-                    "T": T,
-                } for det in nics[:5]]
+                for slot in port_slots:
+                    kp_slice = slice(4 * slot, 4 * (slot + 1))
+                    detections = []
+                    for det in nics[:5]:
+                        kps = np.asarray(det["kps"])[kp_slice]
+                        if kps.shape != (4, 2):
+                            continue
+                        detections.append({
+                            "kps": kps,
+                            "port_slot": slot,
+                            "bbox": det["bbox"],
+                            "conf": det["conf"],
+                            "cls": det.get("cls", "unknown"),
+                            "P": self._pc.build_projection_matrix(K, T),
+                            "K": K,
+                            "T": T,
+                        })
+                    if detections:
+                        per_slot_cam[slot][cam] = detections
                 self.get_logger().info(
                     f"{cam}: NIC dets={len(nics)} top_cls={nics[0].get('cls', 'unknown')} "
-                    f"top_conf={nics[0]['conf']:.2f}"
+                    f"top_conf={nics[0]['conf']:.2f} candidate_ports={list(port_slots)}"
                 )
-            if len(per_cam) < 2:
-                if len(per_cam) == 1:
-                    cam, candidates_2d = next(iter(per_cam.items()))
+            available_cams = set().union(*(slot_cams.keys() for slot_cams in per_slot_cam.values()))
+            if len(available_cams) < 2:
+                if len(available_cams) == 1:
+                    cam = next(iter(available_cams))
                     pnp_candidates = []
-                    for det in candidates_2d:
-                        pnp_result = self._estimate_sfp_port_pose_single_view(
-                            det["kps"], det["K"], det["T"], cam)
-                        if pnp_result is None:
-                            continue
-                        X, kp_3d, q_wxyz, yaw, reproj_error = pnp_result
-                        pnp_candidates.append({
-                            "X": X,
-                            "kp_3d": kp_3d,
-                            "q_wxyz": q_wxyz,
-                            "yaw": yaw,
-                            "score": reproj_error,
-                            "reproj_px": reproj_error,
-                        })
+                    for slot, slot_cams in per_slot_cam.items():
+                        for det in slot_cams.get(cam, []):
+                            pnp_result = self._estimate_sfp_port_pose_single_view(
+                                det["kps"], det["K"], det["T"], cam)
+                            if pnp_result is None:
+                                continue
+                            X, kp_3d, q_wxyz, yaw, reproj_error = pnp_result
+                            pnp_candidates.append({
+                                "X": X,
+                                "kp_3d": kp_3d,
+                                "q_wxyz": q_wxyz,
+                                "yaw": yaw,
+                                "score": reproj_error,
+                                "reproj_px": reproj_error,
+                                "port_slot": slot,
+                            })
                     if not pnp_candidates:
                         return None
                     target_idx = self._extract_trailing_index(
                         task.target_module_name, "nic_card_mount_")
-                    chosen = self._select_by_task_slot(
-                        pnp_candidates, target_idx, SFP_RAIL_LOCAL_Y, "SFP single-view target")
+                    chosen = self._select_sfp_candidate(
+                        pnp_candidates, target_idx, "SFP single-view target")
                     X = chosen["X"]
                     kp_3d = chosen["kp_3d"]
                     q_wxyz = chosen["q_wxyz"]
@@ -1671,12 +1716,18 @@ class PerceptionInsert(Policy):
                         )
                     return X, views
                 return None
-            candidates = self._make_sfp_multiview_candidates(per_cam)
+            candidates = []
+            for slot, slot_cams in per_slot_cam.items():
+                slot_candidates = self._make_sfp_multiview_candidates(slot_cams)
+                for candidate in slot_candidates:
+                    candidate["port_slot"] = slot
+                candidates.extend(slot_candidates)
+            candidates.sort(key=lambda c: c["score"])
             if not candidates:
                 self.get_logger().warn("SFP multiview matching found no plausible port candidates")
                 return None
             target_idx = self._extract_trailing_index(task.target_module_name, "nic_card_mount_")
-            chosen = self._select_by_task_slot(candidates, target_idx, SFP_RAIL_LOCAL_Y, "SFP target")
+            chosen = self._select_sfp_candidate(candidates, target_idx, "SFP target")
             if chosen is None:
                 return None
             X = chosen["X"]
@@ -1687,8 +1738,10 @@ class PerceptionInsert(Policy):
             if q_wxyz is not None:
                 self._last_port_quat_wxyz = q_wxyz
                 self._last_port_yaw = yaw
+                selected_port_name = f"sfp_port_{chosen.get('port_slot', requested_port_slot)}"
                 self.get_logger().info(
-                    f"SFP selected {task.target_module_name}/{task.port_name}: "
+                    f"SFP selected nearest candidate ({selected_port_name}; "
+                    f"requested {task.target_module_name}/{task.port_name}): "
                     f"yaw={np.degrees(yaw):.1f}deg reproj={chosen['reproj_px']:.1f}px "
                     f"size=({chosen['width']*1000:.1f},{chosen['height']*1000:.1f})mm "
                     f"corners_mm={(kp_3d * 1000.0).round(1).tolist()}"

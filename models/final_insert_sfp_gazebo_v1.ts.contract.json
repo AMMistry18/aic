@@ -1,0 +1,12 @@
+{
+  "contract": "sfp_gazebo_v1_69x6",
+  "checkpoint": "/scratch/11590/satya_a/aic/student_gazebo_v1_seed0_5465a5c_baseline/student_a.pt",
+  "feature_mode": "gazebo_v1",
+  "hidden": 256,
+  "wrench_mode": "baseline",
+  "grasp_noise": 1.0,
+  "action_convention": "deploy",
+  "obs_dim": 69,
+  "action_dim": 6,
+  "torchscript_max_abs_error": 0.0
+}

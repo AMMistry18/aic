@@ -1,0 +1,31 @@
+ARG BASE_IMAGE=my-solution:v8
+FROM ${BASE_IMAGE}
+
+# Reuse the validated AMD64 ROS/Pixi environment and replace only the policy
+# implementation and immutable student artifact.
+COPY aic_example_policies/aic_example_policies/ros/PerceptionInsert.py /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/PerceptionInsert.py
+COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/perception_core.py
+COPY aic_example_policies/aic_example_policies/ros/PerceptionInsert.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/PerceptionInsert.py
+COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/perception_core.py
+COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/aic_model/aic_model/RLInsert.py
+COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py
+COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py
+COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/rl_insert_contract.py
+
+COPY models/final_insert_sfp_gazebo_v1.ts /models/final_insert_sfp_gazebo_v1.ts
+COPY models/final_insert_sfp_gazebo_v1.ts.contract.json /models/final_insert_sfp_gazebo_v1.ts.contract.json
+
+ENV RL_INSERT_MODEL=/models/final_insert_sfp_gazebo_v1.ts
+ENV RL_INSERT_WRENCH_MODE=zero
+ENV AIC_SFP_TARGET_MODE=nearest_tip
+ENV RL_INSERT_PREPOSITION=1
+ENV RL_INSERT_HANDOFF_GAP_M=0.026
+ENV RL_INSERT_HANDOFF_LATERAL_SIGMA_M=0
+ENV RL_INSERT_HANDOFF_AXIAL_SIGMA_M=0
+ENV RL_INSERT_HANDOFF_ROT_SIGMA_RAD=0
+ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
+ENV ZENOH_ROUTER_CHECK_ATTEMPTS=-1
+
+# The Flowstate asset name may vary, but the ROS lifecycle node launched by
+# this entrypoint remains aic_model as required by the AIC process wiring.
+CMD ["--ros-args", "-p", "policy:=aic_model.RLInsert", "-p", "use_sim_time:=true"]
