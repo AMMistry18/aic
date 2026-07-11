@@ -1,0 +1,39 @@
+{
+  "controller": "perception_guided_absolute_pose_proxy_v1",
+  "episodes_per_seed": 100,
+  "seeds": [
+    10001,
+    20002,
+    30003
+  ],
+  "perception_noise": 0.0,
+  "grasp_noise": 0.0,
+  "total_episodes": 300,
+  "overall_success_rate": 1.0,
+  "combined_counts": {
+    "success": 300
+  },
+  "per_seed": [
+    {
+      "seed": 10001,
+      "success_rate": 1.0,
+      "counts": {
+        "success": 100
+      }
+    },
+    {
+      "seed": 20002,
+      "success_rate": 1.0,
+      "counts": {
+        "success": 100
+      }
+    },
+    {
+      "seed": 30003,
+      "success_rate": 1.0,
+      "counts": {
+        "success": 100
+      }
+    }
+  ]
+}

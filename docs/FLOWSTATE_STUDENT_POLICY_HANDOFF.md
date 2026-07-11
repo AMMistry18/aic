@@ -73,11 +73,26 @@ Snapshot-sensitive values from 2026-07-11:
 
 ```text
 organization: tar-2@xfa-prod-aic-us
-VM/cluster: vmp-f5ed-08hc5dz6
+VM/cluster: vmp-f5ed-053nou72
 solution: 582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH
 service instance: aic_model
-asset: ai.intrinsic.aic_model.0.0.1+732d52e2a62e9aaffe07abc65e256a7ec03ddd82154cd1b574eb4a176bf190c2
+asset: ai.intrinsic.aic_model.0.0.1+c84d8e248aa372bfa959e0e0b790f6150d96ffd1900226879d6da3798741d393
 ```
+
+On 2026-07-11 this asset was re-uploaded from the local
+`my-solution:student-flowstate-guided-v5` image. The displayed asset version did
+not change because the service manifest identity stayed the same, but the image
+contents now include the Flowstate router entrypoint in
+`docker/aic_model/Dockerfile.student_flowstate`. That entrypoint sets
+`ZENOH_CONFIG_OVERRIDE` from `AIC_MODEL_ROUTER_ADDR` and `AIC_MODEL_PASSWD`
+instead of relying on rmw_zenoh peer scouting.
+
+After upload, the `aic_model` service instance was deleted, added back, and the
+solution was restarted in sim mode on `vmp-f5ed-053nou72`. A direct cluster add
+then reported `instance already exists with id "aic_model"`, which is expected.
+`inctl logs --service aic_model` may return `resource not found` until the
+service emits logs; use a Flowstate lifecycle/configure attempt as the runtime
+verification.
 
 The lifecycle node must remain named `aic_model`. Do not rename it to the asset
 or wrapper name.
@@ -116,13 +131,11 @@ RL_INSERT_HANDOFF_ROT_SIGMA_RAD=0
 The runtime and training wrench contracts now match. Baseline subtraction is
 initialized once per insertion and preserves contact-force changes.
 
-The thin Dockerfile was built from the preserved prior AMD64 service image
-`flowstate:aic_model-student-79c51158`. The new bundle is intentionally not
-checked into Git:
+The thin Dockerfile was built from the preserved prior AMD64 service image.
+The latest local bundle is intentionally not checked into Git:
 
 ```text
-/private/tmp/aic-flowstate-v1-64d4726e/images/aic_model/aic_model.bundle.tar
-sha256=491ad222442d64c2f7fd298f88c34fee72b91da76a175abea72b025c258cc55b
+/private/tmp/aic-flowstate-guided-v5/images/aic_model/aic_model.bundle.tar
 ```
 
 ## Closest-port behavior

@@ -38,6 +38,7 @@ from .rl_insert_contract import (
     HOME_QPOS as AIC_HOME_QPOS,
     build_observation69,
     deploy_action_delta,
+    guided_tip_target,
     port_frame,
     sfp_tip_pose_from_tcp,
     tcp_pose_for_sfp_tip,
@@ -67,8 +68,12 @@ HANDOFF_SEED = int(os.environ.get("RL_INSERT_HANDOFF_SEED", "0"))
 # raw: original Contract-A behavior; zero: isolate pose/action contract;
 # baseline: subtract the six-axis wrench observed before the handoff.
 WRENCH_MODE = os.environ.get("RL_INSERT_WRENCH_MODE", "raw").strip().lower()
+CONTROL_MODE = os.environ.get("RL_INSERT_CONTROL_MODE", "guided").strip().lower()
 
-STEP_DT = 0.10          # s between RL steps
+STEP_DT = float(os.environ.get("RL_INSERT_STEP_DT", "0.10"))
+PREPOSITION_HOLD_SCALE = float(
+    os.environ.get("RL_INSERT_PREPOSITION_HOLD_SCALE", "1.0")
+)
 MAX_RL_STEPS = int(os.environ.get("RL_INSERT_STEPS", "400"))
 INSERT_DEPTH = 0.045    # m, mouth -> seated
 HANDOFF_MAX_DIST = 0.12  # m; farther than this from the mouth => macro failed
@@ -84,10 +89,24 @@ if ACTION_GAIN.shape != (6,) or not np.all(np.isfinite(ACTION_GAIN)):
     raise ValueError("RL_INSERT_ACTION_GAIN must contain six finite comma-separated values")
 SAFETY_MAX_LATERAL_M = float(os.environ.get("RL_INSERT_SAFETY_MAX_LATERAL_M", "0.012"))
 SAFETY_MAX_RETREAT_M = float(os.environ.get("RL_INSERT_SAFETY_MAX_RETREAT_M", "0.015"))
+SAFETY_MAX_ROTATION_RAD = float(
+    os.environ.get("RL_INSERT_SAFETY_MAX_ROTATION_RAD", "0.20")
+)
+GUIDED_OUTSIDE_STEP_M = float(os.environ.get("RL_INSERT_GUIDED_OUTSIDE_STEP_M", "0.0015"))
+GUIDED_INSIDE_STEP_M = float(os.environ.get("RL_INSERT_GUIDED_INSIDE_STEP_M", "0.00075"))
+GUIDED_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_MAX_LEAD_M", "0.004"))
+GUIDED_CONTACT_DEPTH_M = float(
+    os.environ.get("RL_INSERT_GUIDED_CONTACT_DEPTH_M", "-0.008")
+)
+GUIDED_CONTACT_MAX_LEAD_M = float(
+    os.environ.get("RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M", "0.020")
+)
 
 # Impedance mirroring training (CartesianImpedanceAction, kp~100):
 STIFFNESS = [100.0, 100.0, 100.0, 50.0, 50.0, 50.0]
 DAMPING = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+GUIDED_STIFFNESS = [500.0, 500.0, 500.0, 60.0, 60.0, 60.0]
+GUIDED_DAMPING = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
 
 # Grasp transforms from the Phase-1 task description ("Reference Grasp Poses"):
 # pose of gripper/tcp EXPRESSED IN the plug link frame. Quaternions given as
@@ -141,7 +160,7 @@ WRENCH_SCALE = 0.1
 # abort protecting the Tier-2 wrench budget (scoring threshold is 20 N).
 SEAT_DEPTH_TOL = 0.002   # m
 SEAT_LATERAL_MAX = 0.005  # m
-FORCE_ABORT_N = 25.0
+FORCE_ABORT_N = float(os.environ.get("RL_INSERT_FORCE_ABORT_N", "18.0"))
 FORCE_ABORT_STEPS = 8    # consecutive steps above FORCE_ABORT_N => abort
 # ---------------------------------------------------------------------------
 
@@ -209,6 +228,8 @@ class RLInsert(PerceptionInsert):
         log = self.get_logger()
         if WRENCH_MODE not in ("raw", "zero", "baseline"):
             raise ValueError("RL_INSERT_WRENCH_MODE must be raw, zero, or baseline")
+        if CONTROL_MODE not in ("rl", "guided"):
+            raise ValueError("RL_INSERT_CONTROL_MODE must be rl or guided")
         if PORT_SOURCE not in ("perception", "external"):
             raise ValueError("RL_INSERT_PORT_SOURCE must be perception or external")
         self._wrench_baseline = np.zeros(6, dtype=np.float64)
@@ -346,7 +367,7 @@ class RLInsert(PerceptionInsert):
                 stiffness=STIFFNESS,
                 damping=DAMPING,
             )
-            self.sleep_for(hold_s)
+            self.sleep_for(hold_s * PREPOSITION_HOLD_SCALE)
 
     def _joint_vec(self, joint_state, attr):
         vals = dict(zip(joint_state.name, getattr(joint_state, attr)))
@@ -355,6 +376,21 @@ class RLInsert(PerceptionInsert):
         except KeyError:
             arr = np.array(list(getattr(joint_state, attr)))
             return arr[:6] if arr.size >= 6 else np.zeros(6)
+
+    @staticmethod
+    def _wrench_vector(obs_msg):
+        w = obs_msg.wrist_wrench.wrench
+        return np.array(
+            [
+                w.force.x,
+                w.force.y,
+                w.force.z,
+                w.torque.x,
+                w.torque.y,
+                w.torque.z,
+            ],
+            dtype=np.float64,
+        )
 
     # ------------------------------------------------------- obs construction
     def _build_obs(self, obs_msg, tcp_pos, tcp_quat, tip_pos, R_tip,
@@ -433,13 +469,9 @@ class RLInsert(PerceptionInsert):
             return False
 
 
-        w0 = obs.wrist_wrench.wrench
-        self._wrench_baseline = np.array([
-            w0.force.x, w0.force.y, w0.force.z,
-            w0.torque.x, w0.torque.y, w0.torque.z,
-        ], dtype=np.float64)
+        self._wrench_baseline = self._wrench_vector(obs)
         log.info(
-            f"[rl] wrench mode={WRENCH_MODE} baseline="
+            f"[rl] pre-handoff wrench mode={WRENCH_MODE} baseline="
             f"{np.round(self._wrench_baseline, 4).tolist()}"
         )
         log.info(
@@ -487,6 +519,19 @@ class RLInsert(PerceptionInsert):
             self._preposition_handoff(
                 move_robot, send_feedback, port_pos, port_quat)
 
+        # MuJoCo captures its baseline after reset at the handoff. Deployment
+        # must do the same: prepositioning changes cable gravity and tension,
+        # so the earlier sample is not a valid contact-force baseline.
+        handoff_obs = get_observation()
+        if handoff_obs is None:
+            log.error("[rl] no Observation available for handoff wrench baseline")
+            return False
+        self._wrench_baseline = self._wrench_vector(handoff_obs)
+        log.info(
+            f"[rl] handoff wrench baseline={np.round(self._wrench_baseline, 4).tolist()} "
+            f"control_mode={CONTROL_MODE}"
+        )
+
         # --- handoff sanity: are we inside the training envelope (~72 mm)?
         tcp_pos, tcp_quat = self._tcp()
         tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat, plug_type)
@@ -519,6 +564,7 @@ class RLInsert(PerceptionInsert):
         force_hot_steps = 0
         depth = float("nan")
         handoff_depth = float(handoff_delta[2])
+        planned_depth = handoff_depth
 
         for step in range(MAX_RL_STEPS):
             obs = get_observation()
@@ -555,37 +601,85 @@ class RLInsert(PerceptionInsert):
             prev_tcp = (tcp_pos, tcp_quat)
             prev_t = now
 
-            # port-frame deltas -> base frame, applied to the COMMANDED pose
-            dp, drot_world = deploy_action_delta(act, port_quat)
-            dR = _axis_angle_to_R(drot_world)
-            cmd_pos = cmd_pos + dp
-            cmd_R = dR @ cmd_R
-            q = _R_to_q(cmd_R)
-            self.set_pose_target(
-                move_robot,
-                Pose(position=Point(x=cmd_pos[0], y=cmd_pos[1], z=cmd_pos[2]),
-                     orientation=Quaternion(w=q[0], x=q[1], y=q[2], z=q[3])),
-                stiffness=STIFFNESS, damping=DAMPING)
-
             depth_vec = Rp.T @ (tip_pos - port_pos)
             depth = float(depth_vec[2])
             lateral = float(np.linalg.norm(depth_vec[:2]))
+            rotation_error = _R_to_axis_angle(Rp.T @ R_tip)
+            rotation_error_norm = float(np.linalg.norm(rotation_error))
+            wrench_delta = self._wrench_vector(obs) - self._wrench_baseline
+            f_mag = float(np.linalg.norm(wrench_delta[:3]))
+            guided_max_lead = float("nan")
+
+            if CONTROL_MODE == "guided":
+                guided_max_lead = (
+                    GUIDED_CONTACT_MAX_LEAD_M
+                    if depth >= GUIDED_CONTACT_DEPTH_M
+                    else GUIDED_MAX_LEAD_M
+                )
+                target_tip, target_R, planned_depth, target_depth = guided_tip_target(
+                    port_pos=port_pos,
+                    port_quat=port_quat,
+                    current_depth=depth,
+                    planned_depth=planned_depth,
+                    insert_depth=INSERT_DEPTH,
+                    outside_step=GUIDED_OUTSIDE_STEP_M,
+                    inside_step=GUIDED_INSIDE_STEP_M,
+                    max_lead=guided_max_lead,
+                )
+                target_pose = self._tcp_target_for_tip(target_tip, target_R)
+                cmd_pos = np.array([
+                    target_pose.position.x,
+                    target_pose.position.y,
+                    target_pose.position.z,
+                ])
+                cmd_R = _q_to_R(
+                    target_pose.orientation.w,
+                    target_pose.orientation.x,
+                    target_pose.orientation.y,
+                    target_pose.orientation.z,
+                )
+                command_delta_port = Rp.T @ (target_tip - tip_pos)
+                self.set_pose_target(
+                    move_robot,
+                    target_pose,
+                    stiffness=GUIDED_STIFFNESS,
+                    damping=GUIDED_DAMPING,
+                )
+            else:
+                # Learned port-frame deltas are applied to the commanded pose.
+                dp, drot_world = deploy_action_delta(act, port_quat)
+                dR = _axis_angle_to_R(drot_world)
+                cmd_pos = cmd_pos + dp
+                cmd_R = dR @ cmd_R
+                q = _R_to_q(cmd_R)
+                command_delta_port = Rp.T @ dp
+                target_depth = float("nan")
+                self.set_pose_target(
+                    move_robot,
+                    Pose(position=Point(x=cmd_pos[0], y=cmd_pos[1], z=cmd_pos[2]),
+                         orientation=Quaternion(w=q[0], x=q[1], y=q[2], z=q[3])),
+                    stiffness=STIFFNESS, damping=DAMPING)
+
             if step % 10 == 0:
-                dp_port = Rp.T @ dp
                 log.info(
                     f"[rl] step {step}: depth={depth*1000:.1f}/"
                     f"{INSERT_DEPTH*1000:.0f}mm lateral={lateral*1000:.1f}mm "
+                    f"rot_err_deg={np.degrees(rotation_error_norm):.1f} "
+                    f"force_delta_N={f_mag:.2f} "
+                    f"control={CONTROL_MODE} target_depth_mm={target_depth*1000:.1f} "
+                    f"max_lead_mm={guided_max_lead*1000:.1f} "
                     f"raw_act={np.round(raw_act, 3).tolist()} "
-                    f"deploy_act={np.round(act, 3).tolist()} "
-                    f"dp_port_mm={(dp_port*1000).round(3).tolist()}"
+                    f"command_delta_port_mm={(command_delta_port*1000).round(3).tolist()}"
                 )
 
             if (lateral > SAFETY_MAX_LATERAL_M
-                    or depth < handoff_depth - SAFETY_MAX_RETREAT_M):
+                    or depth < handoff_depth - SAFETY_MAX_RETREAT_M
+                    or rotation_error_norm > SAFETY_MAX_ROTATION_RAD):
                 log.error(
                     "[rl] contract safety abort | "
                     f"depth_mm={depth*1000:.1f} initial_mm={handoff_depth*1000:.1f} "
-                    f"lateral_mm={lateral*1000:.1f}"
+                    f"lateral_mm={lateral*1000:.1f} "
+                    f"rot_err_deg={np.degrees(rotation_error_norm):.1f}"
                 )
                 send_feedback("rl contract safety abort")
                 return False
@@ -598,8 +692,6 @@ class RLInsert(PerceptionInsert):
 
             # Tier-2 wrench budget guard: sustained force => back off and abort
             # rather than grind (the scored threshold is 20 N).
-            w = obs.wrist_wrench.wrench
-            f_mag = float(np.linalg.norm([w.force.x, w.force.y, w.force.z]))
             force_hot_steps = force_hot_steps + 1 if f_mag > FORCE_ABORT_N else 0
             if force_hot_steps >= FORCE_ABORT_STEPS:
                 log.error(f"[rl] sustained wrist force {f_mag:.1f} N over "

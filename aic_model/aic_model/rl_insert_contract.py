@@ -124,6 +124,50 @@ def deploy_action_delta(action, port_quat) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
+def guided_tip_target(
+    *,
+    port_pos,
+    port_quat,
+    current_depth,
+    planned_depth,
+    insert_depth=0.045,
+    outside_step=0.0015,
+    inside_step=0.00075,
+    outside_switch_depth=-0.003,
+    max_lead=0.004,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """Return an absolute, centered tip target for guarded insertion.
+
+    The target remains on the perceived port axis with the port orientation.
+    Planned depth advances more slowly around contact and cannot lead the
+    measured tip by more than ``max_lead``. This avoids command integration and
+    lateral/rotation drift while still allowing the impedance controller to
+    settle behind the trajectory.
+    """
+    current_depth = float(current_depth)
+    planned_depth = float(planned_depth)
+    insert_depth = float(insert_depth)
+    max_lead = float(max_lead)
+    values = np.array(
+        [current_depth, planned_depth, insert_depth, outside_step, inside_step, max_lead],
+        dtype=np.float64,
+    )
+    if not np.all(np.isfinite(values)) or outside_step <= 0 or inside_step <= 0:
+        raise ValueError(f"invalid guided insertion parameters: {values}")
+    if max_lead <= 0:
+        raise ValueError("max_lead must be positive")
+
+    step = outside_step if current_depth < outside_switch_depth else inside_step
+    next_plan = min(max(planned_depth, current_depth) + step, insert_depth)
+    target_depth = min(next_plan, current_depth + max_lead, insert_depth)
+    frame = port_frame(port_quat)
+    target_pos = (
+        np.asarray(port_pos, dtype=np.float64).reshape(3)
+        + frame[:, 2] * target_depth
+    )
+    return target_pos, frame, float(next_plan), float(target_depth)
+
+
 def build_observation69(
     *,
     joint_pos,
@@ -213,6 +257,7 @@ __all__ = [
     "build_observation69",
     "canonicalize_quaternion",
     "deploy_action_delta",
+    "guided_tip_target",
     "matrix_to_quat",
     "matrix_to_rotvec",
     "port_frame",

@@ -41,6 +41,12 @@ COPY models/final_insert_sfp_flowstate_v1.ts /models/final_insert_sfp_flowstate_
 COPY models/final_insert_sfp_flowstate_v1.ts.contract.json /models/final_insert_sfp_flowstate_v1.ts.contract.json
 ENV RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
 ENV RL_INSERT_WRENCH_MODE=baseline
+ENV RL_INSERT_CONTROL_MODE=guided
+ENV RL_INSERT_GUIDED_CONTACT_DEPTH_M=-0.008
+ENV RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M=0.020
+ENV RL_INSERT_SAFETY_MAX_LATERAL_M=0.006
+ENV RL_INSERT_SAFETY_MAX_ROTATION_RAD=0.20
+ENV RL_INSERT_FORCE_ABORT_N=18.0
 
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
