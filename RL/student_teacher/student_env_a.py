@@ -353,6 +353,7 @@ def make_student_env_a(perception_noise: float = 1.0,
                        action_convention: str = "deploy",
                        wrench_mode: str = "zero",
                        grasp_noise: float = 1.0,
+                       domain_randomization: bool = False,
                        max_episode_steps: int | None = None,
                        seed: int | None = None) -> StudentObsWrapperA:
     """Build the Contract-A state-student env, pinned at `level` (default 1.0).
@@ -379,6 +380,8 @@ def make_student_env_a(perception_noise: float = 1.0,
         cart_pos_limit_m=0.20,
         cart_rot_limit_rad=0.35,
         include_images=False,       # state-only -> no renderer, no GL
+        domain_randomization=bool(domain_randomization),
+        compiled_variant_seed=(int(seed) if domain_randomization and seed is not None else None),
     )
     scene = SceneInsertEnv(cfg)
     scene.set_reset_mode("curriculum")     # + fixed level, NO level file -> pinned
