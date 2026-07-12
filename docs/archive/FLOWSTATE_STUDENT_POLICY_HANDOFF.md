@@ -1,3 +1,6 @@
+> **ARCHIVED / SUPERSEDED (2026-07-12).** Pre-rewrite policy handoff (lines 7-8 were already noted as inaccurate). RLInsert is now self-contained + rl mode; see `docs/FLOWSTATE_STATUS.md`.
+> Kept for history only — do not follow as current instructions.
+
 # Flowstate student policy handoff
 
 Updated: 2026-07-11

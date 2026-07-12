@@ -1,3 +1,6 @@
+> **ARCHIVED / SUPERSEDED (2026-07-12).** Describes the GUIDED scripted controller. The deployed policy now runs `RL_INSERT_CONTROL_MODE=rl`; guided is only a fallback. See `docs/FLOWSTATE_STATUS.md`.
+> Kept for history only — do not follow as current instructions.
+
 # Flowstate guided insertion v2
 
 Updated: 2026-07-11
