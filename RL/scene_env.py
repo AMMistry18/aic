@@ -782,9 +782,16 @@ class SceneInsertEnv(gym.Env):
             # touches the detent, make its response stiff enough that it cannot
             # numerically tunnel through the 3 mm band under the 10 N controller.
             self.model.geom_friction[self._ridge_geom_ids, 0] = 5.0
-            # Direct-format stiffness/damping (negative solref) avoids REFSafe's
-            # time-constant clamp for this small detent contact.
-            self.model.geom_solref[self._ridge_geom_ids] = (-3.0e5, -3.0e3)
+            # Stability fix (2026-07-12): the previous direct-format stiffness
+            # (-3.0e5, -3.0e3) was ~150x stiffer than the scene's stable weld
+            # (solref 0.002 1) at the 2 ms timestep; a laterally-biased plug
+            # hitting it produced a one-step QACC blow-up (9.8 kN, 50-342 mm
+            # ejection) that broke Student-v3 pilot training. Use a positive
+            # solref with the time constant safely above the REFSafe floor
+            # (2*dt = 4 ms) and critical damping: stiff enough to stop tunneling
+            # through the 3 mm band under the 10 N controller, but numerically
+            # stable. solimp left near-rigid.
+            self.model.geom_solref[self._ridge_geom_ids] = (0.006, 1.0)
             self.model.geom_solimp[self._ridge_geom_ids] = (
                 0.99, 0.999, 0.0001, 0.5, 2.0)
 
