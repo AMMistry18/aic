@@ -163,11 +163,13 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # lateral/rotation cancelled), apply ONE fixed offset before Phase-2 descent, to
 # pre-seat the plug against the (near-constant) wedge location so the seat starts
 # from a better spot. Both are in the PERCEIVED PORT frame:
-#   BIAS_Y_M  = shift along port -Y (default 0.2 mm in -Y => stored negative)
-#   BIAS_RX_RAD = tilt about port +X (default +6.0 deg)
-# Set to 0 to disable (no bias, exactly the previous behavior). Tune at deploy
-# without a rebuild via RL_INSERT_SCRIPT_BIAS_{Y_M,RX_RAD}.
-SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.001"))       # +1.0 mm (+Y)
+#   BIAS_X_M  = shift along port X (lateral, along the pin row; signed)
+#   BIAS_Y_M  = shift along port Y (signed)
+#   BIAS_RX_RAD = tilt about port X (signed; negative tips one way, positive the other)
+# Set to 0 to disable (no bias, exactly the previous behavior). Tune per rebuild
+# via RL_INSERT_SCRIPT_BIAS_{X_M,Y_M,RX_RAD} (no runtime override in Flowstate).
+SCRIPT_BIAS_X_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_X_M", "0.001"))       # +1.0 mm (+X)
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.0025"))      # +2.5 mm (+Y)
 SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
@@ -1175,11 +1177,13 @@ class RLInsert(Policy):
         # No-op when both are 0 (R_seat == R_port, bias_world == 0).
         R_seat = R_port @ _axis_angle_to_R(
             np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
-        bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M               # port Y offset (signed) in base_link
-        if SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
+        bias_world = (Rp[:, 0] * SCRIPT_BIAS_X_M              # port X (lateral) offset
+                      + Rp[:, 1] * SCRIPT_BIAS_Y_M)          # port Y offset, both signed
+        if SCRIPT_BIAS_X_M != 0.0 or SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
             depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
             log.info(f"[script] pre-engage bias (persists in descent): "
-                     f"dY={SCRIPT_BIAS_Y_M*1000:.2f}mm rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
+                     f"dX={SCRIPT_BIAS_X_M*1000:.2f}mm dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
+                     f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
             self.set_pose_target(
                 move_robot, self._tcp_target_for_tip(tip_pos + bias_world, R_seat),
                 stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
