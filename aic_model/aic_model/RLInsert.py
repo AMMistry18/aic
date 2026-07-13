@@ -193,6 +193,13 @@ SCRIPT_REALIGN_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_REALIGN_LATERA
 # grasp angle varies run-to-run (the kinematic tip cannot be trusted either way).
 SCRIPT_STALL_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_STALL_STEPS", "40"))
 SCRIPT_STALL_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_STALL_PROGRESS_M", "0.0008"))
+# Hand-off gate: once the plug is pre-engaged (tilted + biased into the mouth), the
+# "lateral distance from the perceived mouth" reading is high by construction (the
+# tip is deep and cocked, not wandering), so it is NOT a valid wedge signal. Instead
+# keep descending through a depth-stall until FORCE builds -- a real jam -- then hold
+# for the RL hand-off. This lets the script pre-engage the plug as deep as it can
+# GENTLY before handing off, rather than quitting early on a false lateral reading.
+SCRIPT_HANDOFF_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_HANDOFF_FORCE_N", "10.0"))
 
 # One-shot grasp calibration dump: when set, at handoff log the TCP pose and any
 # available ground-truth plug/tip TF frames (all in base_link), so the true
@@ -1246,23 +1253,29 @@ class RLInsert(Policy):
                     stall_depth = depth
                 stall_lat_min = min(stall_lat_min, lateral)
                 stall_lat_max = max(stall_lat_max, lateral)
-            if stall_steps >= SCRIPT_STALL_STEPS and lateral > SCRIPT_WEDGE_LATERAL_M:
+            # Hand off to RL when depth stalls AND force has built to a real jam.
+            # NOTE: we deliberately do NOT abort on lateral distance here -- once the
+            # plug is pre-engaged (tilted/biased into the mouth) the lateral reading
+            # vs the perceived mouth is high by construction and is NOT a wedge. Force
+            # is the honest jam signal; keep descending until it builds.
+            force_jam = np.isfinite(f_mag) and f_mag >= SCRIPT_HANDOFF_FORCE_N
+            if stall_steps >= SCRIPT_STALL_STEPS and force_jam:
                 log.error(
                     f"[script] STALL at depth {stall_depth*1000:.1f}mm for "
-                    f"{stall_steps} steps, lateral {lateral*1000:.2f}mm "
-                    f"(> {SCRIPT_WEDGE_LATERAL_M*1000:.1f}mm), force {f_mag:.2f}N. "
-                    f"Contact reached -- HOLDING position (no retreat), stopping.")
+                    f"{stall_steps} steps, force {f_mag:.2f}N "
+                    f"(>= {SCRIPT_HANDOFF_FORCE_N:.1f}N), lateral {lateral*1000:.2f}mm. "
+                    f"Pre-engaged -- HOLDING position (no retreat), stopping for RL.")
                 log.error(
                     f"[script] STALL-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
                     f"lat_swing_mm={(stall_lat_max-stall_lat_min)*1000:.2f} "
                     f"lat_mm={lateral*1000:.2f} force_N={f_mag:.2f}")
                 # Do NOT retreat on collision (per instruction). Hold the current
-                # contact pose so the plug stays at the mouth -- ready for the
-                # force-reactive RL to take over from here.
+                # contact pose so the plug stays pre-engaged in the mouth -- ready for
+                # the force-reactive RL to take over from here.
                 self.set_pose_target(
                     move_robot, self._tcp_target_for_tip(tip_pos, R_seat),
                     stiffness=STIFFNESS, damping=DAMPING)
-                send_feedback("script reached contact -- holding (no retreat)")
+                send_feedback("script pre-engaged -- holding for RL (no retreat)")
                 return False
 
             # Step sizing:
@@ -1284,8 +1297,14 @@ class RLInsert(Policy):
                           + frac * (SCRIPT_DESCEND_STEP_NEAR_M - SCRIPT_DESCEND_STEP_FAR_M))
 
             # Keep lateral squared during descent; re-tighten if it drifts out.
+            # BUT when a pre-engage bias is active, the plug is DELIBERATELY offset
+            # from the perceived mouth (tilted/biased in), so the mouth-relative
+            # lateral is high by design -- re-aligning would fight the bias and undo
+            # the pre-engagement. Only re-align when NO bias is set.
+            bias_active = (SCRIPT_BIAS_X_M != 0.0 or SCRIPT_BIAS_Y_M != 0.0
+                           or SCRIPT_BIAS_RX_RAD != 0.0)
             lat_world = np.zeros(3)
-            if lateral > SCRIPT_REALIGN_LATERAL_M:
+            if not bias_active and lateral > SCRIPT_REALIGN_LATERAL_M:
                 lat_cmd = -SCRIPT_ALIGN_LATERAL_GAIN * lat_vec
                 lat_step = float(np.linalg.norm(lat_cmd))
                 if lat_step > SCRIPT_ALIGN_MAX_LATERAL_STEP_M:
