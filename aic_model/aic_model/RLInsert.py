@@ -169,7 +169,7 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune per rebuild
 # via RL_INSERT_SCRIPT_BIAS_{X_M,Y_M,RX_RAD} (no runtime override in Flowstate).
 SCRIPT_BIAS_X_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_X_M", "-0.001"))      # -1.0 mm (-X)
-SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.0025"))      # +2.5 mm (+Y)
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.010"))       # +10.0 mm (+Y)
 SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
@@ -1255,17 +1255,21 @@ class RLInsert(Policy):
                     stall_depth = depth
                 stall_lat_min = min(stall_lat_min, lateral)
                 stall_lat_max = max(stall_lat_max, lateral)
-            # Hand off to RL when depth stalls AND force has built to a real jam.
-            # NOTE: we deliberately do NOT abort on lateral distance here -- once the
-            # plug is pre-engaged (tilted/biased into the mouth) the lateral reading
-            # vs the perceived mouth is high by construction and is NOT a wedge. Force
-            # is the honest jam signal; keep descending until it builds.
+            # Hand off to RL when the plug is pre-engaged and DEPTH stalls, OR force
+            # builds. NOTE: we do NOT use lateral distance here -- once pre-engaged
+            # (tilted/biased into the mouth) the lateral vs the perceived mouth is
+            # high by construction and is NOT a wedge signal. The wedge we care about
+            # is a LOW-FORCE geometric catch: depth stuck for many steps at modest
+            # force. So depth-stall alone is a valid hand-off; force is an additional
+            # immediate trigger for a harder jam.
             force_jam = np.isfinite(f_mag) and f_mag >= SCRIPT_HANDOFF_FORCE_N
-            if stall_steps >= SCRIPT_STALL_STEPS and force_jam:
+            depth_stalled = stall_steps >= SCRIPT_STALL_STEPS
+            if depth_stalled or force_jam:
+                trigger = "force-jam" if force_jam else "depth-stall"
                 log.error(
-                    f"[script] STALL at depth {stall_depth*1000:.1f}mm for "
-                    f"{stall_steps} steps, force {f_mag:.2f}N "
-                    f"(>= {SCRIPT_HANDOFF_FORCE_N:.1f}N), lateral {lateral*1000:.2f}mm. "
+                    f"[script] HANDOFF ({trigger}) at depth {stall_depth*1000:.1f}mm, "
+                    f"{stall_steps} stalled steps, force {f_mag:.2f}N, "
+                    f"lateral {lateral*1000:.2f}mm. "
                     f"Pre-engaged -- HOLDING position (no retreat), stopping for RL.")
                 log.error(
                     f"[script] STALL-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
