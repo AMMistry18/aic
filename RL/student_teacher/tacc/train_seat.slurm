@@ -6,14 +6,13 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --exclusive
-#SBATCH --time=12:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=/scratch/11590/satya_a/aic/slurm/%x-%j.out
 #SBATCH --error=/scratch/11590/satya_a/aic/slurm/%x-%j.err
 
-# One exclusive-node job runs seeds 0, 1, and 2 serially.  rtx-small has two
-# GPUs per node but no Slurm GPU GRES, so CUDA_VISIBLE_DEVICES=0 exposes exactly
-# one GPU to the job.  Each seed completes nominal contact then warm-starts full
-# from its own checkpoint.  W&B credentials are inherited from the environment.
+# One exclusive-node job runs seed 0's full nominal-to-full curriculum.  rtx-small
+# has two GPUs per node but no Slurm GPU GRES, so CUDA_VISIBLE_DEVICES=0 exposes
+# exactly one GPU to the job.  W&B credentials are inherited from the environment.
 
 set -euo pipefail
 
@@ -52,36 +51,35 @@ assert torch.cuda.device_count() == 1, (
 print(f"[gpu] torch sees exactly one GPU: {torch.cuda.get_device_name(0)}")
 PY
 
-for SEED in 0 1 2; do
-  nominal_dir="$SCRATCH/aic/seat_nominal_seed${SEED}_${TAG}"
-  full_dir="$SCRATCH/aic/seat_full_seed${SEED}_${TAG}"
-  test ! -e "$nominal_dir"
-  test ! -e "$full_dir"
-  mkdir -p "$nominal_dir" "$full_dir"
-  cp RL/student_teacher/tacc/train_seat.slurm "$nominal_dir/submitted.slurm"
-  cp RL/student_teacher/tacc/train_seat.slurm "$full_dir/submitted.slurm"
+SEED=0
+nominal_dir="$SCRATCH/aic/seat_nominal_seed${SEED}_${TAG}"
+full_dir="$SCRATCH/aic/seat_full_seed${SEED}_${TAG}"
+test ! -e "$nominal_dir"
+test ! -e "$full_dir"
+mkdir -p "$nominal_dir" "$full_dir"
+cp RL/student_teacher/tacc/train_seat.slurm "$nominal_dir/submitted.slurm"
+cp RL/student_teacher/tacc/train_seat.slurm "$full_dir/submitted.slurm"
 
-  pixi run --as-is python -u \
-    -m RL.student_teacher.train_seat \
-    --out "$nominal_dir" \
-    --stage nominal \
-    --steps "$STEPS_NOMINAL" \
-    --num-envs "$NUM_ENVS" \
-    --seed "$SEED" \
-    2>&1 | tee "$nominal_dir/train.log"
-  test -f "$nominal_dir/model.zip"
-  test -f "$nominal_dir/seat_actor.ts"
+pixi run --as-is python -u \
+  -m RL.student_teacher.train_seat \
+  --out "$nominal_dir" \
+  --stage nominal \
+  --steps "$STEPS_NOMINAL" \
+  --num-envs "$NUM_ENVS" \
+  --seed "$SEED" \
+  2>&1 | tee "$nominal_dir/train.log"
+test -f "$nominal_dir/model.zip"
+test -f "$nominal_dir/seat_actor.ts"
 
-  pixi run --as-is python -u \
-    -m RL.student_teacher.train_seat \
-    --out "$full_dir" \
-    --stage full \
-    --init-from "$nominal_dir/model.zip" \
-    --steps "$STEPS_FULL" \
-    --num-envs "$NUM_ENVS" \
-    --seed "$SEED" \
-    2>&1 | tee "$full_dir/train.log"
-  test -f "$full_dir/model.zip"
-  test -f "$full_dir/seat_actor.ts"
-  touch "$SCRATCH/aic/seat_rl_seed${SEED}_${TAG}_COMPLETE"
-done
+pixi run --as-is python -u \
+  -m RL.student_teacher.train_seat \
+  --out "$full_dir" \
+  --stage full \
+  --init-from "$nominal_dir/model.zip" \
+  --steps "$STEPS_FULL" \
+  --num-envs "$NUM_ENVS" \
+  --seed "$SEED" \
+  2>&1 | tee "$full_dir/train.log"
+test -f "$full_dir/model.zip"
+test -f "$full_dir/seat_actor.ts"
+touch "$SCRATCH/aic/seat_rl_seed${SEED}_${TAG}_COMPLETE"
