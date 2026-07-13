@@ -41,6 +41,8 @@ from tf2_ros import TransformException
 
 from .rl_insert_contract import (
     HOME_QPOS as AIC_HOME_QPOS,
+    SFP_TIP_IN_TCP_POS,
+    SFP_TIP_IN_TCP_QUAT,
     build_observation69,
     guided_tip_target,
     port_frame,
