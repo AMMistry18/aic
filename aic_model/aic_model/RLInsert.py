@@ -160,7 +160,17 @@ SCRIPT_DESCEND_STEP_NEAR_M = float(os.environ.get("RL_INSERT_SCRIPT_DESCEND_STEP
 # mouth is depth=0, negative is above/outside). Aligns just above the mouth.
 SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_M", "-0.004"))
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
+# Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
+# descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
+# until force reaches the SEAT_FORCE cap, at which point we hold that one step.
+# This is the scripted force-reactive seat: square plug pressing gently home.
 SCRIPT_CONTACT_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_CONTACT_FORCE_N", "5.0"))
+SCRIPT_SEAT_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_SEAT_FORCE_N", "12.0"))
+SCRIPT_SEAT_STEP_M = float(os.environ.get("RL_INSERT_SCRIPT_SEAT_STEP_M", "0.0003"))
+# Wedge is a GEOMETRIC bind: depth stalled AND lateral blown out. Steady small
+# lateral at a stall is normal contact (keep seating), NOT a wedge. Only abort as
+# a wedge if lateral exceeds this while stalled.
+SCRIPT_WEDGE_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_WEDGE_LATERAL_M", "0.0015"))
 # Re-align if lateral/rotation drifts back out of tolerance mid-descent.
 SCRIPT_REALIGN_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_REALIGN_LATERAL_M", "0.0020"))
 # Wedge/stall detection: if we command inward motion but depth does not progress
@@ -1187,12 +1197,10 @@ class RLInsert(Policy):
                 send_feedback("script insert jammed -- aborted under force budget")
                 return False
 
-            # Wedge/geometric-bind detection: we keep commanding inward, but the
-            # depth is not advancing and the force is LOW (not an axial crush).
-            # That is the angled-plug wedge -- the kinematic tip says "square"
-            # while the physical plug is cocked, so it binds just inside the mouth.
-            # Grinding here forever (the prior bug) teaches us nothing; abort with
-            # the wedge signature instead.
+            # Track depth stall for wedge detection. A WEDGE is a GEOMETRIC bind:
+            # depth stalled AND lateral blown out (the plug levering sideways
+            # because it entered cocked). Steady SMALL lateral at a stall is just
+            # normal contact at the mouth -- keep seating, do NOT call it a wedge.
             if depth > deepest + SCRIPT_STALL_PROGRESS_M:
                 deepest = depth
                 stall_steps = 0
@@ -1204,20 +1212,17 @@ class RLInsert(Policy):
                     stall_depth = depth
                 stall_lat_min = min(stall_lat_min, lateral)
                 stall_lat_max = max(stall_lat_max, lateral)
-            if stall_steps >= SCRIPT_STALL_STEPS:
+            if stall_steps >= SCRIPT_STALL_STEPS and lateral > SCRIPT_WEDGE_LATERAL_M:
                 log.error(
                     f"[script] WEDGE detected: depth stuck at {stall_depth*1000:.1f}mm "
-                    f"for {stall_steps} steps while commanding inward; force low "
-                    f"({f_mag:.2f}N < {FORCE_ABORT_N:.0f}N crush limit). Lateral swung "
-                    f"{stall_lat_min*1000:.2f}-{stall_lat_max*1000:.2f}mm. This is a "
-                    f"geometric bind from an ANGLED GRASP the kinematic tip cannot "
-                    f"see (rot_err reads ~{np.degrees(rot_norm):.2f}deg but the plug "
-                    f"is physically cocked). Retreating and aborting.")
+                    f"for {stall_steps} steps with lateral BLOWN OUT to "
+                    f"{lateral*1000:.2f}mm (> {SCRIPT_WEDGE_LATERAL_M*1000:.1f}mm), "
+                    f"force {f_mag:.2f}N. Plug is levering sideways -- angled-grasp "
+                    f"geometric bind. Retreating and aborting.")
                 log.error(
                     f"[script] WEDGE-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
                     f"lat_swing_mm={(stall_lat_max-stall_lat_min)*1000:.2f} "
-                    f"force_N={f_mag:.2f}  # compare across runs: repeatable=FIXED "
-                    f"grasp miscal, varying=grasp angle VARIES")
+                    f"lat_mm={lateral*1000:.2f} force_N={f_mag:.2f}")
                 retreat_tip = tip_pos - insert_axis * 0.010
                 self.set_pose_target(
                     move_robot, self._tcp_target_for_tip(retreat_tip, R_port),
@@ -1226,17 +1231,23 @@ class RLInsert(Policy):
                 send_feedback("script insert wedged (angled grasp) -- aborted")
                 return False
 
-            # Progressive step: shrink linearly from FAR (at the mouth) to NEAR
-            # (at seated depth). frac in [0,1] as depth goes 0 -> INSERT_DEPTH.
-            frac = float(np.clip(depth / max(INSERT_DEPTH, 1e-6), 0.0, 1.0))
-            step_m = (SCRIPT_DESCEND_STEP_FAR_M
-                      + frac * (SCRIPT_DESCEND_STEP_NEAR_M - SCRIPT_DESCEND_STEP_FAR_M))
-
-            # In contact -> hold depth this step (let it settle), keep re-squaring.
+            # Step sizing:
+            #  - free space (low force): progressive fast descent, shrinking with depth.
+            #  - in contact (force > CONTACT): SLOW force-limited seat push -- keep
+            #    advancing gently (this is the scripted force-reactive seat), and
+            #    only hold for one step once we hit the SEAT_FORCE cap.
             if np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N:
-                step_m = 0.0
+                if f_mag >= SCRIPT_SEAT_FORCE_N:
+                    step_m = 0.0            # at the seat-force cap: hold this step
+                else:
+                    step_m = SCRIPT_SEAT_STEP_M   # gentle push toward seated
                 if dstep % 10 == 0:
-                    log.info(f"[script] contact hold: force={f_mag:.2f}N depth={depth*1000:.1f}mm")
+                    log.info(f"[script] seating: force={f_mag:.2f}N depth={depth*1000:.1f}mm "
+                             f"step_mm={step_m*1000:.2f} lateral={lateral*1000:.2f}mm")
+            else:
+                frac = float(np.clip(depth / max(INSERT_DEPTH, 1e-6), 0.0, 1.0))
+                step_m = (SCRIPT_DESCEND_STEP_FAR_M
+                          + frac * (SCRIPT_DESCEND_STEP_NEAR_M - SCRIPT_DESCEND_STEP_FAR_M))
 
             # Keep lateral squared during descent; re-tighten if it drifts out.
             lat_world = np.zeros(3)
@@ -1247,10 +1258,15 @@ class RLInsert(Policy):
                     lat_cmd *= SCRIPT_ALIGN_MAX_LATERAL_STEP_M / lat_step
                 lat_world = Rp[:, 0] * lat_cmd[0] + Rp[:, 1] * lat_cmd[1]
 
+            # In contact use the softer (compliant) stiffness so the plug can give
+            # against the mouth as it seats; use the stiff gains in free space.
+            in_contact = np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N
+            stiff = STIFFNESS if in_contact else GUIDED_STIFFNESS
+            damp = DAMPING if in_contact else GUIDED_DAMPING
             target_tip = tip_pos + insert_axis * step_m + lat_world
             self.set_pose_target(
                 move_robot, self._tcp_target_for_tip(target_tip, R_port),
-                stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
+                stiffness=stiff, damping=damp)
 
             if dstep % 10 == 0:
                 log.info(f"[script] descend step {dstep}: depth={depth*1000:.1f}/"
