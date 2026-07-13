@@ -29,6 +29,12 @@ export WANDB_MODE=offline
 export OMP_NUM_THREADS=1
 mkdir -p "$SCRATCH/aic/slurm"
 
+# --- materialize the pixi env in this fresh checkout --------------------------
+# A fresh `git checkout` has pixi.toml/pixi.lock but NO installed .pixi/envs/, so
+# `pixi run --as-is` would fall through to system Python. Install first (as the
+# from-checkout slurms train.slurm / refit_flowstate_v1.slurm / preflight.slurm do).
+pixi install --locked
+
 # --- compile gate --------------------------------------------------------------
 pixi run --as-is python -m py_compile \
   RL/student_teacher/align_env.py \
