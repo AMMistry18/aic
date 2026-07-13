@@ -161,6 +161,14 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 SCRIPT_CONTACT_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_CONTACT_FORCE_N", "5.0"))
 # Re-align if lateral/rotation drifts back out of tolerance mid-descent.
 SCRIPT_REALIGN_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_REALIGN_LATERAL_M", "0.0020"))
+# Wedge/stall detection: if we command inward motion but depth does not progress
+# for this many steps while force stays BELOW the hard-jam abort (i.e. it is a
+# geometric bind, not an axial crush), declare wedged and abort instead of
+# grinding to the step budget. A wedge with a repeatable stall depth across runs
+# indicates a FIXED grasp mis-calibration; a varying stall depth indicates the
+# grasp angle varies run-to-run (the kinematic tip cannot be trusted either way).
+SCRIPT_STALL_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_STALL_STEPS", "40"))
+SCRIPT_STALL_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_STALL_PROGRESS_M", "0.0008"))
 GUIDED_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_MAX_LEAD_M", "0.004"))
 GUIDED_CONTACT_DEPTH_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_DEPTH_M", "-0.008"))
 GUIDED_CONTACT_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M", "0.020"))
@@ -1053,6 +1061,14 @@ class RLInsert(Policy):
 
         # ---- Phase 2: progressive slow descent ------------------------------
         force_hot_steps = 0
+        # Wedge/stall tracking: deepest depth reached, and how long we have been
+        # commanding inward without beating it. Also record the lateral swing at
+        # stall (the wedge signature) for the fixed-vs-variable-grasp diagnosis.
+        deepest = -np.inf
+        stall_steps = 0
+        stall_depth = float("nan")
+        stall_lat_min = np.inf
+        stall_lat_max = -np.inf
         for dstep in range(MAX_RL_STEPS):
             obs = get_observation()
             depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
@@ -1084,6 +1100,45 @@ class RLInsert(Policy):
                     stiffness=STIFFNESS, damping=DAMPING)
                 self.sleep_for(1.0)
                 send_feedback("script insert jammed -- aborted under force budget")
+                return False
+
+            # Wedge/geometric-bind detection: we keep commanding inward, but the
+            # depth is not advancing and the force is LOW (not an axial crush).
+            # That is the angled-plug wedge -- the kinematic tip says "square"
+            # while the physical plug is cocked, so it binds just inside the mouth.
+            # Grinding here forever (the prior bug) teaches us nothing; abort with
+            # the wedge signature instead.
+            if depth > deepest + SCRIPT_STALL_PROGRESS_M:
+                deepest = depth
+                stall_steps = 0
+                stall_depth = float("nan")
+                stall_lat_min, stall_lat_max = np.inf, -np.inf
+            else:
+                stall_steps += 1
+                if np.isnan(stall_depth):
+                    stall_depth = depth
+                stall_lat_min = min(stall_lat_min, lateral)
+                stall_lat_max = max(stall_lat_max, lateral)
+            if stall_steps >= SCRIPT_STALL_STEPS:
+                log.error(
+                    f"[script] WEDGE detected: depth stuck at {stall_depth*1000:.1f}mm "
+                    f"for {stall_steps} steps while commanding inward; force low "
+                    f"({f_mag:.2f}N < {FORCE_ABORT_N:.0f}N crush limit). Lateral swung "
+                    f"{stall_lat_min*1000:.2f}-{stall_lat_max*1000:.2f}mm. This is a "
+                    f"geometric bind from an ANGLED GRASP the kinematic tip cannot "
+                    f"see (rot_err reads ~{np.degrees(rot_norm):.2f}deg but the plug "
+                    f"is physically cocked). Retreating and aborting.")
+                log.error(
+                    f"[script] WEDGE-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
+                    f"lat_swing_mm={(stall_lat_max-stall_lat_min)*1000:.2f} "
+                    f"force_N={f_mag:.2f}  # compare across runs: repeatable=FIXED "
+                    f"grasp miscal, varying=grasp angle VARIES")
+                retreat_tip = tip_pos - insert_axis * 0.010
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(retreat_tip, R_port),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                self.sleep_for(1.0)
+                send_feedback("script insert wedged (angled grasp) -- aborted")
                 return False
 
             # Progressive step: shrink linearly from FAR (at the mouth) to NEAR
