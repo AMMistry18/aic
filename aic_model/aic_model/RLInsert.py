@@ -1180,7 +1180,9 @@ class RLInsert(Policy):
         # CRITICAL: the tilt must PERSIST through descent -- R_seat below replaces
         # R_port as the descent orientation. Otherwise Phase 2 re-commands the square
         # R_port every step and erases the tilt instantly (why 2.5 and 6 deg looked
-        # identical). Y is applied as a constant offset added to every descent target.
+        # identical). The positional bias (bias_world) is applied ONCE here as a
+        # one-shot pre-engage move; the descent below commands pure inward motion and
+        # must NOT re-add it (re-adding to the live tip each step walks the plug off).
         # No-op when both are 0 (R_seat == R_port, bias_world == 0).
         R_seat = R_port @ _axis_angle_to_R(
             np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
@@ -1316,9 +1318,13 @@ class RLInsert(Policy):
             in_contact = np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N
             stiff = STIFFNESS if in_contact else GUIDED_STIFFNESS
             damp = DAMPING if in_contact else GUIDED_DAMPING
-            # R_seat/bias_world carry the persistent pre-engage bias (== R_port / 0
-            # when bias is disabled), so the tilt+Y offset hold through the descent.
-            target_tip = tip_pos + insert_axis * step_m + lat_world + bias_world
+            # Descent commands PURE inward motion from the live tip position. The
+            # positional bias (bias_world) was applied ONCE at pre-engage above and
+            # must NOT be re-added here -- adding it every step to the live tip_pos
+            # is a runaway integrator that walks the plug off the board (observed
+            # lateral drifting to 80+ mm). Orientation R_seat is absolute (a target
+            # pose, not an increment), so it correctly persists every step.
+            target_tip = tip_pos + insert_axis * step_m + lat_world
             self.set_pose_target(
                 move_robot, self._tcp_target_for_tip(target_tip, R_seat),
                 stiffness=stiff, damping=damp)
