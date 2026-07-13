@@ -159,6 +159,16 @@ SCRIPT_DESCEND_STEP_NEAR_M = float(os.environ.get("RL_INSERT_SCRIPT_DESCEND_STEP
 # Standoff the tip holds during phase-1 alignment (m along the port axis; the
 # mouth is depth=0, negative is above/outside). Aligns just above the mouth.
 SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_M", "-0.004"))
+# Post-align pre-engage bias: after Phase-1 alignment converges (perception read +
+# lateral/rotation cancelled), apply ONE fixed offset before Phase-2 descent, to
+# pre-seat the plug against the (near-constant) wedge location so the seat starts
+# from a better spot. Both are in the PERCEIVED PORT frame:
+#   BIAS_Y_M  = shift along port -Y (default 0.2 mm in -Y => stored negative)
+#   BIAS_RX_RAD = tilt about port +X (default +2.5 deg)
+# Set to 0 to disable (no bias, exactly the previous behavior). Tune at deploy
+# without a rebuild via RL_INSERT_SCRIPT_BIAS_{Y_M,RX_RAD}.
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "-0.0002"))     # -0.2 mm
+SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "0.043633"))  # +2.5 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
 # descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
@@ -1153,6 +1163,26 @@ class RLInsert(Policy):
                       f"rot_err_deg={np.degrees(rot_norm):.2f}).")
             send_feedback("script align failed -- aborted before descent")
             return False
+
+        # ---- Post-align pre-engage bias -------------------------------------
+        # After alignment, nudge the plug to the (near-constant) wedge spot so the
+        # seat starts pre-engaged. One fixed move in the perceived port frame:
+        # shift along port Y by SCRIPT_BIAS_Y_M and tilt about port X by
+        # SCRIPT_BIAS_RX_RAD. Holds the aligned standoff depth. No-op when both 0.
+        if SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
+            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
+            bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M            # port -Y offset in base_link
+            target_tip = tip_pos + bias_world
+            # tilt about the port-frame X axis (axis expressed in the port frame)
+            target_R = R_port @ _axis_angle_to_R(
+                np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
+            log.info(f"[script] pre-engage bias: dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
+                     f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
+            self.set_pose_target(
+                move_robot, self._tcp_target_for_tip(target_tip, target_R),
+                stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
+            self.sleep_for(STEP_DT)
+            send_feedback("script pre-engage bias applied")
 
         # ---- Phase 2: progressive slow descent ------------------------------
         force_hot_steps = 0
