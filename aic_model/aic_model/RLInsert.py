@@ -169,7 +169,7 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune per rebuild
 # via RL_INSERT_SCRIPT_BIAS_{X_M,Y_M,RX_RAD} (no runtime override in Flowstate).
 SCRIPT_BIAS_X_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_X_M", "-0.0008"))     # -0.8 mm (-X, was -1.0)
-SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.0055"))      # +5.5 mm (+Y)
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.007"))       # +7.0 mm (+Y)
 SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
