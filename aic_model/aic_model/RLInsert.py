@@ -167,8 +167,8 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 #   BIAS_RX_RAD = tilt about port +X (default +6.0 deg)
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune at deploy
 # without a rebuild via RL_INSERT_SCRIPT_BIAS_{Y_M,RX_RAD}.
-SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "-0.0015"))     # -1.5 mm (compensates Y swing from the tilt)
-SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.130900"))  # -7.5 deg
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.001"))       # +1.0 mm (+Y)
+SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
 # descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
@@ -1175,7 +1175,7 @@ class RLInsert(Policy):
         # No-op when both are 0 (R_seat == R_port, bias_world == 0).
         R_seat = R_port @ _axis_angle_to_R(
             np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
-        bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M               # port -Y offset in base_link
+        bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M               # port Y offset (signed) in base_link
         if SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
             depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
             log.info(f"[script] pre-engage bias (persists in descent): "
