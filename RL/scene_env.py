@@ -250,7 +250,8 @@ class SceneEnvConfig:
     random_action_delay_steps: tuple = (0, 1)
     random_friction_scale_range: tuple = (0.35, 2.5)
     # MuJoCo REFSafe clamps below 2*timestep (=4 ms in this scene).
-    random_contact_timeconst_range_s: tuple = (0.004, 0.040)
+    # Keep randomized contacts above MuJoCo's 2*dt REFSafe edge.
+    random_contact_timeconst_range_s: tuple = (0.010, 0.040)
     random_contact_dampratio_range: tuple = (0.35, 2.0)
     # Effective pair margin (split equally across plug and port geoms). Keep it
     # below the compiled ridge clearance so a perfectly aligned plug can pass.
@@ -274,7 +275,7 @@ class SceneEnvConfig:
     # variant; vector workers use distinct seeds to form the training ensemble.
     compiled_variant_seed: Optional[int] = None
     compiled_contact_ridge_enabled: bool = True
-    compiled_contact_ridge_depth_range_m: tuple = (0.0060, 0.0075)
+    compiled_contact_ridge_depth_range_m: tuple = (0.0050, 0.0400)
     compiled_contact_ridge_clearance_range_m: tuple = (0.00021, 0.00030)
 
 
@@ -781,6 +782,9 @@ class SceneInsertEnv(gym.Env):
             # A tight aligned opening is still contact-free. Once a biased plug
             # touches the detent, make its response stiff enough that it cannot
             # numerically tunnel through the 3 mm band under the 10 N controller.
+            # The ridge needs enough tangential hold to produce a bounded jam
+            # rather than a lateral slip/ejection; the stable positive solref
+            # below keeps that hold from producing an impulse.
             self.model.geom_friction[self._ridge_geom_ids, 0] = 5.0
             # Stability fix (2026-07-12): the previous direct-format stiffness
             # (-3.0e5, -3.0e3) was ~150x stiffer than the scene's stable weld
