@@ -169,6 +169,21 @@ SCRIPT_REALIGN_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_REALIGN_LATERA
 # grasp angle varies run-to-run (the kinematic tip cannot be trusted either way).
 SCRIPT_STALL_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_STALL_STEPS", "40"))
 SCRIPT_STALL_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_STALL_PROGRESS_M", "0.0008"))
+
+# One-shot grasp calibration dump: when set, at handoff log the TCP pose and any
+# available ground-truth plug/tip TF frames (all in base_link), so the true
+# tip-relative-to-TCP transform can be solved offline and SFP_TIP_IN_TCP_QUAT
+# recalibrated to the actual grasp (not the wedge-inferred guess). Logs only;
+# does not change control.
+CALIB_DUMP = os.environ.get("RL_INSERT_CALIB_DUMP", "0").strip().lower() in ("1", "true", "yes")
+# Candidate TF frame names the sim MIGHT publish for the true plug/tip pose. We
+# probe each; whichever resolves gives ground truth. Extend via env (comma-sep).
+CALIB_PLUG_FRAMES = [
+    f.strip() for f in os.environ.get(
+        "RL_INSERT_CALIB_PLUG_FRAMES",
+        "sfp_tip,sfp_plug,plug,cable_0,sfp,gripper/sfp_tip,gripper/plug,tool/tip",
+    ).split(",") if f.strip()
+]
 GUIDED_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_MAX_LEAD_M", "0.004"))
 GUIDED_CONTACT_DEPTH_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_DEPTH_M", "-0.008"))
 GUIDED_CONTACT_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M", "0.020"))
@@ -386,6 +401,58 @@ class RLInsert(Policy):
     def _tip_from_tcp(self, tcp_pos, tcp_quat):
         """SFP plug tip pose from TCP + the measured SFP-tip<-TCP transform."""
         return sfp_tip_pose_from_tcp(tcp_pos, tcp_quat)
+
+    def _dump_grasp_calibration(self):
+        """One-shot: log everything needed to recalibrate SFP_TIP_IN_TCP_QUAT.
+
+        Dumps (a) the TCP pose in base_link, (b) the tip pose the CURRENT
+        (possibly wrong) transform produces, and (c) any ground-truth plug/tip TF
+        frame that resolves -- all in base_link. From (a) + a true tip pose the
+        exact tip-relative-to-TCP transform is R_tcp^T @ R_tip_true (right axis),
+        which we then paste into rl_insert_contract. Logs only; no motion change.
+        """
+        log = self.get_logger()
+        try:
+            tcp_pos, tcp_quat = self._tcp()
+        except Exception as ex:
+            log.error(f"[calib] cannot read TCP: {ex}")
+            return
+        tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
+        q_tip_assumed = _rotmat_to_quat_wxyz(R_tip)
+        log.info("[calib] === GRASP CALIBRATION DUMP (base_link) ===")
+        log.info(f"[calib] TCP pos={np.round(tcp_pos,6).tolist()} "
+                 f"quat_wxyz={np.round(tcp_quat,6).tolist()}")
+        log.info(f"[calib] ASSUMED tip (current transform) pos={np.round(tip_pos,6).tolist()} "
+                 f"quat_wxyz={np.round(q_tip_assumed,6).tolist()}")
+        log.info(f"[calib] current SFP_TIP_IN_TCP_QUAT={SFP_TIP_IN_TCP_QUAT.tolist()} "
+                 f"POS={SFP_TIP_IN_TCP_POS.tolist()}")
+        found_any = False
+        for frame in CALIB_PLUG_FRAMES:
+            try:
+                tf = self._lookup_transform("base_link", frame, timeout_sec=0.3)
+            except Exception:
+                continue
+            tr, ro = tf.transform.translation, tf.transform.rotation
+            gt_pos = np.array([tr.x, tr.y, tr.z])
+            gt_quat = np.array([ro.w, ro.x, ro.y, ro.z])  # wxyz
+            # True tip-in-TCP transform: T_tcp^-1 @ T_true. Compute the rotation
+            # part R_tcp^T @ R_true and the position part R_tcp^T @ (p_true-p_tcp).
+            R_tcp = _q_to_R(*tcp_quat)
+            R_true = _q_to_R(*gt_quat)
+            R_rel = R_tcp.T @ R_true
+            q_rel = _rotmat_to_quat_wxyz(R_rel)
+            p_rel = R_tcp.T @ (gt_pos - tcp_pos)
+            found_any = True
+            log.info(f"[calib] GROUND-TRUTH frame '{frame}' RESOLVED: "
+                     f"pos={np.round(gt_pos,6).tolist()} quat_wxyz={np.round(gt_quat,6).tolist()}")
+            log.info(f"[calib]   >>> SOLVED SFP_TIP_IN_TCP_QUAT={np.round(q_rel,10).tolist()}")
+            log.info(f"[calib]   >>> SOLVED SFP_TIP_IN_TCP_POS ={np.round(p_rel,10).tolist()}  "
+                     f"(paste BOTH into rl_insert_contract.py if this frame is the true tip)")
+        if not found_any:
+            log.warn(f"[calib] no ground-truth plug/tip frame resolved from "
+                     f"{CALIB_PLUG_FRAMES}. Set RL_INSERT_CALIB_PLUG_FRAMES to the "
+                     f"correct frame name, or provide TCP + true-tip poses another way.")
+        log.info("[calib] === END DUMP ===")
 
     def _tcp_target_for_tip(self, tip_pos, R_tip):
         tcp_pos, q_tcp = tcp_pose_for_sfp_tip(tip_pos, R_tip)
@@ -804,6 +871,11 @@ class RLInsert(Policy):
         self._wrench_baseline = self._wrench_vector(obs)
         log.info(f"[rl] handoff wrench baseline mode={WRENCH_MODE} "
                  f"baseline={np.round(self._wrench_baseline, 4).tolist()} control={CONTROL_MODE}")
+
+        # One-shot grasp-calibration dump (set RL_INSERT_CALIB_DUMP=1). Logs the
+        # TCP + any ground-truth tip frame so SFP_TIP_IN_TCP_QUAT can be re-solved.
+        if CALIB_DUMP:
+            self._dump_grasp_calibration()
 
         # --- handoff sanity: are we within the last-inch envelope of the mouth?
         Rp = port_frame(port_quat)

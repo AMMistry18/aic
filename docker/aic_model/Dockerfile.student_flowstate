@@ -21,6 +21,9 @@ ENV RL_INSERT_WRENCH_MODE=baseline
 # script = pure-geometry align-then-progressive-descent, NO RL (align-first test
 # bed). Set back to rl / guided to run the learned / scripted-lead policies.
 ENV RL_INSERT_CONTROL_MODE=script
+# One-shot grasp-calibration dump at handoff: logs TCP + ground-truth tip frame
+# so SFP_TIP_IN_TCP_QUAT can be recalibrated to the real grasp. Set 0 to disable.
+ENV RL_INSERT_CALIB_DUMP=1
 ENV RL_INSERT_GUIDED_CONTACT_DEPTH_M=-0.008
 ENV RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M=0.020
 ENV RL_INSERT_SAFETY_MAX_LATERAL_M=0.006
