@@ -1087,6 +1087,17 @@ class RLInsert(Policy):
         R_port = Rp                                  # target tip orientation == port frame
         send_feedback("script align+descend (no RL)")
 
+        # Align at WHERE we were handed off (do not force a descent to a fixed
+        # standoff first). This lets a deliberately-higher handoff -- e.g. +5mm so
+        # the cameras see the port clearer -- simply align higher, then descend
+        # progressively. Never align DEEPER than SCRIPT_ALIGN_STANDOFF_M (if handed
+        # off already close/below, hold there). The 120mm HANDOFF_MAX_DIST guard
+        # (checked in _run before we get here) already permits a higher start.
+        handoff_depth0, _, _, _, _ = self._script_errors(Rp, port_pos)
+        align_standoff = min(handoff_depth0, SCRIPT_ALIGN_STANDOFF_M)
+        log.info(f"[script] align standoff = {align_standoff*1000:.1f}mm "
+                 f"(handoff depth {handoff_depth0*1000:.1f}mm)")
+
         # ---- Phase 1: align at standoff -------------------------------------
         aligned = False
         for astep in range(SCRIPT_ALIGN_MAX_STEPS):
@@ -1106,7 +1117,7 @@ class RLInsert(Policy):
                 lat_cmd *= SCRIPT_ALIGN_MAX_LATERAL_STEP_M / lat_step
             # lat_vec is expressed in the port XY plane -> lift to base_link
             lat_world = Rp[:, 0] * lat_cmd[0] + Rp[:, 1] * lat_cmd[1]
-            depth_err = SCRIPT_ALIGN_STANDOFF_M - depth          # toward standoff
+            depth_err = align_standoff - depth                   # toward standoff
             depth_world = insert_axis * float(np.clip(depth_err, -0.002, 0.002))
             target_tip = tip_pos + lat_world + depth_world
             # Orientation goes toward the port frame, rate-limited. rot_err is the
