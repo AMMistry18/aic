@@ -168,7 +168,7 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune at deploy
 # without a rebuild via RL_INSERT_SCRIPT_BIAS_{Y_M,RX_RAD}.
 SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "-0.0002"))     # -0.2 mm
-SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "0.104720"))  # +6.0 deg
+SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.104720"))  # -6.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
 # descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
