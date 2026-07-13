@@ -1166,20 +1166,22 @@ class RLInsert(Policy):
 
         # ---- Post-align pre-engage bias -------------------------------------
         # After alignment, nudge the plug to the (near-constant) wedge spot so the
-        # seat starts pre-engaged. One fixed move in the perceived port frame:
-        # shift along port Y by SCRIPT_BIAS_Y_M and tilt about port X by
-        # SCRIPT_BIAS_RX_RAD. Holds the aligned standoff depth. No-op when both 0.
+        # seat starts pre-engaged. Fixed offset in the perceived port frame: shift
+        # along port Y by SCRIPT_BIAS_Y_M and tilt about port X by SCRIPT_BIAS_RX_RAD.
+        # CRITICAL: the tilt must PERSIST through descent -- R_seat below replaces
+        # R_port as the descent orientation. Otherwise Phase 2 re-commands the square
+        # R_port every step and erases the tilt instantly (why 2.5 and 6 deg looked
+        # identical). Y is applied as a constant offset added to every descent target.
+        # No-op when both are 0 (R_seat == R_port, bias_world == 0).
+        R_seat = R_port @ _axis_angle_to_R(
+            np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
+        bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M               # port -Y offset in base_link
         if SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
             depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
-            bias_world = Rp[:, 1] * SCRIPT_BIAS_Y_M            # port -Y offset in base_link
-            target_tip = tip_pos + bias_world
-            # tilt about the port-frame X axis (axis expressed in the port frame)
-            target_R = R_port @ _axis_angle_to_R(
-                np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
-            log.info(f"[script] pre-engage bias: dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
-                     f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
+            log.info(f"[script] pre-engage bias (persists in descent): "
+                     f"dY={SCRIPT_BIAS_Y_M*1000:.2f}mm rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
             self.set_pose_target(
-                move_robot, self._tcp_target_for_tip(target_tip, target_R),
+                move_robot, self._tcp_target_for_tip(tip_pos + bias_world, R_seat),
                 stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
             self.sleep_for(STEP_DT)
             send_feedback("script pre-engage bias applied")
@@ -1220,7 +1222,7 @@ class RLInsert(Policy):
                 log.error(f"[script] sustained force {f_mag:.1f}N over {FORCE_ABORT_STEPS} steps "
                           f"at depth={depth*1000:.1f}mm -- HOLDING position (no retreat), stopping.")
                 self.set_pose_target(
-                    move_robot, self._tcp_target_for_tip(tip_pos, R_port),
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_seat),
                     stiffness=STIFFNESS, damping=DAMPING)
                 send_feedback("script high force -- holding (no retreat)")
                 return False
@@ -1254,7 +1256,7 @@ class RLInsert(Policy):
                 # contact pose so the plug stays at the mouth -- ready for the
                 # force-reactive RL to take over from here.
                 self.set_pose_target(
-                    move_robot, self._tcp_target_for_tip(tip_pos, R_port),
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_seat),
                     stiffness=STIFFNESS, damping=DAMPING)
                 send_feedback("script reached contact -- holding (no retreat)")
                 return False
@@ -1291,9 +1293,11 @@ class RLInsert(Policy):
             in_contact = np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N
             stiff = STIFFNESS if in_contact else GUIDED_STIFFNESS
             damp = DAMPING if in_contact else GUIDED_DAMPING
-            target_tip = tip_pos + insert_axis * step_m + lat_world
+            # R_seat/bias_world carry the persistent pre-engage bias (== R_port / 0
+            # when bias is disabled), so the tilt+Y offset hold through the descent.
+            target_tip = tip_pos + insert_axis * step_m + lat_world + bias_world
             self.set_pose_target(
-                move_robot, self._tcp_target_for_tip(target_tip, R_port),
+                move_robot, self._tcp_target_for_tip(target_tip, R_seat),
                 stiffness=stiff, damping=damp)
 
             if dstep % 10 == 0:
