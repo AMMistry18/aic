@@ -1181,20 +1181,18 @@ class RLInsert(Policy):
                 send_feedback("script insert seated")
                 return True
 
-            # Sustained high force -> jam: retreat and abort.
+            # Sustained high force -> jam: HOLD (do not retreat, per instruction).
             if np.isfinite(f_mag) and f_mag > FORCE_ABORT_N:
                 force_hot_steps += 1
             else:
                 force_hot_steps = 0
             if force_hot_steps >= FORCE_ABORT_STEPS:
                 log.error(f"[script] sustained force {f_mag:.1f}N over {FORCE_ABORT_STEPS} steps "
-                          f"at depth={depth*1000:.1f}mm -- jammed; retreating and aborting.")
-                retreat_tip = tip_pos - insert_axis * 0.010
+                          f"at depth={depth*1000:.1f}mm -- HOLDING position (no retreat), stopping.")
                 self.set_pose_target(
-                    move_robot, self._tcp_target_for_tip(retreat_tip, R_port),
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_port),
                     stiffness=STIFFNESS, damping=DAMPING)
-                self.sleep_for(1.0)
-                send_feedback("script insert jammed -- aborted under force budget")
+                send_feedback("script high force -- holding (no retreat)")
                 return False
 
             # Track depth stall for wedge detection. A WEDGE is a GEOMETRIC bind:
@@ -1214,21 +1212,21 @@ class RLInsert(Policy):
                 stall_lat_max = max(stall_lat_max, lateral)
             if stall_steps >= SCRIPT_STALL_STEPS and lateral > SCRIPT_WEDGE_LATERAL_M:
                 log.error(
-                    f"[script] WEDGE detected: depth stuck at {stall_depth*1000:.1f}mm "
-                    f"for {stall_steps} steps with lateral BLOWN OUT to "
-                    f"{lateral*1000:.2f}mm (> {SCRIPT_WEDGE_LATERAL_M*1000:.1f}mm), "
-                    f"force {f_mag:.2f}N. Plug is levering sideways -- angled-grasp "
-                    f"geometric bind. Retreating and aborting.")
+                    f"[script] STALL at depth {stall_depth*1000:.1f}mm for "
+                    f"{stall_steps} steps, lateral {lateral*1000:.2f}mm "
+                    f"(> {SCRIPT_WEDGE_LATERAL_M*1000:.1f}mm), force {f_mag:.2f}N. "
+                    f"Contact reached -- HOLDING position (no retreat), stopping.")
                 log.error(
-                    f"[script] WEDGE-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
+                    f"[script] STALL-SIGNATURE stall_depth_mm={stall_depth*1000:.2f} "
                     f"lat_swing_mm={(stall_lat_max-stall_lat_min)*1000:.2f} "
                     f"lat_mm={lateral*1000:.2f} force_N={f_mag:.2f}")
-                retreat_tip = tip_pos - insert_axis * 0.010
+                # Do NOT retreat on collision (per instruction). Hold the current
+                # contact pose so the plug stays at the mouth -- ready for the
+                # force-reactive RL to take over from here.
                 self.set_pose_target(
-                    move_robot, self._tcp_target_for_tip(retreat_tip, R_port),
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_port),
                     stiffness=STIFFNESS, damping=DAMPING)
-                self.sleep_for(1.0)
-                send_feedback("script insert wedged (angled grasp) -- aborted")
+                send_feedback("script reached contact -- holding (no retreat)")
                 return False
 
             # Step sizing:

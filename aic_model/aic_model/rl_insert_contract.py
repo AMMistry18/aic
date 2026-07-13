@@ -20,11 +20,12 @@ DEPLOY_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
 SFP_TIP_IN_TCP_POS = np.array(
     [-0.0017771781, -0.0188744563, 0.0547221980], dtype=np.float64
 )
-# Refined 2026-07-13 from two Flowstate calib dumps (q_tcp^-1 * q_port averaged),
-# a ~1.16 deg nudge toward "kinematic tip square to the perceived port at
-# handoff". Prior: [0.9852867415, 0.1688620346, -0.0042579615, -0.0260292145].
+# 2026-07-13: v17 applied a +1.16 deg nudge (q_tcp^-1*q_port) which made the tilt
+# WORSE. Per user, apply the SAME 1.16 deg magnitude in the OPPOSITE direction.
+# Original: [0.9852867415, 0.1688620346, -0.0042579615, -0.0260292145].
+# v17 (wrong way): [0.9863980666, 0.1620801968, 0.0030413, -0.0271958552].
 SFP_TIP_IN_TCP_QUAT = np.array(
-    [0.9863980666, 0.1620801968, 0.0030413, -0.0271958552],
+    [0.9840750466, 0.1756266707, -0.0115567892, -0.0248599222],
     dtype=np.float64,
 )
 
