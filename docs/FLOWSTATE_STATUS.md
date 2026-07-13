@@ -44,6 +44,11 @@ outcomes and their next step:
 - v10: first correct rl deploy (baked router addr, non-fatal entrypoint);
   `control=rl` confirmed; aborted at step 0 on the 6 mm gate.
 - v11/v12: v10 + grace-window safety gate.
+- v13 (pending): `RL_INSERT_CONTROL_MODE=script` — pure-geometry align-then-
+  progressive-descent, NO RL. Tests whether a script alone (using the fixed
+  nearest-tip + consensus perception) can align and gently seat, per the
+  align-first decision (docs/INSERTION_PIPELINE_DESIGN.md). If the script seats
+  reliably, RL is reserved for the force-reactive contact seat only.
 
 Always bump the asset manifest `name` (v10 -> v11 -> ...) per deploy; reinstalling
 the same identity does NOT replace the running image.

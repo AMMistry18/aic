@@ -18,7 +18,9 @@ COPY models/final_insert_sfp_flowstate_v1.ts.contract.json /models/final_insert_
 
 ENV RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
 ENV RL_INSERT_WRENCH_MODE=baseline
-ENV RL_INSERT_CONTROL_MODE=rl
+# script = pure-geometry align-then-progressive-descent, NO RL (align-first test
+# bed). Set back to rl / guided to run the learned / scripted-lead policies.
+ENV RL_INSERT_CONTROL_MODE=script
 ENV RL_INSERT_GUIDED_CONTACT_DEPTH_M=-0.008
 ENV RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M=0.020
 ENV RL_INSERT_SAFETY_MAX_LATERAL_M=0.006
