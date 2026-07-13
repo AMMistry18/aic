@@ -350,6 +350,11 @@ class StudentObsWrapperA(gym.Wrapper):
 # --------------------------------------------------------------------------- #
 def make_student_env_a(perception_noise: float = 1.0,
                        level: float = 1.0,
+                       start_jitter_xy_m: float | None = None,
+                       start_jitter_yaw_rad: float | None = None,
+                       start_jitter_tilt_rad: float | None = None,
+                       start_curriculum_band: float | None = None,
+                       start_curriculum_easy_frac: float | None = None,
                        action_convention: str = "deploy",
                        wrench_mode: str = "zero",
                        grasp_noise: float = 1.0,
@@ -369,6 +374,20 @@ def make_student_env_a(perception_noise: float = 1.0,
     env_cfg = EnvConfig()
     reward_cfg = dataclasses.replace(env_cfg.reward, w_image=0.0, beta_s=0.0)
     ms = int(max_episode_steps or env_cfg.term.max_steps)
+    # These are opt-in start-distribution overrides.  Keeping ``None`` preserves
+    # the SceneEnvConfig defaults used by the existing student/align builders.
+    start_cfg = {}
+    if start_jitter_xy_m is not None:
+        start_cfg["jitter_xy_inport_m"] = float(start_jitter_xy_m)
+    if start_jitter_yaw_rad is not None:
+        start_cfg["jitter_yaw_inport_rad"] = float(start_jitter_yaw_rad)
+    if start_jitter_tilt_rad is not None:
+        start_cfg["jitter_tilt_inport_rad"] = float(start_jitter_tilt_rad)
+    if start_curriculum_band is not None:
+        start_cfg["curriculum_band"] = float(start_curriculum_band)
+    if start_curriculum_easy_frac is not None:
+        start_cfg["curriculum_easy_frac"] = float(start_curriculum_easy_frac)
+
     cfg = SceneEnvConfig(
         reward=reward_cfg,
         max_episode_steps=ms,
@@ -382,6 +401,7 @@ def make_student_env_a(perception_noise: float = 1.0,
         include_images=False,       # state-only -> no renderer, no GL
         domain_randomization=bool(domain_randomization),
         compiled_variant_seed=(int(seed) if domain_randomization and seed is not None else None),
+        **start_cfg,
     )
     scene = SceneInsertEnv(cfg)
     scene.set_reset_mode("curriculum")     # + fixed level, NO level file -> pinned
