@@ -169,7 +169,7 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune per rebuild
 # via RL_INSERT_SCRIPT_BIAS_{X_M,Y_M,RX_RAD} (no runtime override in Flowstate).
 SCRIPT_BIAS_X_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_X_M", "-0.001"))      # -1.0 mm (-X)
-SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.010"))       # +10.0 mm (+Y)
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.004"))       # +4.0 mm (+Y)
 SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
@@ -1092,13 +1092,18 @@ class RLInsert(Policy):
         return False
 
     # --------------------------------------------------- scripted controller ---
-    def _script_errors(self, Rp, port_pos):
-        """Current (depth, lateral, rotation-error-vec) of the plug tip in the
-        perceived port frame, from live TCP TF. depth: +inward, 0 at the mouth."""
+    def _script_errors(self, Rp, port_pos, R_target=None):
+        """Current (depth, lateral, rotation-error-vec) of the plug tip.
+
+        Position errors (depth, lateral) are in the port frame Rp about the
+        (possibly bias-shifted) port_pos. The rotation error is vs R_target -- the
+        desired tip orientation, which is the BIASED/tilted frame R_seat when a bias
+        is set (defaults to Rp = untilted port frame). depth: +inward, 0 at mouth."""
         tcp_pos, tcp_quat = self._tcp()
         tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
         d = Rp.T @ (tip_pos - port_pos)
-        rot_err = _R_to_axis_angle(Rp.T @ R_tip)
+        R_ref = Rp if R_target is None else R_target
+        rot_err = _R_to_axis_angle(R_ref.T @ R_tip)
         return (float(d[2]), d[:2].copy(), rot_err, tip_pos, R_tip)
 
     def _run_script(self, get_observation, move_robot, send_feedback, *,
@@ -1116,6 +1121,23 @@ class RLInsert(Policy):
         R_port = Rp                                  # target tip orientation == port frame
         send_feedback("script align+descend (no RL)")
 
+        # PRE-ENGAGE BIAS as an ABSOLUTE target shift. Instead of nudging the plug
+        # by a relative increment (which never fully applied -- a one-shot move got
+        # cut off by the descent, so bigger Y values still undershot), we shift the
+        # TARGET the whole pipeline servos to: biased_port = port + X/Y in the port
+        # frame. Align then drives the tip fully to that biased point (same mechanism
+        # that already converges to <1mm), descent goes straight down through it, and
+        # every error reading is measured vs the biased target. The tilt is applied
+        # as the target orientation (R_seat) below. Bias values now mean exactly what
+        # they say: a +2.5mm Y bias => the plug ends up 2.5mm off the true port in Y.
+        port_pos = np.asarray(port_pos, dtype=float) + (
+            Rp[:, 0] * SCRIPT_BIAS_X_M + Rp[:, 1] * SCRIPT_BIAS_Y_M)
+        R_seat = R_port @ _axis_angle_to_R(
+            np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
+        log.info(f"[script] pre-engage bias (absolute target shift): "
+                 f"dX={SCRIPT_BIAS_X_M*1000:.2f}mm dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
+                 f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
+
         # Align at WHERE we were handed off (do not force a descent to a fixed
         # standoff first). This lets a deliberately-higher handoff -- e.g. +5mm so
         # the cameras see the port clearer -- simply align higher, then descend
@@ -1130,7 +1152,8 @@ class RLInsert(Policy):
         # ---- Phase 1: align at standoff -------------------------------------
         aligned = False
         for astep in range(SCRIPT_ALIGN_MAX_STEPS):
-            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
+            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(
+                Rp, port_pos, R_target=R_seat)
             lateral = float(np.linalg.norm(lat_vec))
             rot_norm = float(np.linalg.norm(rot_err))
             if lateral <= SCRIPT_ALIGN_LATERAL_TOL_M and rot_norm <= SCRIPT_ALIGN_ROTATION_TOL_RAD:
@@ -1149,15 +1172,15 @@ class RLInsert(Policy):
             depth_err = align_standoff - depth                   # toward standoff
             depth_world = insert_axis * float(np.clip(depth_err, -0.002, 0.002))
             target_tip = tip_pos + lat_world + depth_world
-            # Orientation goes toward the port frame, rate-limited. rot_err is the
-            # tip-vs-port error as an axis-angle in the PORT frame (E = Rp^T @ R_tip).
-            # Keep the fraction of the error that a single capped step leaves:
-            #   target_R = Rp @ axis_angle_to_R((1 - move_frac) * rot_err)
+            # Orientation goes toward the BIASED target frame (R_seat = port frame
+            # tilted by the pre-engage bias), rate-limited. rot_err is measured vs
+            # R_seat (see _script_errors, which uses the shifted target). So the tilt
+            # is reached during alignment, not as a separate cut-off move afterward.
             if rot_norm > SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD:
                 move_frac = SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD / rot_norm
-                target_R = R_port @ _axis_angle_to_R((1.0 - move_frac) * rot_err)
+                target_R = R_seat @ _axis_angle_to_R((1.0 - move_frac) * rot_err)
             else:
-                target_R = R_port
+                target_R = R_seat
             self.set_pose_target(
                 move_robot, self._tcp_target_for_tip(target_tip, target_R),
                 stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
@@ -1173,31 +1196,9 @@ class RLInsert(Policy):
             send_feedback("script align failed -- aborted before descent")
             return False
 
-        # ---- Post-align pre-engage bias -------------------------------------
-        # After alignment, nudge the plug to the (near-constant) wedge spot so the
-        # seat starts pre-engaged. Fixed offset in the perceived port frame: shift
-        # along port Y by SCRIPT_BIAS_Y_M and tilt about port X by SCRIPT_BIAS_RX_RAD.
-        # CRITICAL: the tilt must PERSIST through descent -- R_seat below replaces
-        # R_port as the descent orientation. Otherwise Phase 2 re-commands the square
-        # R_port every step and erases the tilt instantly (why 2.5 and 6 deg looked
-        # identical). The positional bias (bias_world) is applied ONCE here as a
-        # one-shot pre-engage move; the descent below commands pure inward motion and
-        # must NOT re-add it (re-adding to the live tip each step walks the plug off).
-        # No-op when both are 0 (R_seat == R_port, bias_world == 0).
-        R_seat = R_port @ _axis_angle_to_R(
-            np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
-        bias_world = (Rp[:, 0] * SCRIPT_BIAS_X_M              # port X (lateral) offset
-                      + Rp[:, 1] * SCRIPT_BIAS_Y_M)          # port Y offset, both signed
-        if SCRIPT_BIAS_X_M != 0.0 or SCRIPT_BIAS_Y_M != 0.0 or SCRIPT_BIAS_RX_RAD != 0.0:
-            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
-            log.info(f"[script] pre-engage bias (persists in descent): "
-                     f"dX={SCRIPT_BIAS_X_M*1000:.2f}mm dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
-                     f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
-            self.set_pose_target(
-                move_robot, self._tcp_target_for_tip(tip_pos + bias_world, R_seat),
-                stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
-            self.sleep_for(STEP_DT)
-            send_feedback("script pre-engage bias applied")
+        # The pre-engage bias is already baked into port_pos (position) and R_seat
+        # (orientation) at the top, so alignment above already drove the plug to the
+        # biased target. No separate one-shot move -- descend straight from here.
 
         # ---- Phase 2: progressive slow descent ------------------------------
         force_hot_steps = 0
@@ -1211,7 +1212,8 @@ class RLInsert(Policy):
         stall_lat_max = -np.inf
         for dstep in range(MAX_RL_STEPS):
             obs = get_observation()
-            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(Rp, port_pos)
+            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(
+                Rp, port_pos, R_target=R_seat)
             lateral = float(np.linalg.norm(lat_vec))
             rot_norm = float(np.linalg.norm(rot_err))
             f_mag = float("nan")
@@ -1302,15 +1304,12 @@ class RLInsert(Policy):
                 step_m = (SCRIPT_DESCEND_STEP_FAR_M
                           + frac * (SCRIPT_DESCEND_STEP_NEAR_M - SCRIPT_DESCEND_STEP_FAR_M))
 
-            # Keep lateral squared during descent; re-tighten if it drifts out.
-            # BUT when a pre-engage bias is active, the plug is DELIBERATELY offset
-            # from the perceived mouth (tilted/biased in), so the mouth-relative
-            # lateral is high by design -- re-aligning would fight the bias and undo
-            # the pre-engagement. Only re-align when NO bias is set.
-            bias_active = (SCRIPT_BIAS_X_M != 0.0 or SCRIPT_BIAS_Y_M != 0.0
-                           or SCRIPT_BIAS_RX_RAD != 0.0)
+            # Keep lateral squared to the BIASED target during descent; re-tighten if
+            # it drifts out. Because the bias is baked into port_pos, "lateral" is the
+            # error vs the biased point, so re-aligning pulls the plug TOWARD the
+            # biased target (it no longer fights the bias). This bounds any drift.
             lat_world = np.zeros(3)
-            if not bias_active and lateral > SCRIPT_REALIGN_LATERAL_M:
+            if lateral > SCRIPT_REALIGN_LATERAL_M:
                 lat_cmd = -SCRIPT_ALIGN_LATERAL_GAIN * lat_vec
                 lat_step = float(np.linalg.norm(lat_cmd))
                 if lat_step > SCRIPT_ALIGN_MAX_LATERAL_STEP_M:
@@ -1322,12 +1321,10 @@ class RLInsert(Policy):
             in_contact = np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N
             stiff = STIFFNESS if in_contact else GUIDED_STIFFNESS
             damp = DAMPING if in_contact else GUIDED_DAMPING
-            # Descent commands PURE inward motion from the live tip position. The
-            # positional bias (bias_world) was applied ONCE at pre-engage above and
-            # must NOT be re-added here -- adding it every step to the live tip_pos
-            # is a runaway integrator that walks the plug off the board (observed
-            # lateral drifting to 80+ mm). Orientation R_seat is absolute (a target
-            # pose, not an increment), so it correctly persists every step.
+            # Descent commands inward motion toward the BIASED target. The bias is
+            # already baked into port_pos (all errors here are measured vs the biased
+            # target) and R_seat, so no bias is re-added -- avoids the earlier runaway
+            # where re-adding an offset each step walked the plug off the board.
             target_tip = tip_pos + insert_axis * step_m + lat_world
             self.set_pose_target(
                 move_robot, self._tcp_target_for_tip(target_tip, R_seat),
