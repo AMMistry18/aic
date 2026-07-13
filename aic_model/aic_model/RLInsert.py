@@ -164,11 +164,11 @@ SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_
 # pre-seat the plug against the (near-constant) wedge location so the seat starts
 # from a better spot. Both are in the PERCEIVED PORT frame:
 #   BIAS_Y_M  = shift along port -Y (default 0.2 mm in -Y => stored negative)
-#   BIAS_RX_RAD = tilt about port +X (default +2.5 deg)
+#   BIAS_RX_RAD = tilt about port +X (default +6.0 deg)
 # Set to 0 to disable (no bias, exactly the previous behavior). Tune at deploy
 # without a rebuild via RL_INSERT_SCRIPT_BIAS_{Y_M,RX_RAD}.
 SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "-0.0002"))     # -0.2 mm
-SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "0.043633"))  # +2.5 deg
+SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "0.104720"))  # +6.0 deg
 # Contact-force handling during descent (uses the tared wrench, like rl mode).
 # Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
 # descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
