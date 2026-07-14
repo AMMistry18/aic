@@ -7,6 +7,7 @@ camera frames with ``python board_search.py IMAGE``.
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -28,6 +29,10 @@ MAX_MOVE_M = 0.05
 RAISE_STEP_M = 0.025
 MAX_MOVES = 3
 SETTLE_SEC = 0.7
+MOTION_SETTLE_TIMEOUT_SEC = 3.0
+MOTION_SETTLE_TOL_M = 0.003
+FRESH_IMAGE_TIMEOUT_SEC = 2.0
+POLL_SEC = 0.10
 MAX_JACOBIAN_CONDITION = 100.0
 MIN_TCP_Z_M = 0.05
 MAX_TCP_Z_M = 1.50
@@ -132,15 +137,34 @@ class BoardSearch:
                 detections.append((detection[3], cam_name, bgr, detection))
         return max(detections, default=None, key=lambda item: item[0])
 
-    def _observe_camera(self, get_observation, cam_name):
-        obs = get_observation()
-        if obs is None:
+    @staticmethod
+    def _image_stamp_ns(obs, cam_name):
+        image = getattr(obs, f"{cam_name.replace('_camera', '')}_image", None)
+        header = getattr(image, "header", None)
+        stamp = getattr(header, "stamp", None)
+        if stamp is None:
             return None
-        cam_data = self.p._get_cam_data(obs, cam_name)
-        if cam_data is None:
+        sec = getattr(stamp, "sec", None)
+        nanosec = getattr(stamp, "nanosec", None)
+        if sec is None or nanosec is None:
             return None
-        bgr, _ = cam_data
-        return bgr, self.detect_board(bgr)
+        return int(sec) * 1_000_000_000 + int(nanosec)
+
+    def _observe_camera(self, get_observation, cam_name, newer_than=None):
+        """Return a post-motion image, not the cached frame from before a probe."""
+        deadline = time.monotonic() + FRESH_IMAGE_TIMEOUT_SEC
+        while True:
+            obs = get_observation()
+            if obs is not None:
+                cam_data = self.p._get_cam_data(obs, cam_name)
+                if cam_data is not None:
+                    bgr, _ = cam_data
+                    stamp = self._image_stamp_ns(obs, cam_name)
+                    if newer_than is None or stamp is None or stamp > newer_than:
+                        return bgr, self.detect_board(bgr), stamp
+            if time.monotonic() >= deadline:
+                return None
+            self.p.sleep_for(POLL_SEC)
 
     def _move_by(self, move_robot, delta):
         from geometry_msgs.msg import Point, Pose, Quaternion
@@ -160,8 +184,24 @@ class BoardSearch:
             ),
         )
         self.p.set_pose_target(move_robot, pose, frame_id="base_link")
-        self.p.sleep_for(SETTLE_SEC)
-        return target - np.asarray(tcp_pos, dtype=np.float64)
+        deadline = time.monotonic() + MOTION_SETTLE_TIMEOUT_SEC
+        actual = np.asarray(tcp_pos, dtype=np.float64)
+        while True:
+            try:
+                actual, _ = self.p._tcp()
+                actual = np.asarray(actual, dtype=np.float64)
+            except Exception:
+                actual = np.asarray(tcp_pos, dtype=np.float64)
+            if float(np.linalg.norm(target - actual)) <= MOTION_SETTLE_TOL_M:
+                self.p.sleep_for(SETTLE_SEC)
+                return actual - np.asarray(tcp_pos, dtype=np.float64)
+            if time.monotonic() >= deadline:
+                self.p.get_logger().warn(
+                    f"[board_search] TCP did not settle within {MOTION_SETTLE_TIMEOUT_SEC:.1f}s; "
+                    f"remaining_error={np.linalg.norm(target - actual):.4f}m"
+                )
+                return actual - np.asarray(tcp_pos, dtype=np.float64)
+            self.p.sleep_for(POLL_SEC)
 
     def _camera_axes_in_base(self, cam_name):
         """Return the selected camera's image-plane and back-away axes in base_link.
@@ -199,6 +239,7 @@ class BoardSearch:
             return False
 
         _, cam_name, bgr0, det0 = chosen
+        stamp0 = self._image_stamp_ns(obs, cam_name)
         log.info(
             f"[board_search] selected {cam_name}: area={det0[3]:.3f} "
             f"centroid=({det0[1]:.1f},{det0[2]:.1f}) border={det0[5]}"
@@ -222,22 +263,22 @@ class BoardSearch:
         # trial showed, and then cannot produce an invertible image Jacobian.
         actual_u_vector = self._move_by(move_robot, PROBE_M * image_u)
         actual_du = float(np.dot(actual_u_vector, image_u))
-        sample1 = self._observe_camera(get_observation, cam_name)
+        sample1 = self._observe_camera(get_observation, cam_name, newer_than=stamp0)
         if sample1 is None or not sample1[1][0]:
             log.error(f"[board_search] board lost after image-U probe in {cam_name}")
             return False
-        bgr1, det1 = sample1
+        bgr1, det1, stamp1 = sample1
         if self._is_success(det1, bgr1.shape):
             log.info("[board_search] board fully framed; moves=1")
             return True
 
         actual_v_vector = self._move_by(move_robot, PROBE_M * image_v)
         actual_dv = float(np.dot(actual_v_vector, image_v))
-        sample2 = self._observe_camera(get_observation, cam_name)
+        sample2 = self._observe_camera(get_observation, cam_name, newer_than=stamp1)
         if sample2 is None or not sample2[1][0]:
             log.error(f"[board_search] board lost after image-V probe in {cam_name}")
             return False
-        bgr2, det2 = sample2
+        bgr2, det2, stamp2 = sample2
         if self._is_success(det2, bgr2.shape):
             log.info("[board_search] board fully framed; moves=2")
             return True
@@ -276,11 +317,11 @@ class BoardSearch:
             f"J={np.round(jacobian, 2).tolist()} cond={condition:.1f}"
         )
 
-        final_sample = self._observe_camera(get_observation, cam_name)
+        final_sample = self._observe_camera(get_observation, cam_name, newer_than=stamp2)
         if final_sample is None or not final_sample[1][0]:
             log.error(f"[board_search] board not detected after move {MAX_MOVES}")
             return False
-        final_bgr, final_det = final_sample
+        final_bgr, final_det, _ = final_sample
         centered = self._is_success(final_det, final_bgr.shape)
         fully_in_frame = not final_det[5]
         log.info(

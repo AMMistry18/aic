@@ -40,11 +40,25 @@ def test_detect_board_reports_clipped_plate():
     assert detection[5]
 
 
+def _observation_at(stamp_ns):
+    return SimpleNamespace(
+        center_image=SimpleNamespace(
+            header=SimpleNamespace(
+                stamp=SimpleNamespace(sec=stamp_ns // 1_000_000_000,
+                                       nanosec=stamp_ns % 1_000_000_000)
+            )
+        )
+    )
+
+
 class _Logger:
     def info(self, _message):
         pass
 
     def error(self, _message):
+        pass
+
+    def warn(self, _message):
         pass
 
 
@@ -89,6 +103,18 @@ def test_two_axis_probe_then_correction_centers_within_three_moves():
     assert not final[5]
     assert abs(final[1] - 320) <= CENTER_TOL_FRAC * 640
     assert abs(final[2] - 240) <= CENTER_TOL_FRAC * 480
+
+
+def test_observe_camera_requires_a_newer_image_stamp_after_motion():
+    policy = _FakePolicy()
+    search = BoardSearch(policy)
+    observations = iter([_observation_at(10), _observation_at(10), _observation_at(11)])
+    bgr, detection, stamp = search._observe_camera(
+        lambda: next(observations), "center_camera", newer_than=10
+    )
+    assert bgr.shape[:2] == (480, 640)
+    assert detection[0]
+    assert stamp == 11
 
 
 class _ViewingAxisFakePolicy(_FakePolicy):
