@@ -1,193 +1,260 @@
-# Flowstate aic_model deploy recipe (inctl / inbuild)
+# Flowstate `aic_model` full-image deployment
 
-Recovered 2026-07-12. The `inctl` + `inbuild` binaries and all bundles live only
-in `/private/tmp`, which is wiped on reboot. This file is the durable record of
-the exact deploy procedure so it never has to be re-derived from chat history.
+Last verified: 2026-07-14 (v38). Use the full Dockerfile path below for v39 and
+later. Do not use the old thin-overlay recipe: inherited images can contain the
+strict router entrypoint that exits before the ROS lifecycle node starts.
 
-## Tooling (both were at /private/tmp, both wiped by reboot)
+The Intrinsic command-line tools and authentication are not committed to this
+repository. Keep them in `~/.aic-flowstate`, not `/private/tmp`, so a reboot does
+not erase the deployment environment.
 
-```text
-inctl:   /private/tmp/inctl-linux-amd64          (linux/amd64, ~39 MB)
-inbuild: /private/tmp/aic-flowstate-guided-v5/inbuild   (linux/amd64)
-inctl home (auth/session): /private/tmp/aic-inctl-home
-macOS CA file: /etc/ssl/cert.pem
+## 1. Install the command-line tools persistently
+
+Sign into the organization console:
+
+<https://flowstate.intrinsic.ai/o/tar-2@xfa-prod-aic-us>
+
+Use **Set up development environment** / developer tools to download the Linux
+AMD64 builds of both `inctl` and `inbuild`. No stable public direct binary URL is
+available; do not guess one.
+
+```bash
+mkdir -p ~/.aic-flowstate/bin ~/.aic-flowstate/inctl-home
+cp ~/Downloads/<inctl-download> ~/.aic-flowstate/bin/inctl-linux-amd64
+cp ~/Downloads/<inbuild-download> ~/.aic-flowstate/bin/inbuild
+chmod 755 ~/.aic-flowstate/bin/inctl-linux-amd64 ~/.aic-flowstate/bin/inbuild
 ```
 
-Both `inctl` and `inbuild` are downloaded from the Flowstate console
-(flowstate.intrinsic.ai, "set up development environment" / dev tools). They are
-not in the repo and there is no public GitHub release. To survive future reboots,
-copy them somewhere persistent (e.g. `~/.aic-inctl/`) after downloading.
+This repository includes a macOS-to-Linux wrapper:
 
-All CLI calls run the linux binary inside a debian container on this Mac:
+```bash
+scripts/flowstate/inctl.sh version
+scripts/flowstate/inctl.sh auth login --no_browser \
+  --org tar-2@xfa-prod-aic-us
+```
+
+The login requires an interactive terminal. Open the URL it prints, approve the
+login, and paste the token into the CLI prompt. Never put the token in Git, a
+script, a handoff document, or chat. Authentication persists under
+`~/.aic-flowstate/inctl-home`.
+
+`inbuild` is separately required. The recovered `inctl` does not implement
+bundle creation (`inctl bundle --help` returned `unknown command`).
+
+## 2. Fixed deployment target
+
+```bash
+export ORG='tar-2@xfa-prod-aic-us'
+export SOL='582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH'
+export FLOWSTATE_HOME="${AIC_FLOWSTATE_HOME:-$HOME/.aic-flowstate}"
+```
+
+Keep the service instance name exactly `aic_model`. Flowstate process lifecycle
+nodes target `/aic_model/change_state`; changing `--name` breaks that wiring.
+
+The cluster ID can change. Discover it after authenticating:
+
+```bash
+scripts/flowstate/inctl.sh cluster list --org "$ORG"
+```
+
+## 3. Choose a new immutable asset version
+
+Flowstate keys services by manifest identity. Reinstalling the same asset name
+does not replace the running image. v38 is current, so the next build is v39:
+
+```bash
+export VERSION=v39
+export ASSET_NAME="aic_model_${VERSION}"
+export IMAGE="my-solution:student-flowstate-script-${VERSION}"
+export WORK="/private/tmp/aic-script-${VERSION}"
+mkdir -p "$WORK/images/aic_model"
+```
+
+Copy the known-good tracked manifest and change **all** v38 identity/display
+occurrences to v39. Do not edit the archive filename:
+
+```bash
+cp deploy/flowstate/aic_model_v38.manifest.textproto \
+  "$WORK/${ASSET_NAME}.manifest.textproto"
+sed -i '' 's/aic_model_v38/aic_model_v39/g; s/v38/v39/g' \
+  "$WORK/${ASSET_NAME}.manifest.textproto"
+rg -n 'v38|v39|archive_filename' "$WORK/${ASSET_NAME}.manifest.textproto"
+```
+
+For versions after v39, adjust both replacements. The manifest must identify
+`ai.intrinsic.aic_model_vNN` and must reference `aic_model.tar`.
+
+## 4. Build the full image
+
+Build from the repository root. `BASE_IMAGE=my-solution:v8` must already exist
+locally; it contains the validated AMD64 ROS/Pixi environment and model weights.
+
+```bash
+docker build --platform linux/amd64 \
+  -f docker/aic_model/Dockerfile.student_flowstate \
+  --build-arg BASE_IMAGE=my-solution:v8 \
+  -t "$IMAGE" .
+```
+
+Do not replace this with `FROM <old-guided-image>` plus one `ENV`. The full
+Dockerfile installs the current source and the router-safe `/entrypoint.sh`.
+
+Verify the baked control mode, router fallback, board-search module, and the
+preserved scripted `+Y` nudge before creating a 7 GB tar:
+
+```bash
+docker inspect "$IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | rg 'RL_INSERT_CONTROL_MODE|RL_INSERT_BOARD_SEARCH|AIC_ROUTER_ADDR'
+
+docker run --rm --platform linux/amd64 --entrypoint /bin/bash "$IMAGE" -lc '
+  rg -n "class BoardSearch" \
+    /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/board_search.py
+  rg -n "_nudge_to_unstick|SCRIPT_NUDGE_DIRS" \
+    /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py
+  rg -n "falling back to rmw_zenoh peer scouting" /entrypoint.sh
+'
+```
+
+Expected environment for the board-only asset:
+
+```text
+RL_INSERT_CONTROL_MODE=script
+RL_INSERT_BOARD_SEARCH=0
+RL_INSERT_BOARD_SEARCH_ONLY_TASK_ID=board_search_only
+AIC_ROUTER_ADDR=zenoh-router.app-intrinsic-base.svc.cluster.local:7447
+```
+
+## 5. Save and bundle the image
+
+```bash
+docker save "$IMAGE" -o "$WORK/images/aic_model/aic_model.tar"
+shasum -a 256 "$WORK/images/aic_model/aic_model.tar"
+```
+
+Run the Linux/AMD64 `inbuild` binary in Debian. The `$WORK` bind mount is writable;
+the image directory is also mounted at the path supplied to `--oci_image`:
 
 ```bash
 docker run --rm --platform linux/amd64 \
-  -v /etc/ssl/cert.pem:/etc/ssl/certs/ca-certificates.crt:ro \
-  -v /private/tmp/inctl-linux-amd64:/inctl:ro \
-  -v /private/tmp/aic-inctl-home:/root \
-  debian:bookworm-slim \
-  /inctl <command>
-```
-
-## Auth
-
-```bash
-/inctl auth login --no_browser --org tar-2@xfa-prod-aic-us
-```
-
-Prints a URL (flowstate.intrinsic.ai/o/tar-2@xfa-prod-aic-us/generate-keys). User
-opens it, approves, and pastes the token INTO THE CLI PROMPT (needs an interactive
-TTY: `docker run -i`). Never paste the token into chat, scripts, or Git.
-
-## Target
-
-```text
-org:      tar-2@xfa-prod-aic-us
-solution: 582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH   (Copy of AIC Phase 1 Template)
-cluster:  verify with `inctl cluster list` (was vmp-f5ed-053nou72)
-service instance name: aic_model   (KEEP THIS — it is the ROS lifecycle node name)
-ROS lifecycle node:    aic_model   -> /aic_model/change_state
-```
-
-## Build the image (thin overlay — fast, only flips one env)
-
-The base `my-solution:student-flowstate-guided-v5` (sha b2a56d8387df) already has
-the correct code/models/entrypoint. To change only the control mode:
-
-```bash
-cat > /tmp/Dockerfile.overlay <<'EOF'
-FROM my-solution:student-flowstate-guided-v5
-ENV RL_INSERT_CONTROL_MODE=rl     # or guided
-EOF
-docker build --platform linux/amd64 -f /tmp/Dockerfile.overlay \
-  -t my-solution:student-flowstate-rl-v8 .
-```
-
-## Bump the asset version (REQUIRED — Flowstate keys assets by manifest identity)
-
-Reinstalling the SAME asset id/version does NOT replace the running image. You must
-change the manifest `name` each time: aic_model_v6 -> v7 -> v8 -> ...
-Asset id becomes `ai.intrinsic.<name>`. The version suffix (`0.0.1+<hash>`) is
-content-derived; the `name` is what makes it a new identity.
-
-Manifest is a textproto; only these fields change per version:
-
-```textproto
-metadata {
-  id { package: "ai.intrinsic"  name: "aic_model_v8" }   # <- bump this
-  vendor { display_name: "Intrinsic" }
-  documentation { description: "Participant Policy Node (rl mode v8)." }
-  display_name: "Participant Policy Node v8"
-}
-service_def {
-  real_spec { image { archive_filename: "aic_model.tar"
-    settings { resource_requirements { limits { key: "nvidia.com/gpu" value: "1" } } } } }
-  sim_spec  { image { archive_filename: "aic_model.tar"
-    settings { resource_requirements { limits { key: "nvidia.com/gpu" value: "1" } } } } }
-}
-assets { image_filenames: ["aic_model.tar"] }
-```
-
-## Build the bundle
-
-Two ways; either works. The bundle is just `aic_model.tar` (docker save) +
-`service_manifest.binarypb` at the tar root.
-
-**A. With inbuild (preferred — it compiles the textproto to binarypb):**
-
-```bash
-WORK=/private/tmp/aic-flowstate-v8
-mkdir -p $WORK/images/aic_model
-docker save my-solution:student-flowstate-rl-v8 \
-  -o $WORK/images/aic_model/aic_model.tar          # ~7 GB, minutes
-# put aic_model_v8.manifest.textproto in $WORK
-docker run --rm --platform linux/amd64 \
-  -v /private/tmp/aic-flowstate-guided-v5/inbuild:/inbuild:ro \
-  -v $WORK:/work -v $WORK/images/aic_model:/img:ro \
+  -v "$FLOWSTATE_HOME/bin/inbuild:/inbuild:ro" \
+  -v "$WORK:/work" \
+  -v "$WORK/images/aic_model:/img:ro" \
   debian:bookworm-slim \
   /inbuild service bundle \
-    --manifest /work/aic_model_v8.manifest.textproto \
+    --manifest "/work/${ASSET_NAME}.manifest.textproto" \
     --oci_image /img/aic_model.tar \
-    --output /work/aic_model_v8.bundle.tar
+    --output "/work/${ASSET_NAME}.bundle.tar"
 ```
 
-**B. Without inbuild (hand-pack; reuse a known-good binarypb):**
-Extract `service_manifest.binarypb` from a prior bundle, swap the identity strings
-(package/name/description/display_name are all <128 bytes so each is a single-byte
-length-delimited token; adjust that byte AND every enclosing message length), then:
+Verify the bundle before uploading. It must contain exactly two root members and
+no macOS `._*` AppleDouble entries:
 
 ```bash
-cp $WORK/images/aic_model/aic_model.tar ./aic_model.tar
-COPYFILE_DISABLE=1 tar --no-mac-metadata -cf aic_model_v8.bundle.tar \
-  aic_model.tar service_manifest.binarypb    # exactly 2 entries, NO ._ AppleDouble
-rm ./aic_model.tar
+tar -tf "$WORK/${ASSET_NAME}.bundle.tar"
+# aic_model.tar
+# service_manifest.binarypb
+shasum -a 256 "$WORK/${ASSET_NAME}.bundle.tar"
 ```
 
-GOTCHA: macOS `tar` adds `._*` AppleDouble files that break the upload. Always use
-`COPYFILE_DISABLE=1 tar --no-mac-metadata` and verify `tar -tf` shows exactly the
-two members with no `._` entries.
+If a hand-packed tar is ever necessary, use
+`COPYFILE_DISABLE=1 tar --no-mac-metadata`; prefer `inbuild` because it compiles
+the textproto correctly.
 
-## Install the asset (uploads ~7.5 GB — slow; upload may need a retry)
+## 6. Install the asset
 
-Stage into a docker volume to avoid a huge bind-mount, then:
+The wrapper must be able to see the bundle. Because its default container only
+mounts the CLI and auth home, stage the large bundle in a Docker volume and run
+the equivalent `inctl` container with that volume mounted:
 
 ```bash
-SOL=582bcf0b-e30d-43b4-ad4c-6388e7b03719_BRANCH
-/inctl asset install /work/aic_model_v8.bundle.tar \
-  --org tar-2@xfa-prod-aic-us --solution $SOL
+docker volume create aic-flowstate-upload
+docker run --rm \
+  -v aic-flowstate-upload:/upload \
+  -v "$WORK:/host:ro" \
+  debian:bookworm-slim \
+  cp "/host/${ASSET_NAME}.bundle.tar" /upload/
+
+docker run --rm --platform linux/amd64 \
+  -v /etc/ssl/cert.pem:/etc/ssl/certs/ca-certificates.crt:ro \
+  -v "$FLOWSTATE_HOME/bin/inctl-linux-amd64:/inctl:ro" \
+  -v "$FLOWSTATE_HOME/inctl-home:/root" \
+  -v aic-flowstate-upload:/upload:ro \
+  debian:bookworm-slim \
+  /inctl asset install "/upload/${ASSET_NAME}.bundle.tar" \
+    --org "$ORG" --solution "$SOL"
 ```
 
-If it stalls or the UI says "hasn't finished uploading yet", the session likely
-expired (401/XSRF). Re-auth and re-run the SAME install; it is idempotent.
+The multi-gigabyte upload may be quiet for several minutes. If it fails with
+401/XSRF or says the upload did not finish, reauthenticate and rerun the same
+install; installation is content-addressed/idempotent.
 
-## Rebind the service instance to the new asset
+## 7. Rebind the live service
+
+Echo and then run the literal positional asset ID. Do not place the asset ID in
+an unset shell variable: that produces `Asset ID cannot be empty`.
+
+For v39, the required add command is literally:
 
 ```bash
-/inctl service delete aic_model --org tar-2@xfa-prod-aic-us --solution $SOL
-/inctl service add ai.intrinsic.aic_model_v8 \
-  --name aic_model --org tar-2@xfa-prod-aic-us --solution $SOL
+scripts/flowstate/inctl.sh service delete aic_model \
+  --org "$ORG" --solution "$SOL"
+
+scripts/flowstate/inctl.sh service add ai.intrinsic.aic_model_v39 \
+  --name aic_model --org "$ORG" --solution "$SOL"
 ```
 
-Keep `--name aic_model` so the ROS node stays `aic_model` and
-`/aic_model/change_state` resolves.
+Only delete/rebind the `aic_model` service. Do not delete the solution or
+unrelated services. Keep old versioned assets until the new one is proven so
+rollback remains possible.
 
-## Verify
+## 8. Verify startup and runtime separately
+
+Check recent logs:
 
 ```bash
-/inctl service state list --org ... --solution $SOL   # aic_model must appear
-/inctl logs --org ... --solution $SOL --service aic_model --since 10m --tail 200
+scripts/flowstate/inctl.sh logs \
+  --org "$ORG" --solution "$SOL" \
+  --service aic_model --since 10m --tail 300
 ```
 
-Then in the Flowstate UI: lifecycle skill node name = `aic_model`; configure ->
-activate; run one insertion. Confirm the log prints `control=rl` (or `guided`).
-`resource not found` for `--service aic_model` means the instance is not bound.
+Startup proof is all three lines:
 
-## GOTCHA: crash-loop on "AIC_MODEL_ROUTER_ADDR must be provided"
-
-Symptom: after `service add`, the instance stays `NotFound` forever; `inctl logs
---service aic_model` shows only `AIC_MODEL_ROUTER_ADDR must be provided` and no
-`Loading policy module` / `on_configure`. This is a crash loop, NOT slow
-scheduling — polling will never succeed.
-
-Cause: the image was built as a thin overlay `FROM ...guided-v5`, which still
-carries the OLD strict `/entrypoint.sh` that does `exit 1` when no router env is
-injected. Overlaying only `ENV RL_INSERT_CONTROL_MODE=rl` does NOT replace that
-baked entrypoint. Flowstate does not always inject `AIC_MODEL_ROUTER_ADDR`, so
-the strict entrypoint exits immediately.
-
-Fix: build from the FULL `docker/aic_model/Dockerfile.student_flowstate` (which
-bakes `ENV AIC_ROUTER_ADDR=zenoh-router.app-intrinsic-base.svc.cluster.local:7447`
-and installs the non-fatal entrypoint that falls back to peer-scouting), NOT an
-overlay on guided-v5. Verify the built image has BOTH baked before bundling:
-
-```bash
-docker inspect <img> --format '{{range .Config.Env}}{{println .}}{{end}}' \
-  | grep -E 'RL_INSERT_CONTROL_MODE|AIC_ROUTER_ADDR'   # both must be present
-# and the baked /entrypoint.sh must NOT `exit 1` on missing router (only under AIC_ENABLE_ACL)
+```text
+Loading policy module: aic_model.RLInsert
+Loaded policy module aic_model.RLInsert
+Using policy: RLInsert
 ```
 
-## Cleanup
+`service state list/get` has occasionally omitted a service whose logs prove it
+is running, so do not treat the omission alone as authoritative. Conversely,
+successful `asset install` is not runtime proof.
 
-After v8 is bound and working, uninstall stale assets so only the current one
-remains: old `ai.intrinsic.aic_model`, `aic_model_v6/v7`, and
-`ai.tar2.aic_insertion_policy`. Do NOT delete the solution or unrelated services.
+For board search, the Flowstate process must run serially:
+
+```text
+tare FT
+  -> switch_to_aic_controller
+  -> configure aic_model
+  -> activate aic_model
+  -> Insert Cable Skill (id = board_search_only)
+  -> switch_to_default_controller
+```
+
+Runtime success requires `[board_search] board-only task complete: True` and
+visible arm motion. See `docs/BOARD_SEARCH_V38_HANDOFF.md` for the current
+controller/session blocker. Do not report a deploy as fully successful from
+startup logs alone.
+
+## 9. v38 rollback/provenance
+
+```text
+asset:             ai.intrinsic.aic_model_v38
+installed version: ai.intrinsic.aic_model_v38.0.0.1+144f4ebff271742bd2c971ae709011b6ba279a45a7f32b31a5dc6026c91c619b
+image tag:         my-solution:student-flowstate-script-v38
+bundle SHA-256:    127e3338ab8ceca17029b1cb78c44450deafae7a0ca7c0db3abf6fd5182ab15a
+image SHA-256:     2fb125ac454731d99b3a9974c430dd067fa8d458cb4c14859699da3393d0752b
+```
+
+To roll back the binding, delete `aic_model` and add the desired already
+installed asset with the same `--name aic_model` convention.

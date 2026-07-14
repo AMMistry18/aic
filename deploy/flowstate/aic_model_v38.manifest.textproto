@@ -1,0 +1,21 @@
+metadata {
+  id { package: "ai.intrinsic" name: "aic_model_v38" }
+  vendor { display_name: "Intrinsic" }
+  documentation { description: "Participant Policy Node v38: synchronized camera-frame board search and scripted +Y stall nudge." }
+  display_name: "Participant Policy Node v38"
+}
+service_def {
+  real_spec {
+    image {
+      archive_filename: "aic_model.tar"
+      settings { resource_requirements { limits { key: "nvidia.com/gpu" value: "1" } } }
+    }
+  }
+  sim_spec {
+    image {
+      archive_filename: "aic_model.tar"
+      settings { resource_requirements { limits { key: "nvidia.com/gpu" value: "1" } } }
+    }
+  }
+}
+assets { image_filenames: ["aic_model.tar"] }
