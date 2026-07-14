@@ -147,12 +147,16 @@ def test_shallow_handoff_has_validated_bounded_fallback():
 
 
 @pytest.mark.parametrize(
-    ("requested_seed", "depth_bounds_m"),
-    ((1, (24e-3, 30e-3)), (2, (39e-3, 42e-3))),
+    ("stage", "requested_seed", "depth_bounds_m"),
+    (
+        ("near_seated", 0, (34e-3, 42e-3)),
+        ("full", 1, (24e-3, 30e-3)),
+        ("full", 2, (39e-3, 42e-3)),
+    ),
 )
 def test_other_handoff_fallbacks_are_true_lateral_wedges(
-        requested_seed, depth_bounds_m):
-    env = make_seat_env("full", seed=requested_seed, domain_randomization=True)
+        stage, requested_seed, depth_bounds_m):
+    env = make_seat_env(stage, seed=requested_seed, domain_randomization=True)
     try:
         candidate, base_seed = env._validated_fallback_candidate()
         _obs69, prepared_info, _reset_info, ended = env._prepare_candidate(
@@ -167,6 +171,37 @@ def test_other_handoff_fallbacks_are_true_lateral_wedges(
         assert validation["accepted_probe"]["depth_progress_m"] >= 2.0e-3
     finally:
         env.close()
+
+
+def test_near_seated_repeated_resets_are_validated_and_never_raise():
+    """Finite reset rejection may use fallback, but may never weaken validation."""
+    resets = 16
+    env = make_seat_env("near_seated", seed=3101, domain_randomization=True)
+    rows = []
+    try:
+        for _ in range(resets):
+            obs, info = env.reset()
+            probe = info["seat_reset_probe"]
+            assert obs["actor"].shape == (8, 34)
+            assert obs["privileged"].shape == (32,)
+            assert info["seat_reset_true_lateral_wedge"]
+            assert info["plug_port_contacts"] > 0
+            assert info["contact_force_norm"] <= 10.0
+            assert probe["straight_probe"]["depth_progress_m"] <= 1.0e-3
+            assert probe["accepted_probe"]["depth_progress_m"] >= 2.0e-3
+            rows.append(info)
+    finally:
+        env.close()
+
+    fallback_count = sum(bool(row["seat_reset_used_fallback"]) for row in rows)
+    attempts = np.asarray(
+        [row["seat_reset_attempts"] for row in rows], dtype=np.int64)
+    print(
+        "near_seated_repeated_resets: "
+        f"validated={len(rows)}/{resets}; fallbacks={fallback_count}/{resets}; "
+        f"mean_attempts={attempts.mean():.3f}; max_attempts={attempts.max()}"
+    )
+    assert len(rows) == resets
 
 
 def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):

@@ -36,6 +36,34 @@ WEDGE_NUDGE_PROBE_STEPS = 40
 WEDGE_MAX_RESET_ATTEMPTS = 12
 WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK = 8
 
+# Measured fallback candidates for the finite-rejection path.  They have each
+# passed the same contact, straight-stall, and lateral-nudge validator used for
+# randomized starts.  The stage is part of the key because near_seated and the
+# deepest full-handoff variant share compiled seed 20260731 but need distinct
+# delivered offsets/tilts.
+_VALIDATED_FALLBACKS = {
+    # candidate seed 3101, measured near-seated wedge (37.67 mm inserted)
+    ("near_seated", 20260731): (
+        "minus_x", (-0.0007031737131406934, 0.0),
+        (0.0, -0.010026035269526843), 6155,
+    ),
+    # candidate seed 3303, shallow full-handoff wedge
+    ("wedge", 20260715): (
+        "plus_y", (0.0, 0.0008643056179418527),
+        (-0.010790705455643949, 0.0), 1112,
+    ),
+    # candidate seed 3301, middle full-handoff wedge
+    ("wedge", 20260740): (
+        "minus_x", (-0.0009651352335727138, 0.0),
+        (0.0, 0.01666155638998779), 1111,
+    ),
+    # candidate seed 3302, deep full-handoff wedge
+    ("wedge", 20260731): (
+        "minus_x", (-0.0007578445580473826, 0.0),
+        (0.0, 0.013444755345908511), 6155,
+    ),
+}
+
 # The final deploy stage is an explicit mixture of the three clean Phase-1
 # contact variants.  These reset levels were measured after settling (the
 # commanded level alone is not an accurate proxy for delivered depth): they
@@ -251,25 +279,15 @@ class SeatEnv(gym.Wrapper):
         }
 
     def _validated_fallback_candidate(self) -> tuple[dict, int]:
-        """Return a measured pose/dynamics pair for the compiled depth variant.
+        """Return a measured pose/dynamics pair for this stage/variant.
 
         Each pair previously passed the same contact, straight-stall, and
         lateral-nudge validator.  It is still revalidated on use and is reached
         only after eight randomized candidates fail, preventing an unlucky
         finite rejection sequence from crashing training or evaluation.
         """
-        specifications = {
-            # candidate seed 3303, attempt 1
-            20260715: ("plus_y", (0.0, 0.0008643056179418527),
-                       (-0.010790705455643949, 0.0), 1112),
-            # candidate seed 3301, attempt 2
-            20260740: ("minus_x", (-0.0009651352335727138, 0.0),
-                       (0.0, 0.01666155638998779), 1111),
-            # candidate seed 3302, attempt 1
-            20260731: ("minus_x", (-0.0007578445580473826, 0.0),
-                       (0.0, 0.013444755345908511), 6155),
-        }
-        direction, offset, tilt, base_seed = specifications[self._compiled_seed]
+        fallback_key = (self.stage.name, self._compiled_seed)
+        direction, offset, tilt, base_seed = _VALIDATED_FALLBACKS[fallback_key]
         offset_xy = np.asarray(offset, dtype=np.float64)
         tilt_xy = np.asarray(tilt, dtype=np.float64)
         return ({
@@ -466,8 +484,9 @@ class SeatEnv(gym.Wrapper):
         accepted = None
         rejected = []
         for attempt in range(WEDGE_MAX_RESET_ATTEMPTS):
+            fallback_key = (self.stage.name, self._compiled_seed)
             use_fallback = bool(
-                self.stage.name == "wedge"
+                fallback_key in _VALIDATED_FALLBACKS
                 and attempt == WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK
             )
             if use_fallback:
