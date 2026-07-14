@@ -146,6 +146,29 @@ def test_shallow_handoff_has_validated_bounded_fallback():
         env.close()
 
 
+@pytest.mark.parametrize(
+    ("requested_seed", "depth_bounds_m"),
+    ((1, (24e-3, 30e-3)), (2, (39e-3, 42e-3))),
+)
+def test_other_handoff_fallbacks_are_true_lateral_wedges(
+        requested_seed, depth_bounds_m):
+    env = make_seat_env("full", seed=requested_seed, domain_randomization=True)
+    try:
+        candidate, base_seed = env._validated_fallback_candidate()
+        _obs69, prepared_info, _reset_info, ended = env._prepare_candidate(
+            base_seed, candidate)
+        assert not ended
+        start_depth_m = env.scene._insertion_depth_m()
+        validation = env._validate_candidate(
+            base_seed, candidate, prepared_info)
+        assert validation["true_lateral_wedge"]
+        assert depth_bounds_m[0] <= start_depth_m <= depth_bounds_m[1]
+        assert validation["straight_probe"]["depth_progress_m"] <= 1.0e-3
+        assert validation["accepted_probe"]["depth_progress_m"] >= 2.0e-3
+    finally:
+        env.close()
+
+
 def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
     """Exercise the numerical reward without constructing a MuJoCo scene."""
     env = object.__new__(SeatEnv)

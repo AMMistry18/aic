@@ -34,7 +34,7 @@ WEDGE_LOW_FORCE_MAX_N = 10.0
 WEDGE_STALL_WINDOW_S = 1.2
 WEDGE_NUDGE_PROBE_STEPS = 40
 WEDGE_MAX_RESET_ATTEMPTS = 12
-WEDGE_SHALLOW_RANDOM_ATTEMPTS = 8
+WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK = 8
 
 # The final deploy stage is an explicit mixture of the three clean Phase-1
 # contact variants.  These reset levels were measured after settling (the
@@ -250,23 +250,35 @@ class SeatEnv(gym.Wrapper):
             "commanded_tilt_rad": tilt_magnitude,
         }
 
-    @staticmethod
-    def _shallow_fallback_candidate() -> dict:
-        """Known-good shallow pose, still subject to the full wedge validator.
+    def _validated_fallback_candidate(self) -> tuple[dict, int]:
+        """Return a measured pose/dynamics pair for the compiled depth variant.
 
-        This is the measured seed-3303 candidate at the Phase-1 shallow ridge.
-        It is used only after eight randomized shallow candidates fail, avoiding
-        a training/evaluation crash from an unlucky finite rejection sequence.
+        Each pair previously passed the same contact, straight-stall, and
+        lateral-nudge validator.  It is still revalidated on use and is reached
+        only after eight randomized candidates fail, preventing an unlucky
+        finite rejection sequence from crashing training or evaluation.
         """
-        magnitude = 0.0008643056179418527
-        tilt = -0.010790705455643949
-        return {
-            "direction": "plus_y",
-            "offset_xy_m": np.array([0.0, magnitude], dtype=np.float64),
-            "commanded_offset_m": magnitude,
-            "tilt_xy_rad": np.array([tilt, 0.0], dtype=np.float64),
-            "commanded_tilt_rad": abs(tilt),
+        specifications = {
+            # candidate seed 3303, attempt 1
+            20260715: ("plus_y", (0.0, 0.0008643056179418527),
+                       (-0.010790705455643949, 0.0), 1112),
+            # candidate seed 3301, attempt 2
+            20260740: ("minus_x", (-0.0009651352335727138, 0.0),
+                       (0.0, 0.01666155638998779), 1111),
+            # candidate seed 3302, attempt 1
+            20260731: ("minus_x", (-0.0007578445580473826, 0.0),
+                       (0.0, 0.013444755345908511), 6155),
         }
+        direction, offset, tilt, base_seed = specifications[self._compiled_seed]
+        offset_xy = np.asarray(offset, dtype=np.float64)
+        tilt_xy = np.asarray(tilt, dtype=np.float64)
+        return ({
+            "direction": direction,
+            "offset_xy_m": offset_xy,
+            "commanded_offset_m": float(np.linalg.norm(offset_xy)),
+            "tilt_xy_rad": tilt_xy,
+            "commanded_tilt_rad": float(np.linalg.norm(tilt_xy)),
+        }, base_seed)
 
     def _prepare_candidate(self, base_seed: int, candidate: dict):
         _obs69, reset_info = self.env.reset(
@@ -456,21 +468,16 @@ class SeatEnv(gym.Wrapper):
         for attempt in range(WEDGE_MAX_RESET_ATTEMPTS):
             use_fallback = bool(
                 self.stage.name == "wedge"
-                and self._compiled_seed == 20260715
-                and attempt == WEDGE_SHALLOW_RANDOM_ATTEMPTS
+                and attempt == WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK
             )
-            candidate = (
-                self._shallow_fallback_candidate()
-                if use_fallback else self._candidate()
-            )
+            if use_fallback:
+                candidate, base_seed = self._validated_fallback_candidate()
+            else:
+                candidate = self._candidate()
+                base_seed = self._validation_seed_base + 1009 * attempt
             # Each stage uses a Phase-1-proven runtime variant as its first
             # candidate; later attempts still sweep independently randomized
             # dynamics while preserving the same immutable ridge geometry.
-            base_seed = (
-                self._validation_seed_base
-                if use_fallback
-                else self._validation_seed_base + 1009 * attempt
-            )
             obs69, prepared_info, reset_info, ended = self._prepare_candidate(
                 base_seed, candidate)
             validation = (
