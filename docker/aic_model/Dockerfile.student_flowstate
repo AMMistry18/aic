@@ -10,19 +10,24 @@ COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/sr
 COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/perception_core.py
 COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/aic_model/aic_model/RLInsert.py
 COPY aic_model/aic_model/board_search.py /ws_aic/src/aic/aic_model/aic_model/board_search.py
+COPY aic_model/aic_model/seat_actor_adapter.py /ws_aic/src/aic/aic_model/aic_model/seat_actor_adapter.py
 COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py
 COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py
 COPY aic_model/aic_model/board_search.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/board_search.py
+COPY aic_model/aic_model/seat_actor_adapter.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/seat_actor_adapter.py
 COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/rl_insert_contract.py
 
 COPY models/final_insert_sfp_flowstate_v1.ts /models/final_insert_sfp_flowstate_v1.ts
 COPY models/final_insert_sfp_flowstate_v1.ts.contract.json /models/final_insert_sfp_flowstate_v1.ts.contract.json
+COPY models/seat_actor_tacc_3305828_nominal_130k.ts /models/seat_actor_tacc_3305828_nominal_130k.ts
+COPY models/seat_actor_tacc_3305828_nominal_130k.ts.contract.json /models/seat_actor_tacc_3305828_nominal_130k.ts.contract.json
 
 ENV RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
 ENV RL_INSERT_WRENCH_MODE=baseline
 # script = pure-geometry align-then-progressive-descent, NO RL (align-first test
 # bed). Set back to rl / guided to run the learned / scripted-lead policies.
-ENV RL_INSERT_CONTROL_MODE=script
+ENV RL_INSERT_CONTROL_MODE=script_then_seat_rl
+ENV RL_INSERT_SEAT_MODEL=/models/seat_actor_tacc_3305828_nominal_130k.ts
 # ``Task.id == board_search_only`` runs only the board-framing pre-step.  Keep
 # the optional prepend mode off so ordinary task IDs execute the v35 path.
 ENV RL_INSERT_BOARD_SEARCH=0

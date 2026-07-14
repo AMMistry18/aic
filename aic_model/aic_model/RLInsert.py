@@ -49,9 +49,14 @@ from .rl_insert_contract import (
     sfp_tip_pose_from_tcp,
     tcp_pose_for_sfp_tip,
 )
+from .seat_actor_adapter import SeatActorHistory
 
 # ----------------------------- configuration -------------------------------
 MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_flowstate_v1.ts")
+# The TACC seat actor is a distinct policy ABI (8 x 34 history -> 6 actions).
+# It is deliberately a *post-script* fallback: the base script still owns
+# perception, alignment, free-space descent, and the pre-engaged handoff.
+SEAT_MODEL_PATH = os.environ.get("RL_INSERT_SEAT_MODEL", "/models/seat_actor_tacc_3305828_nominal_130k.ts")
 
 # Perception weights.  best.pt = SFP YOLO-pose keypoints (the one loaded "in the
 # form"); best_sc_pose.pt = SC pose (kept wired for later, not used for SFP).
@@ -96,6 +101,18 @@ INSERT_DEPTH = 0.045    # m, mouth -> seated
 # From the handoff, the tip may legitimately start a bit outside the mouth.
 # This only guards against a totally wrong perception / handoff (macro failed).
 HANDOFF_MAX_DIST = float(os.environ.get("RL_INSERT_HANDOFF_MAX_DIST", "0.12"))  # m
+
+# The actor was trained through ``SeatEnv.step`` which multiplies its normalized
+# output by 0.20 before applying the shared deploy action scales. Preserve that
+# exact scale here. Its job begins only after a low-force script depth stall.
+SEAT_RL_STEPS = int(os.environ.get("RL_INSERT_SEAT_RL_STEPS", "250"))
+SEAT_RL_ACTION_GAIN = float(os.environ.get("RL_INSERT_SEAT_RL_ACTION_GAIN", "0.20"))
+SEAT_RL_MAX_HANDOFF_FORCE_N = float(
+    os.environ.get("RL_INSERT_SEAT_RL_MAX_HANDOFF_FORCE_N", "10.0"))
+SEAT_RL_FORCE_ABORT_N = float(os.environ.get("RL_INSERT_SEAT_RL_FORCE_ABORT_N", "18.0"))
+SEAT_RL_MAX_LATERAL_M = float(os.environ.get("RL_INSERT_SEAT_RL_MAX_LATERAL_M", "0.012"))
+SEAT_RL_MAX_ROTATION_RAD = float(os.environ.get("RL_INSERT_SEAT_RL_MAX_ROTATION_RAD", "0.35"))
+SEAT_RL_MAX_RETREAT_M = float(os.environ.get("RL_INSERT_SEAT_RL_MAX_RETREAT_M", "0.010"))
 
 # Deploy action adapter (kept from the contract; identity by default).
 ACTION_SIGN = np.array([
@@ -371,8 +388,9 @@ class RLInsert(Policy):
         log = self.get_logger()
         if WRENCH_MODE not in ("raw", "zero", "baseline"):
             raise ValueError("RL_INSERT_WRENCH_MODE must be raw, zero, or baseline")
-        if CONTROL_MODE not in ("rl", "guided", "script"):
-            raise ValueError("RL_INSERT_CONTROL_MODE must be rl, guided, or script")
+        if CONTROL_MODE not in ("rl", "guided", "script", "script_then_seat_rl"):
+            raise ValueError(
+                "RL_INSERT_CONTROL_MODE must be rl, guided, script, or script_then_seat_rl")
 
         self._task = None
         self._wrench_baseline = np.zeros(6, dtype=np.float64)
@@ -404,6 +422,18 @@ class RLInsert(Policy):
         probe = self._forward(np.zeros(69, dtype=np.float32))
         log.info(f"[rl] model loaded from {MODEL_PATH}; probe={np.round(probe, 4)}")
 
+        self._seat_model = None
+        if CONTROL_MODE == "script_then_seat_rl":
+            if not os.path.exists(SEAT_MODEL_PATH):
+                raise FileNotFoundError(
+                    f"[seat_rl] model not found at {SEAT_MODEL_PATH}; COPY the exported "
+                    "TACC seat actor into the image and/or set RL_INSERT_SEAT_MODEL")
+            self._seat_model = torch.jit.load(SEAT_MODEL_PATH, map_location="cpu")
+            self._seat_model.eval()
+            seat_probe = self._seat_forward(np.zeros((8, 34), dtype=np.float32))
+            log.info(f"[seat_rl] model loaded from {SEAT_MODEL_PATH}; "
+                     f"probe={np.round(seat_probe, 4)} gain={SEAT_RL_ACTION_GAIN:.3f}")
+
         if HOME_QPOS_ENV:
             self._home_qpos = np.array([float(v) for v in HOME_QPOS_ENV.split(",")])
             assert self._home_qpos.shape == (6,)
@@ -417,6 +447,19 @@ class RLInsert(Policy):
         with self._torch.no_grad():
             out = self._model(self._torch.from_numpy(obs69.astype(np.float32)))
         return np.clip(out.detach().cpu().numpy().reshape(-1), -1.0, 1.0)
+
+    def _seat_forward(self, history):
+        if self._seat_model is None:
+            raise RuntimeError("seat RL was requested without a loaded seat actor")
+        history = np.asarray(history, dtype=np.float32)
+        if history.shape != (8, 34):
+            raise ValueError(f"seat actor expected (8, 34), got {history.shape}")
+        with self._torch.no_grad():
+            out = self._seat_model(self._torch.from_numpy(history))
+        action = np.clip(out.detach().cpu().numpy().reshape(-1), -1.0, 1.0)
+        if action.shape != (6,) or not np.all(np.isfinite(action)):
+            raise ValueError(f"invalid seat actor output: {action}")
+        return action
 
     def _lookup_transform(self, target_frame, source_frame, timeout_sec=0.2):
         return self._parent_node._tf_buffer.lookup_transform(
@@ -972,6 +1015,11 @@ class RLInsert(Policy):
             return self._run_script(
                 get_observation, move_robot, send_feedback,
                 port_pos=port_pos, port_quat=port_quat, Rp=Rp)
+        if CONTROL_MODE == "script_then_seat_rl":
+            return self._run_script(
+                get_observation, move_robot, send_feedback,
+                port_pos=port_pos, port_quat=port_quat, Rp=Rp,
+                handoff_to_seat_rl=True)
 
         # ------------------------------ insertion loop -----------------------
         # Straight descent from the CURRENT pose down the perceived port axis.
@@ -1213,8 +1261,136 @@ class RLInsert(Policy):
                  f"excursion cap without freeing the stall.")
         return False
 
+    def _run_seat_rl(self, get_observation, move_robot, send_feedback, *,
+                     port_pos, port_quat, Rp):
+        """Run the TACC seat actor from the base script's held wedge pose.
+
+        This intentionally never replaces the script.  It sees the actual
+        perceived port (not the script's temporary pre-engage bias), reconstructs
+        the 8x34 actor history used at training, and only owns the final reactive
+        lateral/rotation correction and seating motion.
+        """
+        log = self.get_logger()
+        if self._seat_model is None:
+            raise RuntimeError("script requested seat RL without a loaded actor")
+        send_feedback("script handoff -> seat RL")
+        log.info("[seat_rl] starting post-script reactive seat handoff")
+
+        history = SeatActorHistory()
+        last_action = np.zeros(6, dtype=np.float32)
+        prev_tcp = None
+        prev_t = None
+        cmd_pos = None
+        cmd_R = None
+        handoff_depth = None
+
+        for step in range(SEAT_RL_STEPS):
+            obs = get_observation()
+            if obs is None:
+                self.sleep_for(STEP_DT)
+                continue
+            try:
+                tcp_pos, tcp_quat = self._tcp()
+            except TransformException as ex:
+                log.warn(f"[seat_rl] tcp TF miss: {ex}")
+                self.sleep_for(STEP_DT)
+                continue
+            tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
+            now = time.monotonic()
+            dt = (now - prev_t) if prev_t else STEP_DT
+            obs69 = self._build_obs(
+                obs, tcp_pos, tcp_quat, tip_pos, R_tip,
+                port_pos, port_quat, prev_tcp, dt, last_action)
+            actor_history = (history.reset(obs69, dt=dt) if step == 0
+                             else history.append(obs69, dt=dt))
+
+            depth_vec = Rp.T @ (tip_pos - port_pos)
+            depth = float(depth_vec[2])
+            lateral = float(np.linalg.norm(depth_vec[:2]))
+            rotation = _R_to_axis_angle(Rp.T @ R_tip)
+            rot_norm = float(np.linalg.norm(rotation))
+            wrench_delta = self._wrench_vector(obs) - self._wrench_baseline
+            f_mag = float(np.linalg.norm(wrench_delta[:3]))
+            if handoff_depth is None:
+                handoff_depth = depth
+                cmd_pos = tcp_pos.copy()
+                cmd_R = _q_to_R(*tcp_quat)
+                log.info(f"[seat_rl] handoff: depth={depth*1000:.2f}mm "
+                         f"lateral={lateral*1000:.2f}mm "
+                         f"rot_deg={np.degrees(rot_norm):.2f} force={f_mag:.2f}N")
+
+            if depth >= INSERT_DEPTH - SEAT_DEPTH_TOL and lateral < SEAT_LATERAL_MAX:
+                log.info(f"[seat_rl] seated after {step} steps: depth={depth*1000:.1f}mm "
+                         f"lateral={lateral*1000:.1f}mm")
+                send_feedback("seat RL insert seated")
+                return True
+            if f_mag > SEAT_RL_FORCE_ABORT_N:
+                log.error(f"[seat_rl] force {f_mag:.1f}N exceeds {SEAT_RL_FORCE_ABORT_N:.1f}N; "
+                          "holding handoff pose (no retreat).")
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_tip),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                send_feedback("seat RL force guard -- holding")
+                return False
+            if (lateral > SEAT_RL_MAX_LATERAL_M
+                    or rot_norm > SEAT_RL_MAX_ROTATION_RAD
+                    or depth < handoff_depth - SEAT_RL_MAX_RETREAT_M):
+                log.error(f"[seat_rl] contract guard: depth={depth*1000:.1f}mm "
+                          f"lateral={lateral*1000:.1f}mm rot={np.degrees(rot_norm):.1f}deg; "
+                          "holding handoff pose.")
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_tip),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                send_feedback("seat RL contract guard -- holding")
+                return False
+
+            raw_action = self._seat_forward(actor_history)
+            # SeatEnv.step applies this exact scalar before the shared deploy
+            # action scales. Save the scaled value because it occupies the next
+            # actor frame's ``previous_action`` fields during training.
+            action = np.clip(raw_action * SEAT_RL_ACTION_GAIN, -1.0, 1.0)
+            history.set_previous_action(action)
+            last_action = action.astype(np.float32)
+            from .rl_insert_contract import deploy_action_delta
+            dp, drot_world = deploy_action_delta(action, port_quat)
+            if f_mag > ADVANCE_FREEZE_FORCE_N:
+                inward = float(dp @ Rp[:, 2])
+                if inward > 0.0:
+                    dp = dp - inward * Rp[:, 2]
+
+            angle = float(np.linalg.norm(drot_world))
+            if angle < 1e-10:
+                dR = np.eye(3)
+            else:
+                axis = drot_world / angle
+                K = np.array([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]],
+                              [-axis[1], axis[0], 0]])
+                dR = np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+            cmd_pos = cmd_pos + dp
+            cmd_R = dR @ cmd_R
+            q = _rotmat_to_quat_wxyz(cmd_R)
+            self.set_pose_target(
+                move_robot,
+                Pose(position=Point(x=cmd_pos[0], y=cmd_pos[1], z=cmd_pos[2]),
+                     orientation=Quaternion(w=q[0], x=q[1], y=q[2], z=q[3])),
+                stiffness=STIFFNESS, damping=DAMPING)
+            if step == 0 or step % 10 == 0:
+                command_port = Rp.T @ dp
+                log.info(f"[seat_rl] step {step}: depth={depth*1000:.1f}mm "
+                         f"lateral={lateral*1000:.2f}mm force={f_mag:.2f}N "
+                         f"raw={np.round(raw_action, 3).tolist()} "
+                         f"deploy={np.round(action, 3).tolist()} "
+                         f"delta_port_mm={(command_port*1000).round(3).tolist()}")
+            prev_tcp = (tcp_pos, tcp_quat)
+            prev_t = now
+            self.sleep_for(STEP_DT)
+
+        log.error(f"[seat_rl] step budget ({SEAT_RL_STEPS}) exhausted; holding position")
+        send_feedback("seat RL timed out -- holding")
+        return False
+
     def _run_script(self, get_observation, move_robot, send_feedback, *,
-                    port_pos, port_quat, Rp):
+                    port_pos, port_quat, Rp, handoff_to_seat_rl=False):
         """Pure-geometry align-then-progressive-descent. No RL, no network.
 
         Phase 1: hold a standoff depth and cancel perceived lateral + rotation
@@ -1237,7 +1413,8 @@ class RLInsert(Policy):
         # every error reading is measured vs the biased target. The tilt is applied
         # as the target orientation (R_seat) below. Bias values now mean exactly what
         # they say: a +2.5mm Y bias => the plug ends up 2.5mm off the true port in Y.
-        port_pos = np.asarray(port_pos, dtype=float) + (
+        actual_port_pos = np.asarray(port_pos, dtype=float).copy()
+        port_pos = actual_port_pos + (
             Rp[:, 0] * SCRIPT_BIAS_X_M + Rp[:, 1] * SCRIPT_BIAS_Y_M)
         R_seat = R_port @ _axis_angle_to_R(
             np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
@@ -1408,6 +1585,14 @@ class RLInsert(Policy):
                     move_robot, self._tcp_target_for_tip(tip_pos, R_seat),
                     stiffness=STIFFNESS, damping=DAMPING)
                 send_feedback("script pre-engaged -- holding for RL (no retreat)")
+                if handoff_to_seat_rl and not force_jam and np.isfinite(f_mag) \
+                        and f_mag <= SEAT_RL_MAX_HANDOFF_FORCE_N:
+                    return self._run_seat_rl(
+                        get_observation, move_robot, send_feedback,
+                        port_pos=actual_port_pos, port_quat=port_quat, Rp=Rp)
+                if handoff_to_seat_rl:
+                    log.error(f"[seat_rl] refusing script handoff: trigger={trigger} "
+                              f"force={f_mag:.2f}N max_safe={SEAT_RL_MAX_HANDOFF_FORCE_N:.2f}N")
                 return False
 
             # Step sizing:

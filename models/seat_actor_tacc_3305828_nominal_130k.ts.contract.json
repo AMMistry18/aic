@@ -1,0 +1,20 @@
+{
+  "artifact": "seat_actor_tacc_3305828_nominal_130k.ts",
+  "source": "TACC Slurm 3305828, nominal stage checkpoint at 130000 completed timesteps",
+  "remote_checkpoint": "/scratch/11590/satya_a/aic/seat_nominal_seed0_phase3_seed0_3347f8e4a0a0_3305828/model.zip",
+  "remote_checkpoint_sha256": "2ec793f0d75fa820e36ffc792f66c6ec9721ca269bfc215ea767286ce955bd17",
+  "torchscript_sha256": "f2f1388767f88f9f487cec5ae444ee39f87bb2c15cf0a783397dd3891e003a8d",
+  "input": "seat actor history",
+  "input_shape": [8, 34],
+  "output_shape": [6],
+  "output_convention": "normalized seat action; RLInsert applies the training SEAT_ACTION_GAIN of 0.20 before shared deploy action scales",
+  "privileged_input": false,
+  "torchscript_max_abs_error": 0.0,
+  "latest_nominal_evaluation": {
+    "episodes": 8,
+    "seat_success_rate": 1.0,
+    "jam_rate": 0.0,
+    "bad_collision_rate": 0.0,
+    "max_force_n": 7.697882160561741
+  }
+}
