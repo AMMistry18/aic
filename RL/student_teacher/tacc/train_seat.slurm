@@ -20,10 +20,16 @@ PROJECT_DIR="${PROJECT_DIR:-$WORK/aic-seat-rl-20260713}"
 STEPS_NOMINAL="${STEPS_NOMINAL:-300000}"
 STEPS_FULL="${STEPS_FULL:-300000}"
 NUM_ENVS="${NUM_ENVS:-8}"
-CHECKPOINT_FREQ="${CHECKPOINT_FREQ:-50000}"
+CHECKPOINT_FREQ="${CHECKPOINT_FREQ:-10000}"
 EVAL_FREQ="${EVAL_FREQ:-10000}"
 EVAL_EPISODES="${EVAL_EPISODES:-8}"
 WANDB_LOG_FREQ="${WANDB_LOG_FREQ:-1000}"
+VIDEO_FREQ="${VIDEO_FREQ:-50000}"
+GRADIENT_STEPS="${GRADIENT_STEPS:--1}"
+# The post-cache local 8-env smoke sustained 6 fps while doing one SAC update
+# per transition on CPU.  600k / 6 = 27.8 h, leaving >20 h inside the 48 h
+# allocation for startup, evaluation, video, export, and TACC variance.
+BUDGET_FPS_FLOOR="${BUDGET_FPS_FLOOR:-6}"
 
 cd "$PROJECT_DIR"
 export PATH="$HOME/.pixi/bin:$PATH"
@@ -65,11 +71,21 @@ GIT_COMMIT="$(git rev-parse --short=12 HEAD)"
 TAG="${TAG:-phase3_seed${SEED}_${GIT_COMMIT}_${SLURM_JOB_ID}}"
 nominal_dir="$SCRATCH/aic/seat_nominal_seed${SEED}_${TAG}"
 full_dir="$SCRATCH/aic/seat_full_seed${SEED}_${TAG}"
+total_steps=$((STEPS_NOMINAL + STEPS_FULL))
+estimated_seconds=$(((total_steps + BUDGET_FPS_FLOOR - 1) / BUDGET_FPS_FLOOR))
+checkpoint_seconds=$(((CHECKPOINT_FREQ + BUDGET_FPS_FLOOR - 1) / BUDGET_FPS_FLOOR))
+if (( estimated_seconds > 40 * 60 * 60 )); then
+  echo "[budget] ERROR: ${total_steps} steps at ${BUDGET_FPS_FLOOR} fps " \
+       "needs ${estimated_seconds}s, exceeding the 40h training budget"
+  exit 2
+fi
 
 run_stage() {
   local stage="$1"
   local out_dir="$2"
   local init_from="${3:-}"
+  local tb_dir="$PROJECT_DIR/.tensorboard/$TAG/$stage"
+  local wandb_name="seat_${stage}_seed${SEED}_${GIT_COMMIT}_job${SLURM_JOB_ID}"
   local -a resume_args=()
 
   if [[ -f "$out_dir/RUN_COMPLETE" ]]; then
@@ -77,6 +93,7 @@ run_stage() {
     return
   fi
   mkdir -p "$out_dir"
+  mkdir -p "$tb_dir"
   cp RL/student_teacher/tacc/train_seat.slurm "$out_dir/submitted.slurm"
   if [[ -f "$out_dir/model.zip" ]]; then
     resume_args=(--resume)
@@ -94,10 +111,14 @@ run_stage() {
     --steps "${stage_steps[$stage]}" \
     --num-envs "$NUM_ENVS" \
     --seed "$SEED" \
+    --gradient-steps "$GRADIENT_STEPS" \
     --checkpoint-freq "$CHECKPOINT_FREQ" \
+    --video-freq "$VIDEO_FREQ" \
     --eval-freq "$EVAL_FREQ" \
     --eval-episodes "$EVAL_EPISODES" \
     --wandb-log-freq "$WANDB_LOG_FREQ" \
+    --tensorboard-log "$tb_dir" \
+    --wandb-run-name "$wandb_name" \
     --video \
     "${resume_args[@]}" \
     2>&1 | tee "$out_dir/train.log"
@@ -112,7 +133,8 @@ declare -A stage_steps=(
   [full]="$STEPS_FULL"
 )
 echo "[train] seed=$SEED tag=$TAG commit=$GIT_COMMIT time_limit=2-00:00:00"
-echo "[train] checkpoint_freq=$CHECKPOINT_FREQ eval_freq=$EVAL_FREQ wandb_log_freq=$WANDB_LOG_FREQ"
+echo "[budget] total_steps=$total_steps fps_floor=$BUDGET_FPS_FLOOR estimated_seconds=$estimated_seconds checkpoint_seconds=$checkpoint_seconds"
+echo "[train] checkpoint_freq=$CHECKPOINT_FREQ eval_freq=$EVAL_FREQ video_freq=$VIDEO_FREQ wandb_log_freq=$WANDB_LOG_FREQ gradient_steps=$GRADIENT_STEPS"
 run_stage nominal "$nominal_dir"
 run_stage full "$full_dir" "$nominal_dir/model.zip"
 touch "$SCRATCH/aic/seat_rl_seed${SEED}_${TAG}_COMPLETE"
