@@ -163,6 +163,29 @@ class BoardSearch:
         self.p.sleep_for(SETTLE_SEC)
         return target - np.asarray(tcp_pos, dtype=np.float64)
 
+    def _camera_axes_in_base(self, cam_name):
+        """Return the selected camera's image-plane and back-away axes in base_link.
+
+        ``_lookup_cam_from_base`` returns camera-from-base, so its transpose maps
+        a unit camera-frame direction to base_link.  The wrist cameras move rigidly
+        with the TCP while this routine keeps orientation fixed.
+        """
+        T_cam_from_base = self.p._lookup_cam_from_base(cam_name)
+        if T_cam_from_base is None:
+            return None
+        R_cam_from_base = np.asarray(T_cam_from_base, dtype=np.float64)[:3, :3]
+        if R_cam_from_base.shape != (3, 3):
+            return None
+        R_base_from_cam = R_cam_from_base.T
+        image_u = R_base_from_cam[:, 0]
+        image_v = R_base_from_cam[:, 1]
+        # Camera +Z points toward the observed scene. Move opposite it to
+        # increase standoff when the board overflows the image.
+        back_away = -R_base_from_cam[:, 2]
+        if min(np.linalg.norm(image_u), np.linalg.norm(image_v), np.linalg.norm(back_away)) < 0.9:
+            return None
+        return image_u, image_v, back_away
+
     def run(self, get_observation, move_robot):
         """Frame the whole board with two XY probes and one correction."""
         log = self.p.get_logger()
@@ -184,34 +207,48 @@ class BoardSearch:
             log.info("[board_search] board already fully framed; moves=0")
             return True
 
-        # Moves 1 and 2 measure independent columns of d(pixel)/d(base XY).
-        actual_dx = self._move_by(move_robot, (PROBE_M, 0.0, 0.0))[0]
+        axes = self._camera_axes_in_base(cam_name)
+        if axes is None:
+            log.error(f"[board_search] no usable camera TF for {cam_name}")
+            return False
+        image_u, image_v, back_away = axes
+        log.info(
+            f"[board_search] {cam_name} probe axes in base: "
+            f"u={np.round(image_u, 3).tolist()} v={np.round(image_v, 3).tolist()}"
+        )
+
+        # Moves 1 and 2 measure independent columns of d(pixel)/d(camera image
+        # plane).  Fixed base X/Y can be parallel to the viewing axis, as the v36
+        # trial showed, and then cannot produce an invertible image Jacobian.
+        actual_u_vector = self._move_by(move_robot, PROBE_M * image_u)
+        actual_du = float(np.dot(actual_u_vector, image_u))
         sample1 = self._observe_camera(get_observation, cam_name)
         if sample1 is None or not sample1[1][0]:
-            log.error(f"[board_search] board lost after X probe in {cam_name}")
+            log.error(f"[board_search] board lost after image-U probe in {cam_name}")
             return False
         bgr1, det1 = sample1
         if self._is_success(det1, bgr1.shape):
             log.info("[board_search] board fully framed; moves=1")
             return True
 
-        actual_dy = self._move_by(move_robot, (0.0, PROBE_M, 0.0))[1]
+        actual_v_vector = self._move_by(move_robot, PROBE_M * image_v)
+        actual_dv = float(np.dot(actual_v_vector, image_v))
         sample2 = self._observe_camera(get_observation, cam_name)
         if sample2 is None or not sample2[1][0]:
-            log.error(f"[board_search] board lost after Y probe in {cam_name}")
+            log.error(f"[board_search] board lost after image-V probe in {cam_name}")
             return False
         bgr2, det2 = sample2
         if self._is_success(det2, bgr2.shape):
             log.info("[board_search] board fully framed; moves=2")
             return True
 
-        if abs(actual_dx) < 1e-6 or abs(actual_dy) < 1e-6:
+        if abs(actual_du) < 1e-6 or abs(actual_dv) < 1e-6:
             log.error("[board_search] probe motion was clipped to zero")
             return False
         pix0 = np.array(det0[1:3], dtype=np.float64)
         pix1 = np.array(det1[1:3], dtype=np.float64)
         pix2 = np.array(det2[1:3], dtype=np.float64)
-        jacobian = np.column_stack(((pix1 - pix0) / actual_dx, (pix2 - pix1) / actual_dy))
+        jacobian = np.column_stack(((pix1 - pix0) / actual_du, (pix2 - pix1) / actual_dv))
         condition = float(np.linalg.cond(jacobian))
         if not np.isfinite(condition) or condition > MAX_JACOBIAN_CONDITION:
             log.error(
@@ -222,13 +259,17 @@ class BoardSearch:
 
         height, width = bgr2.shape[:2]
         pixel_error = np.array([width / 2.0, height / 2.0]) - pix2
-        xy_correction = np.linalg.solve(jacobian, pixel_error)
-        raise_z = 0.0
+        image_plane_correction = np.linalg.solve(jacobian, pixel_error)
+        backoff = 0.0
         if det2[5]:
             # Scale the standoff adjustment mildly with observed coverage. The
             # final vector clamp remains the hard safety bound.
-            raise_z = RAISE_STEP_M * float(np.clip(det2[3] / 0.25, 0.5, 2.0))
-        correction = np.array([xy_correction[0], xy_correction[1], raise_z])
+            backoff = RAISE_STEP_M * float(np.clip(det2[3] / 0.25, 0.5, 2.0))
+        correction = (
+            image_plane_correction[0] * image_u
+            + image_plane_correction[1] * image_v
+            + backoff * back_away
+        )
         applied = self._move_by(move_robot, correction)
         log.info(
             f"[board_search] correction={np.round(applied, 4).tolist()} "

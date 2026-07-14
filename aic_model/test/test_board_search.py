@@ -64,6 +64,9 @@ class _FakePolicy:
     def _tcp(self):
         return self.position.copy(), np.array([1.0, 0.0, 0.0, 0.0])
 
+    def _lookup_cam_from_base(self, _cam_name):
+        return np.eye(4)
+
     def set_pose_target(self, _move_robot, pose, frame_id="base_link"):
         assert frame_id == "base_link"
         self.position = np.array([pose.position.x, pose.position.y, pose.position.z])
@@ -82,6 +85,38 @@ def test_two_axis_probe_then_correction_centers_within_three_moves():
     get_observation = lambda: SimpleNamespace()
     assert search.run(get_observation, lambda _update: None)
     assert len(policy.moves) == MAX_MOVES
+    final = search.detect_board(policy._image())
+    assert not final[5]
+    assert abs(final[1] - 320) <= CENTER_TOL_FRAC * 640
+    assert abs(final[2] - 240) <= CENTER_TOL_FRAC * 480
+
+
+class _ViewingAxisFakePolicy(_FakePolicy):
+    """Base X is optical depth, reproducing the singular v36 probe geometry."""
+
+    def __init__(self):
+        super().__init__()
+        self.home = self.position.copy()
+        self.jacobian = np.array([[0.0, 200.0, -1800.0], [0.0, -1800.0, 100.0]])
+
+    def _image(self):
+        centroid = np.array([380.0, 190.0]) + self.jacobian @ (self.position - self.home)
+        return _frame(center=centroid)
+
+    def _lookup_cam_from_base(self, _cam_name):
+        # camera X -> base Z; camera Y -> base Y; camera Z -> base X
+        T = np.eye(4)
+        T[:3, :3] = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]])
+        return T
+
+
+def test_camera_frame_probes_work_when_base_x_is_viewing_axis():
+    policy = _ViewingAxisFakePolicy()
+    search = BoardSearch(policy)
+    assert search.run(lambda: SimpleNamespace(), lambda _update: None)
+    assert len(policy.moves) == MAX_MOVES
+    # The first probe is camera-image U, which is base Z in this pose, not base X.
+    assert policy.moves[0][2] > policy.home[2]
     final = search.detect_board(policy._image())
     assert not final[5]
     assert abs(final[1] - 320) <= CENTER_TOL_FRAC * 640
