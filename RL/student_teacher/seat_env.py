@@ -1,6 +1,7 @@
 """Force-reactive seat environment starting from a validated lateral wedge."""
 from __future__ import annotations
 
+import copy
 from collections import deque
 from dataclasses import dataclass
 
@@ -33,8 +34,19 @@ WEDGE_STRAIGHT_PROGRESS_MAX_M = 1.0e-3
 WEDGE_LOW_FORCE_MAX_N = 10.0
 WEDGE_STALL_WINDOW_S = 1.2
 WEDGE_NUDGE_PROBE_STEPS = 40
-WEDGE_MAX_RESET_ATTEMPTS = 12
 WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK = 8
+VALIDATED_START_POOL_SIZE = 2
+VALIDATED_START_POOL_MAX_CANDIDATES = 24
+UNSAFE_PROBE_STATUSES = frozenset((
+    "bad_collision", "force_abort", "off_limit",
+))
+
+# Validated pose specifications are deterministic for a stage, compiled contact
+# variant, and reset level.  Keep one process-local copy so repeated evaluator
+# construction does not rerun the expensive physical nudge sweep.  Subprocess
+# training workers build their own pools once, then use only reconstruction plus
+# a cheap safety check at episode reset.
+_VALIDATED_START_SPEC_CACHE: dict[tuple, dict] = {}
 
 # Measured fallback candidates for the finite-rejection path.  They have each
 # passed the same contact, straight-stall, and lateral-nudge validator used for
@@ -207,6 +219,11 @@ class SeatEnv(gym.Wrapper):
         self._reset_rng = np.random.default_rng(reset_seed)
         self._reset_count = 0
         self._reset_resample_count = 0
+        self._validated_start_pool: list[dict] = []
+        self._pool_build_attempts = 0
+        self._pool_build_rejections = 0
+        self._steps_since_reset = 0
+        self._current_reset_metrics: dict = {}
 
     def _privileged(self) -> np.ndarray:
         teacher = np.asarray(build_teacher_obs21(self.scene), dtype=np.float64)
@@ -297,6 +314,48 @@ class SeatEnv(gym.Wrapper):
             "tilt_xy_rad": tilt_xy,
             "commanded_tilt_rad": float(np.linalg.norm(tilt_xy)),
         }, base_seed)
+
+    @staticmethod
+    def _copy_candidate(candidate: dict) -> dict:
+        return {
+            "direction": str(candidate["direction"]),
+            "offset_xy_m": np.asarray(
+                candidate["offset_xy_m"], dtype=np.float64).copy(),
+            "commanded_offset_m": float(candidate["commanded_offset_m"]),
+            "tilt_xy_rad": np.asarray(
+                candidate["tilt_xy_rad"], dtype=np.float64).copy(),
+            "commanded_tilt_rad": float(candidate["commanded_tilt_rad"]),
+        }
+
+    def _start_safety_reason(self, info: dict) -> str | None:
+        """Return why a reconstructed start is unsafe, without stepping it."""
+        cfg = self.scene.cfg
+        force = float(info.get("contact_force_norm", np.inf))
+        lateral = float(info.get("lateral_error_m", np.inf))
+        contacts = int(info.get("plug_port_contacts", 0))
+        delivered_lo, delivered_hi = self.stage.accepted_lateral_range_m
+        if not np.isfinite(force) or force > WEDGE_LOW_FORCE_MAX_N:
+            return "force_out_of_range"
+        if contacts <= 0 or not (delivered_lo <= lateral <= delivered_hi):
+            return "contact_or_offset"
+        if int(info.get("off_limit_contacts", 0)) > 0:
+            return "off_limit"
+
+        penetration = float(info.get(
+            "plug_port_penetration_excess_m", np.inf))
+        overinsert = float(info.get("overinsert_m", np.inf))
+        depth_norm = float(info.get("depth_norm", np.inf))
+        axis_error = abs(float(info.get("plug_axis_error_rad", np.inf)))
+        roll_error = abs(float(info.get("plug_roll_error_rad", np.inf)))
+        if penetration > cfg.bad_collision_penetration_excess_m:
+            return "bad_collision_penetration"
+        if overinsert > cfg.bad_collision_overinsert_m:
+            return "bad_collision_overinsert"
+        if (depth_norm >= cfg.bad_collision_depth_gate
+                and (axis_error > cfg.bad_collision_axis_rad
+                     or roll_error > cfg.bad_collision_roll_rad)):
+            return "bad_collision_crooked_deep"
+        return None
 
     def _prepare_candidate(self, base_seed: int, candidate: dict):
         _obs69, reset_info = self.env.reset(
@@ -404,6 +463,12 @@ class SeatEnv(gym.Wrapper):
 
     def _validate_candidate(self, base_seed: int, candidate: dict,
                             prepared_info: dict) -> dict:
+        unsafe_start = self._start_safety_reason(prepared_info)
+        if unsafe_start is not None:
+            return {
+                "true_lateral_wedge": False,
+                "reason": unsafe_start,
+            }
         lateral = float(prepared_info.get("lateral_error_m", np.inf))
         force = float(prepared_info.get("contact_force_norm", np.inf))
         contacts = int(prepared_info.get("plug_port_contacts", 0))
@@ -423,6 +488,15 @@ class SeatEnv(gym.Wrapper):
             }
 
         straight = self._straight_probe(base_seed, candidate)
+        if straight.get("end_status") in UNSAFE_PROBE_STATUSES:
+            return {
+                "true_lateral_wedge": False,
+                "reason": "unsafe_straight_probe",
+                "contact_count": contacts,
+                "force_n": force,
+                "lateral_offset_m": lateral,
+                "straight_probe": straight,
+            }
         if straight["depth_progress_m"] > WEDGE_STRAIGHT_PROGRESS_MAX_M:
             return {
                 "true_lateral_wedge": False,
@@ -437,6 +511,8 @@ class SeatEnv(gym.Wrapper):
         for direction_name in ("plus_x", "minus_x", "plus_y", "minus_y"):
             probe = self._nudge_probe(base_seed, candidate, direction_name)
             probes.append(probe)
+            if probe.get("end_status") in UNSAFE_PROBE_STATUSES:
+                continue
             if probe["unstick_success"]:
                 return {
                     "true_lateral_wedge": True,
@@ -457,6 +533,98 @@ class SeatEnv(gym.Wrapper):
             "straight_probe": straight,
             "probes": probes,
         }
+
+    def _pool_cache_key(self) -> tuple:
+        return (
+            self.stage.name,
+            int(self._compiled_seed),
+            round(float(self._reset_level), 8),
+        )
+
+    def _build_validated_start_pool(self) -> list[dict]:
+        """Validate a small pose pool once; never run probes in hot resets."""
+        pool: list[dict] = []
+        rejected = 0
+        signatures = set()
+        fallback_key = (self.stage.name, self._compiled_seed)
+        for attempt in range(VALIDATED_START_POOL_MAX_CANDIDATES):
+            use_fallback = bool(
+                fallback_key in _VALIDATED_FALLBACKS
+                and attempt == WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK
+            )
+            if use_fallback:
+                candidate, base_seed = self._validated_fallback_candidate()
+            else:
+                candidate = self._candidate()
+                base_seed = self._validation_seed_base + 1009 * attempt
+
+            obs69, prepared_info, reset_info, ended = self._prepare_candidate(
+                base_seed, candidate)
+            if ended:
+                rejected += 1
+                continue
+            validation = self._validate_candidate(
+                base_seed, candidate, prepared_info)
+            if not validation["true_lateral_wedge"]:
+                rejected += 1
+                continue
+
+            # Reconstruct once after all probe actions and apply the same cheap
+            # check used at runtime.  No validation action may leak into the
+            # cached learner start.
+            obs69, prepared_info, reset_info, ended = self._prepare_candidate(
+                base_seed, candidate)
+            safety_reason = (
+                "terminated_while_settling" if ended
+                else self._start_safety_reason(prepared_info)
+            )
+            if safety_reason is not None:
+                rejected += 1
+                continue
+
+            signature = (
+                int(base_seed),
+                tuple(np.round(candidate["offset_xy_m"], 12)),
+                tuple(np.round(candidate["tilt_xy_rad"], 12)),
+            )
+            if signature in signatures:
+                continue
+            signatures.add(signature)
+            pool.append({
+                "candidate": self._copy_candidate(candidate),
+                "base_seed": int(base_seed),
+                "validation": copy.deepcopy(validation),
+                "used_fallback": bool(use_fallback),
+            })
+            if len(pool) >= VALIDATED_START_POOL_SIZE:
+                self._pool_build_attempts = attempt + 1
+                break
+        else:
+            self._pool_build_attempts = VALIDATED_START_POOL_MAX_CANDIDATES
+
+        self._pool_build_rejections = rejected
+        if not pool:
+            raise RuntimeError(
+                f"failed to build any safe validated {self.stage.name} starts "
+                f"from {self._pool_build_attempts} candidates")
+        return pool
+
+    def _ensure_validated_start_pool(self) -> None:
+        if self._validated_start_pool:
+            return
+        cache_key = self._pool_cache_key()
+        cached = _VALIDATED_START_SPEC_CACHE.get(cache_key)
+        if cached is None:
+            pool = self._build_validated_start_pool()
+            cached = {
+                "pool": pool,
+                "build_attempts": self._pool_build_attempts,
+                "build_rejections": self._pool_build_rejections,
+            }
+            _VALIDATED_START_SPEC_CACHE[cache_key] = copy.deepcopy(cached)
+        self._validated_start_pool = copy.deepcopy(cached["pool"])
+        self._pool_build_attempts = int(cached["build_attempts"])
+        self._pool_build_rejections = int(cached["build_rejections"])
 
     def _normalize_accepted_reset(self, obs69: np.ndarray) -> np.ndarray:
         self.scene._step_count = 0
@@ -481,42 +649,38 @@ class SeatEnv(gym.Wrapper):
         if requested_seed is not None:
             self._reset_rng = np.random.default_rng(int(requested_seed))
 
+        self._ensure_validated_start_pool()
         accepted = None
         rejected = []
-        for attempt in range(WEDGE_MAX_RESET_ATTEMPTS):
-            fallback_key = (self.stage.name, self._compiled_seed)
-            use_fallback = bool(
-                fallback_key in _VALIDATED_FALLBACKS
-                and attempt == WEDGE_RANDOM_ATTEMPTS_BEFORE_FALLBACK
-            )
-            if use_fallback:
-                candidate, base_seed = self._validated_fallback_candidate()
-            else:
-                candidate = self._candidate()
-                base_seed = self._validation_seed_base + 1009 * attempt
-            # Each stage uses a Phase-1-proven runtime variant as its first
-            # candidate; later attempts still sweep independently randomized
-            # dynamics while preserving the same immutable ridge geometry.
+        order = self._reset_rng.permutation(len(self._validated_start_pool))
+        for attempt, pool_index in enumerate(order):
+            item = self._validated_start_pool[int(pool_index)]
+            candidate = self._copy_candidate(item["candidate"])
+            base_seed = int(item["base_seed"])
+            use_fallback = bool(item["used_fallback"])
             obs69, prepared_info, reset_info, ended = self._prepare_candidate(
                 base_seed, candidate)
-            validation = (
-                {"true_lateral_wedge": False, "reason": "terminated_while_settling"}
-                if ended else self._validate_candidate(
-                    base_seed, candidate, prepared_info))
-            if validation["true_lateral_wedge"]:
-                # Reconstruct the accepted candidate once more: none of the
-                # straight/nudge validation actions leak into the learner start.
-                obs69, prepared_info, reset_info, ended = self._prepare_candidate(
-                    base_seed, candidate)
-                if not ended:
-                    accepted = (obs69, prepared_info, reset_info, candidate,
-                                validation, attempt, base_seed, use_fallback)
-                    break
-            rejected.append({"attempt": attempt + 1, **validation})
+            safety_reason = (
+                "terminated_while_settling" if ended
+                else self._start_safety_reason(prepared_info)
+            )
+            if safety_reason is None:
+                accepted = (
+                    obs69, prepared_info, reset_info, candidate,
+                    copy.deepcopy(item["validation"]), attempt, base_seed,
+                    use_fallback,
+                )
+                break
+            rejected.append({
+                "attempt": attempt + 1,
+                "true_lateral_wedge": False,
+                "reason": safety_reason,
+            })
         if accepted is None:
             raise RuntimeError(
-                f"failed to construct a solvable {self.stage.name} lateral wedge "
-                f"after {WEDGE_MAX_RESET_ATTEMPTS} attempts: {rejected}")
+                f"all {len(self._validated_start_pool)} cached "
+                f"{self.stage.name} starts failed the runtime safety check: "
+                f"{rejected}")
 
         (obs69, prepared_info, reset_info, candidate, validation, attempt,
          base_seed, used_fallback) = accepted
@@ -535,6 +699,11 @@ class SeatEnv(gym.Wrapper):
             "seat_reset_attempts": attempt + 1,
             "seat_reset_resample_count": attempt,
             "seat_reset_used_fallback": used_fallback,
+            "seat_reset_pool_size": len(self._validated_start_pool),
+            "seat_reset_pool_build_attempts": self._pool_build_attempts,
+            "seat_reset_pool_build_rejections": self._pool_build_rejections,
+            "seat_reset_cache_hit": True,
+            "seat_reset_validation_mode": "cached_pose_safety_check",
             "seat_reset_rejected": rejected,
             "seat_reset_commanded_offset_m": candidate["commanded_offset_m"],
             "seat_reset_commanded_tilt_rad": candidate["commanded_tilt_rad"],
@@ -552,6 +721,12 @@ class SeatEnv(gym.Wrapper):
         self._prev_action[:] = 0.0
         self._prev_f_lateral = 0.0
         self._last_reward_terms = {}
+        self._steps_since_reset = 0
+        self._current_reset_metrics = {
+            "seat_reset_attempts": int(attempt + 1),
+            "seat_reset_used_fallback": bool(used_fallback),
+            "seat_reset_pool_size": int(len(self._validated_start_pool)),
+        }
         first = self._frame(obs69)
         self._frames = deque((first.copy() for _ in range(HISTORY)), maxlen=HISTORY)
         return self._observation(obs69, append=False), info
@@ -574,6 +749,11 @@ class SeatEnv(gym.Wrapper):
             "seat_commanded_action": commanded.astype(np.float32),
             "seat_reward_terms": dict(self._last_reward_terms),
         })
+        first_step = self._steps_since_reset == 0
+        info["seat_reset_first_step"] = first_step
+        if first_step:
+            info.update(self._current_reset_metrics)
+        self._steps_since_reset += 1
         return self._observation(obs69), reward, terminated, truncated, info
 
     @staticmethod

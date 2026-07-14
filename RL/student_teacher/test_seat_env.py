@@ -1,6 +1,8 @@
 """CPU-only acceptance checks for the wedged-start Seat RL v2 env."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -24,6 +26,9 @@ def _sample(stage: str, seed: int, n: int = 4):
             obs, info = env.reset(seed=seed + i)
             assert obs["actor"].shape == (8, 34)
             assert obs["privileged"].shape == (32,)
+            assert info["seat_reset_cache_hit"]
+            assert info["seat_reset_validation_mode"] == "cached_pose_safety_check"
+            assert info["seat_reset_pool_size"] >= 1
             probe = info["seat_reset_probe"]
             rows.append({
                 "depth_m": float(env.scene._insertion_depth_m()),
@@ -119,28 +124,28 @@ def test_seat_reset_distribution():
 
 
 def test_shallow_handoff_has_validated_bounded_fallback():
-    # This exact evaluation seed exhausted all 12 random candidates in the
-    # Phase-3 smoke.  It must now recover via the validated shallow fallback,
-    # not crash or accept a flat/axially-mobile start.
+    # The old hot reset needed this after eight random failures.  It remains a
+    # safe pool-construction candidate, but runtime resets never rerun probes.
     env = make_seat_env("full", seed=91002, domain_randomization=True)
     try:
-        obs, info = env.reset(seed=91002)
-        probe = info["seat_reset_probe"]
-        assert obs["actor"].shape == (8, 34)
-        assert obs["privileged"].shape == (32,)
-        assert info["seat_reset_used_fallback"]
-        assert info["seat_reset_attempts"] == 9
-        assert info["seat_reset_true_lateral_wedge"]
-        assert 4.5e-3 <= env.scene._insertion_depth_m() <= 7.5e-3
-        assert probe["straight_probe"]["depth_progress_m"] <= 1.0e-3
-        assert probe["accepted_probe"]["depth_progress_m"] >= 2.0e-3
+        candidate, base_seed = env._validated_fallback_candidate()
+        _obs69, prepared_info, _reset_info, ended = env._prepare_candidate(
+            base_seed, candidate)
+        assert not ended
+        start_depth_m = env.scene._insertion_depth_m()
+        validation = env._validate_candidate(
+            base_seed, candidate, prepared_info)
+        assert validation["true_lateral_wedge"]
+        assert env._start_safety_reason(prepared_info) is None
+        assert 4.5e-3 <= start_depth_m <= 7.5e-3
+        assert validation["straight_probe"]["depth_progress_m"] <= 1.0e-3
+        assert validation["accepted_probe"]["depth_progress_m"] >= 2.0e-3
         print(
             "shallow_fallback: "
-            f"attempts={info['seat_reset_attempts']} "
-            f"depth_mm={1e3 * env.scene._insertion_depth_m():.3f} "
-            f"lateral_mm={1e3 * info['lateral_error_m']:.3f} "
+            f"depth_mm={1e3 * start_depth_m:.3f} "
+            f"lateral_mm={1e3 * prepared_info['lateral_error_m']:.3f} "
             f"nudge_progress_mm="
-            f"{1e3 * probe['accepted_probe']['depth_progress_m']:.3f}"
+            f"{1e3 * validation['accepted_probe']['depth_progress_m']:.3f}"
         )
     finally:
         env.close()
@@ -174,7 +179,7 @@ def test_other_handoff_fallbacks_are_true_lateral_wedges(
 
 
 def test_near_seated_repeated_resets_are_validated_and_never_raise():
-    """Finite reset rejection may use fallback, but may never weaken validation."""
+    """Cached reset reconstruction stays safe without rerunning probe sweeps."""
     resets = 16
     env = make_seat_env("near_seated", seed=3101, domain_randomization=True)
     rows = []
@@ -187,6 +192,8 @@ def test_near_seated_repeated_resets_are_validated_and_never_raise():
             assert info["seat_reset_true_lateral_wedge"]
             assert info["plug_port_contacts"] > 0
             assert info["contact_force_norm"] <= 10.0
+            assert info["seat_reset_cache_hit"]
+            assert info["seat_reset_validation_mode"] == "cached_pose_safety_check"
             assert probe["straight_probe"]["depth_progress_m"] <= 1.0e-3
             assert probe["accepted_probe"]["depth_progress_m"] >= 2.0e-3
             rows.append(info)
@@ -202,6 +209,72 @@ def test_near_seated_repeated_resets_are_validated_and_never_raise():
         f"mean_attempts={attempts.mean():.3f}; max_attempts={attempts.max()}"
     )
     assert len(rows) == resets
+
+
+def test_cached_reset_does_not_rerun_physical_validator(monkeypatch):
+    env = make_seat_env("near_seated", seed=3101, domain_randomization=True)
+    try:
+        _obs, first = env.reset(seed=3101)
+        assert first["seat_reset_pool_size"] >= 1
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("hot reset reran the physical nudge validator")
+
+        monkeypatch.setattr(env, "_validate_candidate", fail_if_called)
+        for seed in range(4100, 4108):
+            _obs, info = env.reset(seed=seed)
+            assert info["seat_reset_true_lateral_wedge"]
+            assert info["seat_reset_cache_hit"]
+            assert env._start_safety_reason(info) is None
+    finally:
+        env.close()
+
+
+def test_validator_rejects_unsafe_probe_terminations(monkeypatch):
+    env = object.__new__(SeatEnv)
+    env.stage = STAGES["near_seated"]
+    env.scene = SimpleNamespace(cfg=SimpleNamespace(
+        bad_collision_penetration_excess_m=1.5e-3,
+        bad_collision_overinsert_m=2.0e-3,
+        bad_collision_depth_gate=0.45,
+        bad_collision_axis_rad=0.35,
+        bad_collision_roll_rad=0.35,
+    ))
+    prepared = {
+        "contact_force_norm": 3.0,
+        "lateral_error_m": 0.35e-3,
+        "plug_port_contacts": 2,
+        "off_limit_contacts": 0,
+        "plug_port_penetration_excess_m": 0.0,
+        "overinsert_m": 0.0,
+        "depth_norm": 0.8,
+        "plug_axis_error_rad": 0.05,
+        "plug_roll_error_rad": 0.05,
+    }
+
+    monkeypatch.setattr(env, "_straight_probe", lambda *_args: {
+        "depth_progress_m": 0.0,
+        "end_status": "bad_collision",
+    })
+    result = env._validate_candidate(1, {}, prepared)
+    assert not result["true_lateral_wedge"]
+    assert result["reason"] == "unsafe_straight_probe"
+
+    monkeypatch.setattr(env, "_straight_probe", lambda *_args: {
+        "depth_progress_m": 0.0,
+        "end_status": None,
+    })
+    monkeypatch.setattr(env, "_nudge_probe", lambda *_args: {
+        "depth_progress_m": 3.0e-3,
+        "end_status": "force_abort",
+        "unstick_success": True,
+    })
+    result = env._validate_candidate(1, {}, prepared)
+    assert not result["true_lateral_wedge"]
+    assert result["reason"] == "flat_or_dead_stall"
+
+    penetrating = {**prepared, "plug_port_penetration_excess_m": 2.0e-3}
+    assert env._start_safety_reason(penetrating) == "bad_collision_penetration"
 
 
 def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
