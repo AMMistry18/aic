@@ -85,6 +85,10 @@ MAX_HANDOFF_SELECT_M = float(os.environ.get("RL_INSERT_MAX_HANDOFF_SELECT_M", "0
 # baseline: subtract the six-axis wrench observed before the handoff.
 WRENCH_MODE = os.environ.get("RL_INSERT_WRENCH_MODE", "baseline").strip().lower()
 CONTROL_MODE = os.environ.get("RL_INSERT_CONTROL_MODE", "guided").strip().lower()
+BOARD_SEARCH = os.environ.get("RL_INSERT_BOARD_SEARCH", "0") == "1"
+BOARD_SEARCH_ONLY_TASK_ID = os.environ.get(
+    "RL_INSERT_BOARD_SEARCH_ONLY_TASK_ID", "board_search_only"
+).strip()
 
 STEP_DT = float(os.environ.get("RL_INSERT_STEP_DT", "0.10"))
 MAX_RL_STEPS = int(os.environ.get("RL_INSERT_STEPS", "400"))
@@ -200,6 +204,32 @@ SCRIPT_STALL_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_STALL_PROGRESS_
 # for the RL hand-off. This lets the script pre-engage the plug as deep as it can
 # GENTLY before handing off, rather than quitting early on a false lateral reading.
 SCRIPT_HANDOFF_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_HANDOFF_FORCE_N", "10.0"))
+
+# --- Stall-nudge recovery (try a small lateral shift BEFORE giving up) --------
+# Observed failure: the plug stalls right at the mouth without entering the port,
+# and all it needs is a little more motion in +Y (port frame) to drop in. On a
+# depth-stall, before handing off, step +Y a little and keep pushing down; if depth
+# breaks free, it worked and normal descent resumes from the better offset. +Y ONLY
+# by design (see SCRIPT_NUDGE_DIRS) -- -Y / +/-X would only shove the plug off the
+# offset the pre-engage bias already dialed in. Each step is small and the total
+# excursion is capped so the plug can never walk off the board. Set
+# RL_INSERT_SCRIPT_NUDGE_ENABLE=0 to disable and fall straight back to the old
+# hold-and-handoff behavior.
+SCRIPT_NUDGE_ENABLE = os.environ.get(
+    "RL_INSERT_SCRIPT_NUDGE_ENABLE", "1").strip().lower() in ("1", "true", "yes")
+# Size of each individual nudge step (port-frame meters).
+SCRIPT_NUDGE_STEP_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_STEP_M", "0.0004"))  # 0.4 mm
+# Max cumulative lateral excursion the nudge search may add (safety cap vs runaway).
+SCRIPT_NUDGE_MAX_TOTAL_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_MAX_TOTAL_M", "0.0020"))  # 2 mm
+# How many settle+observe steps to hold after a nudge before judging if it helped.
+SCRIPT_NUDGE_SETTLE_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_NUDGE_SETTLE_STEPS", "8"))
+# Depth gain (past the stall depth) that counts as "the nudge broke it free".
+SCRIPT_NUDGE_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_PROGRESS_M", "0.0010"))  # 1 mm
+# Direction(s) to nudge, in the PORT frame (dx_alongPinRow, dy). +Y ONLY -- the
+# stall is a consistent "needs a little more +Y" catch, and -Y / +/-X would only
+# shove the plug off the offset the pre-engage bias already dialed in. Keep this a
+# single direction; the retry just keeps stepping +Y (bounded by the excursion cap).
+SCRIPT_NUDGE_DIRS = [("+Y", 0.0, 1.0)]
 
 # One-shot grasp calibration dump: when set, at handoff log the TCP pose and any
 # available ground-truth plug/tip TF frames (all in base_link), so the true
@@ -882,6 +912,20 @@ class RLInsert(Policy):
             log.error("[rl] no Observation in 10 s -- zenoh wiring broken")
             return False
 
+        # The Flowstate insert-cable skill exposes Task.id.  Reserving one ID
+        # gives the process a board-framing-only step without a second ROS
+        # policy node/action server.  All normal task IDs retain v35 behavior.
+        if task.id == BOARD_SEARCH_ONLY_TASK_ID:
+            from .board_search import BoardSearch
+            ok = BoardSearch(self).run(get_observation, move_robot)
+            log.info(f"[board_search] board-only task complete: {ok}")
+            return ok
+
+        if BOARD_SEARCH:
+            from .board_search import BoardSearch
+            ok = BoardSearch(self).run(get_observation, move_robot)
+            log.info(f"[board_search] whole board in view: {ok}")
+
         # --- perceive the SFP port pose (multi-frame consensus so one bad frame
         #     or a wrong-port pick does not commit us to the wrong cage)
         perceived = self.perceive_port_pose_consensus(task, get_observation)
@@ -1106,6 +1150,69 @@ class RLInsert(Policy):
         rot_err = _R_to_axis_angle(R_ref.T @ R_tip)
         return (float(d[2]), d[:2].copy(), rot_err, tip_pos, R_tip)
 
+    def _nudge_to_unstick(self, get_observation, move_robot, *, Rp, port_pos,
+                          R_seat, insert_axis, stall_depth):
+        """On a mouth stall, step +Y a little to try to drop the plug in.
+
+        The plug often stalls at the mouth needing only a little more motion in +Y
+        (port frame). Step +Y one small increment at a time (each capped cumulatively
+        so it cannot walk off the board), keeping a gentle inward push, and check if
+        depth advanced past the stall depth. Return True the moment it breaks free
+        (leaving the plug at the better offset so normal descent resumes); False if we
+        reach the excursion cap without freeing it (caller then falls back to the
+        hold-and-handoff). +Y only by design -- see SCRIPT_NUDGE_DIRS.
+        """
+        log = self.get_logger()
+        applied_dx = 0.0            # cumulative port-frame excursion (safety cap)
+        applied_dy = 0.0
+        # Keep stepping in the configured direction(s) -- +Y only -- one small step at
+        # a time, up to the cumulative excursion cap. Each step gets a few settle+push
+        # sub-steps to see if depth breaks free before adding the next step.
+        while True:
+            name, ux, uy = SCRIPT_NUDGE_DIRS[0]
+            step_dx = ux * SCRIPT_NUDGE_STEP_M
+            step_dy = uy * SCRIPT_NUDGE_STEP_M
+            # Would the NEXT step push us past the cumulative excursion cap? Stop.
+            if (abs(applied_dx + step_dx) > SCRIPT_NUDGE_MAX_TOTAL_M or
+                    abs(applied_dy + step_dy) > SCRIPT_NUDGE_MAX_TOTAL_M):
+                break
+            applied_dx += step_dx
+            applied_dy += step_dy
+            lat_world = Rp[:, 0] * step_dx + Rp[:, 1] * step_dy
+            log.info(f"[script] NUDGE {name}: step={SCRIPT_NUDGE_STEP_M*1000:.2f}mm "
+                     f"(cumulative dX={applied_dx*1000:.2f} dY={applied_dy*1000:.2f}mm) "
+                     f"from stall depth {stall_depth*1000:.1f}mm")
+            # Settle+push: apply the lateral step AND a gentle inward push each step,
+            # so the freed plug actually descends rather than just sliding sideways.
+            broke_free = False
+            for _ in range(SCRIPT_NUDGE_SETTLE_STEPS):
+                obs = get_observation()
+                depth, _, _, tip_pos, _ = self._script_errors(
+                    Rp, port_pos, R_target=R_seat)
+                target_tip = tip_pos + insert_axis * SCRIPT_SEAT_STEP_M + lat_world
+                # Compliant gains so the plug can give and find the pocket.
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(target_tip, R_seat),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                # Only apply the full lateral step on the first sub-step; after that
+                # hold the offset and keep pushing inward (lat_world -> 0) so we do
+                # not integrate the nudge every step into a runaway.
+                lat_world = np.zeros(3)
+                self.sleep_for(STEP_DT)
+                if depth > stall_depth + SCRIPT_NUDGE_PROGRESS_M:
+                    broke_free = True
+                    break
+            if broke_free:
+                depth, _, _, _, _ = self._script_errors(Rp, port_pos, R_target=R_seat)
+                log.info(f"[script] NUDGE {name} UNSTUCK: depth advanced to "
+                         f"{depth*1000:.1f}mm -- resuming descent.")
+                return True
+            # This step did not help; loop adds another +Y increment until the
+            # cumulative-cap check stops us.
+        log.info(f"[script] +Y nudge reached the {SCRIPT_NUDGE_MAX_TOTAL_M*1000:.1f}mm "
+                 f"excursion cap without freeing the stall.")
+        return False
+
     def _run_script(self, get_observation, move_robot, send_feedback, *,
                     port_pos, port_quat, Rp):
         """Pure-geometry align-then-progressive-descent. No RL, no network.
@@ -1266,6 +1373,23 @@ class RLInsert(Policy):
             # immediate trigger for a harder jam.
             force_jam = np.isfinite(f_mag) and f_mag >= SCRIPT_HANDOFF_FORCE_N
             depth_stalled = stall_steps >= SCRIPT_STALL_STEPS
+            # Recovery: a LOW-FORCE depth-stall (stuck at the mouth, not a hard jam)
+            # often just needs a little more +Y motion to drop in. Try a small bounded
+            # +Y nudge BEFORE handing off. Only for the depth-stall case -- a force-jam
+            # is a real bind, hand that off directly.
+            if SCRIPT_NUDGE_ENABLE and depth_stalled and not force_jam:
+                log.info(f"[script] depth-stall at {stall_depth*1000:.1f}mm "
+                         f"(force {f_mag:.2f}N) -- trying nudge recovery before handoff.")
+                if self._nudge_to_unstick(
+                        get_observation, move_robot, Rp=Rp, port_pos=port_pos,
+                        R_seat=R_seat, insert_axis=insert_axis, stall_depth=stall_depth):
+                    # Nudge broke it free: reset stall tracking and resume descent.
+                    deepest = -np.inf
+                    stall_steps = 0
+                    stall_depth = float("nan")
+                    stall_lat_min, stall_lat_max = np.inf, -np.inf
+                    continue
+                # Nudge failed: fall through to the hold-and-handoff below.
             if depth_stalled or force_jam:
                 trigger = "force-jam" if force_jam else "depth-stall"
                 log.error(

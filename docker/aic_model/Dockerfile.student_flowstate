@@ -9,8 +9,10 @@ FROM ${BASE_IMAGE}
 COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/perception_core.py
 COPY aic_example_policies/aic_example_policies/ros/perception_core.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/perception_core.py
 COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/aic_model/aic_model/RLInsert.py
+COPY aic_model/aic_model/board_search.py /ws_aic/src/aic/aic_model/aic_model/board_search.py
 COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py
 COPY aic_model/aic_model/RLInsert.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py
+COPY aic_model/aic_model/board_search.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/board_search.py
 COPY aic_model/aic_model/rl_insert_contract.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/rl_insert_contract.py
 
 COPY models/final_insert_sfp_flowstate_v1.ts /models/final_insert_sfp_flowstate_v1.ts
@@ -21,6 +23,10 @@ ENV RL_INSERT_WRENCH_MODE=baseline
 # script = pure-geometry align-then-progressive-descent, NO RL (align-first test
 # bed). Set back to rl / guided to run the learned / scripted-lead policies.
 ENV RL_INSERT_CONTROL_MODE=script
+# ``Task.id == board_search_only`` runs only the board-framing pre-step.  Keep
+# the optional prepend mode off so ordinary task IDs execute the v35 path.
+ENV RL_INSERT_BOARD_SEARCH=0
+ENV RL_INSERT_BOARD_SEARCH_ONLY_TASK_ID=board_search_only
 # One-shot grasp-calibration dump at handoff: logs TCP + ground-truth tip frame
 # so SFP_TIP_IN_TCP_QUAT can be recalibrated to the real grasp. Set 0 to disable.
 ENV RL_INSERT_CALIB_DUMP=1
