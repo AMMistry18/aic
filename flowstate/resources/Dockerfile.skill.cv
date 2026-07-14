@@ -1,0 +1,126 @@
+FROM ubuntu:24.04 AS pixi-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    liblttng-ust-dev \
+    libxml2-dev \
+    patch \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=0.67.2 bash
+ENV PATH="/root/.pixi/bin:${PATH}"
+# Keep the large Intrinsic SDK/OR-Tools build inside Docker Desktop's memory
+# envelope. Unbounded host parallelism can wedge the builder under load.
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
+
+WORKDIR /workspace
+
+# Use the recovered, SDK-compatible skill-only lock. This excludes model,
+# training, simulation, and developer dependencies from the skill image.
+COPY src/aic/flowstate/resources/pixi.skill.toml ./pixi.toml
+COPY src/aic/flowstate/resources/pixi.skill.lock ./pixi.lock
+COPY src/aic/robostack_mapping.json src/aic/pixi_env_setup.sh ./
+RUN pixi install --environment skill-build \
+    && pixi install --environment skill-runtime
+
+
+FROM pixi-builder AS sdk-builder
+COPY src/sdk-ros/ ./sdk-ros/
+RUN pixi run --environment skill-build colcon build \
+    --merge-install \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    --event-handlers=console_direct+ \
+    --packages-up-to intrinsic_sdk \
+    --base-paths sdk-ros
+
+
+FROM sdk-builder AS build
+
+ARG SKILL_PACKAGE=aic_perception
+ARG SKILL_NAME=check_board_visibility_skill
+ARG SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main
+
+COPY src/aic/flowstate/ ./flowstate/
+COPY src/aic/aic_interfaces/ ./aic_interfaces/
+RUN pixi run --environment skill-build colcon build \
+    --merge-install \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    --event-handlers=console_direct+ \
+    --packages-up-to "${SKILL_PACKAGE}" \
+    --base-paths flowstate aic_interfaces sdk-ros
+
+RUN pixi shell-hook --environment skill-runtime > /pixi_hook.sh \
+    && rm -rf /root/.pixi/cache /root/.cache/pixi /workspace/.pixi/cache \
+    && if [ -d /workspace/build/pybind11_abseil_vendor/pybind11_abseil_vendor-prefix/src/pybind11_abseil_vendor-build ]; then \
+         mkdir -p /workspace/install/opt/bindings && \
+         cp -r /workspace/build/pybind11_abseil_vendor/pybind11_abseil_vendor-prefix/src/pybind11_abseil_vendor-build \
+           /workspace/install/opt/bindings/pybind11_abseil; \
+       fi
+
+
+FROM ubuntu:24.04 AS runtime
+
+ARG SKILL_PACKAGE=aic_perception
+ARG SKILL_NAME=check_board_visibility_skill
+ARG SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+COPY --from=build /workspace/.pixi/envs/skill-runtime /workspace/.pixi/envs/skill-runtime
+COPY --from=build /workspace/install ./install
+COPY --from=build /pixi_hook.sh /pixi_hook.sh
+COPY --from=build /workspace/pixi_env_setup.sh /workspace/pixi_env_setup.sh
+RUN sed -i 's/\r$//' /workspace/pixi_env_setup.sh
+
+# Pin the tested headless OpenCV wheel and preserve the locked Pixi NumPy.
+RUN /workspace/.pixi/envs/skill-runtime/bin/python -m ensurepip --upgrade \
+    && /workspace/.pixi/envs/skill-runtime/bin/python -m pip install \
+      --no-cache-dir --no-deps \
+      absl-py==2.4.0 \
+      googleapis-common-protos==1.75.0 \
+      grpcio==1.78.1 \
+      grpcio-status==1.78.1 \
+      retrying==1.4.2 \
+      opencv-python-headless==5.0.0.93
+
+RUN mkdir -p /opt/ros/overlay \
+    && ln -sf /workspace/install /opt/ros/overlay/install
+
+ENV PYTHONPATH="/workspace/install/opt/bindings/pybind11_abseil:/workspace/install/lib/python3.12/site-packages"
+ENV LD_LIBRARY_PATH="/workspace/install/opt/bindings/pybind11_abseil:/workspace/install/lib"
+ENV SKILL_PACKAGE=${SKILL_PACKAGE}
+ENV SKILL_NAME=${SKILL_NAME}
+ENV SKILL_EXEC_PATH="/workspace/install/lib/${SKILL_PACKAGE}/${SKILL_EXECUTABLE_NAME}"
+ENV SKILL_CONFIG="share/${SKILL_PACKAGE}/${SKILL_NAME}_config.pbbin"
+
+RUN printf '%s\n' \
+      '#!/bin/bash' \
+      'set -eo pipefail' \
+      'source /pixi_hook.sh' \
+      'source /workspace/install/local_setup.bash' \
+      'export RMW_IMPLEMENTATION=rmw_zenoh_cpp' \
+      'export ROS_HOME=/tmp' \
+      'export ZENOH_CONFIG_OVERRIDE="connect/endpoints=[\"tcp/zenoh-router.app-intrinsic-base.svc.cluster.local:7447\"]"' \
+      'exec "$SKILL_EXEC_PATH" "$@"' \
+      > /run_skill.sh \
+    && chmod 755 /run_skill.sh
+
+RUN mkdir -p /skills \
+    && ln -sf /run_skill.sh /skills/skill_service \
+    && ln -sf "/workspace/install/${SKILL_CONFIG}" \
+       /skills/skill_service_config.proto.bin
+
+LABEL "ai.intrinsic.asset-id"="ai.tar2.check_board_visibility_skill"
+ENV ZENOH_ROUTER_CHECK_ATTEMPTS=-1
+
+CMD ["/skills/skill_service", "--skill_service_config_filename=/skills/skill_service_config.proto.bin"]

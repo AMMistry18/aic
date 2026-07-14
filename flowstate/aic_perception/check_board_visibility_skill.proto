@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package ai.tar2;
+
+// Absolute Cartesian TCP pose in target_frame (base_link for this skill).
+message ViewPose {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double qx = 4;
+  double qy = 5;
+  double qz = 6;
+  double qw = 7;
+}
+
+message CheckBoardVisibilitySkillParams {
+  // Required background/foreground brightness gap in grey levels. 0 -> 30.
+  uint32 min_contrast = 1;
+  // Clearance from each usable image edge. 0 -> 15 pixels.
+  uint32 margin_px = 2;
+  // Bottom fraction excluded to remove gripper fingers. 0 -> 0.15.
+  double ignore_bottom_frac = 3;
+  // Maximum camera-plane translation per internal iteration. 0 -> 0.02 m.
+  double step_m = 4;
+  // Retreat when the board touches opposite edges. 0 -> step_m.
+  double backoff_step_m = 5;
+  // Fresh wrist-camera and permitted robot-TF budget. 0 -> 10 seconds.
+  uint32 timeout_seconds = 6;
+  // Minimum board component fraction. 0 -> 0.005.
+  double min_area_frac = 7;
+  // Abort and reverse above 18 N by default, 2 N below the documented
+  // 20 N sustained-force scoring threshold. 0 -> 18 N.
+  double max_force_n = 8;
+  // Deprecated compatibility field. The adaptive search no longer stops after
+  // a fixed number of moves.
+  uint32 max_moves = 9;
+  // Maximum Cartesian setpoint speed. 0 -> 0.025 m/s.
+  double max_speed_mps = 10;
+  // Minimum-jerk setpoint publication frequency. 0 -> 20 Hz.
+  double publish_hz = 11;
+  // Measured TCP position tolerance after each move. 0 -> 0.003 m.
+  double settle_tolerance_m = 12;
+  // Motion and settling budget for one internal move. 0 -> 5 seconds.
+  double move_timeout_seconds = 13;
+  // Maximum cumulative TCP translation in one invocation. 0 -> 0.50 m.
+  double max_travel_m = 14;
+  // Abort when force changes this much from the initial baseline. 0 -> 5 N.
+  double force_delta_n = 15;
+  // Overall adaptive-search deadline. 0 -> 90 seconds.
+  double search_timeout_seconds = 16;
+  // Maximum start-relative TCP displacement. 0 -> 0.25 m.
+  double max_displacement_m = 17;
+  // Camera aim correction per orientation action. 0 -> 0.07 rad.
+  double angular_step_rad = 18;
+  // Maximum orientation change from the starting pose. 0 -> 0.35 rad.
+  double max_angular_displacement_rad = 19;
+  // Maximum accumulated angular travel including rollbacks. 0 -> 1.2 rad.
+  double max_angular_travel_rad = 20;
+  // Dynamic frame clearance reserved for protruding NIC/SC hardware. 0 -> 0.20.
+  double context_margin_frac = 21;
+  // Board pixels required for downstream component detail. 0 -> 0.06.
+  double min_detail_area_frac = 22;
+  // Minimum clean board silhouette quality. 0 -> 0.50.
+  double min_rectangularity = 23;
+  // Consecutive fresh snapshots required before success. 0 -> 2.
+  uint32 stable_frames = 24;
+  // Maximum angular setpoint speed. 0 -> 0.12 rad/s.
+  double max_angular_speed_rps = 25;
+  // Measured TCP orientation tolerance. 0 -> 0.025 rad.
+  double settle_orientation_tolerance_rad = 26;
+}
+
+message CheckBoardVisibilitySkillResult {
+  // True only when the internal search completed without a safety/runtime error.
+  bool success = 1;
+  string message = 2;
+
+  // True when at least one camera sees the whole board with margin.
+  bool done = 3;
+
+  string steer_camera = 4;
+  string edges = 5;
+  double area_frac = 6;
+  uint32 num_cameras = 7;
+
+  // Last internally commanded base-link translation; diagnostics only.
+  double dx = 8;
+  double dy = 9;
+  double dz = 10;
+
+  // Last internally commanded TCP target; diagnostics only.
+  bool target_valid = 11;
+  ViewPose target = 12;
+  double rectangularity = 13;
+
+  // True when at least one plausible board component was detected.
+  bool seen = 14;
+  double force_n = 15;
+  string target_frame = 16;  // Always "base_link" when target_valid is true.
+  bool backoff = 17;
+  uint32 moves_executed = 18;
+  double travel_m = 19;
+  bool moved = 20;
+  bool force_abort = 21;
+  // True when the board silhouette and the padded task-component envelope are
+  // inside a usable camera frame at adequate scale and quality.
+  bool component_coverage_ready = 22;
+  double view_quality = 23;
+  double angular_travel_rad = 24;
+  double elapsed_seconds = 25;
+  string last_action = 26;
+  uint32 rollback_count = 27;
+}

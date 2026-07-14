@@ -1,0 +1,30 @@
+id {
+  package: "ai.tar2"
+  name: "check_board_visibility_skill"
+}
+display_name: "Search Board Visibility"
+vendor {
+  display_name: "TAR-2"
+}
+documentation {
+  description: "Uses permitted wrist-camera images, controller state, wrist force, and robot-mounted TF frames to run an adaptive viewpoint search until the full task board and a padded NIC/SC component envelope are visible. It performs bounded minimum-jerk 6-DoF Cartesian moves through aic_controller with measured-TCP settling, image-score rollback, and force-triggered reversal. It never reads task-board, port, module, cable, Gazebo, or scoring ground-truth poses."
+}
+options {
+  supports_cancellation: true
+  python_config {
+    skill_module: "aic_perception.check_board_visibility_skill"
+    proto_module: "aic_perception.check_board_visibility_skill_pb2"
+    create_skill: "aic_perception.check_board_visibility_skill.CheckBoardVisibilitySkill"
+  }
+}
+dependencies {
+}
+parameter {
+  message_full_name: "ai.tar2.CheckBoardVisibilitySkillParams"
+  default_value: {
+    type_url: "type.googleapis.com/ai.tar2.CheckBoardVisibilitySkillParams"
+  }
+}
+return_type {
+  message_full_name: "ai.tar2.CheckBoardVisibilitySkillResult"
+}
