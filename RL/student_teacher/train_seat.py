@@ -39,6 +39,10 @@ def parse_args():
     parser.add_argument("--buffer-size", type=int, default=500_000)
     parser.add_argument("--learning-starts", type=int, default=5_000)
     parser.add_argument("--checkpoint-freq", type=int, default=20_000)
+    parser.add_argument("--eval-freq", type=int,
+                        help="evaluation cadence; defaults to checkpoint cadence")
+    parser.add_argument("--wandb-log-freq", type=int, default=1_000,
+                        help="frequent W&B scalar cadence in environment steps")
     parser.add_argument("--eval-episodes", type=int, default=30)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
@@ -47,6 +51,10 @@ def parse_args():
         parser.error("--resume and --init-from are mutually exclusive")
     if args.init_from is not None and not args.init_from.is_file():
         parser.error(f"--init-from checkpoint does not exist: {args.init_from}")
+    if args.eval_freq is not None and args.eval_freq <= 0:
+        parser.error("--eval-freq must be positive")
+    if args.wandb_log_freq <= 0:
+        parser.error("--wandb-log-freq must be positive")
     return args
 
 
@@ -169,9 +177,27 @@ def _init_wandb(args, config):
         except Exception as offline_exc:
             print(f"[wandb] disabled: offline fallback failed: {offline_exc}", flush=True)
             return None
-    if run is not None and (requested_mode == "offline" or getattr(run, "offline", False)):
-        sync_dir = Path(run.dir).parent
-        print(f"[wandb] offline run ready; later run: wandb sync {sync_dir}", flush=True)
+    if run is not None:
+        actual_offline = bool(getattr(run, "offline", False))
+        if requested_mode == "offline" or actual_offline:
+            sync_dir = Path(run.dir).parent
+            print(
+                f"[wandb] mode=offline; later run: wandb sync {sync_dir}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[wandb] mode=online url={getattr(run, 'url', 'unavailable')}",
+                flush=True,
+            )
+        run.define_metric("global_step")
+        for metric in (
+                "rollout/ep_len_mean", "rollout/ep_rew_mean", "time/fps",
+                "train/actor_loss", "train/critic_loss", "train/ent_coef",
+                "train/ent_coef_loss", "eval/seat_success_rate",
+                "eval/bad_collision_rate", "eval/max_force_n_mean",
+                "eval/max_force_n_p95", "eval/max_force_n_max"):
+            run.define_metric(metric, step_metric="global_step")
     return run
 
 
@@ -303,8 +329,11 @@ def main():
                 table = wandb.Table(
                     columns=columns,
                     data=[[row[column] for column in columns] for row in traces])
-                wandb_run.log({**metrics, "eval/seat_traces": table},
-                              step=int(self.num_timesteps))
+                wandb_run.log({
+                    "global_step": int(self.num_timesteps),
+                    **metrics,
+                    "eval/seat_traces": table,
+                })
             print(json.dumps(payload, indent=2), flush=True)
 
         def _on_step(self):
@@ -329,7 +358,33 @@ def main():
         vec_env.seed(190_000 + args.seed)
         return vec_env, render_env
 
-    evaluator = SeatEvaluator(args.checkpoint_freq)
+    evaluator = SeatEvaluator(args.eval_freq or args.checkpoint_freq)
+
+    class LiveWandbMetrics(BaseCallback):
+        """Stream train scalars between expensive checkpoints/evaluations."""
+
+        def __init__(self, every_steps):
+            super().__init__()
+            self.every_steps = max(1, int(every_steps))
+            self.next_step = self.every_steps
+
+        def _on_step(self):
+            if wandb_run is None or int(self.num_timesteps) < self.next_step:
+                return True
+            payload = {"global_step": int(self.num_timesteps)}
+            logger_values = self.model.logger.name_to_value
+            for metric in (
+                    "rollout/ep_len_mean", "rollout/ep_rew_mean", "time/fps",
+                    "train/actor_loss", "train/critic_loss", "train/ent_coef",
+                    "train/ent_coef_loss"):
+                value = logger_values.get(metric)
+                if value is not None and np.isfinite(float(value)):
+                    payload[metric] = float(value)
+            wandb_run.log(payload)
+            self.next_step = int(self.num_timesteps) + self.every_steps
+            return True
+
+    live_wandb = LiveWandbMetrics(args.wandb_log_freq)
     video = WandbVideoRecorder(
         make_eval_env=make_video_env,
         every_steps=args.checkpoint_freq,
@@ -383,7 +438,10 @@ def main():
     if remaining:
         model.learn(
             total_timesteps=remaining,
-            callback=CallbackList([CheckpointCallback(args.checkpoint_freq), evaluator, video]),
+            callback=CallbackList([
+                CheckpointCallback(args.checkpoint_freq), evaluator, video,
+                live_wandb,
+            ]),
             reset_num_timesteps=reset_num_timesteps,
             progress_bar=False,
         )
