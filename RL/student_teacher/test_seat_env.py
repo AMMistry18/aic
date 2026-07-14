@@ -35,6 +35,7 @@ def _sample(stage: str, seed: int, n: int = 4):
                 "contacts": int(info["plug_port_contacts"]),
                 "level": float(info["curriculum_level"]),
                 "attempts": int(info["seat_reset_attempts"]),
+                "used_fallback": bool(info["seat_reset_used_fallback"]),
                 "direction": str(info["seat_reset_direction"]),
                 "true_wedge": bool(info["seat_reset_true_lateral_wedge"]),
                 "straight_progress_m": float(
@@ -73,6 +74,7 @@ def _describe(stage: str, rows: list[dict]):
         f"({accepted_fraction:.3f}); resamples={total_candidates-len(rows)} "
         f"flat_resamples={flat_resamples}; "
         f"resampled_reset_fraction={np.mean(attempts > 1):.3f}; "
+        f"fallbacks={sum(row['used_fallback'] for row in rows)}; "
         f"directions={sorted({row['direction'] for row in rows})}; "
         f"compiled_seeds={sorted({row['compiled_seed'] for row in rows})}"
     )
@@ -114,6 +116,34 @@ def test_seat_reset_distribution():
     assert STAGES["tight"] is STAGES["near_seated"]
     assert STAGES["band"] is STAGES["mid"]
     assert STAGES["full"] is STAGES["wedge"]
+
+
+def test_shallow_handoff_has_validated_bounded_fallback():
+    # This exact evaluation seed exhausted all 12 random candidates in the
+    # Phase-3 smoke.  It must now recover via the validated shallow fallback,
+    # not crash or accept a flat/axially-mobile start.
+    env = make_seat_env("full", seed=91002, domain_randomization=True)
+    try:
+        obs, info = env.reset(seed=91002)
+        probe = info["seat_reset_probe"]
+        assert obs["actor"].shape == (8, 34)
+        assert obs["privileged"].shape == (32,)
+        assert info["seat_reset_used_fallback"]
+        assert info["seat_reset_attempts"] == 9
+        assert info["seat_reset_true_lateral_wedge"]
+        assert 4.5e-3 <= env.scene._insertion_depth_m() <= 7.5e-3
+        assert probe["straight_probe"]["depth_progress_m"] <= 1.0e-3
+        assert probe["accepted_probe"]["depth_progress_m"] >= 2.0e-3
+        print(
+            "shallow_fallback: "
+            f"attempts={info['seat_reset_attempts']} "
+            f"depth_mm={1e3 * env.scene._insertion_depth_m():.3f} "
+            f"lateral_mm={1e3 * info['lateral_error_m']:.3f} "
+            f"nudge_progress_mm="
+            f"{1e3 * probe['accepted_probe']['depth_progress_m']:.3f}"
+        )
+    finally:
+        env.close()
 
 
 def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
