@@ -38,12 +38,22 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--buffer-size", type=int, default=500_000)
     parser.add_argument("--learning-starts", type=int, default=5_000)
+    parser.add_argument(
+        "--gradient-steps", type=int, default=-1,
+        help="SAC updates per vector rollout; -1 matches collected transitions",
+    )
     parser.add_argument("--checkpoint-freq", type=int, default=20_000)
+    parser.add_argument("--video-freq", type=int,
+                        help="video cadence; defaults to checkpoint cadence")
     parser.add_argument("--eval-freq", type=int,
                         help="evaluation cadence; defaults to checkpoint cadence")
     parser.add_argument("--wandb-log-freq", type=int, default=1_000,
                         help="frequent W&B scalar cadence in environment steps")
     parser.add_argument("--eval-episodes", type=int, default=30)
+    parser.add_argument("--tensorboard-log", type=Path,
+                        help="TensorBoard root (keep under the work checkout)")
+    parser.add_argument("--wandb-run-name",
+                        help="unique W&B name; launcher includes commit/job id")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--video", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
@@ -135,6 +145,7 @@ def evaluate_seat(model, *, stage: str, episodes: int, seed: int):
         "eval/final_depth_mm_p50": _finite_stats(final_depths, percentile=50),
         "eval/final_depth_mm_max": float(np.nanmax(final_depths)),
         "eval/max_force_n_mean": _finite_stats(max_forces),
+        "eval/max_force_n": _finite_stats(max_forces),
         "eval/max_force_n_p95": _finite_stats(max_forces, percentile=95),
         "eval/max_force_n_max": float(np.nanmax(max_forces)),
         "eval/f_lateral_at_end_n": _finite_stats(final_lateral),
@@ -156,7 +167,8 @@ def _init_wandb(args, config):
     requested_mode = os.environ.get("WANDB_MODE", "online")
     init_kwargs = dict(
         project="aic-seat-rl",
-        name=f"seat_{args.stage}_seed{args.seed}",
+        name=(args.wandb_run_name
+              or f"seat_{args.stage}_seed{args.seed}"),
         dir=str(args.out),
         config=config,
         sync_tensorboard=True,
@@ -196,8 +208,11 @@ def _init_wandb(args, config):
                 "train/actor_loss", "train/critic_loss", "train/ent_coef",
                 "train/ent_coef_loss", "eval/seat_success_rate",
                 "eval/bad_collision_rate", "eval/max_force_n_mean",
-                "eval/max_force_n_p95", "eval/max_force_n_max"):
+                "eval/max_force_n", "eval/max_force_n_p95",
+                "eval/max_force_n_max", "train/update_data_ratio"):
             run.define_metric(metric, step_metric="global_step")
+        for metric_glob in ("reset/*", "termination/*", "reward/*"):
+            run.define_metric(metric_glob, step_metric="global_step")
     return run
 
 
@@ -264,6 +279,8 @@ def main():
 
     config = {**vars(args), "out": str(args.out),
               "init_from": str(args.init_from) if args.init_from else None,
+              "tensorboard_log": (
+                  str(args.tensorboard_log) if args.tensorboard_log else None),
               "env_stage": STAGE_TO_ENV[args.stage], "gamma": 0.98,
               "trainer": "stable_baselines3.SAC"}
     (args.out / "config.json").write_text(json.dumps(config, indent=2) + "\n")
@@ -367,8 +384,59 @@ def main():
             super().__init__()
             self.every_steps = max(1, int(every_steps))
             self.next_step = self.every_steps
+            self.reset_count = 0
+            self.reset_attempts = 0.0
+            self.reset_fallbacks = 0
+            self.reset_pool_sizes: list[float] = []
+            self.term_counts = {
+                status: 0 for status in (
+                    "success", "bad_collision", "force_abort", "off_limit",
+                    "timeout",
+                )
+            }
+            self.reward_sums: dict[str, float] = {}
+            self.reward_samples = 0
+
+        def _accumulate_diagnostics(self):
+            infos = list(self.locals.get("infos") or ())
+            dones = np.asarray(
+                self.locals.get("dones", np.zeros(len(infos), dtype=bool)),
+                dtype=bool,
+            ).reshape(-1)
+            for index, info in enumerate(infos):
+                if bool(info.get("seat_reset_first_step", False)):
+                    self.reset_count += 1
+                    self.reset_attempts += float(
+                        info.get("seat_reset_attempts", 1))
+                    self.reset_fallbacks += int(bool(
+                        info.get("seat_reset_used_fallback", False)))
+                    self.reset_pool_sizes.append(float(
+                        info.get("seat_reset_pool_size", float("nan"))))
+                terms = info.get("seat_reward_terms") or {}
+                for name, value in terms.items():
+                    value = float(value)
+                    if np.isfinite(value):
+                        self.reward_sums[name] = (
+                            self.reward_sums.get(name, 0.0) + value)
+                if terms:
+                    self.reward_samples += 1
+                if index < len(dones) and dones[index]:
+                    status = str(info.get("term_status") or "timeout")
+                    if status not in self.term_counts:
+                        self.term_counts[status] = 0
+                    self.term_counts[status] += 1
+
+        def _reset_interval(self):
+            self.reset_count = 0
+            self.reset_attempts = 0.0
+            self.reset_fallbacks = 0
+            self.reset_pool_sizes.clear()
+            self.term_counts = {name: 0 for name in self.term_counts}
+            self.reward_sums.clear()
+            self.reward_samples = 0
 
         def _on_step(self):
+            self._accumulate_diagnostics()
             if wandb_run is None or int(self.num_timesteps) < self.next_step:
                 return True
             payload = {"global_step": int(self.num_timesteps)}
@@ -380,24 +448,56 @@ def main():
                 value = logger_values.get(metric)
                 if value is not None and np.isfinite(float(value)):
                     payload[metric] = float(value)
+            learned_transitions = max(
+                int(self.num_timesteps) - int(args.learning_starts), 0)
+            if learned_transitions > 0:
+                payload["train/update_data_ratio"] = (
+                    float(getattr(self.model, "_n_updates", 0))
+                    / float(learned_transitions)
+                )
+            if self.reset_count:
+                payload["reset/attempts_mean"] = (
+                    self.reset_attempts / self.reset_count)
+                payload["reset/fallback_rate"] = (
+                    self.reset_fallbacks / self.reset_count)
+                finite_pool_sizes = [
+                    value for value in self.reset_pool_sizes
+                    if np.isfinite(value)
+                ]
+                if finite_pool_sizes:
+                    payload["reset/pool_size_mean"] = float(np.mean(
+                        finite_pool_sizes))
+            total_terms = sum(self.term_counts.values())
+            if total_terms:
+                for status, count in self.term_counts.items():
+                    payload[f"termination/{status}_rate"] = (
+                        count / total_terms)
+            if self.reward_samples:
+                for name, total in self.reward_sums.items():
+                    payload[f"reward/{name}_mean"] = (
+                        total / self.reward_samples)
             wandb_run.log(payload)
+            self._reset_interval()
             self.next_step = int(self.num_timesteps) + self.every_steps
             return True
 
     live_wandb = LiveWandbMetrics(args.wandb_log_freq)
     video = WandbVideoRecorder(
         make_eval_env=make_video_env,
-        every_steps=args.checkpoint_freq,
+        every_steps=args.video_freq or args.checkpoint_freq,
         episodes_per_video=2,
         deterministic=True,
         key="eval/rollout_video",
         render_camera="center_camera",
         max_steps=400,
         record_on_training_end=True,
+        record_at_start=False,
+        explicit_wandb_step=False,
         enabled=args.video,
     )
     print(f"[video] WandbVideoRecorder attached enabled={args.video} "
-          f"every_steps={args.checkpoint_freq} camera=center_camera", flush=True)
+          f"every_steps={args.video_freq or args.checkpoint_freq} "
+          "camera=center_camera", flush=True)
 
     common = dict(
         policy=AsymmetricSACPolicy,
@@ -409,14 +509,15 @@ def main():
         tau=0.005,
         gamma=0.98,
         train_freq=(1, "step"),
-        gradient_steps=1,
+        gradient_steps=args.gradient_steps,
         ent_coef="auto_0.01",
         target_entropy=-3.0,
         policy_kwargs=dict(net_arch=[256, 256], share_features_extractor=False),
         seed=args.seed,
         device="auto",
         verbose=1,
-        tensorboard_log=str(args.out / "tensorboard"),
+        tensorboard_log=str(
+            args.tensorboard_log or (args.out / "tensorboard")),
     )
     model_path = args.out / "model.zip"
     replay_path = args.out / "replay_buffer.pkl"

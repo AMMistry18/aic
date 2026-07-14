@@ -299,6 +299,8 @@ class WandbVideoRecorder(BaseCallback):
                  render_width: int = 768,
                  min_frames: int = 12,
                  record_on_training_end: bool = True,
+                 record_at_start: bool = True,
+                 explicit_wandb_step: bool = True,
                  deterministic: bool = True,
                  enabled: bool = True,
                  verbose: int = 1):
@@ -321,9 +323,11 @@ class WandbVideoRecorder(BaseCallback):
         self.render_width = int(render_width)
         self.min_frames = int(min_frames)
         self.record_on_training_end = bool(record_on_training_end)
+        self.record_at_start = bool(record_at_start)
+        self.explicit_wandb_step = bool(explicit_wandb_step)
         self.deterministic = bool(deterministic)
         self.enabled = bool(enabled)
-        self._next_video_step = 0
+        self._next_video_step = 0 if self.record_at_start else self.every_steps
         self._vec_env = None
         self._render_env = None
         self._train_level_file = None
@@ -535,7 +539,11 @@ class WandbVideoRecorder(BaseCallback):
                 }
                 if extra_metrics:
                     payload.update(extra_metrics)
-                wandb.log(payload, step=int(self.num_timesteps))
+                if self.explicit_wandb_step:
+                    wandb.log(payload, step=int(self.num_timesteps))
+                else:
+                    payload.setdefault("global_step", int(self.num_timesteps))
+                    wandb.log(payload)
         except Exception as exc:
             if self.verbose:
                 print(f"[wandb-video] upload failed: {exc}", flush=True)
