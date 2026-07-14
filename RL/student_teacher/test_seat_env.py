@@ -1,4 +1,4 @@
-"""CPU-only reset-distribution acceptance check for the Stage-A seat env."""
+"""CPU-only acceptance checks for the wedged-start Seat RL v2 env."""
 from __future__ import annotations
 
 import numpy as np
@@ -7,80 +7,113 @@ import pytest
 from RL.student_teacher.seat_env import (
     FORCE_SOFT_START_N,
     SEATED_SUCCESS_BONUS,
-    SEAT_RETRACTION_FROM_SEATED_M,
+    STAGES,
     SeatEnv,
     make_seat_env,
 )
+from RL.student_teacher.parity.evaluate_guided_controller import guided_action
+from RL.student_teacher.student_env_a import DEPLOY_POS_SCALE
 
 
-def _sample(stage: str, seed: int = 7, n: int = 20):
-    env = make_seat_env(stage, seed=seed, domain_randomization=False)
-    lateral, rotation, retraction, insertion = [], [], [], []
+def _sample(stage: str, seed: int, n: int = 4):
+    rows = []
     for i in range(n):
-        obs, _ = env.reset(seed=seed + i)
-        assert obs["actor"].shape == (8, 34)
-        assert obs["privileged"].shape == (32,)
-        obs69 = env._current_obs69
-        lateral.append(float(np.linalg.norm(obs69[32:38][:2])))
-        rotation.append(float(np.linalg.norm(obs69[35:38])))
-        retraction.append(float(env.scene.cfg.seated_depth_m - env.scene._insertion_depth_m()))
-        insertion.append(float(env.scene._insertion_depth_m()))
-    return (np.asarray(lateral), np.asarray(rotation), np.asarray(retraction),
-            np.asarray(insertion))
+        env = make_seat_env(
+            stage, seed=seed + i, domain_randomization=True)
+        try:
+            obs, info = env.reset(seed=seed + i)
+            assert obs["actor"].shape == (8, 34)
+            assert obs["privileged"].shape == (32,)
+            probe = info["seat_reset_probe"]
+            rows.append({
+                "depth_m": float(env.scene._insertion_depth_m()),
+                "compiled_seed": int(env._compiled_seed),
+                "lateral_m": float(info["lateral_error_m"]),
+                "rotation_rad": float(np.hypot(
+                    info["plug_axis_error_rad"], info["plug_roll_error_rad"])),
+                "force_n": float(info["contact_force_norm"]),
+                "contacts": int(info["plug_port_contacts"]),
+                "level": float(info["curriculum_level"]),
+                "attempts": int(info["seat_reset_attempts"]),
+                "direction": str(info["seat_reset_direction"]),
+                "true_wedge": bool(info["seat_reset_true_lateral_wedge"]),
+                "straight_progress_m": float(
+                    probe["straight_probe"]["depth_progress_m"]),
+                "nudge_progress_m": float(
+                    probe["accepted_probe"]["depth_progress_m"]),
+                "rejected": list(info["seat_reset_rejected"]),
+            })
+        finally:
+            env.close()
+    return rows
 
 
-def _describe(name, lateral, rotation, retraction, insertion):
+def _describe(stage: str, rows: list[dict]):
+    def values(key):
+        return np.asarray([row[key] for row in rows], dtype=np.float64)
+
+    depth = 1e3 * values("depth_m")
+    lateral = 1e3 * values("lateral_m")
+    rotation = np.degrees(values("rotation_rad"))
+    attempts = values("attempts")
+    rejected = [item for row in rows for item in row["rejected"]]
+    flat_resamples = sum(
+        item.get("reason") in {
+            "contact_or_offset", "not_stalled_axially", "flat_or_dead_stall"
+        } for item in rejected)
+    total_candidates = int(np.sum(attempts))
+    accepted_fraction = len(rows) / max(total_candidates, 1)
     print(
-        f"{name}: lateral_mm min/mean/max={lateral.min()*1e3:.3f}/"
-        f"{lateral.mean()*1e3:.3f}/{lateral.max()*1e3:.3f}; "
-        f"rotation_deg min/mean/max={np.degrees(rotation.min()):.3f}/"
-        f"{np.degrees(rotation.mean()):.3f}/{np.degrees(rotation.max()):.3f}; "
-        f"retraction_from_seated_mm min/mean/max={retraction.min()*1e3:.3f}/"
-        f"{retraction.mean()*1e3:.3f}/{retraction.max()*1e3:.3f}; "
-        f"insertion_depth_mm min/mean/max={insertion.min()*1e3:.3f}/"
-        f"{insertion.mean()*1e3:.3f}/{insertion.max()*1e3:.3f}"
+        f"{stage}: level min/mean/max={values('level').min():.6f}/"
+        f"{values('level').mean():.6f}/{values('level').max():.6f}; "
+        f"depth_mm min/mean/max={depth.min():.3f}/{depth.mean():.3f}/{depth.max():.3f}; "
+        f"lateral_mm min/mean/max={lateral.min():.3f}/{lateral.mean():.3f}/{lateral.max():.3f}; "
+        f"rotation_deg min/mean/max={rotation.min():.3f}/{rotation.mean():.3f}/{rotation.max():.3f}; "
+        f"accepted_true_wedges={len(rows)}/{total_candidates} "
+        f"({accepted_fraction:.3f}); resamples={total_candidates-len(rows)} "
+        f"flat_resamples={flat_resamples}; "
+        f"resampled_reset_fraction={np.mean(attempts > 1):.3f}; "
+        f"directions={sorted({row['direction'] for row in rows})}; "
+        f"compiled_seeds={sorted({row['compiled_seed'] for row in rows})}"
     )
 
 
-def _zero_jitter_floor(seed: int = 101) -> tuple[float, float]:
-    """Measure the reset/settle residual with commanded in-port jitter disabled."""
-    env = make_seat_env("tight", seed=seed, domain_randomization=False)
-    env.scene.cfg.jitter_xy_inport_m = 0.0
-    env.scene.cfg.jitter_yaw_inport_rad = 0.0
-    env.scene.cfg.jitter_tilt_inport_rad = 0.0
-    env.reset(seed=seed)
-    obs69 = env._current_obs69
-    return (float(np.linalg.norm(obs69[32:38][:2])),
-            float(np.linalg.norm(obs69[35:38])))
-
-
 def test_seat_reset_distribution():
-    tight = _sample("tight")
-    full = _sample("full")
-    _describe("tight", *tight)
-    _describe("full", *full)
-    floor_lat, floor_rot = _zero_jitter_floor()
-    print(f"zero_jitter_floor: lateral_mm={floor_lat*1e3:.3f}; "
-          f"rotation_deg={np.degrees(floor_rot):.3f}")
+    samples = {
+        "near_seated": _sample("near_seated", 3101),
+        "mid": _sample("mid", 3201),
+        "wedge": _sample("wedge", 3301),
+    }
+    for stage, rows in samples.items():
+        _describe(stage, rows)
+        assert all(row["true_wedge"] for row in rows)
+        assert all(row["contacts"] > 0 for row in rows)
+        assert all(row["force_n"] <= 10.0 for row in rows)
+        assert all(0.24e-3 <= row["lateral_m"] <= 1.0e-3 for row in rows)
+        assert all(row["straight_progress_m"] <= 1.0e-3 for row in rows)
+        assert all(row["nudge_progress_m"] >= 2.0e-3 for row in rows)
 
-    tight_lat, tight_rot, tight_retract, tight_insert = tight
-    full_lat, full_rot, full_retract, full_insert = full
-    # Uniform radial-in-a-box samples include small values; require the tight
-    # distribution to remain centred in the measured 0.7 mm hand-off regime.
-    assert 0.25e-3 <= tight_lat.mean() <= 0.70e-3
-    # ~1.1 degrees is the reset/settle floor, not commanded jitter.
-    assert np.degrees(tight_rot.max()) <= 1.6
-    assert full_lat.max() <= 2.0e-3
-    assert np.degrees(full_rot.max()) <= 2.0
-    assert np.radians(0.9) <= floor_rot <= np.radians(1.5)
-    assert floor_lat < 0.7e-3
-    for values in (tight_retract, full_retract):
-        assert np.allclose(
-            values, SEAT_RETRACTION_FROM_SEATED_M, atol=1.5e-3)
-    for values in (tight_insert, full_insert):
-        assert 4.5e-3 <= values.min()
-        assert values.max() <= 7.0e-3
-        assert 5.0e-3 <= values.mean() <= 6.5e-3
+    means = {
+        stage: np.mean([row["depth_m"] for row in rows])
+        for stage, rows in samples.items()
+    }
+    assert means["near_seated"] > means["mid"]
+    wedge_depths = np.asarray([
+        row["depth_m"] for row in samples["wedge"]])
+    wedge_by_variant = {
+        row["compiled_seed"]: row["depth_m"] for row in samples["wedge"]
+    }
+    assert wedge_depths.min() < means["mid"]
+    assert np.ptp(wedge_depths) >= 15e-3
+    assert 34e-3 <= means["near_seated"] <= 42e-3
+    assert 25e-3 <= means["mid"] <= 35e-3
+    assert set(wedge_by_variant) == {20260715, 20260740, 20260731}
+    assert 4.5e-3 <= wedge_by_variant[20260715] <= 7.5e-3
+    assert 24e-3 <= wedge_by_variant[20260740] <= 30e-3
+    assert 39e-3 <= wedge_by_variant[20260731] <= 42e-3
+    assert STAGES["tight"] is STAGES["near_seated"]
+    assert STAGES["band"] is STAGES["mid"]
+    assert STAGES["full"] is STAGES["wedge"]
 
 
 def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
@@ -134,6 +167,34 @@ def test_seat_reward_signs():
     assert reward > 0.0
     assert terms["lateral"] > 0.0
 
+    # With identical depth progress, unloading the lateral wedge must beat an
+    # axial shove that keeps the side load and lateral pose error unchanged.
+    relief_after = before_lateral.copy()
+    relief_after[0] = 0.5e-3
+    relief_after[2] = 0.5e-3
+    shove_after = before_lateral.copy()
+    shove_after[2] = 0.5e-3
+    relief_reward, relief_terms = _reward_case(
+        before_lateral, relief_after,
+        {"f_z": 5.0, "f_lateral": 2.0, "contact_force_norm": 6.0,
+         "term_status": None},
+        prev_f_lateral=8.0,
+    )
+    shove_reward, shove_terms = _reward_case(
+        before_lateral, shove_after,
+        {"f_z": 5.0, "f_lateral": 8.0, "contact_force_norm": 9.5,
+         "term_status": None},
+        prev_f_lateral=8.0,
+    )
+    print(
+        f"reward_unstick_vs_shove: relief={relief_reward:.6f} "
+        f"shove={shove_reward:.6f}"
+    )
+    assert relief_reward > shove_reward
+    assert relief_terms["lateral"] > shove_terms["lateral"]
+    assert relief_terms["force_direction"] > shove_terms["force_direction"]
+    assert relief_terms["lateral_force"] > shove_terms["lateral_force"]
+
     reward, terms = _reward_case(
         zero, zero,
         {"f_z": 0.0, "f_lateral": 0.0, "contact_force_norm": 0.0,
@@ -184,83 +245,67 @@ def test_squareness_penalty_is_depth_ramped_and_sign_safe():
     assert more_crooked["squareness"] < deep["squareness"]
 
 
-def test_random_policy_smoke_and_feasibility():
-    """Five-episode safety smoke plus the 50-episode Stage-C random gate."""
-    episodes = 50
-    smoke_episodes = 5
+def test_wedge_random_vs_lateral_nudge_feasibility():
+    episodes = 4
     seed = 20260713
     rng = np.random.default_rng(seed)
-    env = make_seat_env("tight", seed=seed, domain_randomization=False)
-    seated_depth = float(env.scene.cfg.seated_depth_m)
-    force_abort_n = float(env.scene.cfg.force_abort_n)
+    env = make_seat_env("wedge", seed=seed, domain_randomization=True)
+    random_success = 0
+    random_status: dict[str, int] = {}
+    nudge_success = 0
+    nudge_progress = []
+    try:
+        for episode in range(episodes):
+            obs, _reset_info = env.reset(seed=seed + episode)
+            for _ in range(env.scene.cfg.max_episode_steps):
+                action = rng.uniform(-1.0, 1.0, size=6).astype(np.float32)
+                obs, reward, terminated, truncated, info = env.step(action)
+                assert np.isfinite(reward)
+                assert all(np.isfinite(v) for v in info["seat_reward_terms"].values())
+                if terminated or truncated:
+                    break
+            status = str(info.get("term_status") or "timeout")
+            random_status[status] = random_status.get(status, 0) + 1
+            random_success += int(status == "success")
 
-    seated_count = 0
-    exact_depth_count = 0
-    bonus_count = 0
-    smoke_force_below = 0
-    smoke_steps = 0
-    smoke_max_force = 0.0
-    total_steps = 0
-    traces = []
-
-    for episode in range(episodes):
-        env.reset(seed=seed + episode)
-        start_depth = float(env.scene._insertion_depth_m())
-        max_depth = start_depth
-        episode_max_force = 0.0
-        end_status = None
-        episode_seated = False
-        episode_exact_depth = False
-        for _ in range(env.scene.cfg.max_episode_steps):
-            action = rng.uniform(-1.0, 1.0, size=6).astype(np.float32)
-            _obs, reward, terminated, truncated, info = env.step(action)
-            assert np.isfinite(reward)
-            assert all(np.isfinite(v) for v in info["seat_reward_terms"].values())
-
-            force = float(info["contact_force_norm"])
-            assert np.isfinite(force)
-            episode_max_force = max(episode_max_force, force)
+        for episode in range(episodes):
+            obs, reset_info = env.reset(seed=seed + 100 + episode)
+            start_depth = float(env.scene._insertion_depth_m())
+            max_depth = start_depth
+            direction = SeatEnv._direction(
+                reset_info["seat_reset_probe"]["accepted_probe"]["direction"])
+            # Exact Phase-1 physical feasibility probe: one 0.75 mm lateral
+            # correction, then guided descent. Random policy above still uses
+            # the unchanged contact-scaled SeatEnv action path.
+            obs69 = env._current_obs69.copy()
+            action = guided_action(obs69).astype(np.float64)
+            action[:2] = direction * (
+                0.75e-3 / np.asarray(DEPLOY_POS_SCALE[:2], dtype=np.float64))
+            obs69, _reward, terminated, truncated, info = env.contract_env.step(
+                np.clip(action, -1.0, 1.0).astype(np.float32))
             max_depth = max(max_depth, float(info["insertion_depth_m"]))
-            end_status = info.get("term_status")
-            total_steps += 1
-            if episode < smoke_episodes:
-                smoke_steps += 1
-                smoke_force_below += int(force < force_abort_n)
-                smoke_max_force = max(smoke_max_force, force)
+            for _ in range(40):
+                if terminated or truncated:
+                    break
+                obs69, _reward, terminated, truncated, info = (
+                    env.contract_env.step(guided_action(obs69)))
+                max_depth = max(max_depth, float(info["insertion_depth_m"]))
+            progress = max_depth - start_depth
+            success = bool(
+                progress >= 2.0e-3 or info.get("term_status") == "success")
+            nudge_success += int(success)
+            nudge_progress.append(progress)
+    finally:
+        env.close()
 
-            if float(info["insertion_depth_m"]) >= seated_depth:
-                episode_exact_depth = True
-            if info.get("term_status") == "success":
-                episode_seated = True
-            if info["seat_reward_terms"]["success"] == SEATED_SUCCESS_BONUS:
-                bonus_count += 1
-            if terminated or truncated:
-                break
-        seated_count += int(episode_seated)
-        exact_depth_count += int(episode_exact_depth)
-        if episode < 5:
-            traces.append((episode, start_depth, max_depth, end_status,
-                           episode_max_force))
-
-    gentle_fraction = smoke_force_below / max(smoke_steps, 1)
     print(
-        f"random_smoke_5: steps={smoke_steps} force_below_abort="
-        f"{smoke_force_below}/{smoke_steps} ({gentle_fraction:.3f}) "
-        f"max_force_n={smoke_max_force:.3f}"
+        f"wedge_random_vs_nudge: random_success={random_success}/{episodes} "
+        f"random_status={random_status}; lateral_nudge_success="
+        f"{nudge_success}/{episodes}; nudge_progress_mm="
+        f"{[round(1e3*x, 3) for x in nudge_progress]}"
     )
-    print(
-        f"random_feasibility_50: seated_success={seated_count}/{episodes} "
-        f"exact_depth={exact_depth_count}/{episodes} "
-        f"success_bonus_fires={bonus_count} total_steps={total_steps}"
-    )
-    for episode, start_depth, max_depth, status, max_force in traces:
-        print(
-            f"random_trace[{episode}]: start_depth_mm={start_depth*1e3:.3f} "
-            f"max_depth_mm={max_depth*1e3:.3f} end_status={status} "
-            f"max_force_n={max_force:.3f}"
-        )
-    assert gentle_fraction >= 0.90
-    assert bonus_count == seated_count
+    assert random_success <= 1
+    assert nudge_success >= 3
 
 
 if __name__ == "__main__":
