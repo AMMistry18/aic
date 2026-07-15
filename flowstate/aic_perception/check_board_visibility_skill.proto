@@ -42,21 +42,22 @@ message CheckBoardVisibilitySkillParams {
   double settle_tolerance_m = 12;
   // Motion and settling budget for one internal move. 0 -> 5 seconds.
   double move_timeout_seconds = 13;
-  // Maximum cumulative TCP translation in one invocation. 0 -> 0.50 m.
+  // Maximum cumulative TCP translation in one invocation. 0 -> 0.80 m.
   double max_travel_m = 14;
   // Abort when force changes this much from the initial baseline. 0 -> 5 N.
   double force_delta_n = 15;
   // Overall adaptive-search deadline. 0 -> 90 seconds.
   double search_timeout_seconds = 16;
-  // Maximum start-relative TCP displacement. 0 -> 0.25 m.
+  // Maximum start-relative TCP displacement. 0 -> 0.50 m.
   double max_displacement_m = 17;
-  // Camera aim correction per orientation action. 0 -> 0.07 rad.
+  // Base scale for one image-feedback shoulder-pan correction. 0 -> 0.10 rad.
+  // The normal visible-board probe uses a fraction of this value.
   double angular_step_rad = 18;
-  // Maximum orientation change from the starting pose. 0 -> 0.35 rad.
+  // Maximum shoulder-pan change from the starting joint pose. 0 -> 1.60 rad.
   double max_angular_displacement_rad = 19;
-  // Maximum accumulated angular travel including rollbacks. 0 -> 1.2 rad.
+  // Maximum accumulated shoulder-pan travel including reversals. 0 -> 2.20 rad.
   double max_angular_travel_rad = 20;
-  // Dynamic frame clearance reserved for protruding NIC/SC hardware. 0 -> 0.20.
+  // Dynamic frame clearance reserved for protruding NIC/SC hardware. 0 -> 0.05.
   double context_margin_frac = 21;
   // Board pixels required for downstream component detail. 0 -> 0.06.
   double min_detail_area_frac = 22;
@@ -66,7 +67,7 @@ message CheckBoardVisibilitySkillParams {
   uint32 stable_frames = 24;
   // Maximum angular setpoint speed. 0 -> 0.12 rad/s.
   double max_angular_speed_rps = 25;
-  // Measured TCP orientation tolerance. 0 -> 0.025 rad.
+  // Measured TCP orientation tolerance during fixed-orientation clearance. 0 -> 0.025 rad.
   double settle_orientation_tolerance_rad = 26;
 }
 
@@ -102,8 +103,9 @@ message CheckBoardVisibilitySkillResult {
   double travel_m = 19;
   bool moved = 20;
   bool force_abort = 21;
-  // True when the board silhouette and the padded task-component envelope are
-  // inside a usable camera frame at adequate scale and quality.
+  // True after all three cameras met the horizontal area gate and the board
+  // silhouette plus padded task-component envelope are inside one usable
+  // camera frame at adequate scale and quality.
   bool component_coverage_ready = 22;
   double view_quality = 23;
   double angular_travel_rad = 24;

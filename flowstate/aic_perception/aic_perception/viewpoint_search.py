@@ -1,14 +1,12 @@
-"""Stateful, image-feedback viewpoint search planning.
+"""Camera-feedback policy for the four-stage task-board search.
 
-This module is intentionally independent of ROS and robot-control messages.  It
-turns successive per-camera :class:`MaskReport` observations into dimensionless
-motion requests.  The skill wrapper is responsible for mapping those requests
-through the selected camera frame and enforcing time, workspace, force, and
-controller limits.
-
-The planner never stops because a particular number of actions was proposed.
-It stops only for an explicit deadline, a completed view, loss of all visual
-evidence, or exhaustion of the safe alternatives for a stagnant observation.
+The sequence is deliberately fixed by the workcell geometry: align with J1,
+increase J2 clearance until the lower board is visible, use J3 clearance for
+the upper edge, then use J4 camera-roll for fine framing.  Each stage is
+*feedback directed*: its first relative direction is a probe and the opposite
+direction is selected when the camera evidence regresses.  A single camera
+with a complete padded board view is sufficient to finish; the other cameras
+are steering evidence, not a mandatory pixel-stitching requirement.
 """
 
 from __future__ import annotations
@@ -16,19 +14,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import math
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from .board_visibility import MaskReport
 
 
 class ActionKind(str, Enum):
-    """Kinds of actions understood by the board-visibility skill wrapper."""
-
+    OBSERVE = "observe"                # fresh-frame confirmation; no motion
+    BASE_YAW = "base_yaw"              # J1-equivalent base yaw arc
+    BACKOFF = "backoff"                # J2-equivalent optical-axis clearance
+    UP_CLEARANCE = "up_clearance"      # J3-equivalent vertical clearance
+    CAMERA_ROLL = "camera_roll"        # J4-equivalent optical-axis roll
+    # Retained for compatibility with older serialized diagnostics.
     TRANSLATE = "translate"
-    BACKOFF = "backoff"
     APPROACH = "approach"
     AIM = "aim"
     COMBINED = "combined"
+    HORIZONTAL_SCAN = "horizontal_scan"
     ROLLBACK = "rollback"
     DONE = "done"
     STAGNATED = "stagnated"
@@ -36,32 +38,22 @@ class ActionKind(str, Enum):
     DEADLINE = "deadline"
 
 
-_MOVEMENT_KINDS = frozenset(
-    {
-        ActionKind.TRANSLATE,
-        ActionKind.BACKOFF,
-        ActionKind.APPROACH,
-        ActionKind.AIM,
-        ActionKind.COMBINED,
-    }
-)
+_MOVEMENT_KINDS = frozenset({
+    ActionKind.BASE_YAW, ActionKind.BACKOFF, ActionKind.UP_CLEARANCE,
+    ActionKind.CAMERA_ROLL, ActionKind.TRANSLATE, ActionKind.APPROACH,
+    ActionKind.AIM, ActionKind.COMBINED, ActionKind.HORIZONTAL_SCAN,
+})
+
+
+class _Phase(str, Enum):
+    J1_YAW = "j1_yaw_alignment"
+    J2_CLEARANCE = "j2_bottom_clearance"
+    J3_CLEARANCE = "j3_top_clearance"
+    J4_ROLL = "j4_camera_roll"
 
 
 @dataclass(frozen=True)
 class ViewpointAction:
-    """A dimensionless motion request produced from the latest camera images.
-
-    ``image_direction`` is expressed as image-right/image-down.  The wrapper
-    multiplies it by its configured Cartesian step and transforms it through
-    the selected camera optical frame.  ``axial_direction`` is positive away
-    from the board and negative toward it.  ``aim_direction`` is an image-plane
-    pitch/yaw request which the wrapper scales by its angular step.
-
-    A combined action may contain all three components.  A rollback action asks
-    the wrapper to return to the pose saved immediately before ``rollback_of``.
-    Terminal actions never request robot motion.
-    """
-
     action_id: int
     kind: ActionKind
     camera: str | None = None
@@ -81,99 +73,81 @@ class ViewpointAction:
 
 
 @dataclass(frozen=True)
-class _ActionSpec:
-    kind: ActionKind
-    image_direction: tuple[float, float] = (0.0, 0.0)
-    axial_direction: float = 0.0
-    aim_direction: tuple[float, float] = (0.0, 0.0)
-    translation_scale: float = 1.0
-    angular_scale: float = 0.0
-
-
-@dataclass(frozen=True)
-class _PendingAction:
+class _Pending:
     action: ViewpointAction
-    report: MaskReport
-    state_key: tuple[object, ...]
-    action_key: tuple[object, ...]
+    phase: _Phase
+    score: float
 
 
 def image_direction_for_edges(edges: frozenset[str]) -> tuple[float, float]:
-    """Return a normalized image-plane camera correction for clipped edges."""
-
-    horizontal = (-1.0 if "left" in edges else 0.0) + (
-        1.0 if "right" in edges else 0.0
-    )
-    vertical = (-1.0 if "top" in edges else 0.0) + (
-        1.0 if "bottom" in edges else 0.0
-    )
-    norm = math.hypot(horizontal, vertical)
-    if norm <= 1e-12:
-        return (0.0, 0.0)
-    return (horizontal / norm, vertical / norm)
+    horizontal = (-1.0 if "left" in edges else 0.0) + (1.0 if "right" in edges else 0.0)
+    vertical = (-1.0 if "top" in edges else 0.0) + (1.0 if "bottom" in edges else 0.0)
+    magnitude = math.hypot(horizontal, vertical)
+    return (horizontal / magnitude, vertical / magnitude) if magnitude else (0.0, 0.0)
 
 
 def has_opposite_edges(edges: frozenset[str]) -> bool:
-    return ("left" in edges and "right" in edges) or (
-        "top" in edges and "bottom" in edges
-    )
+    return ("left" in edges and "right" in edges) or ("top" in edges and "bottom" in edges)
 
 
 class AdaptiveViewpointPlanner:
-    """Choose feedback-adaptive viewpoint actions without a move-count limit.
-
-    Call :meth:`next_action` once for each post-settle camera snapshot.  The
-    planner evaluates the previously requested action from the new report,
-    remembers persistent edge patterns per camera, and avoids repeating an
-    ineffective action at the same visual state.
-
-    The caller owns the overall monotonic deadline and passes
-    ``deadline_reached=True`` when it expires.  This keeps time deterministic in
-    tests and avoids embedding sleeps or clocks in the pure planner.
-    """
+    """Execute J1 -> J2 -> J3 -> J4 using the best stable camera view."""
 
     def __init__(
         self,
         *,
         min_goal_area_frac: float = 0.04,
-        max_goal_area_frac: float = 0.38,
+        max_goal_area_frac: float = 0.45,
+        expected_cameras: Sequence[str] = ("left_camera", "center_camera", "right_camera"),
+        horizontal_coverage_area_frac: float | None = None,
+        yaw_probe_scale: float = 0.75,
+        coverage_improvement_tolerance: float = 0.02,
         camera_switch_margin: float = 0.35,
         improvement_tolerance: float = 0.025,
         regression_tolerance: float = 0.04,
         area_quantum: float = 0.025,
         rectangularity_quantum: float = 0.10,
+        horizontal_center_threshold: float = 0.10,
+        horizontal_exit_threshold: float = 0.20,
+        alignment_confirmation_frames: int = 2,
+        clearance_drift_tolerance: float = 0.08,
     ) -> None:
         if not 0.0 <= min_goal_area_frac < max_goal_area_frac <= 1.0:
             raise ValueError("goal area limits must satisfy 0 <= min < max <= 1")
-        if camera_switch_margin < 0.0:
-            raise ValueError("camera_switch_margin must be non-negative")
-        if improvement_tolerance < 0.0:
-            raise ValueError("improvement_tolerance must be non-negative")
-        if regression_tolerance <= improvement_tolerance:
-            raise ValueError(
-                "regression_tolerance must exceed improvement_tolerance"
-            )
-        if area_quantum <= 0.0 or rectangularity_quantum <= 0.0:
-            raise ValueError("state quantization values must be positive")
-
+        cameras = tuple(str(item) for item in expected_cameras)
+        if not cameras or len(set(cameras)) != len(cameras):
+            raise ValueError("expected_cameras must be non-empty and unique")
         self.min_goal_area_frac = float(min_goal_area_frac)
         self.max_goal_area_frac = float(max_goal_area_frac)
-        self.camera_switch_margin = float(camera_switch_margin)
-        self.improvement_tolerance = float(improvement_tolerance)
-        self.regression_tolerance = float(regression_tolerance)
-        self.area_quantum = float(area_quantum)
-        self.rectangularity_quantum = float(rectangularity_quantum)
+        self.expected_cameras = cameras
+        self.horizontal_coverage_area_frac = float(horizontal_coverage_area_frac or min_goal_area_frac)
+        self.yaw_probe_scale = float(yaw_probe_scale)
+        self.improvement_tolerance = float(coverage_improvement_tolerance)
+        self.horizontal_center_threshold = float(horizontal_center_threshold)
+        self.horizontal_exit_threshold = float(horizontal_exit_threshold)
+        self.alignment_confirmation_frames = int(alignment_confirmation_frames)
+        self.clearance_drift_tolerance = float(clearance_drift_tolerance)
+        if self.alignment_confirmation_frames < 1:
+            raise ValueError("alignment_confirmation_frames must be positive")
+        if self.clearance_drift_tolerance < 0.0:
+            raise ValueError("clearance_drift_tolerance must be non-negative")
         self.reset()
 
     def reset(self) -> None:
-        self._selected_camera: str | None = None
-        self._last_edges: dict[str, frozenset[str]] = {}
-        self._edge_runs: dict[str, int] = {}
-        self._blacklisted: set[tuple[object, ...]] = set()
-        self._pending: _PendingAction | None = None
-        self._awaiting_rollback = False
+        self._phase = _Phase.J1_YAW
+        self._pending: _Pending | None = None
         self._next_action_id = 1
         self._terminal_action: ViewpointAction | None = None
+        self._selected_camera: str | None = None
+        self._direction = 0.0
+        self._phase_moves = 0
+        self._yaw_globally_unavailable = False
+        self._yaw_confirmed_moves = 0
+        self._yaw_reversal_candidate = 0.0
+        self._yaw_reversal_streak = 0
+        self._j1_alignment_streak = 0
+        self._j1_latched_error: float | None = None
+        self._current_score = 0.0
 
     @property
     def selected_camera(self) -> str | None:
@@ -184,376 +158,404 @@ class AdaptiveViewpointPlanner:
         return self._terminal_action is not None
 
     @property
+    def phase(self) -> str:
+        return self._phase.value
+
+    @property
+    def coverage_achieved(self) -> bool:
+        return False  # compatibility: completion is intentionally per-camera.
+
+    @property
     def blacklisted_action_count(self) -> int:
-        return len(self._blacklisted)
+        return 0
 
     def report_quality(self, report: MaskReport) -> float:
-        """Return a scalar used for camera selection, not goal acceptance."""
-
         if not report.seen:
-            return -1000.0
-        area = min(1.0, max(0.0, float(report.area_frac)))
-        rectangularity = min(1.0, max(0.0, float(report.rectangularity)))
-        score = 10.0
-        score -= 3.0 * len(report.edges)
-        if has_opposite_edges(report.edges):
-            score -= 1.0
-        score += 1.5 * rectangularity
-        # More visible board pixels are normally better for a partial view, but
-        # cap this term so a close, heavily clipped view does not dominate.
-        score += 2.0 * min(1.0, area / max(self.max_goal_area_frac, 1e-9))
-        if area > self.max_goal_area_frac:
-            score -= 4.0 * (area - self.max_goal_area_frac)
-        if report.full:
-            score += 20.0
-        return score
+            return -100.0
+        return (10.0 + 12.0 * float(report.full) + 2.0 * min(1.0, report.area_frac / self.max_goal_area_frac)
+                + min(1.0, report.rectangularity) - 1.5 * len(report.edges)
+                - 0.6 * abs(report.center_error[0]) - 0.3 * abs(report.center_error[1])
+                - 2.0 * float(report.artificial_bottom_contact))
 
-    def next_action(
-        self,
-        reports: Mapping[str, MaskReport],
-        *,
-        deadline_reached: bool = False,
-    ) -> ViewpointAction:
-        """Consume a fresh multi-camera observation and return the next action."""
-
+    def next_action(self, reports: Mapping[str, MaskReport], *, deadline_reached: bool = False) -> ViewpointAction:
         if self._terminal_action is not None:
             return self._terminal_action
         if deadline_reached:
-            return self._terminate(
-                ActionKind.DEADLINE,
-                "viewpoint-search deadline reached before a complete view",
-            )
+            return self._terminate(ActionKind.DEADLINE, "viewpoint-search deadline reached before a complete view")
+        goal = self._goal_camera(reports)
+        if goal is not None:
+            self._selected_camera = goal
+            return self._terminate(ActionKind.DONE, f"complete usable board view in {goal}", goal)
 
-        current_reports = dict(reports)
-        self._update_edge_runs(current_reports)
-        if self._awaiting_rollback:
-            # The caller has re-observed after returning to the saved pose.  Do
-            # not judge the rollback as though it were a new search action.
-            self._awaiting_rollback = False
-
-        goal_camera = self._goal_camera(current_reports)
-        if goal_camera is not None:
-            self._selected_camera = goal_camera
-            return self._terminate(
-                ActionKind.DONE,
-                f"complete usable board view in {goal_camera}",
-                camera=goal_camera,
-            )
-
-        if self._pending is not None:
-            feedback = self._evaluate_pending(current_reports)
-            if feedback == "regressed":
-                failed = self._pending
-                self._blacklisted.add(failed.action_key)
-                self._pending = None
-                self._awaiting_rollback = True
-                return self._new_action(
-                    _ActionSpec(ActionKind.ROLLBACK),
-                    camera=failed.action.camera,
-                    request_rollback=True,
-                    rollback_of=failed.action.action_id,
-                    reason=(
-                        f"{failed.action.kind.value} regressed the "
-                        f"{failed.action.camera} view; restore its saved pose"
-                    ),
-                )
-            if feedback == "stagnant":
-                self._blacklisted.add(self._pending.action_key)
+        center = reports.get("center_camera")
+        if center is None or not center.seen:
+            pending = self._pending
             self._pending = None
+            self._j1_alignment_streak = 0
+            if pending is not None and pending.action.kind is ActionKind.BASE_YAW:
+                previous = math.copysign(
+                    1.0, pending.action.aim_direction[0] or 1.0
+                )
+                candidate = -previous
+                if candidate == self._yaw_reversal_candidate:
+                    self._yaw_reversal_streak += 1
+                else:
+                    self._yaw_reversal_candidate = candidate
+                    self._yaw_reversal_streak = 1
+                if self._yaw_reversal_streak >= 2:
+                    self._direction = candidate
+                    self._yaw_reversal_candidate = 0.0
+                    self._yaw_reversal_streak = 0
+                else:
+                    self._direction = previous
+                self._phase_moves += 1
+            if self._phase is not _Phase.J1_YAW:
+                self._advance(_Phase.J1_YAW)
+            direction = self._side_camera_yaw_hint(reports)
+            return self._emit(ActionKind.BASE_YAW, "center_camera", aim=(direction, 0.0), angular=0.75,
+                              reason="J1 acquisition sweep: center camera lost the board; reverse/continue yaw")
+        primary_name = "center_camera"
+        primary = center
+        self._selected_camera = primary_name
+        self._consume_pending(primary)
+        self._current_score = self._phase_score(primary, self._phase)
 
-        selected = self._choose_camera(current_reports)
-        if selected is None:
-            return self._terminate(
-                ActionKind.NO_VIEW,
-                "no plausible board is visible in any supported camera",
-            )
-
-        candidate = self._candidate_for_camera(selected, current_reports[selected])
-        if candidate is None:
-            # Once a camera's safe actions are exhausted, deliberately try a
-            # different visible camera even when ordinary hysteresis would keep
-            # the current one.  Stagnation is global, not camera-local.
-            alternatives = sorted(
-                (
-                    (name, report)
-                    for name, report in current_reports.items()
-                    if name != selected and report.seen
+        # A small/partial center-camera mask can steer acquisition, but it is
+        # never sufficient to finish J1. Scoring it here lets two repeated
+        # regressions reverse the sweep without alternating every frame.
+        if not self._credible_alignment_report(primary):
+            self._j1_alignment_streak = 0
+            if self._phase is not _Phase.J1_YAW:
+                self._advance(_Phase.J1_YAW)
+                self._current_score = self._phase_score(primary, self._phase)
+            sign = self._choose_yaw_sign(primary)
+            return self._emit(
+                ActionKind.BASE_YAW,
+                primary_name,
+                aim=(sign, 0.0),
+                angular=self._yaw_scale(primary),
+                reason=(
+                    "J1 acquisition sweep: center-camera board mask is too "
+                    "small for an alignment decision"
                 ),
-                key=lambda item: self.report_quality(item[1]),
-                reverse=True,
-            )
-            for name, report in alternatives:
-                candidate = self._candidate_for_camera(name, report)
-                if candidate is not None:
-                    selected = name
-                    break
-
-        if candidate is None:
-            return self._terminate(
-                ActionKind.STAGNATED,
-                "all safe viewpoint actions were ineffective at the current view",
-                camera=selected,
             )
 
-        self._selected_camera = selected
-        spec, state_key, action_key = candidate
-        action = self._new_action(
-            spec,
-            camera=selected,
-            reason=self._reason_for(spec, current_reports[selected]),
-        )
-        self._pending = _PendingAction(
-            action=action,
-            report=current_reports[selected],
-            state_key=state_key,
-            action_key=action_key,
-        )
-        return action
+        # J2/J3/J4 can change the projected horizontal location.  Never keep
+        # rolling or changing clearance after the center camera has lost the
+        # actual board.  Restart the prescribed workflow at J1 immediately.
+        if (
+            self._phase is not _Phase.J1_YAW
+            and (
+                not self._yaw_aligned(
+                    primary,
+                    threshold=self.horizontal_exit_threshold,
+                )
+                or self._clearance_horizontal_drifted(primary)
+            )
+        ):
+            self._advance(_Phase.J1_YAW)
+            self._current_score = self._phase_score(primary, self._phase)
 
-    def _update_edge_runs(self, reports: Mapping[str, MaskReport]) -> None:
-        for camera, report in reports.items():
-            edges = report.edges if report.seen else frozenset()
-            if self._last_edges.get(camera) == edges:
-                self._edge_runs[camera] = self._edge_runs.get(camera, 0) + 1
+        # The exact requested ordering.  A phase can advance early once its
+        # visual condition is satisfied; it never waits for all three cameras.
+        if self._phase is _Phase.J1_YAW:
+            if self._yaw_aligned(primary):
+                self._j1_alignment_streak += 1
+                if self._j1_alignment_streak < self.alignment_confirmation_frames:
+                    # No motion occurs during confirmation, so discard the
+                    # previous move direction. If the next fresh frame falls
+                    # outside the gate, its center/edge evidence chooses the
+                    # correction instead of blindly continuing stale yaw.
+                    self._direction = 0.0
+                    self._yaw_reversal_candidate = 0.0
+                    self._yaw_reversal_streak = 0
+                    return self._emit(
+                        ActionKind.OBSERVE,
+                        primary_name,
+                        reason=(
+                            "J1 alignment candidate: capture a second fresh "
+                            "center-camera frame before changing joints"
+                        ),
+                    )
+                self._j1_latched_error = abs(float(primary.center_error[0]))
+                self._advance(_Phase.J2_CLEARANCE)
+                self._current_score = self._phase_score(primary, self._phase)
             else:
-                self._last_edges[camera] = edges
-                self._edge_runs[camera] = 1
+                self._j1_alignment_streak = 0
+                sign = self._choose_yaw_sign(primary)
+                return self._emit(ActionKind.BASE_YAW, primary_name, aim=(sign, 0.0), angular=self._yaw_scale(primary),
+                                  reason="J1 horizontal yaw: center the board in the center camera")
+        if self._phase is _Phase.J2_CLEARANCE:
+            if self._clearance_ready(primary):
+                self._advance(_Phase.J3_CLEARANCE)
+                self._current_score = self._phase_score(primary, self._phase)
+            else:
+                sign = self._choose_relative_sign(primary, default=1.0)
+                return self._emit(ActionKind.BACKOFF, primary_name, axial=sign, scale=1.0,
+                                  reason="J2 relative clearance: expose the lower board edge")
+        if self._phase is _Phase.J3_CLEARANCE:
+            if self._top_visible(primary):
+                self._advance(_Phase.J4_ROLL)
+                self._current_score = self._phase_score(primary, self._phase)
+            else:
+                sign = self._choose_relative_sign(primary, default=1.0)
+                return self._emit(ActionKind.UP_CLEARANCE, primary_name, axial=sign, scale=1.0,
+                                  reason="J3 relative clearance: expose the upper board edge")
+        # J4 is a camera roll, not a pitch.  The wrapper maps this to a roll
+        # about the selected optical axis; its sign is checked after each view.
+        if self._phase is _Phase.J4_ROLL:
+            if self._phase_moves >= 4:
+                self._advance(_Phase.J1_YAW)
+                self._current_score = self._phase_score(primary, self._phase)
+            else:
+                sign = self._choose_relative_sign(primary, default=1.0)
+                return self._emit(ActionKind.CAMERA_ROLL, primary_name, aim=(sign, 0.0), angular=0.55,
+                                  reason="J4 camera roll: fine-frame top and bottom board edges")
+        return self.next_action(reports, deadline_reached=deadline_reached)
+
+    def mark_yaw_unavailable(self, action: ViewpointAction, *, reason: str, global_unavailable: bool = False) -> None:
+        if action.kind != ActionKind.BASE_YAW:
+            raise ValueError("yaw rejection does not match the pending action")
+        self._pending = None
+        self._yaw_globally_unavailable = bool(global_unavailable)
+        # A preflight boundary is a hard constraint, not negative image
+        # feedback. Reversing here caused the observed two-pose oscillation:
+        # image feedback immediately requested the improving direction again,
+        # which the same boundary rejected. Stop once with a useful diagnostic
+        # instead of commanding motion away from the best measured view.
+        self._terminate(
+            ActionKind.STAGNATED,
+            f"J1 yaw cannot continue in its improving direction: {reason}",
+            camera=action.camera,
+        )
 
     def _goal_camera(self, reports: Mapping[str, MaskReport]) -> str | None:
-        candidates = [
-            (camera, report)
-            for camera, report in reports.items()
-            if report.seen
-            and report.full
-            and self.min_goal_area_frac
-            <= float(report.area_frac)
-            <= self.max_goal_area_frac
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: self.report_quality(item[1]))[0]
+        candidates = [(name, report) for name, report in reports.items()
+                      if report.seen and report.full and self.min_goal_area_frac <= report.area_frac <= self.max_goal_area_frac]
+        return max(candidates, key=lambda item: self.report_quality(item[1]))[0] if candidates else None
 
-    def _choose_camera(self, reports: Mapping[str, MaskReport]) -> str | None:
-        detected = [
-            (camera, report)
-            for camera, report in reports.items()
-            if report.seen
-        ]
-        if not detected:
-            return None
-        best_camera, best_report = max(
-            detected, key=lambda item: self.report_quality(item[1])
-        )
-        if self._selected_camera is None:
-            return best_camera
-        current = reports.get(self._selected_camera)
-        if current is None or not current.seen:
-            return best_camera
-        current_score = self.report_quality(current)
-        best_score = self.report_quality(best_report)
-        if (
-            best_camera != self._selected_camera
-            and best_score <= current_score + self.camera_switch_margin
-        ):
-            return self._selected_camera
-        return best_camera
-
-    def _evaluate_pending(self, reports: Mapping[str, MaskReport]) -> str:
-        assert self._pending is not None
-        previous = self._pending.report
-        current = reports.get(self._pending.action.camera or "")
-        if current is None or not current.seen:
-            return "regressed"
-        delta = self._progress_delta(previous, current, self._pending.action.kind)
-        if delta < -self.regression_tolerance:
-            return "regressed"
-        if delta <= self.improvement_tolerance:
-            return "stagnant"
-        return "improved"
-
-    @staticmethod
-    def _progress_delta(
-        previous: MaskReport,
-        current: MaskReport,
-        action_kind: ActionKind,
-    ) -> float:
-        """Measure action progress with the intended axial direction in mind."""
-
-        if current.full and not previous.full:
-            return 20.0
-        if previous.full and not current.full:
-            return -20.0
-        delta = 3.0 * (len(previous.edges) - len(current.edges))
-        delta += 1.5 * (
-            float(current.rectangularity) - float(previous.rectangularity)
-        )
-        area_change = float(current.area_frac) - float(previous.area_frac)
-        if action_kind == ActionKind.BACKOFF:
-            area_change = -area_change
-        # An approach should increase scale; translations, aiming, and combined
-        # corrections normally reveal more of a clipped board.
-        delta += 4.0 * area_change
-        return delta
-
-    def _candidate_for_camera(
-        self, camera: str, report: MaskReport
-    ) -> tuple[_ActionSpec, tuple[object, ...], tuple[object, ...]] | None:
-        state_key = self._state_key(camera, report)
-        for spec in self._action_specs(camera, report):
-            action_key = self._action_key(state_key, spec)
-            if action_key not in self._blacklisted:
-                return spec, state_key, action_key
-        return None
-
-    def _action_specs(self, camera: str, report: MaskReport) -> list[_ActionSpec]:
-        if report.full and report.area_frac < self.min_goal_area_frac:
-            return [
-                _ActionSpec(
-                    ActionKind.APPROACH,
-                    axial_direction=-1.0,
-                    translation_scale=0.75,
-                )
-            ]
-        if report.full and report.area_frac > self.max_goal_area_frac:
-            return [
-                _ActionSpec(
-                    ActionKind.BACKOFF,
-                    axial_direction=1.0,
-                    translation_scale=0.75,
-                )
-            ]
-
-        direction = image_direction_for_edges(report.edges)
-        translate = _ActionSpec(
-            ActionKind.TRANSLATE,
-            image_direction=direction,
-            translation_scale=1.0,
-        )
-        combined = _ActionSpec(
-            ActionKind.COMBINED,
-            image_direction=direction,
-            axial_direction=0.35,
-            aim_direction=direction,
-            translation_scale=0.70,
-            angular_scale=0.50,
-        )
-        aim = _ActionSpec(
-            ActionKind.AIM,
-            aim_direction=direction,
-            translation_scale=0.0,
-            angular_scale=0.75,
-        )
-        backoff = _ActionSpec(
-            ActionKind.BACKOFF,
-            axial_direction=1.0,
-            translation_scale=0.75,
-        )
-
-        if has_opposite_edges(report.edges):
-            base = [backoff, combined, aim, translate]
-        elif direction == (0.0, 0.0):
-            # A future stricter detector can report not-full because of
-            # perspective/shape quality even without a clipped edge.
-            base = [aim, backoff]
-        else:
-            base = [translate, combined, aim, backoff]
-
-        run = max(1, self._edge_runs.get(camera, 1))
-        offset = (run - 1) % len(base)
-        return base[offset:] + base[:offset]
-
-    def _state_key(self, camera: str, report: MaskReport) -> tuple[object, ...]:
-        return (
-            camera,
-            tuple(sorted(report.edges)),
-            bool(report.full),
-            int(round(float(report.area_frac) / self.area_quantum)),
-            int(
-                round(
-                    float(report.rectangularity)
-                    / self.rectangularity_quantum
-                )
-            ),
-        )
-
-    @staticmethod
-    def _action_key(
-        state_key: tuple[object, ...], spec: _ActionSpec
-    ) -> tuple[object, ...]:
-        def rounded(values: tuple[float, float]) -> tuple[float, float]:
-            return (round(values[0], 3), round(values[1], 3))
-
-        return (
-            *state_key,
-            spec.kind.value,
-            rounded(spec.image_direction),
-            round(spec.axial_direction, 3),
-            rounded(spec.aim_direction),
-        )
-
-    @staticmethod
-    def _reason_for(spec: _ActionSpec, report: MaskReport) -> str:
-        edges = ",".join(sorted(report.edges)) or "none"
-        if spec.kind == ActionKind.TRANSLATE:
-            return f"translate from image evidence at clipped edges {edges}"
-        if spec.kind == ActionKind.COMBINED:
-            return f"persistent edges {edges}; combine centering, aim, and standoff"
-        if spec.kind == ActionKind.AIM:
-            return f"persistent edges {edges}; change camera viewing angle"
-        if spec.kind == ActionKind.BACKOFF:
-            return f"increase standoff for clipped/oversized view at {edges}"
-        if spec.kind == ActionKind.APPROACH:
-            return "complete board is too small; approach for component resolution"
-        return spec.kind.value
-
-    def _new_action(
+    def _credible_alignment_report(
         self,
-        spec: _ActionSpec,
-        *,
-        camera: str | None,
-        reason: str,
-        request_rollback: bool = False,
-        rollback_of: int | None = None,
-        terminal: bool = False,
-    ) -> ViewpointAction:
-        action = ViewpointAction(
-            action_id=self._next_action_id,
-            kind=spec.kind,
-            camera=camera,
-            image_direction=spec.image_direction,
-            axial_direction=spec.axial_direction,
-            aim_direction=spec.aim_direction,
-            translation_scale=spec.translation_scale,
-            angular_scale=spec.angular_scale,
-            request_rollback=request_rollback,
-            rollback_of=rollback_of,
-            terminal=terminal,
-            reason=reason,
+        report: MaskReport | None,
+    ) -> bool:
+        return bool(
+            report is not None
+            and report.seen
+            and report.area_frac >= self.min_goal_area_frac
         )
+
+    def _consume_pending(self, current: MaskReport) -> None:
+        pending = self._pending
+        self._pending = None
+        if pending is None or pending.phase is not self._phase:
+            return
+        self._phase_moves += 1
+        score = self._phase_score(current, self._phase)
+        if score < pending.score - self.improvement_tolerance:
+            if pending.action.kind == ActionKind.BASE_YAW:
+                previous = math.copysign(
+                    1.0, pending.action.aim_direction[0] or 1.0
+                )
+                candidate = -previous
+                left_only = "left" in current.edges and "right" not in current.edges
+                right_only = "right" in current.edges and "left" not in current.edges
+                explicit_opposite_edge = (
+                    (candidate < 0.0 and left_only)
+                    or (candidate > 0.0 and right_only)
+                )
+                if explicit_opposite_edge:
+                    self._direction = candidate
+                    self._yaw_reversal_candidate = 0.0
+                    self._yaw_reversal_streak = 0
+                    self._yaw_confirmed_moves = 0
+                else:
+                    if candidate == self._yaw_reversal_candidate:
+                        self._yaw_reversal_streak += 1
+                    else:
+                        self._yaw_reversal_candidate = candidate
+                        self._yaw_reversal_streak = 1
+                    # One noisy mask cannot reverse J1. Keep the current
+                    # improving direction until regression repeats.
+                    if self._yaw_reversal_streak >= 2:
+                        self._direction = candidate
+                        self._yaw_reversal_candidate = 0.0
+                        self._yaw_reversal_streak = 0
+                        self._yaw_confirmed_moves = 0
+                    else:
+                        self._direction = previous
+            elif pending.action.kind in {ActionKind.BACKOFF, ActionKind.UP_CLEARANCE}:
+                self._direction = -float(pending.action.axial_direction or 1.0)
+            else:
+                self._direction = -float(pending.action.aim_direction[0] or 1.0)
+        else:
+            self._direction = (pending.action.axial_direction or pending.action.aim_direction[0] or self._direction)
+            if pending.action.kind is ActionKind.BASE_YAW:
+                if score > pending.score + self.improvement_tolerance:
+                    self._yaw_confirmed_moves += 1
+                    self._yaw_reversal_candidate = 0.0
+                    self._yaw_reversal_streak = 0
+                elif self._yaw_reversal_candidate:
+                    previous = math.copysign(
+                        1.0, pending.action.aim_direction[0] or 1.0
+                    )
+                    if self._yaw_reversal_candidate == -previous:
+                        self._yaw_reversal_streak += 1
+                        if self._yaw_reversal_streak >= 2:
+                            self._direction = self._yaw_reversal_candidate
+                            self._yaw_reversal_candidate = 0.0
+                            self._yaw_reversal_streak = 0
+                            self._yaw_confirmed_moves = 0
+
+    def _yaw_aligned(
+        self,
+        report: MaskReport,
+        *,
+        threshold: float | None = None,
+    ) -> bool:
+        # A small centered blob touching the ignored gripper band is normally
+        # the wrist/gripper, not the task board.  The previous policy advanced
+        # on exactly that false positive (area 0.021, y=0.928).
+        center_limit = (
+            self.horizontal_center_threshold
+            if threshold is None
+            else float(threshold)
+        )
+        if report.area_frac < self.min_goal_area_frac:
+            return False
+        if abs(report.center_error[0]) > center_limit:
+            return False
+        left = "left" in report.edges
+        right = "right" in report.edges
+        oversized = (
+            report.area_frac > self.max_goal_area_frac
+            or (left and right)
+        )
+        # Edge-free is ideal at useful scale.  When an oversized board is
+        # already centered, yaw cannot remove its edge contacts; J2 standoff
+        # is the correct next degree of freedom.
+        return oversized or not (left or right)
+
+    def _bottom_visible(self, report: MaskReport) -> bool:
+        return "bottom" not in report.edges and not report.artificial_bottom_contact
+
+    def _clearance_ready(self, report: MaskReport) -> bool:
+        """True when J2 standoff has produced a usable board scale."""
+
+        return (
+            self._bottom_visible(report)
+            and report.area_frac <= self.max_goal_area_frac
+            and not has_opposite_edges(report.edges)
+        )
+
+    def _clearance_horizontal_drifted(self, report: MaskReport) -> bool:
+        """Return to J1 when a clearance move materially loses centering."""
+
+        if self._phase is _Phase.J1_YAW:
+            return False
+        current_error = abs(float(report.center_error[0]))
+        if current_error > self.horizontal_exit_threshold:
+            return True
+        if self._j1_latched_error is None:
+            return False
+        return current_error > self._j1_latched_error + self.clearance_drift_tolerance
+
+    def _top_visible(self, report: MaskReport) -> bool:
+        return "top" not in report.edges
+
+    def _choose_yaw_sign(self, report: MaskReport) -> float:
+        if self._direction:
+            return math.copysign(1.0, self._direction)
+        if "left" in report.edges and "right" not in report.edges:
+            return -1.0
+        if "right" in report.edges and "left" not in report.edges:
+            return 1.0
+        return math.copysign(1.0, report.center_error[0] or 1.0)
+
+    def _yaw_scale(self, report: MaskReport) -> float:
+        """Use a probe first, then monotonic coarse-to-fine yaw steps."""
+
+        if self._yaw_confirmed_moves <= 0:
+            return self.yaw_probe_scale
+        error = abs(float(report.center_error[0]))
+        if error > 0.50:
+            return 1.50
+        if error > 0.25:
+            return 1.00
+        return 0.50
+
+    def _side_camera_yaw_hint(self, reports: Mapping[str, MaskReport]) -> float:
+        """Use side masks only to seed a reversible center-camera sweep."""
+
+        if self._direction:
+            return math.copysign(1.0, self._direction)
+        weighted = 0.0
+        for name in ("left_camera", "right_camera"):
+            report = reports.get(name)
+            if report is None or not report.seen:
+                continue
+            if "left" in report.edges and "right" not in report.edges:
+                weighted -= max(report.area_frac, 0.01)
+            elif "right" in report.edges and "left" not in report.edges:
+                weighted += max(report.area_frac, 0.01)
+            else:
+                weighted += report.center_error[0] * max(report.area_frac, 0.01)
+        return math.copysign(1.0, weighted or 1.0)
+
+    def _choose_relative_sign(self, report: MaskReport, *, default: float) -> float:
+        return math.copysign(1.0, self._direction) if self._direction else default
+
+    def _phase_score(self, report: MaskReport, phase: _Phase) -> float:
+        if phase is _Phase.J1_YAW:
+            detail_deficit = max(
+                0.0,
+                self.min_goal_area_frac - float(report.area_frac),
+            ) / max(self.min_goal_area_frac, 1e-9)
+            return (
+                -abs(report.center_error[0])
+                - 2.0 * float("left" in report.edges or "right" in report.edges)
+                - 6.0 * float(report.artificial_bottom_contact)
+                - 4.0 * detail_deficit
+                + float(report.area_frac)
+            )
+        if phase is _Phase.J2_CLEARANCE:
+            scale_excess = max(
+                0.0,
+                report.area_frac - self.max_goal_area_frac,
+            ) / max(self.max_goal_area_frac, 1e-9)
+            return (
+                6.0 * float(self._clearance_ready(report))
+                + 2.0 * float(self._bottom_visible(report))
+                - 2.0 * float(report.artificial_bottom_contact)
+                - float("bottom" in report.edges)
+                - 3.0 * float(has_opposite_edges(report.edges))
+                - 2.0 * scale_excess
+            )
+        if phase is _Phase.J3_CLEARANCE:
+            return 4.0 * float(self._top_visible(report)) - float("top" in report.edges) - abs(report.center_error[1]) * 0.2
+        return self.report_quality(report)
+
+    def _advance(self, phase: _Phase) -> None:
+        self._phase = phase
+        self._phase_moves = 0
+        self._direction = 0.0
+        if phase is _Phase.J1_YAW:
+            self._yaw_confirmed_moves = 0
+            self._yaw_reversal_candidate = 0.0
+            self._yaw_reversal_streak = 0
+            self._j1_alignment_streak = 0
+
+    def _emit(self, kind: ActionKind, camera: str, *, axial: float = 0.0, aim: tuple[float, float] = (0.0, 0.0), scale: float = 1.0, angular: float = 0.0, reason: str) -> ViewpointAction:
+        action = ViewpointAction(self._next_action_id, kind, camera, axial_direction=axial, aim_direction=aim, translation_scale=scale, angular_scale=angular, reason=reason)
         self._next_action_id += 1
+        # Only robot motion needs before/after feedback scoring. OBSERVE is a
+        # deliberate fresh-frame confirmation with no pending movement.
+        if action.moves_robot:
+            self._pending = _Pending(action, self._phase, self._current_score)
+        else:
+            self._pending = None
         return action
 
-    def _terminate(
-        self,
-        kind: ActionKind,
-        reason: str,
-        *,
-        camera: str | None = None,
-    ) -> ViewpointAction:
-        self._pending = None
-        self._terminal_action = self._new_action(
-            _ActionSpec(kind),
-            camera=camera,
-            reason=reason,
-            terminal=True,
-        )
+    def _terminate(self, kind: ActionKind, reason: str, camera: str | None = None) -> ViewpointAction:
+        self._terminal_action = ViewpointAction(self._next_action_id, kind, camera=camera, terminal=True, reason=reason)
+        self._next_action_id += 1
         return self._terminal_action
-
-
-__all__ = [
-    "ActionKind",
-    "AdaptiveViewpointPlanner",
-    "ViewpointAction",
-    "has_opposite_edges",
-    "image_direction_for_edges",
-]

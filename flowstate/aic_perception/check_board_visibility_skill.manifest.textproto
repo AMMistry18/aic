@@ -1,13 +1,13 @@
 id {
   package: "ai.tar2"
-  name: "check_board_visibility_skill"
+  name: "check_board_visibility_skill_v4"
 }
-display_name: "Search Board Visibility"
+display_name: "Search Board Visibility v4"
 vendor {
   display_name: "TAR-2"
 }
 documentation {
-  description: "Uses permitted wrist-camera images, controller state, wrist force, and robot-mounted TF frames to run an adaptive viewpoint search until the full task board and a padded NIC/SC component envelope are visible. It performs bounded minimum-jerk 6-DoF Cartesian moves through aic_controller with measured-TCP settling, image-score rollback, and force-triggered reversal. It never reads task-board, port, module, cable, Gazebo, or scoring ground-truth poses."
+  description: "Uses permitted wrist-camera images, measured /joint_states arm angles, controller state, wrist force, and robot-mounted TF frames to search until the full task board and a padded NIC/SC component envelope are visible. Image feedback hill-climbs the shoulder-pan-equivalent base-Z TCP arc against all three camera masks, prioritizing camera count and worst-camera board area; a worsening probe tests the opposite yaw. The arc rotates TCP position and orientation together through the accepted Cartesian controller and does not require a joint-target-mode switch. Only after three-camera horizontal coverage succeeds, or after both safe yaw directions fail at one height, may it raise the TCP; an escape height step is immediately followed by another yaw optimization. Every move retains measured settling, workspace/travel limits, force-triggered reversal, and a bounded deadline. It never reads task-board, port, module, cable, Gazebo, or scoring ground-truth poses."
 }
 options {
   supports_cancellation: true

@@ -2,8 +2,9 @@
 
 ## Check Board Visibility
 
-`ai.tar2.check_board_visibility_skill` uses only documented participant data:
-three wrist-camera image topics, controller state, wrist wrench, and
+`ai.tar2.check_board_visibility_skill_v4` uses only documented participant data:
+three wrist-camera image topics, measured `/joint_states`, controller state,
+wrist wrench, and
 robot-mounted TF. Its TF access is code-restricted to these pairs:
 
 ```text
@@ -14,43 +15,59 @@ base_link <- gripper/tcp
 ```
 
 It does not request task-board, port, module, cable, Gazebo, entity-state, or
-scoring transforms. One invocation performs the camera/motion loop itself. It
-sends bounded full-pose Cartesian setpoints to `/aic_controller/pose_commands`,
-waits for measured TCP position and orientation settling, then scores a fresh
-three-camera snapshot before choosing another move. Camera pitch/yaw changes
-are Cartesian orientation targets, so the controller can coordinate all six
-joints without blind joint-space sweeps.
+scoring transforms. One invocation performs the camera/motion loop itself. If
+no camera sees the board, it sends a bounded joint-1 horizontal acquisition
+sweep as a small base-Z Cartesian TCP arc through
+`/aic_controller/pose_commands`. This target rotates TCP position and
+orientation together and is the local forward-kinematics motion of shoulder
+pan, without requiring the live controller to accept a joint-target-mode
+switch. Detection does not end horizontal alignment: a visible left/right edge,
+missing camera, or low board-area fraction seeds a small yaw probe.
+The result is scored across all three cameras, prioritizing camera count and
+then the worst camera's visible board area. The search continues toward an
+improving yaw and tests the opposite side when a probe makes coverage worse.
+Only after all three cameras meet the horizontal coverage target does it send
+base-frame `+Z` Cartesian clearance steps through
+`/aic_controller/pose_commands`, passing the measured TCP orientation through
+unchanged.
 
-The search is feedback-driven, not random and not a fixed sequence. It selects
-among camera-plane translation, optical-axis backoff/approach, camera aiming,
-and combined corrections. An action that makes the image worse is rolled back
-and blacklisted for that visual state; persistent edge evidence rotates through
-other safe action types and cameras. There is no fixed move-count terminal.
+The search is feedback-driven, not random and not a fixed sequence. If neither
+yaw direction improves three-camera coverage, it restores the best measured
+yaw, takes one upward escape step, and immediately repeats horizontal
+optimization at the new height. It does not stack upward moves before that yaw
+retry. The visible-board policy never pitches the camera, combines rotation
+with translation, or approaches an uncertain board. There is no fixed
+move-count terminal.
 
-`done` requires the board silhouette plus a dynamic 20%-of-projected-board
-context envelope to remain inside one usable camera frame for two fresh
-snapshots. It also requires enough board pixels for downstream NIC/SC detail,
-a sufficiently clean silhouette, and no contact with the gripper-exclusion
-boundary. This is a geometric coverage guarantee for the plate and protruding
-component zones; IVM downstream remains responsible for semantic NIC/SC pose
-detection.
+`done` first requires every configured wrist camera to see at least 12% board
+pixels by default. After that horizontal gate latches, the board silhouette plus
+a dynamic 5%-of-projected-board context envelope must remain inside one usable
+camera frame for two fresh snapshots. It also requires enough board pixels for
+downstream NIC/SC detail, a sufficiently clean silhouette, and no broad
+board-body contact with the gripper-exclusion boundary. A narrow arm/finger
+bridge into that band is removed before this contact test. This is a geometric
+coverage guarantee for the plate and protruding component zones; IVM downstream
+remains responsible for semantic NIC/SC pose detection.
 
 The internal motion safeguards are:
 
-- quintic minimum-jerk translation plus shortest-path quaternion SLERP at 20 Hz;
-- at most 0.025 m/s and 0.12 rad/s, with nominal 0.02 m and 0.07 rad actions;
-- a 90 second overall deadline, 0.25 m start-relative TCP envelope, 0.50 m
-  cumulative translation, 0.35 rad start-relative orientation, and 1.2 rad
+- quintic minimum-jerk Cartesian setpoints at 20 Hz;
+- at most 0.04 m/s and 0.20 rad/s, with coarse-to-fine 0.05-0.15 rad
+  visible-board yaw actions;
+- a 90 second overall deadline, 0.50 m start-relative TCP envelope, 0.80 m
+  cumulative translation, 1.60 rad start-relative J1 yaw, and 2.20 rad
   cumulative angular travel by default;
-- no blind move when the board is not detected;
+- a finite four-leg joint-1 scan when no camera detects the board, plus
+  image-feedback joint-1 centering when a partial board is already visible;
 - no motion above 18 N absolute wrist force (2 N below the documented 20 N
   scoring threshold) or a 5 N change from the initial force baseline;
 - immediate reversal to the beginning of the current step on force or
   cancellation;
 - measured-TCP pose settling and controller-subscriber checks after every move;
-- full-pose rollback after view regression or guarded motion failure; and
-- explicit stagnation failure only after all safe action types/cameras for the
-  current visual states have been exhausted.
+- confirmation of a strictly newer joint-mode controller sample before any
+  shoulder-pan command; and
+- bounded time, force, displacement, and cumulative-travel termination rather
+  than a trial-step limit.
 
 `aic_controller` provides command clamping, smoothing, impedance control, and a
 tracking-error safety reset. It is not the Flowstate world-model motion planner,
@@ -60,7 +77,8 @@ skill cannot guarantee collision-free motion from arbitrary starting poses.
 Inputs are the skill parameters in `CheckBoardVisibilitySkillParams`; no world
 objects or task poses are passed in. The ROS bridge must expose the three image
 topics, `/fts_broadcaster/wrench`, `/aic_controller/controller_state`, the
-Cartesian command and target-mode interfaces, and the four allowlisted
+measured `/joint_states` topic, Cartesian command and target-mode interfaces,
+and the four allowlisted
 robot-mounted TF pairs above.
 
 Build from a Linux/AMD64 workspace laid out as:

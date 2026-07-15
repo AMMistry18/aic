@@ -20,6 +20,7 @@ def test_configuration_has_closed_robot_camera_tf_allowlist():
     assert config.camera_frames == CAMERA_OPTICAL_FRAMES
     assert config.pose_command_topic == POSE_COMMAND_TOPIC
     assert config.controller_state_topic == CONTROLLER_STATE_TOPIC
+    assert config.joint_state_topic == "/joint_states"
     assert config.change_target_mode_service == CHANGE_TARGET_MODE_SERVICE
     assert all(name.endswith("_camera/optical") for name in config.camera_frames.values())
 
@@ -39,5 +40,7 @@ def test_privileged_or_environment_frame_override_is_rejected():
         PerceptionConfig(pose_command_topic="/joint_trajectory_controller/command")
     with pytest.raises(ValueError):
         PerceptionConfig(controller_state_topic="/gazebo/entity_state")
+    with pytest.raises(ValueError):
+        PerceptionConfig(joint_state_topic="/gazebo/joint_states")
     with pytest.raises(ValueError):
         PerceptionConfig(change_target_mode_service="/scoring/change_mode")

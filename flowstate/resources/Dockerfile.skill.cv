@@ -110,6 +110,8 @@ RUN printf '%s\n' \
       'source /workspace/install/local_setup.bash' \
       'export RMW_IMPLEMENTATION=rmw_zenoh_cpp' \
       'export ROS_HOME=/tmp' \
+      'export ROS_LOG_DIR="/tmp/aic_ros_logs_${UID}"' \
+      'mkdir -p "$ROS_LOG_DIR"' \
       'export ZENOH_CONFIG_OVERRIDE="connect/endpoints=[\"tcp/zenoh-router.app-intrinsic-base.svc.cluster.local:7447\"]"' \
       'exec "$SKILL_EXEC_PATH" "$@"' \
       > /run_skill.sh \

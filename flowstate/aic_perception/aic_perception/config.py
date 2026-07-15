@@ -21,6 +21,8 @@ CAMERA_OPTICAL_FRAMES = {
     "right_camera": "right_camera/optical",
 }
 POSE_COMMAND_TOPIC = "/aic_controller/pose_commands"
+JOINT_COMMAND_TOPIC = "/aic_controller/joint_commands"
+JOINT_STATE_TOPIC = "/joint_states"
 CONTROLLER_STATE_TOPIC = "/aic_controller/controller_state"
 CHANGE_TARGET_MODE_SERVICE = "/aic_controller/change_target_mode"
 
@@ -33,6 +35,8 @@ class PerceptionConfig:
     gripper_frame: str = "gripper/tcp"
     wrench_topic: str = "/fts_broadcaster/wrench"
     pose_command_topic: str = POSE_COMMAND_TOPIC
+    joint_command_topic: str = JOINT_COMMAND_TOPIC
+    joint_state_topic: str = JOINT_STATE_TOPIC
     controller_state_topic: str = CONTROLLER_STATE_TOPIC
     change_target_mode_service: str = CHANGE_TARGET_MODE_SERVICE
     cameras: tuple[str, ...] = CAMERA_NAMES
@@ -52,6 +56,10 @@ class PerceptionConfig:
             raise ValueError("wrench topic may not be overridden")
         if self.pose_command_topic != POSE_COMMAND_TOPIC:
             raise ValueError("pose command topic may not be overridden")
+        if self.joint_command_topic != JOINT_COMMAND_TOPIC:
+            raise ValueError("joint command topic may not be overridden")
+        if self.joint_state_topic != JOINT_STATE_TOPIC:
+            raise ValueError("joint state topic may not be overridden")
         if self.controller_state_topic != CONTROLLER_STATE_TOPIC:
             raise ValueError("controller state topic may not be overridden")
         if self.change_target_mode_service != CHANGE_TARGET_MODE_SERVICE:

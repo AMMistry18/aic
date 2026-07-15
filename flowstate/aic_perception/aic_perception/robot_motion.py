@@ -1,8 +1,8 @@
-"""Guarded Cartesian motion through the documented AIC controller interface."""
+"""Guarded Cartesian and joint motion through documented AIC interfaces."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import threading
 import time
@@ -11,6 +11,16 @@ from typing import Any, Callable
 import numpy as np
 
 from .config import PerceptionConfig
+
+
+ARM_JOINT_NAMES = (
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+)
 
 
 @dataclass(frozen=True)
@@ -23,11 +33,24 @@ class ControllerPose:
 
 
 @dataclass(frozen=True)
+class JointReference:
+    """Fresh measured arm joints paired with TCP speed and controller mode."""
+
+    positions: tuple[float, ...]
+    tcp_speed_mps: float
+    received_at: float
+    # ``aic_control_interfaces/msg/TargetMode.mode`` is uint8.  Store it as an
+    # ordinary Python int so mode comparisons remain explicit and testable.
+    target_mode: int | None = None
+
+
+@dataclass(frozen=True)
 class MotionOutcome:
     success: bool
     message: str
     distance_m: float = 0.0
     angular_distance_rad: float = 0.0
+    joint_distance_rad: float = 0.0
     force_abort: bool = False
     cancelled: bool = False
 
@@ -60,6 +83,49 @@ def quaternion_angular_distance(
     second_unit = np.asarray(normalize_quaternion(second), dtype=float)
     dot = float(np.clip(abs(np.dot(first_unit, second_unit)), 0.0, 1.0))
     return 2.0 * math.acos(dot)
+
+
+def base_yaw_target_pose(
+    position: tuple[float, float, float] | np.ndarray,
+    orientation: tuple[float, float, float, float] | np.ndarray,
+    angle_rad: float,
+) -> tuple[
+    tuple[float, float, float],
+    tuple[float, float, float, float],
+]:
+    """Return the TCP pose induced by shoulder pan about base-frame +Z.
+
+    Rotating position and orientation together is the rigid forward-kinematics
+    effect of joint 1.  It lets the accepted Cartesian controller execute the
+    horizontal search without switching into a rejected joint target mode.
+    """
+
+    xyz = np.asarray(position, dtype=float)
+    if xyz.shape != (3,) or not np.all(np.isfinite(xyz)):
+        raise ValueError("position must contain three finite values")
+    if not math.isfinite(float(angle_rad)):
+        raise ValueError("yaw angle must be finite")
+    current = normalize_quaternion(orientation)
+    cosine = math.cos(float(angle_rad))
+    sine = math.sin(float(angle_rad))
+    target_position = (
+        float(cosine * xyz[0] - sine * xyz[1]),
+        float(sine * xyz[0] + cosine * xyz[1]),
+        float(xyz[2]),
+    )
+    half = 0.5 * float(angle_rad)
+    x2, y2, z2, w2 = current
+    z1 = math.sin(half)
+    w1 = math.cos(half)
+    target_orientation = normalize_quaternion(
+        (
+            w1 * x2 - z1 * y2,
+            w1 * y2 + z1 * x2,
+            w1 * z2 + z1 * w2,
+            w1 * w2 - z1 * z2,
+        )
+    )
+    return target_position, target_orientation
 
 
 def quaternion_slerp(
@@ -113,6 +179,36 @@ def interpolated_positions(
     ]
 
 
+def interpolated_joint_positions(
+    start: tuple[float, ...],
+    target: tuple[float, ...],
+    samples: int,
+) -> list[tuple[float, ...]]:
+    """Minimum-jerk samples for an arbitrary fixed-size joint vector."""
+
+    if samples < 2:
+        raise ValueError("samples must be at least two")
+    start_array = np.asarray(start, dtype=float)
+    target_array = np.asarray(target, dtype=float)
+    if (
+        start_array.ndim != 1
+        or target_array.shape != start_array.shape
+        or start_array.size == 0
+    ):
+        raise ValueError("joint vectors must be non-empty and equal-sized")
+    if not np.all(np.isfinite(np.concatenate((start_array, target_array)))):
+        raise ValueError("joint positions must be finite")
+    return [
+        tuple(
+            float(value)
+            for value in start_array
+            + minimum_jerk(index / (samples - 1))
+            * (target_array - start_array)
+        )
+        for index in range(samples)
+    ]
+
+
 def interpolated_poses(
     start_position: tuple[float, float, float],
     target_position: tuple[float, float, float],
@@ -145,20 +241,36 @@ def interpolated_poses(
 
 
 class RobotMotion:
-    """Own one bounded, force-guarded Cartesian controller session."""
+    """Own bounded, force-guarded Cartesian and joint controller sessions."""
 
     def __init__(self, node: Any, camera_rig: Any, config: PerceptionConfig):
-        from aic_control_interfaces.msg import ControllerState, MotionUpdate
+        from aic_control_interfaces.msg import (
+            ControllerState,
+            JointMotionUpdate,
+            MotionUpdate,
+            TargetMode,
+        )
         from aic_control_interfaces.srv import ChangeTargetMode
-        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from rclpy.qos import (
+            DurabilityPolicy,
+            QoSProfile,
+            ReliabilityPolicy,
+            qos_profile_sensor_data,
+        )
+        from sensor_msgs.msg import JointState
 
         self._node = node
         self._camera_rig = camera_rig
         self._config = config
         self._MotionUpdate = MotionUpdate
+        self._JointMotionUpdate = JointMotionUpdate
+        self._mode_joint = int(TargetMode.MODE_JOINT)
         self._ChangeTargetMode = ChangeTargetMode
         self._condition = threading.Condition()
         self._state: ControllerPose | None = None
+        self._joint_reference: JointReference | None = None
+        self._target_mode: int | None = None
+        self._target_mode_received_at = -math.inf
         qos = QoSProfile(
             depth=5,
             reliability=ReliabilityPolicy.RELIABLE,
@@ -167,17 +279,27 @@ class RobotMotion:
         self._publisher = node.create_publisher(
             MotionUpdate, config.pose_command_topic, qos
         )
+        self._joint_publisher = node.create_publisher(
+            JointMotionUpdate, config.joint_command_topic, qos
+        )
         self._state_subscription = node.create_subscription(
             ControllerState,
             config.controller_state_topic,
             self._on_controller_state,
             qos,
         )
+        self._joint_state_subscription = node.create_subscription(
+            JointState,
+            config.joint_state_topic,
+            self._on_joint_state,
+            qos_profile_sensor_data,
+        )
         self._mode_client = node.create_client(
             ChangeTargetMode, config.change_target_mode_service
         )
 
     def _on_controller_state(self, message: Any) -> None:
+        received_at = time.monotonic()
         try:
             pose = message.tcp_pose
             velocity = message.tcp_velocity.linear
@@ -206,6 +328,12 @@ class RobotMotion:
             normalized = normalize_quaternion(orientation)
         except ValueError:
             return
+        target_mode = None
+        try:
+            target_mode = int(message.target_mode.mode)
+        except (AttributeError, TypeError, ValueError):
+            # TCP feedback remains useful if an older bridge omits mode.
+            pass
         angular_speed_radps = None
         try:
             angular = message.tcp_velocity.angular
@@ -225,8 +353,56 @@ class RobotMotion:
                 position=position,
                 orientation=normalized,
                 speed_mps=speed,
-                received_at=time.monotonic(),
+                received_at=received_at,
                 angular_speed_radps=angular_speed_radps,
+            )
+            if target_mode is not None:
+                self._target_mode = target_mode
+                self._target_mode_received_at = received_at
+            self._condition.notify_all()
+
+    def _on_joint_state(self, message: Any) -> None:
+        """Cache the six measured arm joints in controller command order.
+
+        ``ControllerState.reference_joint_state`` is a commanded reference and
+        has no positions in the workcell's impedance mode.  ``/joint_states``
+        is the documented measured source; names are used so gripper joints or
+        publisher ordering can never move the wrong arm axis.
+        """
+
+        received_at = time.monotonic()
+        try:
+            names = tuple(str(name) for name in message.name)
+            positions = tuple(float(value) for value in message.position)
+        except (AttributeError, TypeError, ValueError):
+            return
+        if len(names) != len(positions) or len(set(names)) != len(names):
+            return
+        by_name = dict(zip(names, positions))
+        if not all(name in by_name for name in ARM_JOINT_NAMES):
+            return
+        ordered = tuple(by_name[name] for name in ARM_JOINT_NAMES)
+        if not np.all(np.isfinite(ordered)):
+            return
+
+        with self._condition:
+            state = self._state
+            tcp_speed = (
+                state.speed_mps
+                if state is not None
+                and received_at - state.received_at <= 0.5
+                else math.inf
+            )
+            target_mode = (
+                self._target_mode
+                if received_at - self._target_mode_received_at <= 0.5
+                else None
+            )
+            self._joint_reference = JointReference(
+                positions=ordered,
+                tcp_speed_mps=float(tcp_speed),
+                received_at=received_at,
+                target_mode=target_mode,
             )
             self._condition.notify_all()
 
@@ -243,6 +419,63 @@ class RobotMotion:
                 if remaining <= 0.0:
                     return None
                 self._condition.wait(timeout=remaining)
+
+    def _current_joint_reference(
+        self,
+        timeout_sec: float,
+        target_mode: int | None = None,
+    ) -> JointReference | None:
+        """Return a fresh reference for every joint, or ``None`` when stale."""
+
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._condition:
+            while True:
+                if (
+                    self._joint_reference is not None
+                    and time.monotonic() - self._joint_reference.received_at <= 0.5
+                    and (
+                        target_mode is None
+                        or self._joint_reference.target_mode == target_mode
+                    )
+                ):
+                    return self._joint_reference
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._condition.wait(timeout=remaining)
+
+    def _next_joint_reference(
+        self,
+        after_received_at: float,
+        timeout_sec: float,
+        target_mode: int | None = None,
+    ) -> JointReference | None:
+        """Wait for a new, fresh controller sample after ``after_received_at``."""
+
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        with self._condition:
+            while True:
+                reference = self._joint_reference
+                if (
+                    reference is not None
+                    and reference.received_at > after_received_at
+                    and time.monotonic() - reference.received_at <= 0.5
+                    and (
+                        target_mode is None
+                        or reference.target_mode == target_mode
+                    )
+                ):
+                    return reference
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._condition.wait(timeout=remaining)
+
+    def current_joint1(self, timeout_sec: float = 0.25) -> float | None:
+        """Expose measured shoulder-pan position as a readiness signal."""
+
+        reference = self._current_joint_reference(timeout_sec)
+        return None if reference is None else float(reference.positions[0])
 
     def _ensure_cartesian_mode(self, timeout_sec: float) -> tuple[bool, str]:
         from aic_control_interfaces.msg import TargetMode
@@ -263,6 +496,29 @@ class RobotMotion:
             return False, f"Cartesian target-mode request failed: {error}"
         if response is None or not response.success:
             return False, "controller rejected Cartesian target mode"
+        return True, ""
+
+    def _ensure_joint_mode(self, timeout_sec: float) -> tuple[bool, str]:
+        """Switch the documented AIC controller to joint target mode."""
+
+        from aic_control_interfaces.msg import TargetMode
+
+        if not self._mode_client.wait_for_service(timeout_sec=timeout_sec):
+            return False, "joint target-mode service is unavailable"
+        request = self._ChangeTargetMode.Request()
+        request.target_mode.mode = TargetMode.MODE_JOINT
+        future = self._mode_client.call_async(request)
+        deadline = time.monotonic() + timeout_sec
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return False, "timed out switching to joint target mode"
+        try:
+            response = future.result()
+        except Exception as error:
+            return False, f"joint target-mode request failed: {error}"
+        if response is None or not response.success:
+            return False, "controller rejected joint target mode"
         return True, ""
 
     @staticmethod
@@ -310,6 +566,27 @@ class RobotMotion:
         )
         return message
 
+    def _joint_command(self, positions: tuple[float, ...]) -> Any:
+        """Build one documented position-mode JointMotionUpdate command."""
+
+        from aic_control_interfaces.msg import TrajectoryGenerationMode
+
+        values = tuple(float(value) for value in positions)
+        if not values or not np.all(np.isfinite(values)):
+            raise ValueError("joint command positions must be finite and non-empty")
+        message = self._JointMotionUpdate()
+        message.target_state.positions = list(values)
+        # These are the repository's documented conservative joint-position
+        # defaults.  All arrays exactly match the controller-reported joint
+        # vector length so the controller cannot silently reject the update.
+        message.target_stiffness = [85.0] * len(values)
+        message.target_damping = [75.0] * len(values)
+        message.target_feedforward_torque = [0.0] * len(values)
+        message.trajectory_generation_mode.mode = (
+            TrajectoryGenerationMode.MODE_POSITION
+        )
+        return message
+
     def _publish_profile(
         self,
         start: tuple[float, float, float],
@@ -338,6 +615,67 @@ class RobotMotion:
             if remaining > 0.0:
                 time.sleep(remaining)
         return True
+
+    def _publish_joint_profile(
+        self,
+        start: tuple[float, ...],
+        target: tuple[float, ...],
+        duration_sec: float,
+        publish_hz: float,
+        stop: Callable[[], bool] | None = None,
+    ) -> tuple[bool, tuple[float, ...]]:
+        """Publish a minimum-jerk full-vector joint profile."""
+
+        samples = max(2, int(math.ceil(duration_sec * publish_hz)) + 1)
+        period = 1.0 / publish_hz
+        next_tick = time.monotonic()
+        last = tuple(float(value) for value in start)
+        for positions in interpolated_joint_positions(start, target, samples):
+            if stop is not None and stop():
+                return False, last
+            self._joint_publisher.publish(self._joint_command(positions))
+            last = positions
+            next_tick += period
+            remaining = next_tick - time.monotonic()
+            if remaining > 0.0:
+                time.sleep(remaining)
+        return True, last
+
+    def _retreat_joint_target(
+        self,
+        start: JointReference,
+        last_commanded: tuple[float, ...],
+        max_speed_radps: float,
+        publish_hz: float,
+    ) -> None:
+        """Best-effort return to the full measured arm pose saved before yaw."""
+
+        current = self._current_joint_reference(
+            0.15, target_mode=self._mode_joint
+        )
+        current_positions = (
+            current.positions
+            if current is not None
+            and len(current.positions) == len(start.positions)
+            else last_commanded
+        )
+        distance = float(
+            np.max(
+                np.abs(
+                    np.asarray(start.positions, dtype=float)
+                    - np.asarray(current_positions, dtype=float)
+                )
+            )
+        )
+        # A quintic minimum-jerk profile has a peak normalized derivative of
+        # 1.875, so scale duration by that factor to honor the requested limit.
+        duration = max(0.2, 1.875 * distance / max_speed_radps)
+        self._publish_joint_profile(
+            current_positions,
+            start.positions,
+            duration,
+            publish_hz,
+        )
 
     @staticmethod
     def _force_exceeded(
@@ -382,6 +720,264 @@ class RobotMotion:
             start.orientation,
             duration,
             publish_hz,
+        )
+
+    def move_joint1_yaw(
+        self,
+        delta_rad: float,
+        *,
+        max_speed_radps: float = 0.12,
+        publish_hz: float,
+        settle_tolerance_rad: float = 0.01,
+        settle_tcp_speed_mps: float = 0.02,
+        timeout_sec: float,
+        baseline_force_xyz: tuple[float, float, float] | None,
+        max_force_n: float,
+        force_delta_n: float,
+        cancelled: Callable[[], bool],
+    ) -> MotionOutcome:
+        """Yaw joint 1 while preserving every other controller reference.
+
+        The primitive reads the complete measured vector from documented
+        ``/joint_states`` and changes shoulder-pan only.  It never invents
+        targets for the remaining joints.  ControllerState confirms target
+        mode and supplies TCP speed.  A force, cancel, stale-force, or
+        stale-controller guard returns the full vector to the saved measured
+        start before reporting failure.
+        """
+
+        numeric_parameters = (
+            delta_rad,
+            max_speed_radps,
+            publish_hz,
+            settle_tolerance_rad,
+            settle_tcp_speed_mps,
+            timeout_sec,
+            max_force_n,
+            force_delta_n,
+        )
+        if not all(math.isfinite(float(value)) for value in numeric_parameters):
+            return MotionOutcome(False, "joint-yaw parameters must be finite")
+        if not 0.0 < max_speed_radps <= 0.12:
+            return MotionOutcome(
+                False, "joint-1 yaw speed must be in (0, 0.12] rad/s"
+            )
+        if publish_hz <= 0.0 or timeout_sec <= 0.0:
+            return MotionOutcome(False, "publish rate and timeout must be positive")
+        if settle_tolerance_rad < 0.0 or settle_tcp_speed_mps < 0.0:
+            return MotionOutcome(False, "joint settling tolerances must be non-negative")
+        # Viewpoint corrections are intentionally small.  Larger base sweeps
+        # need a collision-aware motion planner rather than this local servo.
+        if abs(delta_rad) > 0.30 + 1e-9:
+            return MotionOutcome(False, "joint-1 yaw step exceeds 0.30 rad safety bound")
+
+        if self._joint_publisher.get_subscription_count() < 1:
+            deadline = time.monotonic() + min(timeout_sec, 2.0)
+            while (
+                self._joint_publisher.get_subscription_count() < 1
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+        if self._joint_publisher.get_subscription_count() < 1:
+            return MotionOutcome(False, "joint pose command has no subscriber")
+
+        # Record fresh measured joints before changing modes.  Commanding from
+        # an older Cartesian-mode sample could otherwise pull unrelated joints
+        # toward a stale posture.
+        pre_switch = self._current_joint_reference(min(timeout_sec, 2.0))
+        if pre_switch is None:
+            return MotionOutcome(False, "no fresh measured arm joint state")
+        mode_ok, mode_error = self._ensure_joint_mode(min(timeout_sec, 2.0))
+        if not mode_ok:
+            return MotionOutcome(False, mode_error)
+
+        def finish(outcome: MotionOutcome) -> MotionOutcome:
+            """Never leave the shared controller in joint target mode."""
+
+            restored, restore_error = self._ensure_cartesian_mode(
+                min(timeout_sec, 2.0)
+            )
+            if restored:
+                return outcome
+            return replace(
+                outcome,
+                success=False,
+                message=f"{outcome.message}; {restore_error}",
+            )
+
+        start = self._next_joint_reference(
+            pre_switch.received_at,
+            min(timeout_sec, 2.0),
+            target_mode=self._mode_joint,
+        )
+        if start is None:
+            return finish(
+                MotionOutcome(
+                    False,
+                    "no newer measured arm state confirming joint target mode",
+                )
+            )
+        if not start.positions:
+            return finish(MotionOutcome(False, "measured arm joint state is empty"))
+        if abs(delta_rad) <= settle_tolerance_rad:
+            return finish(
+                MotionOutcome(True, "joint-1 target already within tolerance")
+            )
+
+        target_values = list(start.positions)
+        target_values[0] += float(delta_rad)
+        target = tuple(target_values)
+        # Peak velocity for minimum-jerk interpolation is 1.875 * distance / T.
+        duration = max(0.35, 1.875 * abs(delta_rad) / max_speed_radps)
+        if duration >= timeout_sec:
+            return finish(
+                MotionOutcome(
+                    False,
+                    "joint-1 motion profile exceeds per-move timeout",
+                    joint_distance_rad=abs(delta_rad),
+                )
+            )
+
+        guard_reason: str | None = None
+
+        def stop_requested() -> bool:
+            nonlocal guard_reason
+            if cancelled():
+                guard_reason = "cancelled"
+                return True
+            force_xyz = self._camera_rig.latest_force_xyz(max_age_sec=0.5)
+            if force_xyz is None:
+                guard_reason = "stale_force"
+                return True
+            if (
+                self._current_joint_reference(
+                    0.0, target_mode=self._mode_joint
+                )
+                is None
+            ):
+                guard_reason = "stale_controller"
+                return True
+            if self._force_exceeded(
+                force_xyz,
+                baseline_force_xyz,
+                max_force_n,
+                force_delta_n,
+            ):
+                guard_reason = "force"
+                return True
+            return False
+
+        completed, last_commanded = self._publish_joint_profile(
+            start.positions,
+            target,
+            duration,
+            publish_hz,
+            stop_requested,
+        )
+        if not completed:
+            self._retreat_joint_target(
+                start, last_commanded, max_speed_radps, publish_hz
+            )
+            messages = {
+                "cancelled": "joint-1 yaw cancelled and reversed",
+                "stale_force": (
+                    "wrist force feedback became stale; joint-1 yaw reversed"
+                ),
+                "stale_controller": (
+                    "measured joint feedback became stale; joint-1 yaw reversed"
+                ),
+                "force": "wrist force guard triggered; joint-1 yaw reversed",
+            }
+            return finish(
+                MotionOutcome(
+                    False,
+                    messages.get(
+                        guard_reason or "", "joint-1 yaw stopped and reversed"
+                    ),
+                    joint_distance_rad=abs(delta_rad),
+                    force_abort=guard_reason == "force",
+                    cancelled=guard_reason == "cancelled",
+                )
+            )
+
+        deadline = time.monotonic() + max(0.2, timeout_sec - duration)
+        stable_samples = 0
+        last_received_at = start.received_at
+        while time.monotonic() < deadline:
+            if stop_requested():
+                self._retreat_joint_target(
+                    start, target, max_speed_radps, publish_hz
+                )
+                messages = {
+                    "cancelled": "joint-1 yaw cancelled while settling and reversed",
+                    "stale_force": (
+                        "wrist force feedback became stale; joint-1 yaw reversed"
+                    ),
+                    "stale_controller": (
+                        "measured joint feedback became stale; joint-1 yaw reversed"
+                    ),
+                    "force": (
+                        "wrist force guard triggered while settling; "
+                        "joint-1 yaw reversed"
+                    ),
+                }
+                return finish(
+                    MotionOutcome(
+                        False,
+                        messages.get(
+                            guard_reason or "", "joint-1 yaw stopped and reversed"
+                        ),
+                        joint_distance_rad=abs(delta_rad),
+                        force_abort=guard_reason == "force",
+                        cancelled=guard_reason == "cancelled",
+                    )
+                )
+
+            self._joint_publisher.publish(self._joint_command(target))
+            remaining = max(0.0, deadline - time.monotonic())
+            reference = self._next_joint_reference(
+                last_received_at,
+                min(0.15, remaining),
+                target_mode=self._mode_joint,
+            )
+            if reference is not None:
+                last_received_at = reference.received_at
+                if len(reference.positions) != len(target):
+                    self._retreat_joint_target(
+                        start, target, max_speed_radps, publish_hz
+                    )
+                    return finish(
+                        MotionOutcome(
+                            False,
+                            "measured joint vector size changed; joint-1 yaw reversed",
+                            joint_distance_rad=abs(delta_rad),
+                        )
+                    )
+                if (
+                    abs(reference.positions[0] - target[0])
+                    <= settle_tolerance_rad
+                    and reference.tcp_speed_mps <= settle_tcp_speed_mps
+                ):
+                    stable_samples += 1
+                    if stable_samples >= 3:
+                        return finish(
+                            MotionOutcome(
+                                True,
+                                "measured joint 1 settled at yaw target",
+                                joint_distance_rad=abs(delta_rad),
+                            )
+                        )
+                else:
+                    stable_samples = 0
+            time.sleep(max(0.02, 1.0 / publish_hz))
+
+        self._retreat_joint_target(start, target, max_speed_radps, publish_hz)
+        return finish(
+            MotionOutcome(
+                False,
+                "measured joint 1 did not settle before timeout; yaw reversed",
+                joint_distance_rad=abs(delta_rad),
+            )
         )
 
     def move_smooth(
@@ -500,7 +1096,12 @@ class RobotMotion:
             if cancelled():
                 was_cancelled = True
                 return True
-            force_xyz = self._camera_rig.latest_force_xyz(max_age_sec=0.25)
+            # Match CameraRig.grab's freshness contract.  The F/T broadcaster
+            # runs at 50 Hz, but brief best-effort ROS/Zenoh jitter exceeded
+            # the old motion-only 0.25 s cutoff and caused a false rollback.
+            # Force magnitude and baseline-delta checks still run on every
+            # accepted sample and a 0.5 s loss still aborts the move.
+            force_xyz = self._camera_rig.latest_force_xyz(max_age_sec=0.5)
             if force_xyz is None:
                 force_feedback_lost = True
                 return True
@@ -592,7 +1193,7 @@ class RobotMotion:
                 )
                 if (
                     position_error <= settle_tolerance_m
-                    and state.speed_mps <= 0.01
+                    and state.speed_mps <= 0.02
                     and orientation_error <= settle_angular_tolerance_rad
                     and angular_velocity_settled
                 ):
@@ -607,6 +1208,60 @@ class RobotMotion:
                 else:
                     stable_samples = 0
             time.sleep(max(0.02, 1.0 / publish_hz))
+
+        # AIC can keep reporting a small nonzero TCP velocity while holding a
+        # valid target.  Preserve the safety margin, but do not reverse a move
+        # that demonstrably arrived at the viewpoint merely because the last
+        # few velocity samples did not become exactly quiet.
+        state = self._current_state(0.15)
+        if state is not None:
+            position_error = float(
+                np.linalg.norm(target - np.asarray(state.position, dtype=float))
+            )
+            orientation_error = (
+                quaternion_angular_distance(
+                    state.orientation, normalized_target_orientation
+                )
+                if orientation_requested
+                else 0.0
+            )
+            if (
+                position_error <= settle_tolerance_m
+                and orientation_error <= settle_angular_tolerance_rad
+            ):
+                return MotionOutcome(
+                    True,
+                    "measured TCP reached target with residual controller motion",
+                    distance_m=distance,
+                    angular_distance_rad=angular_distance,
+                )
+
+            angular_velocity_safe = (
+                state.angular_speed_radps is None
+                or state.angular_speed_radps <= max(0.08, settle_angular_speed_radps)
+            )
+            if state.speed_mps <= 0.02 and angular_velocity_safe:
+                # A joint/workspace limit can make the controller stop short
+                # of a Cartesian request even though the reached pose is safe.
+                # Hold that measured pose and let camera feedback choose a new
+                # direction instead of reversing and failing the whole search.
+                self._publisher.publish(
+                    self._command(state.position, state.orientation)
+                )
+                measured_distance = float(
+                    np.linalg.norm(
+                        np.asarray(state.position, dtype=float) - start_position
+                    )
+                )
+                measured_angle = quaternion_angular_distance(
+                    start.orientation, state.orientation
+                )
+                return MotionOutcome(
+                    True,
+                    "controller stopped short; replanning from measured TCP",
+                    distance_m=measured_distance,
+                    angular_distance_rad=measured_angle,
+                )
 
         self._retreat_to_step_start(start, publish_hz)
         return MotionOutcome(

@@ -68,10 +68,45 @@ def test_contact_with_ignored_finger_band_counts_as_bottom_cutoff():
     report = analyze_board(
         frame(rect=(70, 80, 250, 230)), ignore_bottom_frac=0.15, margin_px=5
     )
-    assert report.seen
-    assert "bottom" in report.edges
+    assert report.seen and not report.full
     assert report.artificial_bottom_contact
     assert "artificial_bottom_contact" in report.failure_reasons
+
+
+def test_thin_gripper_bridge_into_ignored_band_does_not_veto_board():
+    image = frame(rect=(70, 55, 250, 175))
+    # Model a narrow arm/finger connection which widens into the gripper close
+    # to the excluded band.  The raw largest component reaches the crop at
+    # y=203, but its broad board body is wholly above it.
+    cv2.rectangle(image, (156, 172), (164, 198), (45, 45, 45), -1)
+    cv2.rectangle(image, (132, 195), (188, 239), (45, 45, 45), -1)
+
+    report = analyze_board(
+        image,
+        ignore_bottom_frac=0.15,
+        margin_px=15,
+        context_pad_frac=0.05,
+    )
+
+    assert report.seen and report.full
+    assert report.bbox is not None and report.bbox[3] == 203
+    assert not report.artificial_bottom_contact
+    assert "artificial_bottom_contact" not in report.failure_reasons
+
+
+def test_board_above_finger_band_uses_physical_bottom_clearance():
+    # The board clears the masked gripper band, but is less than margin_px from
+    # that artificial boundary.  Since all physical corners remain in-frame,
+    # the crop itself must not invent a bottom-clipped edge.
+    report = analyze_board(
+        frame(rect=(70, 55, 250, 190)),
+        ignore_bottom_frac=0.15,
+        margin_px=15,
+        context_pad_frac=0.05,
+    )
+    assert report.seen and report.full
+    assert "bottom" not in report.edges
+    assert not report.artificial_bottom_contact
 
 
 def test_dynamic_context_envelope_rejects_board_before_old_margin_contact():

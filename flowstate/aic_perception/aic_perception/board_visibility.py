@@ -23,8 +23,9 @@ class MaskReport:
     bbox: tuple[int, int, int, int] | None = None
     rectangularity: float = 0.0
     centroid: tuple[float, float] | None = None
-    # Clear space from the board component to left, right, top, and the bottom
-    # of the usable image.  The usable bottom excludes the gripper band.
+    # Clear space from the board component to each physical image edge.  The
+    # separately reported artificial_bottom_contact records overlap with the
+    # masked gripper band.
     clearance_px: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     # The required clearance grows with projected board size.  This reserves
     # image context for components which protrude above the plate.
@@ -157,7 +158,7 @@ def analyze_board(
         float(x0),
         float(width - 1 - x1),
         float(y0),
-        float(usable_bottom - y1),
+        float(height - 1 - y1),
     )
     context_pad_px = max(
         float(margin_px),
@@ -171,11 +172,59 @@ def analyze_board(
         if clearance <= context_pad_px:
             edges.add(edge)
 
-    artificial_bottom_contact = bool(
-        band_y < height and y1 >= usable_bottom
-    )
-
     component = (labels == component_index).astype(np.uint8)
+
+    # Do not let a narrow arm/finger bridge turn the whole board component into
+    # a bottom-contacting blob.  The ignored band is deliberately opaque to
+    # the detector, so the only useful evidence at that boundary is whether
+    # the *broad body* of the largest component reaches it.  A horizontal
+    # opening severs narrow vertical appendages while leaving an actually
+    # bottom-clipped board intact.  Selecting the largest surviving core also
+    # handles a thin bridge which widens into the gripper at the crop boundary.
+    #
+    # The opening width is deliberately modest (12% of a robust component-row
+    # width, and at least two morphology kernels).  Thus ordinary perspective
+    # taper and every substantial board contact still veto ``full``; only a
+    # genuinely narrow connection can be ignored.
+    artificial_bottom_contact = False
+    raw_bottom_contact = bool(band_y < height and y1 >= usable_bottom)
+    if raw_bottom_contact:
+        component_roi = component[y0 : y1 + 1, x0 : x1 + 1]
+        row_widths = np.count_nonzero(component_roi, axis=1)
+        positive_row_widths = row_widths[row_widths > 0]
+        if positive_row_widths.size == 0:
+            # This should be unreachable for a selected connected component,
+            # but failing closed is safer than declaring a complete view.
+            artificial_bottom_contact = True
+        else:
+            reference_width = float(np.percentile(positive_row_widths, 75.0))
+            bridge_width_px = max(
+                2 * int(morph_px) + 1,
+                int(np.ceil(0.12 * reference_width)),
+            )
+            bridge_width_px = min(
+                max(1, int(round(reference_width))), bridge_width_px
+            )
+            broad_kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT, (bridge_width_px, 1)
+            )
+            broad_component = cv2.morphologyEx(
+                component, cv2.MORPH_OPEN, broad_kernel
+            )
+            broad_count, broad_labels, broad_stats, _ = (
+                cv2.connectedComponentsWithStats(broad_component, 8)
+            )
+            if broad_count <= 1:
+                artificial_bottom_contact = True
+            else:
+                broad_index = (
+                    int(np.argmax(broad_stats[1:, cv2.CC_STAT_AREA])) + 1
+                )
+                broad_core = broad_labels == broad_index
+                artificial_bottom_contact = bool(
+                    np.any(broad_core[usable_bottom, :])
+                )
+
     contours, _ = cv2.findContours(
         component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
