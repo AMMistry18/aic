@@ -228,7 +228,13 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         saved_action_poses = {}
         complete_camera = None
         complete_streak = 0
+        complete_streaks = {
+            name: 0 for name in self.config.camera_frames
+        }
         iteration = 0
+
+        def motion_cancelled() -> bool:
+            return bool(cancelled() or time.monotonic() >= deadline)
 
         while True:
             result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
@@ -329,14 +335,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 and item.area_frac <= 0.45
             ]
             if ready_candidates:
+                ready_by_name = dict(ready_candidates)
+                for name in complete_streaks:
+                    complete_streaks[name] = (
+                        complete_streaks[name] + 1
+                        if name in ready_by_name
+                        else 0
+                    )
                 ready_camera, ready_report = max(
-                    ready_candidates, key=lambda item: view_quality(item[1])
+                    ready_candidates,
+                    key=lambda item: (
+                        complete_streaks.get(item[0], 0),
+                        view_quality(item[1]),
+                    ),
                 )
-                if complete_camera == ready_camera:
-                    complete_streak += 1
-                else:
-                    complete_camera = ready_camera
-                    complete_streak = 1
+                complete_camera = ready_camera
+                complete_streak = complete_streaks.get(ready_camera, 0)
                 result.component_coverage_ready = True
                 result.steer_camera = ready_camera
                 result.edges = ""
@@ -344,9 +358,28 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.rectangularity = float(ready_report.rectangularity)
                 result.view_quality = float(view_quality(ready_report))
             else:
+                for name in complete_streaks:
+                    complete_streaks[name] = 0
                 complete_camera = None
                 complete_streak = 0
                 result.component_coverage_ready = False
+
+            # A visually complete frame never overrides the force guard.
+            # Evaluate it before either success or the stability-frame
+            # ``continue`` so a high-force second frame cannot be released.
+            if self._force_exceeded(
+                snapshot.force_xyz,
+                baseline_force_xyz,
+                max_force_n,
+                force_delta_n,
+            ):
+                result.success = False
+                result.force_abort = True
+                result.message = (
+                    f"wrist force guard active at {result.force_n:.2f}N; "
+                    "refusing another move"
+                )
+                return
 
             if complete_streak >= stable_frames:
                 result.done = True
@@ -366,20 +399,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     complete_camera,
                 )
                 continue
-
-            if self._force_exceeded(
-                snapshot.force_xyz,
-                baseline_force_xyz,
-                max_force_n,
-                force_delta_n,
-            ):
-                result.success = False
-                result.force_abort = True
-                result.message = (
-                    f"wrist force guard active at {result.force_n:.2f}N; "
-                    "refusing another move"
-                )
-                return
 
             # ``analyze_board.full`` already requires physical and dynamic
             # context clearance on every edge.  Do not add a second centroid
@@ -485,7 +504,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     result.last_action = "base_yaw_preflight_rejected"
                     continue
                 if (
-                    result.angular_travel_rad + abs(joint_delta)
+                    (
+                        result.angular_travel_rad + abs(joint_delta)
+                    )
                     > max_angular_travel_rad + 1e-9
                 ):
                     rejection_reason = (
@@ -527,6 +548,28 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 predicted_start_displacement = float(
                     np.linalg.norm(predicted_position - initial_pose[0])
                 )
+                predicted_start_angle = quaternion_angular_distance(
+                    initial_pose[1], target_orientation
+                )
+                if predicted_start_angle > max_angular_displacement_rad + 1e-9:
+                    rejection_reason = (
+                        "predicted joint-1 yaw would exceed the "
+                        f"{max_angular_displacement_rad:.3f}rad start-relative "
+                        "TCP orientation envelope"
+                    )
+                    logging.warning(
+                        "iteration=%d rejecting action=%s id=%d before motion: %s",
+                        iteration,
+                        action.kind.value,
+                        action.action_id,
+                        rejection_reason,
+                    )
+                    planner.mark_yaw_unavailable(
+                        action,
+                        reason=rejection_reason,
+                    )
+                    result.last_action = "base_yaw_preflight_rejected"
+                    continue
                 if predicted_start_displacement > max_displacement_m + 1e-9:
                     rejection_reason = (
                         "predicted joint-1 TCP sweep would exceed the "
@@ -547,7 +590,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     result.last_action = "base_yaw_preflight_rejected"
                     continue
                 if (
-                    result.travel_m + predicted_step_distance
+                    (
+                        result.travel_m + predicted_step_distance
+                    )
                     > max_travel_m + 1e-9
                 ):
                     rejection_reason = (
@@ -582,6 +627,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     target_joint1,
                     joint_delta,
                 )
+                # Preserve the exact pre-yaw pose. If the center-camera mask
+                # discontinuously switches between disconnected board
+                # fragments, the planner restores this pose once and changes
+                # viewpoint with J2 instead of entering a yaw limit cycle.
+                saved_action_poses[action.action_id] = (
+                    tuple(float(value) for value in current_position),
+                    current_orientation,
+                )
                 outcome = self.robot_motion.move_smooth(
                     tuple(float(value) for value in predicted_position),
                     target_orientation=target_orientation,
@@ -599,10 +652,17 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     baseline_force_xyz=baseline_force_xyz,
                     max_force_n=max_force_n,
                     force_delta_n=force_delta_n,
-                    cancelled=cancelled,
+                    cancelled=motion_cancelled,
                 )
                 if outcome.cancelled:
-                    raise skill_interface.SkillCancelledError(outcome.message)
+                    if cancelled():
+                        raise skill_interface.SkillCancelledError(outcome.message)
+                    result.success = False
+                    result.message = (
+                        "adaptive viewpoint search reached its safety deadline "
+                        "during joint-1 motion"
+                    )
+                    return
                 if not outcome.success:
                     result.success = False
                     result.force_abort = outcome.force_abort
@@ -624,6 +684,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 start_displacement = float(
                     np.linalg.norm(post_position_array - initial_pose[0])
                 )
+                start_angle = quaternion_angular_distance(
+                    initial_pose[1], post_orientation
+                )
                 if start_displacement > max_displacement_m + 1e-9:
                     result.success = False
                     result.message = (
@@ -631,7 +694,17 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         f"{max_displacement_m:.3f}m workspace envelope"
                     )
                     return
-                if result.travel_m + step_distance > max_travel_m + 1e-9:
+                if start_angle > max_angular_displacement_rad + 1e-9:
+                    result.success = False
+                    result.message = (
+                        "joint-1 centering reached the "
+                        f"{max_angular_displacement_rad:.3f}rad TCP orientation envelope"
+                    )
+                    return
+                if (
+                    result.travel_m + step_distance
+                    > max_travel_m + 1e-9
+                ):
                     result.success = False
                     result.message = (
                         "joint-1 centering reached the "
@@ -657,15 +730,39 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 post_joint1 = self.robot_motion.current_joint1(
                     min(timeout_sec, 0.5)
                 )
-                measured_joint_delta = (
-                    float(post_joint1 - joint1)
-                    if post_joint1 is not None
-                    else float(joint_delta)
-                )
-                result.angular_travel_rad += max(
+                if post_joint1 is None:
+                    result.success = False
+                    result.message = (
+                        "fresh measured /joint_states arm pose unavailable "
+                        "after horizontal board centering"
+                    )
+                    return
+                if (
+                    abs(float(post_joint1) - initial_joint1)
+                    > max_angular_displacement_rad + 1e-9
+                ):
+                    result.success = False
+                    result.message = (
+                        "measured joint-1 pose exceeded the start-relative "
+                        f"{max_angular_displacement_rad:.3f}rad envelope"
+                    )
+                    return
+                measured_joint_delta = float(post_joint1 - joint1)
+                angular_step = max(
                     abs(measured_joint_delta),
                     float(outcome.angular_distance_rad),
                 )
+                if (
+                    result.angular_travel_rad + angular_step
+                    > max_angular_travel_rad + 1e-9
+                ):
+                    result.success = False
+                    result.message = (
+                        "measured joint-1 motion exceeded the cumulative "
+                        f"{max_angular_travel_rad:.3f}rad envelope"
+                    )
+                    return
+                result.angular_travel_rad += angular_step
                 result.moved = True
                 logging.info(
                     "base-yaw arc %d completed: requested=%.4frad "
@@ -690,12 +787,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         f"{action.rollback_of}"
                     )
                     return
-                (px, py, pz), (qx, qy, qz, qw) = self._gripper_pose(timeout_sec)
+                try:
+                    (px, py, pz), (qx, qy, qz, qw) = self._gripper_pose(
+                        timeout_sec
+                    )
+                except Exception as error:
+                    result.success = False
+                    result.message = (
+                        "permitted gripper TF unavailable during rollback: "
+                        f"{error}"
+                    )
+                    return
                 target_position, target_orientation = saved_pose
                 delta = np.asarray(target_position, dtype=float) - np.asarray(
                     (px, py, pz), dtype=float
                 )
-                result.rollback_count += 1
                 camera_for_log = action.camera or "saved_pose"
                 result.backoff = False
             else:
@@ -720,6 +826,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 current_orientation = normalize_quaternion((qx, qy, qz, qw))
                 if initial_pose is None:
                     initial_pose = (current_position.copy(), current_orientation)
+                    initial_joint1 = self.robot_motion.current_joint1(
+                        min(timeout_sec, 2.0)
+                    )
+                    if initial_joint1 is None:
+                        result.success = False
+                        result.message = (
+                            "fresh measured /joint_states arm pose unavailable "
+                            "at adaptive-search start"
+                        )
+                        return
 
                 if action.kind == ActionKind.UP_CLEARANCE:
                     # This phase is deliberately not optical-axis aiming.  In
@@ -827,7 +943,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     "start-relative workspace envelope"
                 )
                 return
-            if result.travel_m + step_distance > max_travel_m + 1e-9:
+            if (
+                action.kind != ActionKind.ROLLBACK
+                and result.travel_m + step_distance
+                > max_travel_m + 1e-9
+            ):
                 result.success = False
                 result.message = (
                     f"adaptive search exhausted its {max_travel_m:.3f}m "
@@ -843,7 +963,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
             if (
-                result.angular_travel_rad + step_angle
+                action.kind != ActionKind.ROLLBACK
+                and (
+                    result.angular_travel_rad + step_angle
+                )
                 > max_angular_travel_rad + 1e-9
             ):
                 result.success = False
@@ -897,15 +1020,76 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 baseline_force_xyz=baseline_force_xyz,
                 max_force_n=max_force_n,
                 force_delta_n=force_delta_n,
-                cancelled=cancelled,
+                cancelled=motion_cancelled,
             )
             if outcome.cancelled:
-                raise skill_interface.SkillCancelledError(outcome.message)
+                if cancelled():
+                    raise skill_interface.SkillCancelledError(outcome.message)
+                result.success = False
+                result.message = (
+                    "adaptive viewpoint search reached its safety deadline "
+                    f"during {action.kind.value} motion"
+                )
+                return
             if not outcome.success:
                 result.success = False
                 result.force_abort = outcome.force_abort
                 result.message = outcome.message
                 return
+            post_motion_joint1 = self.robot_motion.current_joint1(
+                min(timeout_sec, 0.5)
+            )
+            if post_motion_joint1 is None:
+                result.success = False
+                result.message = (
+                    "fresh measured /joint_states arm pose unavailable after "
+                    f"{action.kind.value} motion"
+                )
+                return
+            if (
+                initial_joint1 is not None
+                and abs(float(post_motion_joint1) - initial_joint1)
+                > max_angular_displacement_rad + 1e-9
+            ):
+                result.success = False
+                result.message = (
+                    f"{action.kind.value} motion moved measured joint 1 beyond "
+                    f"the {max_angular_displacement_rad:.3f}rad start-relative envelope"
+                )
+                return
+            if action.kind == ActionKind.ROLLBACK:
+                try:
+                    restored_position, restored_orientation = self._gripper_pose(
+                        timeout_sec
+                    )
+                except Exception as error:
+                    result.success = False
+                    result.message = (
+                        "permitted gripper TF unavailable after rollback: "
+                        f"{error}"
+                    )
+                    return
+                rollback_position_error = float(
+                    np.linalg.norm(
+                        np.asarray(restored_position, dtype=float)
+                        - np.asarray(target_position, dtype=float)
+                    )
+                )
+                rollback_angle_error = quaternion_angular_distance(
+                    restored_orientation, target_orientation
+                )
+                if (
+                    rollback_position_error > settle_tolerance_m
+                    or rollback_angle_error > settle_orientation_tolerance_rad
+                ):
+                    result.success = False
+                    result.message = (
+                        "anti-cycle rollback did not restore its saved pose "
+                        f"(position error {rollback_position_error:.4f}m, "
+                        f"orientation error {rollback_angle_error:.4f}rad)"
+                    )
+                    return
+                result.rollback_count += 1
             result.moves_executed += 1
             result.travel_m += float(outcome.distance_m)
             result.angular_travel_rad += float(outcome.angular_distance_rad)
