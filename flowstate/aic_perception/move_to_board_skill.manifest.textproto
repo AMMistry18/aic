@@ -1,0 +1,30 @@
+id {
+  package: "ai.tar2"
+  name: "move_to_board_skill_v1"
+}
+display_name: "Move To Board v1"
+vendor {
+  display_name: "TAR-2"
+}
+documentation {
+  description: "Camera-driven board survey skill. Applies per-camera gripper ignore masks, runs analyze_board with a 10px framing margin, and performs one guarded 2D image-plane centering move through the AIC controller when the board is visible but not yet framed."
+}
+options {
+  supports_cancellation: true
+  python_config {
+    skill_module: "aic_perception.move_to_board_skill"
+    proto_module: "aic_perception.move_to_board_skill_pb2"
+    create_skill: "aic_perception.move_to_board_skill.MoveToBoardSkill"
+  }
+}
+dependencies {
+}
+parameter {
+  message_full_name: "ai.tar2.MoveToBoardSkillParams"
+  default_value: {
+    type_url: "type.googleapis.com/ai.tar2.MoveToBoardSkillParams"
+  }
+}
+return_type {
+  message_full_name: "ai.tar2.MoveToBoardSkillResult"
+}
