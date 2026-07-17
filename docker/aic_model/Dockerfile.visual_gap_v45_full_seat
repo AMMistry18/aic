@@ -1,0 +1,22 @@
+ARG BASE_IMAGE=my-solution:student-flowstate-v44-direct-in-port-handoff
+FROM ${BASE_IMAGE}
+
+# Preserve the exact deployed v44 implementation.  This layer changes only the
+# selected post-handoff seat actor from the nominal checkpoint to the completed
+# 300k full-stage export from TACC job 3305828.
+RUN test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/RLInsert.py | cut -d' ' -f1)" = \
+      "9f0850d7bd8a882394b370c93d7b2cc34bcb65f5c8abf6295e3f71207acb0487" && \
+    test "$(sha256sum /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py | cut -d' ' -f1)" = \
+      "9f0850d7bd8a882394b370c93d7b2cc34bcb65f5c8abf6295e3f71207acb0487" && \
+    test "$(sha256sum /models/final_insert_sfp_flowstate_v1.ts | cut -d' ' -f1)" = \
+      "64d4726eb7b6d4b25df2d4a3b4d7d1af5a4bc2522081cd5b4fda451bc1282cf6" && \
+    test "$(sha256sum /models/seat_actor_tacc_3305828_nominal_130k.ts | cut -d' ' -f1)" = \
+      "f2f1388767f88f9f487cec5ae444ee39f87bb2c15cf0a783397dd3891e003a8d"
+
+COPY models/seat_actor_tacc_3305828_full_300k.ts /models/seat_actor_tacc_3305828_full_300k.ts
+COPY models/seat_actor_tacc_3305828_full_300k.ts.contract.json /models/seat_actor_tacc_3305828_full_300k.ts.contract.json
+
+RUN test "$(sha256sum /models/seat_actor_tacc_3305828_full_300k.ts | cut -d' ' -f1)" = \
+      "1d2e2ce4830725fadfb7c139f50f6670e01a5ccaa6a31a19c89044a6829bd0c9"
+
+ENV RL_INSERT_SEAT_MODEL=/models/seat_actor_tacc_3305828_full_300k.ts

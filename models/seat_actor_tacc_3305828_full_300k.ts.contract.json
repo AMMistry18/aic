@@ -1,0 +1,29 @@
+{
+  "artifact": "seat_actor_tacc_3305828_full_300k.ts",
+  "source": "TACC Slurm 3305828, completed full stage at 300000 timesteps",
+  "remote_checkpoint": "/scratch/11590/satya_a/aic/seat_full_seed0_phase3_seed0_3347f8e4a0a0_3305828/model.zip",
+  "remote_checkpoint_sha256": "f90fcd57d22a9730bf525627d47f99a1c2e38a90108166fc2879b592320c2cbd",
+  "remote_torchscript": "/scratch/11590/satya_a/aic/seat_full_seed0_phase3_seed0_3347f8e4a0a0_3305828/seat_actor.ts",
+  "torchscript_sha256": "1d2e2ce4830725fadfb7c139f50f6670e01a5ccaa6a31a19c89044a6829bd0c9",
+  "stage": "full",
+  "timesteps": 300000,
+  "warm_started_from": "/scratch/11590/satya_a/aic/seat_nominal_seed0_phase3_seed0_3347f8e4a0a0_3305828/model.zip",
+  "input": "seat actor history",
+  "input_shape": [8, 34],
+  "output_shape": [6],
+  "output_convention": "normalized seat action; RLInsert applies the training SEAT_ACTION_GAIN of 0.20 before shared deploy action scales",
+  "privileged_input": false,
+  "torchscript_max_abs_error": 0.0,
+  "sample_action_finite": true,
+  "final_full_evaluation": {
+    "episodes": 8,
+    "seat_success_rate": 0.5,
+    "jam_rate": 0.125,
+    "bad_collision_rate": 0.375,
+    "force_abort_rate": 0.0,
+    "final_depth_mm_mean": 47.260526497357,
+    "max_force_n_mean": 13.857578200021589,
+    "max_force_n_max": 34.08107395636092
+  },
+  "wandb_run": "https://wandb.ai/tar2/aic-seat-rl/runs/ak0gpku2"
+}

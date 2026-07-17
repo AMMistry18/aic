@@ -1,0 +1,25 @@
+ARG BASE_IMAGE=my-solution:student-flowstate-script-v41
+FROM ${BASE_IMAGE}
+
+# Preserve the validated v41 image and policy source exactly, then apply one
+# hash-gated source patch at the existing low-force adaptive-sweep call site.
+COPY aic_model/aic_model/visual_gap.py /ws_aic/src/aic/aic_model/aic_model/visual_gap.py
+COPY aic_model/aic_model/visual_gap_recovery.py /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py
+COPY aic_model/aic_model/visual_gap.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap.py
+COPY aic_model/aic_model/visual_gap_recovery.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap_recovery.py
+COPY flowstate/aic_perception/aic_perception/gripper_masks.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_perception/gripper_masks.py
+COPY flowstate/aic_perception/masks/ /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_perception/masks/
+COPY docker/aic_model/patch_v41_visual_gap.py /tmp/patch_v41_visual_gap.py
+
+RUN /ws_aic/src/aic/.pixi/envs/default/bin/python /tmp/patch_v41_visual_gap.py \
+      /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+      /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py && \
+    /ws_aic/src/aic/.pixi/envs/default/bin/python -m py_compile \
+      /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+      /ws_aic/src/aic/aic_model/aic_model/visual_gap.py \
+      /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py
+
+# Default OFF preserves exact v41 behavior.  The v42 deployment build explicitly
+# passes --build-arg RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=1.
+ARG RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=0
+ENV RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=${RL_INSERT_VISUAL_GAP_WEDGE_ENABLE}

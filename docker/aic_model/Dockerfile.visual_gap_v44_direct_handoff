@@ -1,0 +1,21 @@
+ARG BASE_IMAGE=my-solution:student-flowstate-visual-gap-v43-debug
+FROM ${BASE_IMAGE}
+
+# Refuse to build unless the base is the exact deployed v43 policy and debug
+# implementation.  v44 changes only the confirmed in-port rescue control order.
+RUN test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/RLInsert.py | cut -d' ' -f1)" = \
+      "c27a764b9e64837ddee1748272abadd229cfa888ff05847324bfe819df77db57" && \
+    test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/visual_gap.py | cut -d' ' -f1)" = \
+      "12048640d675787d32d10b1b31466f49dda68c2b5238f0bd79e5bb27f71fd285" && \
+    test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py | cut -d' ' -f1)" = \
+      "4a9c100e28b21b0e8dbf5ea4df064312efaddde821bd05747c1154e21e1cf3ba"
+
+COPY docker/aic_model/patch_v43_direct_in_port_handoff.py /tmp/patch_v43_direct_in_port_handoff.py
+
+RUN /ws_aic/src/aic/.pixi/envs/default/bin/python \
+      /tmp/patch_v43_direct_in_port_handoff.py \
+      /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+      /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py && \
+    /ws_aic/src/aic/.pixi/envs/default/bin/python -m py_compile \
+      /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+      /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/RLInsert.py

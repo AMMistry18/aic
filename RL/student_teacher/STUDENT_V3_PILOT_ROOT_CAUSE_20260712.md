@@ -49,14 +49,19 @@ be reconstructed from this run; only final evaluation reports them.
 |---|---:|---:|---:|
 | 0 | -219 / -266 / -271 | 5.59 / 64.76 | 14.48 / 39.45 |
 | 1 | -264 / -280 / -277 | 5.68 / 69.56 | 13.53 / 43.69 |
+| 2 | -223 / -250 / -211 | 4.01 / 56.95 | 13.17 / 41.73 |
 
 Seed 0 final evaluation was 30% success, 53.3% collision, 71.4 mm mean peak
 lateral, and -109.6 return. Seed 1 was 0% success, 46.7% collision, 161.3 mm
-mean peak lateral, and -359.7 return. Seed 2 evaluation is pending while job
-`3299715` finishes; it must be added before closing the pilot report.
+mean peak lateral, and -359.7 return. Seed 2 was 6.7% success, 63.3%
+collision, 206.1 mm mean peak lateral, 212.2 N force p95, and -379.1 return.
+Pilot job `3299715` completed normally after all three evaluations.
 
-The seed 0/1 training logs contain 18/20 `QACC` warnings respectively. Returns
-do not improve, and actor/critic losses grow substantially.
+The seed 0/1/2 training logs contain 18/20/26 `QACC` warnings respectively.
+Returns do not consistently improve, and actor/critic losses grow
+substantially. The generated selection file lists seeds 1 and 0, but that
+ranking is invalid for continuation: it sorts collision rate before success
+and therefore ranks a 0%-success seed first. No full-scale job is active.
 
 ## Reward signs
 

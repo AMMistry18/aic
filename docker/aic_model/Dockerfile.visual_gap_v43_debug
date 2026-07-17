@@ -1,0 +1,27 @@
+ARG BASE_IMAGE=my-solution:student-flowstate-visual-gap-v42
+FROM ${BASE_IMAGE}
+
+# Refuse to build on anything except the exact deployed v42 policy and visual
+# modules.  v43 changes diagnostics only; RLInsert.py is never copied or patched.
+RUN test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/RLInsert.py | cut -d' ' -f1)" = \
+      "c27a764b9e64837ddee1748272abadd229cfa888ff05847324bfe819df77db57" && \
+    test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/visual_gap.py | cut -d' ' -f1)" = \
+      "eb68e1cc8a28b0fd002aa3f79f0342e64b77ebf137adab027d99a00c63d531f8" && \
+    test "$(sha256sum /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py | cut -d' ' -f1)" = \
+      "a5c001224d3e7a52481602e640a88aacdcb0cb165bd12c98c729fabd844badf5"
+
+COPY aic_model/aic_model/visual_gap.py /ws_aic/src/aic/aic_model/aic_model/visual_gap.py
+COPY aic_model/aic_model/visual_gap_recovery.py /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py
+COPY aic_model/aic_model/visual_gap.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap.py
+COPY aic_model/aic_model/visual_gap_recovery.py /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap_recovery.py
+
+RUN /ws_aic/src/aic/.pixi/envs/default/bin/python -m py_compile \
+      /ws_aic/src/aic/aic_model/aic_model/visual_gap.py \
+      /ws_aic/src/aic/aic_model/aic_model/visual_gap_recovery.py \
+      /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap.py \
+      /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/visual_gap_recovery.py
+
+# Default OFF keeps the diagnostic additions inert.  The v43 review build
+# explicitly enables this flag so one wedge frame per camera is recoverable.
+ARG RL_INSERT_VISUAL_GAP_DEBUG=0
+ENV RL_INSERT_VISUAL_GAP_DEBUG=${RL_INSERT_VISUAL_GAP_DEBUG}

@@ -187,5 +187,17 @@ directories were preserved as
 
 Replacement pilot `3299715` was submitted against the existing manifest. Its
 preflight passed (5 tests), then seeds 0 and 1 entered CUDA training and
-created TensorBoard logs. It does not recollect or alter the retained prior;
-seed 2 remains sequenced after seeds 0 and 1.
+created TensorBoard logs. It did not recollect or alter the retained prior;
+seed 2 then ran after seeds 0 and 1. All three pilot results are diagnosed in
+`STUDENT_V3_PILOT_ROOT_CAUSE_20260712.md`; none is eligible for scale-up.
+
+## Contact-physics calibration after pilot ejections
+
+The guided-only calibration is documented in
+`MUJOCO_CONTACT_PHYSICS_CALIBRATION_20260712.md`. The selected physics-only
+configuration is positive ridge `solref=(0.006, 1.0)`, ridge friction `5.0`,
+and random contact time-constant floor `0.006 s`. The final 10 nominal / 40
+randomized sentinel (TACC job `3300263`) had zero QACC warnings, 10/10 nominal
+success, 31.6 N maximum force, 26.2 mm maximum lateral displacement, and a
+9.1 mm maximum one-step lateral change. Its randomized jams were bounded
+8 N stalls near 6 mm depth, not numerical ejections.
