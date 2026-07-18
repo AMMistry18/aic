@@ -181,3 +181,32 @@ def test_stale_force_is_not_returned_as_motion_feedback():
     assert rig.latest_force_xyz(max_age_sec=0.25) is None
     with pytest.raises(ValueError):
         rig.latest_force_xyz(max_age_sec=0.0)
+
+
+def test_wait_for_force_returns_next_fresh_sample():
+    rig = make_rig()
+    rig._force_xyz = (9.0, 9.0, 9.0)
+    rig._force_received_at = time.monotonic() - 1.0
+
+    def publish_force():
+        time.sleep(0.02)
+        rig._on_wrench(
+            SimpleNamespace(
+                wrench=SimpleNamespace(
+                    force=SimpleNamespace(x=3.0, y=4.0, z=0.0)
+                )
+            )
+        )
+
+    publisher = threading.Thread(target=publish_force)
+    publisher.start()
+    force = rig.wait_for_force_xyz(timeout_sec=0.5, max_age_sec=0.1)
+    publisher.join()
+    assert force == (3.0, 4.0, 0.0)
+
+
+def test_wait_for_force_times_out_without_fresh_sample():
+    rig = make_rig()
+    assert rig.wait_for_force_xyz(timeout_sec=0.01) is None
+    with pytest.raises(ValueError):
+        rig.wait_for_force_xyz(timeout_sec=-0.1)

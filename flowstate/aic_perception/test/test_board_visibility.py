@@ -10,6 +10,9 @@ from aic_perception.board_visibility import (
     analyze_board,
     combine_cameras,
     decide_direction,
+    detect_purple_logo,
+    ivm_survey_ready,
+    ivm_survey_rejection_reasons,
     optical_axes_in_base,
     rotation_matrix_from_quaternion,
     search_progress,
@@ -18,12 +21,23 @@ from aic_perception.board_visibility import (
 )
 
 
+# The sim insignia measures H=150 exactly; BGR (180, 0, 180) reproduces it.
+LOGO_BGR = (180, 0, 180)
+
+
 def frame(rect=(70, 50, 250, 180), size=(320, 240), bg=210, board=45):
     width, height = size
     image = np.full((height, width, 3), bg, dtype=np.uint8)
     if rect is not None:
         x0, y0, x1, y1 = rect
         cv2.rectangle(image, (x0, y0), (x1, y1), (board,) * 3, -1)
+    return image
+
+
+def logo_frame(logo_rect=(210, 90, 240, 120), **kwargs):
+    image = frame(**kwargs)
+    x0, y0, x1, y1 = logo_rect
+    cv2.rectangle(image, (x0, y0), (x1, y1), LOGO_BGR, -1)
     return image
 
 
@@ -49,6 +63,59 @@ def test_centered_board_is_full_and_rectangular():
     assert view_quality(report) > 0.7
 
 
+def survey_report(**changes):
+    values = dict(
+        seen=True,
+        full=True,
+        area_frac=0.20,
+        rectangularity=0.85,
+        clearance_px=(100.0, 100.0, 100.0, 100.0),
+        context_pad_px=40.0,
+        center_error=(0.0, 0.0),
+        artificial_bottom_contact=False,
+        orientation_deg=2.0,
+        long_axis_ratio=1.25,
+        logo_seen=True,
+    )
+    values.update(changes)
+    return MaskReport(**values)
+
+
+def test_ivm_survey_ready_requires_more_than_plate_visibility():
+    assert ivm_survey_ready(survey_report())
+
+    oblique_side_view = survey_report(
+        rectangularity=0.63,
+        center_error=(0.204, 0.219),
+        artificial_bottom_contact=True,
+        orientation_deg=65.4,
+        long_axis_ratio=1.20,
+        clearance_px=(298.0, 128.0, 306.0, 39.0),
+        context_pad_px=36.0,
+    )
+    reasons = ivm_survey_rejection_reasons(oblique_side_view)
+    assert not ivm_survey_ready(oblique_side_view)
+    assert "low_rectangularity" in reasons
+    assert "horizontal_off_center" in reasons
+    assert "gripper_mask_contact" in reasons
+    assert "long_axis_misaligned" in reasons
+    assert "component_context_tight" in reasons
+
+
+def test_ivm_survey_ready_rejects_clipped_or_ambiguous_center_view():
+    report = survey_report(
+        full=False,
+        center_error=(-0.369, 0.195),
+        artificial_bottom_contact=True,
+        long_axis_ratio=1.09,
+    )
+    reasons = ivm_survey_rejection_reasons(report)
+    assert "plate_not_full" in reasons
+    assert "horizontal_off_center" in reasons
+    assert "gripper_mask_contact" in reasons
+    assert "long_axis_ambiguous" in reasons
+
+
 @pytest.mark.parametrize(
     ("rect", "edge"),
     [
@@ -64,13 +131,13 @@ def test_reports_each_cut_edge(rect, edge):
     assert edge in report.edges
 
 
-def test_contact_with_ignored_finger_band_counts_as_bottom_cutoff():
+def test_contact_with_ignored_finger_band_is_diagnostic_not_a_veto():
     report = analyze_board(
         frame(rect=(70, 80, 250, 230)), ignore_bottom_frac=0.15, margin_px=5
     )
-    assert report.seen and not report.full
+    assert report.seen and report.full
     assert report.artificial_bottom_contact
-    assert "artificial_bottom_contact" in report.failure_reasons
+    assert "artificial_bottom_contact" not in report.failure_reasons
 
 
 def test_thin_gripper_bridge_into_ignored_band_does_not_veto_board():
@@ -92,6 +159,8 @@ def test_thin_gripper_bridge_into_ignored_band_does_not_veto_board():
     assert report.bbox is not None and report.bbox[3] == 203
     assert not report.artificial_bottom_contact
     assert "artificial_bottom_contact" not in report.failure_reasons
+    assert abs(report.orientation_deg) < 3.0
+    assert report.long_axis_ratio > 1.2
 
 
 def test_board_above_finger_band_uses_physical_bottom_clearance():
@@ -178,6 +247,127 @@ def test_invalid_image_is_rejected():
         analyze_board(np.array([], dtype=np.uint8))
     with pytest.raises(ValueError):
         analyze_board(np.zeros((10, 10), dtype=np.float32))
+
+
+def test_logo_detected_and_filled_into_board_mask():
+    plain = analyze_board(frame())
+    with_logo = analyze_board(logo_frame())
+    assert with_logo.seen and with_logo.full
+    assert with_logo.logo_seen
+    # The insignia sits right of image center in this frame.
+    assert with_logo.logo_center_error[0] > 0.2
+    assert with_logo.logo_bbox is not None
+    # The fill keeps the bright logo inside the board component: without it
+    # the logo would punch a hole and shrink the measured area.
+    assert with_logo.area_frac == pytest.approx(plain.area_frac, abs=0.005)
+    assert with_logo.rectangularity > 0.95
+
+
+def test_logo_anchors_component_selection_over_larger_blob():
+    # A larger dark blob (arm/shadow) competes with the board.  Largest-area
+    # selection would pick the arm; the insignia anchor must pick the board.
+    image = frame(rect=(200, 60, 300, 140))
+    cv2.rectangle(image, (20, 40), (160, 200), (45, 45, 45), -1)
+    cv2.rectangle(image, (255, 85), (285, 115), LOGO_BGR, -1)
+
+    report = analyze_board(image, ignore_bottom_frac=0.0)
+    assert report.seen and report.logo_seen
+    assert report.bbox is not None
+    assert report.bbox[0] >= 195, "anchor must select the board blob"
+
+
+def test_largest_blob_fallback_without_logo():
+    image = frame(rect=(200, 60, 300, 140))
+    cv2.rectangle(image, (20, 40), (160, 200), (45, 45, 45), -1)
+    report = analyze_board(image, ignore_bottom_frac=0.0)
+    assert report.seen and not report.logo_seen
+    assert report.bbox is not None
+    assert report.bbox[0] <= 25, "without the logo the larger blob wins"
+
+
+def test_logo_survives_contrast_guard_rejection():
+    # Plate fills the frame: Otsu has no foreground/background split, so the
+    # board mask is rejected, but the insignia still proves board presence.
+    image = np.full((240, 320, 3), 45, dtype=np.uint8)
+    cv2.rectangle(image, (40, 90), (70, 120), LOGO_BGR, -1)
+    report = analyze_board(image)
+    assert not report.seen
+    assert report.logo_seen
+    assert report.logo_center_error[0] < -0.5
+
+
+def test_gray_input_never_reports_a_logo():
+    gray = np.full((240, 320), 210, dtype=np.uint8)
+    cv2.rectangle(gray, (70, 50), (250, 180), 45, -1)
+    report = analyze_board(gray)
+    assert report.seen
+    assert not report.logo_seen
+    assert detect_purple_logo(gray) is None
+
+
+def test_blue_connectors_are_not_a_logo():
+    # SC connectors measure around H=100; they must never satisfy the
+    # tightened H in [135, 165] band.
+    image = frame()
+    cv2.rectangle(image, (100, 80), (140, 120), (200, 120, 20), -1)
+    report = analyze_board(image)
+    assert not report.logo_seen
+
+
+def test_logo_blobs_are_unioned():
+    # The insignia often fragments into an outline piece and a bar piece.
+    image = frame()
+    cv2.rectangle(image, (200, 80), (215, 130), LOGO_BGR, -1)
+    cv2.rectangle(image, (228, 80), (243, 130), LOGO_BGR, -1)
+    result = detect_purple_logo(image)
+    assert result is not None
+    _, centroid, area, bbox = result
+    assert 215 < centroid[0] < 228, "centroid must be the union centroid"
+    assert bbox[0] <= 200 and bbox[2] >= 243
+    assert area >= 2 * 15 * 50 * 0.9
+
+
+def test_orientation_measures_board_long_axis_angle():
+    aligned = analyze_board(frame())
+    assert abs(aligned.orientation_deg) < 3.0
+
+    rotated = np.full((240, 320, 3), 210, dtype=np.uint8)
+    box = cv2.boxPoints(((160.0, 110.0), (160.0, 80.0), 30.0)).astype(np.int32)
+    cv2.fillConvexPoly(rotated, box, (45, 45, 45))
+    result = analyze_board(rotated, ignore_bottom_frac=0.0)
+    assert result.seen
+    assert 25.0 <= abs(result.orientation_deg) <= 35.0
+
+
+def test_orientation_maps_board_long_side_to_image_long_side():
+    landscape = analyze_board(
+        frame(rect=(40, 80, 280, 150), size=(320, 240)),
+        ignore_bottom_frac=0.0,
+    )
+    portrait = analyze_board(
+        frame(rect=(30, 100, 210, 160), size=(240, 320)),
+        ignore_bottom_frac=0.0,
+    )
+    assert abs(landscape.orientation_deg) < 3.0
+    assert abs(abs(portrait.orientation_deg) - 90.0) < 3.0
+
+
+def test_frame_clipped_component_reports_ambiguous_orientation():
+    # A board slice bounded by two image edges inherits its minAreaRect from
+    # the frame, not the plate; the angle would read ~0 regardless of true
+    # rotation, so the estimate must be declared ambiguous instead.
+    clipped = analyze_board(
+        frame(rect=(0, 0, 170, 130)), ignore_bottom_frac=0.0
+    )
+    assert clipped.seen
+    assert clipped.long_axis_ratio == pytest.approx(1.0)
+    assert clipped.orientation_deg == pytest.approx(0.0)
+
+    unclipped = analyze_board(
+        frame(rect=(40, 30, 210, 160)), ignore_bottom_frac=0.0
+    )
+    assert unclipped.seen
+    assert unclipped.long_axis_ratio > 1.2
 
 
 def test_direction_for_diagonal_cut_is_normalized():

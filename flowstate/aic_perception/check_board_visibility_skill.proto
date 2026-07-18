@@ -18,7 +18,7 @@ message CheckBoardVisibilitySkillParams {
   uint32 min_contrast = 1;
   // Clearance from each usable image edge. 0 -> 15 pixels.
   uint32 margin_px = 2;
-  // Bottom fraction excluded to remove gripper fingers. 0 -> 0.15.
+  // Optional extra bottom exclusion beyond calibrated per-camera masks. 0 -> none.
   double ignore_bottom_frac = 3;
   // Maximum camera-plane translation per internal iteration. 0 -> 0.02 m.
   double step_m = 4;
@@ -46,7 +46,7 @@ message CheckBoardVisibilitySkillParams {
   double max_travel_m = 14;
   // Abort when force changes this much from the initial baseline. 0 -> 5 N.
   double force_delta_n = 15;
-  // Overall adaptive-search deadline. 0 -> 90 seconds.
+  // Overall adaptive-search deadline. 0 -> 150 seconds.
   double search_timeout_seconds = 16;
   // Maximum start-relative TCP displacement. 0 -> 0.50 m.
   double max_displacement_m = 17;

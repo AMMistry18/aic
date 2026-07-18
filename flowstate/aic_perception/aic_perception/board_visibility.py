@@ -2,6 +2,15 @@
 
 This module is deliberately independent of ROS so the segmentation and steering
 logic can be unit-tested with synthetic or saved camera images.
+
+The board carries a bright magenta insignia on one side of the plate.  It is
+the only purple object in the workcell, so it doubles as a fiducial: its
+presence proves the board is in view, and the dark component touching it is
+the board by construction (never the arm or a shadow).  The insignia hue was
+measured at H=150+/-2 across every saved sim frame while the nearest blue
+pixels (SC connectors, NIC PCBs) top out at H=110, so the [135, 165] band
+below keeps a 25-unit margin and stays symmetric about 150 in case of an
+RGB/BGR channel swap.
 """
 
 from __future__ import annotations
@@ -10,6 +19,59 @@ from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
 import numpy as np
+
+
+PURPLE_HUE_RANGE = (135, 165)
+PURPLE_SAT_MIN = 60
+PURPLE_VAL_MIN = 60
+# The insignia outline often fragments into an outline piece and a bar piece
+# under occlusion or frame clipping, so blobs are unioned rather than taking
+# only the largest one.
+PURPLE_MIN_BLOB_PX = 50
+PURPLE_MIN_TOTAL_PX = 100
+
+
+def detect_purple_logo(image: np.ndarray):
+    """Detect the board's magenta insignia in a BGR/BGRA image.
+
+    Returns ``None`` when the image carries no hue (grayscale) or no credible
+    purple region exists.  Otherwise returns ``(mask, centroid, area_px,
+    bbox)`` where ``mask`` is the cleaned union of all purple blobs,
+    ``centroid`` is the union centroid ``(x, y)`` in pixels, and ``bbox`` is
+    ``(x0, y0, x1, y1)`` of the union.
+    """
+    import cv2
+
+    if image.ndim != 3 or image.shape[0] < 8 or image.shape[1] < 8:
+        return None
+    bgr = image
+    if image.shape[2] == 4:
+        bgr = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    lower = np.array(
+        [PURPLE_HUE_RANGE[0], PURPLE_SAT_MIN, PURPLE_VAL_MIN], dtype=np.uint8
+    )
+    upper = np.array([PURPLE_HUE_RANGE[1], 255, 255], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return None
+    union = np.zeros_like(mask)
+    total = 0
+    for index in range(1, count):
+        area = int(stats[index, cv2.CC_STAT_AREA])
+        if area >= PURPLE_MIN_BLOB_PX:
+            union[labels == index] = 255
+            total += area
+    if total < PURPLE_MIN_TOTAL_PX:
+        return None
+    ys, xs = np.nonzero(union)
+    centroid = (float(xs.mean()), float(ys.mean()))
+    bbox = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+    return union, centroid, total, bbox
 
 
 @dataclass(frozen=True)
@@ -41,6 +103,18 @@ class MaskReport:
     center_score: float = 0.0
     quality_score: float = 0.0
     failure_reasons: tuple[str, ...] = ()
+    # Signed angle error (degrees, in [-90, 90)) between the board plate's
+    # long axis and the image's longer pixel axis.  Zero means the long side
+    # of the physical board uses the camera's widest field of view.
+    orientation_deg: float = 0.0
+    long_axis_ratio: float = 1.0
+    # Magenta-insignia fiducial evidence.  ``logo_seen`` can be true even when
+    # ``seen`` is false (for example the plate fills the frame and the Otsu
+    # contrast guard rejects it): the logo alone proves the board is in view.
+    logo_seen: bool = False
+    logo_center_error: tuple[float, float] = (0.0, 0.0)
+    logo_area_frac: float = 0.0
+    logo_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,12 +143,18 @@ def analyze_board(
     min_rectangularity: float = 0.60,
     min_detail_area_frac: float = 0.02,
     context_pad_frac: float = 0.10,
+    ignore_mask: np.ndarray | None = None,
 ) -> MaskReport:
     """Return whether the whole dark task board is visible in ``image``.
 
     The mask uses a global Otsu inverse threshold. A contrast guard prevents
     Otsu from inventing a foreground split in an essentially uniform frame.
-    Only the largest surviving connected component participates in edge tests.
+    ``ignore_mask`` identifies calibrated pixels occupied by the camera's own
+    gripper.  Those pixels cannot become board foreground.  Contact with the
+    calibrated mask is reported as a diagnostic only: the live wrist-camera
+    masks intentionally extend beyond the rendered silhouette, so using a
+    one-pixel contact as a completion veto rejects clearly separated, complete
+    board views.
     """
     import cv2
 
@@ -108,44 +188,101 @@ def analyze_board(
     height, width = gray.shape
     if height < 2 or width < 2:
         return MaskReport(seen=False, full=False)
+
+    ignored = np.zeros((height, width), dtype=bool)
+    if ignore_mask is not None:
+        supplied_ignore = np.asarray(ignore_mask)
+        if supplied_ignore.shape != (height, width):
+            raise ValueError("ignore_mask must match the image height and width")
+        ignored = supplied_ignore.astype(bool, copy=True)
+
+    # The insignia is detected before any grayscale decision so its evidence
+    # survives every early return below.  Its gray value sits between the
+    # plate and the floor, so without the explicit fill Otsu would flicker it
+    # in and out of the board mask frame to frame.
+    logo = detect_purple_logo(img)
+    logo_fields: dict = {}
+    logo_mask = None
+    if logo is not None:
+        logo_mask, logo_centroid, logo_area_px, logo_bbox = logo
+        half_w = max(1.0, 0.5 * float(width - 1))
+        half_h = max(1.0, 0.5 * float(height - 1))
+        logo_fields = dict(
+            logo_seen=True,
+            logo_center_error=(
+                (logo_centroid[0] - half_w) / half_w,
+                (logo_centroid[1] - half_h) / half_h,
+            ),
+            logo_area_frac=logo_area_px / float(height * width),
+            logo_bbox=logo_bbox,
+        )
+
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    threshold_gray = gray.copy()
+    threshold_gray[ignored] = 255
 
     _, mask = cv2.threshold(
-        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        threshold_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )
 
-    foreground = gray[mask > 0]
-    background = gray[mask == 0]
+    foreground = gray[(mask > 0) & ~ignored]
+    background = gray[(mask == 0) & ~ignored]
     if (
         foreground.size == 0
         or background.size == 0
         or float(background.mean()) - float(foreground.mean()) < min_contrast
     ):
-        return MaskReport(seen=False, full=False)
+        return MaskReport(seen=False, full=False, **logo_fields)
+
+    # The insignia is physically part of the plate: force it into the board
+    # foreground so it can never punch a hole or shift the centroid.
+    if logo_mask is not None:
+        logo_mask = logo_mask.copy()
+        logo_mask[ignored] = 0
+        mask = cv2.bitwise_or(mask, logo_mask)
 
     band_y = height
     if ignore_bottom_frac > 0.0:
         band_y = max(1, int(height * (1.0 - ignore_bottom_frac)))
-        mask[band_y:, :] = 0
+        ignored[band_y:, :] = True
+    mask[ignored] = 0
 
     kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT, (int(morph_px), int(morph_px))
     )
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    # Closing can grow foreground back into the deliberately excluded band.
+    # Closing can grow foreground back into the deliberately excluded region.
     # Keep its boundary exact so contact with it remains a meaningful signal.
-    if band_y < height:
-        mask[band_y:, :] = 0
+    mask[ignored] = 0
 
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
     if count <= 1:
-        return MaskReport(seen=False, full=False)
+        return MaskReport(seen=False, full=False, **logo_fields)
 
-    component_index = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+    # Anchor component selection to the insignia when it is visible: the
+    # component overlapping the (dilated) purple region is the board by
+    # construction.  Largest-area selection is only the fallback; it can
+    # alternate between unrelated dark fragments (arm, shadows, occluded
+    # board halves), which was the root cause of the old identity churn.
+    component_index = 0
+    if logo_mask is not None:
+        anchor = cv2.dilate(logo_mask, kernel, iterations=3)
+        anchored_labels = labels[anchor > 0]
+        anchored_labels = anchored_labels[anchored_labels > 0]
+        if anchored_labels.size:
+            counts = np.bincount(anchored_labels)
+            candidate = int(np.argmax(counts))
+            if (
+                int(stats[candidate, cv2.CC_STAT_AREA])
+                >= min_area_frac * height * width
+            ):
+                component_index = candidate
+    if component_index == 0:
+        component_index = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
     area = int(stats[component_index, cv2.CC_STAT_AREA])
     if area < min_area_frac * height * width:
-        return MaskReport(seen=False, full=False)
+        return MaskReport(seen=False, full=False, **logo_fields)
 
     x0 = int(stats[component_index, cv2.CC_STAT_LEFT])
     y0 = int(stats[component_index, cv2.CC_STAT_TOP])
@@ -175,20 +312,31 @@ def analyze_board(
     component = (labels == component_index).astype(np.uint8)
 
     # Do not let a narrow arm/finger bridge turn the whole board component into
-    # a bottom-contacting blob.  The ignored band is deliberately opaque to
-    # the detector, so the only useful evidence at that boundary is whether
-    # the *broad body* of the largest component reaches it.  A horizontal
+    # an ignore-mask-contacting blob.  The ignored region is deliberately
+    # opaque to the detector, so the only useful evidence at that boundary is
+    # whether the *broad body* of the largest component reaches it. A horizontal
     # opening severs narrow vertical appendages while leaving an actually
     # bottom-clipped board intact.  Selecting the largest surviving core also
     # handles a thin bridge which widens into the gripper at the crop boundary.
     #
     # The opening width is deliberately modest (12% of a robust component-row
-    # width, and at least two morphology kernels).  Thus ordinary perspective
-    # taper and every substantial board contact still veto ``full``; only a
-    # genuinely narrow connection can be ignored.
+    # width, and at least two morphology kernels).  The resulting contact bit
+    # is useful for diagnostics and the broad core remains the reliable source
+    # for J6 orientation, but contact does not veto an otherwise complete view.
     artificial_bottom_contact = False
-    raw_bottom_contact = bool(band_y < height and y1 >= usable_bottom)
-    if raw_bottom_contact:
+    # Orientation must be measured from the broad plate body, never from a
+    # thin gripper/arm bridge that happens to share the dark component.  The
+    # latter can make minAreaRect's longer dimension follow the board's short
+    # side, producing an exactly-orthogonal J6 target.
+    orientation_component: np.ndarray | None = component
+    ignored_u8 = ignored.astype(np.uint8)
+    ignored_neighborhood = cv2.dilate(
+        ignored_u8,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+        iterations=1,
+    ).astype(bool)
+    raw_ignore_contact = bool(np.any(component.astype(bool) & ignored_neighborhood))
+    if raw_ignore_contact:
         component_roi = component[y0 : y1 + 1, x0 : x1 + 1]
         row_widths = np.count_nonzero(component_roi, axis=1)
         positive_row_widths = row_widths[row_widths > 0]
@@ -216,25 +364,76 @@ def analyze_board(
             )
             if broad_count <= 1:
                 artificial_bottom_contact = True
+                # No broad plate core survived.  The raw component is then
+                # dominated by a narrow bridge/occluder, so any 90-degree
+                # edge choice would be guesswork; suppress J6 alignment.
+                orientation_component = None
             else:
                 broad_index = (
                     int(np.argmax(broad_stats[1:, cv2.CC_STAT_AREA])) + 1
                 )
                 broad_core = broad_labels == broad_index
+                orientation_component = broad_core.astype(np.uint8)
                 artificial_bottom_contact = bool(
-                    np.any(broad_core[usable_bottom, :])
+                    np.any(broad_core & ignored_neighborhood)
                 )
 
+    rectangularity = 0.0
     contours, _ = cv2.findContours(
         component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
-    rectangularity = 0.0
     if contours:
         contour = max(contours, key=cv2.contourArea)
         rect_width, rect_height = cv2.minAreaRect(contour)[1]
         rect_area = float(rect_width * rect_height)
         if rect_area > 0.0:
             rectangularity = min(1.0, area / rect_area)
+
+    orientation_deg = 0.0
+    long_axis_ratio = 1.0
+    orientation_contours = []
+    if orientation_component is not None:
+        orientation_contours, _ = cv2.findContours(
+            orientation_component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+    if orientation_contours:
+        contour = max(orientation_contours, key=cv2.contourArea)
+        min_rect = cv2.minAreaRect(contour)
+        rect_width, rect_height = min_rect[1]
+        rect_area = float(rect_width * rect_height)
+        if rect_area > 0.0:
+            short_side = min(float(rect_width), float(rect_height))
+            long_side = max(float(rect_width), float(rect_height))
+            if short_side > 1e-6:
+                long_axis_ratio = long_side / short_side
+
+            # A component hard-clipped by two or more physical image edges
+            # takes its minAreaRect geometry from the frame boundaries, not
+            # the plate: the measured angle then reads confidently
+            # axis-aligned regardless of the true board rotation (observed
+            # on clipped center-camera close-ups).  Declare it ambiguous so
+            # J6 waits until standoff clears the clipping.
+            hard_edge_clips = sum(
+                1 for value in clearances if value <= 2.0
+            )
+            if hard_edge_clips >= 2:
+                long_axis_ratio = 1.0
+
+            # cv2 reports the angle of the ``rect_width`` side.  Select the
+            # geometrically longer rectangle side explicitly, then compare it
+            # with the image's longer dimension.  This prevents a 90-degree
+            # short-side target and also supports portrait camera streams.
+            # A nearly square observation has no stable long/short identity;
+            # a few pixels of segmentation noise can swap it by 90 degrees.
+            # Refuse roll until perspective exposes a credible long side.
+            if long_axis_ratio >= 1.10:
+                board_long_axis_deg = float(min_rect[2])
+                if rect_width < rect_height:
+                    board_long_axis_deg += 90.0
+                image_long_axis_deg = 0.0 if width >= height else 90.0
+                orientation_deg = (
+                    (board_long_axis_deg - image_long_axis_deg + 90.0) % 180.0
+                ) - 90.0
 
     area_frac = area / float(height * width)
     context_ok = not edges
@@ -288,8 +487,13 @@ def analyze_board(
     failure_reasons: list[str] = []
     if not context_ok:
         failure_reasons.append("context_clipped")
-    if artificial_bottom_contact:
-        failure_reasons.append("artificial_bottom_contact")
+    # Mask contact is diagnostic, not a visibility failure.  The calibrated
+    # wrist-camera masks are conservative and, in the live right-camera trace,
+    # their upper boundary reached the board's lower modules despite a visible
+    # background gap to the rendered gripper.  The mask already prevents those
+    # gripper pixels from entering the selected component; vetoing completion
+    # on any boundary contact defeated the purpose of masking and cost four
+    # unnecessary clearance moves.
     if not detail_ok:
         failure_reasons.append("insufficient_detail")
     if not shape_ok:
@@ -299,7 +503,6 @@ def analyze_board(
         context_ok
         and detail_ok
         and shape_ok
-        and not artificial_bottom_contact
     )
     return MaskReport(
         seen=True,
@@ -322,6 +525,9 @@ def analyze_board(
         center_score=center_score,
         quality_score=quality_score,
         failure_reasons=tuple(failure_reasons),
+        orientation_deg=orientation_deg,
+        long_axis_ratio=long_axis_ratio,
+        **logo_fields,
     )
 
 
@@ -331,6 +537,62 @@ def view_quality(report: MaskReport) -> float:
     if not report.seen:
         return 0.0
     return float(np.clip(report.quality_score, 0.0, 1.0))
+
+
+def ivm_survey_rejection_reasons(
+    report: MaskReport,
+    *,
+    max_area_frac: float = 0.45,
+    min_rectangularity: float = 0.70,
+    max_center_error_x: float = 0.15,
+    max_center_error_y: float = 0.25,
+    min_long_axis_ratio: float = 1.15,
+    max_long_axis_error_deg: float = 12.0,
+    clearance_scale: float = 1.50,
+) -> tuple[str, ...]:
+    """Explain why a frame is not yet suitable for downstream IVM.
+
+    ``MaskReport.full`` only answers whether the segmented plate fits in the
+    image. Pose estimation needs a stronger terminal condition: the centered
+    camera must have an identity anchor, enough context around protruding
+    components, no overlap with the calibrated gripper silhouette, and the
+    board's long side aligned with the camera's wide image dimension.
+
+    Keeping this predicate separate from ``full`` is intentional. Partial and
+    oblique side-camera reports remain useful steering evidence, but cannot
+    prematurely release the downstream NIC/SFP/SC estimators.
+    """
+
+    reasons: list[str] = []
+    if not report.full:
+        reasons.append("plate_not_full")
+    if not report.logo_seen:
+        reasons.append("logo_not_seen")
+    if report.area_frac > max_area_frac:
+        reasons.append("board_too_large")
+    if report.rectangularity < min_rectangularity:
+        reasons.append("low_rectangularity")
+    if abs(float(report.center_error[0])) > max_center_error_x:
+        reasons.append("horizontal_off_center")
+    if abs(float(report.center_error[1])) > max_center_error_y:
+        reasons.append("vertical_off_center")
+    if report.artificial_bottom_contact:
+        reasons.append("gripper_mask_contact")
+    if report.long_axis_ratio < min_long_axis_ratio:
+        reasons.append("long_axis_ambiguous")
+    elif abs(float(report.orientation_deg)) > max_long_axis_error_deg:
+        reasons.append("long_axis_misaligned")
+
+    required_clearance = clearance_scale * float(report.context_pad_px)
+    if min(report.clearance_px) < required_clearance:
+        reasons.append("component_context_tight")
+    return tuple(reasons)
+
+
+def ivm_survey_ready(report: MaskReport, **kwargs) -> bool:
+    """Return whether one center-camera frame is ready for all IVM models."""
+
+    return not ivm_survey_rejection_reasons(report, **kwargs)
 
 
 def search_progress(

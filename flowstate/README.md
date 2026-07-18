@@ -117,7 +117,13 @@ IVM NIC estimate -> filter estimates -> remaining process
 
 Do not run Move Robot, another Insert Cable policy, or any other motion session
 in parallel with this skill. Always switch back to the default controller before
-using Flowstate Move Robot again. `target`, `dx/dy/dz`, and `target_valid` remain
+using Flowstate Move Robot again. Route both the successful and unsuccessful
+board-search result through `Switch To Default Controller`; validate the returned
+`success` and `done` fields only after that cleanup node. Expected sensor/search
+failures are returned as `success=false` so the serial cleanup step still runs.
+Cancellation still aborts execution and requires the process's cancellation
+cleanup path to switch back to the default controller. `target`, `dx/dy/dz`, and
+`target_valid` remain
 as diagnostics for the last attempted internal move; they are no longer wired
 to another skill. Use `moves_executed`, `travel_m`, `force_abort`, `seen`, and
 `done` for process diagnostics.

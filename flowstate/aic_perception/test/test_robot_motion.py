@@ -146,6 +146,16 @@ def test_callbacks_pair_measured_named_joints_with_controller_mode():
     assert type(motion._joint_reference.target_mode) is int
 
 
+def test_controller_handoff_holds_the_reported_mode_at_measured_state():
+    motion = RobotMotion.__new__(RobotMotion)
+    calls = []
+    motion._reported_target_mode = lambda: 2
+    motion._publish_mode_hold_command = lambda mode: calls.append(mode) or True
+
+    assert motion.prepare_controller_handoff()
+    assert calls == [2]
+
+
 def test_quaternion_normalization_and_distance_treat_sign_as_equivalent():
     np.testing.assert_allclose(normalize_quaternion((0.0, 0.0, 0.0, 2.0)), (0, 0, 0, 1))
     assert quaternion_angular_distance(
@@ -241,6 +251,12 @@ def test_move_smooth_settles_rotation_without_angular_velocity(monkeypatch):
 
     class CameraRig:
         @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            assert timeout_sec == 1.0
+            assert max_age_sec == 0.5
+            return (0.0, 0.0, 0.0)
+
+        @staticmethod
         def latest_force_xyz(max_age_sec):
             assert max_age_sec == 0.5
             return (0.0, 0.0, 0.0)
@@ -318,7 +334,9 @@ def test_move_smooth_replans_from_safe_measured_pose_when_controller_stops_short
 
     motion = RobotMotion.__new__(RobotMotion)
     motion._publisher = Publisher()
-    motion._camera_rig = object()
+    motion._camera_rig = SimpleNamespace(
+        wait_for_force_xyz=lambda **_kwargs: (0.0, 0.0, 0.0)
+    )
     monkeypatch.setattr(motion, "_ensure_cartesian_mode", lambda _: (True, ""))
     monkeypatch.setattr(
         motion, "_command", lambda position, orientation: (position, orientation)
@@ -363,7 +381,59 @@ def test_move_smooth_replans_from_safe_measured_pose_when_controller_stops_short
     assert motion._publisher.messages[-1][0] == stopped_short.position
 
 
-def test_joint1_yaw_preserves_all_other_controller_references(monkeypatch):
+def test_move_smooth_waits_for_fresh_force_before_publishing(monkeypatch):
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._publisher = Publisher()
+    motion._camera_rig = SimpleNamespace(
+        wait_for_force_xyz=lambda **_kwargs: None
+    )
+    monkeypatch.setattr(motion, "_ensure_cartesian_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion,
+        "_current_state",
+        lambda _: ControllerPose(
+            position=(0.0, 0.0, 0.0),
+            orientation=(0.0, 0.0, 0.0, 1.0),
+            speed_mps=0.0,
+            received_at=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        motion,
+        "_publish_profile",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Cartesian setpoints must not publish without fresh force"
+        ),
+    )
+
+    outcome = motion.move_smooth(
+        (0.01, 0.0, 0.0),
+        max_speed_mps=0.025,
+        publish_hz=20.0,
+        settle_tolerance_m=0.001,
+        timeout_sec=2.0,
+        baseline_force_xyz=(0.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert not outcome.success
+    assert "fresh wrist-force" in outcome.message
+
+
+@pytest.mark.parametrize(
+    ("method_name", "joint_index"),
+    (("move_joint1_yaw", 0), ("move_joint6_yaw", 5)),
+)
+def test_single_joint_yaw_preserves_all_other_controller_references(
+    monkeypatch, method_name, joint_index
+):
     class Publisher:
         def __init__(self):
             self.messages = []
@@ -376,6 +446,12 @@ def test_joint1_yaw_preserves_all_other_controller_references(monkeypatch):
             self.messages.append(message)
 
     class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            assert timeout_sec == 1.0
+            assert max_age_sec == 0.5
+            return (0.0, 0.0, 0.0)
+
         @staticmethod
         def latest_force_xyz(max_age_sec):
             assert max_age_sec == 0.5
@@ -402,7 +478,9 @@ def test_joint1_yaw_preserves_all_other_controller_references(monkeypatch):
         target_mode=1,
     )
     joint_mode_start = JointReference(start.positions, 0.0, 2.0, target_mode=2)
-    target = (0.26, *start.positions[1:])
+    target_values = list(start.positions)
+    target_values[joint_index] += 0.06
+    target = tuple(target_values)
     references = iter(
         [joint_mode_start]
         + [
@@ -427,7 +505,7 @@ def test_joint1_yaw_preserves_all_other_controller_references(monkeypatch):
         return True, args[1]
 
     monkeypatch.setattr(motion, "_publish_joint_profile", complete_profile)
-    outcome = motion.move_joint1_yaw(
+    outcome = getattr(motion, method_name)(
         0.06,
         max_speed_radps=0.12,
         publish_hz=20.0,
@@ -443,7 +521,14 @@ def test_joint1_yaw_preserves_all_other_controller_references(monkeypatch):
     assert captured["args"][0] == start.positions
     assert captured["args"][1] == pytest.approx(target)
     assert captured["args"][2] == pytest.approx(1.875 * 0.06 / 0.12)
-    assert captured["args"][1][1:] == start.positions[1:]
+    assert captured["args"][1][joint_index] == pytest.approx(
+        start.positions[joint_index] + 0.06
+    )
+    assert all(
+        captured["args"][1][index] == pytest.approx(value)
+        for index, value in enumerate(start.positions)
+        if index != joint_index
+    )
     assert motion._joint_publisher.messages[-1] == pytest.approx(target)
     assert restores == [2.0]
 
@@ -527,6 +612,10 @@ def test_joint1_yaw_force_guard_reverses_to_entire_starting_target(monkeypatch):
 
     class CameraRig:
         @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (19.0, 0.0, 0.0)
+
+        @staticmethod
         def latest_force_xyz(max_age_sec):
             return (19.0, 0.0, 0.0)
 
@@ -598,6 +687,10 @@ def test_joint1_yaw_settle_timeout_reverses_and_restores_cartesian(monkeypatch):
             pass
 
     class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (0.0, 0.0, 0.0)
+
         @staticmethod
         def latest_force_xyz(max_age_sec):
             return (0.0, 0.0, 0.0)
@@ -681,3 +774,17 @@ def test_force_guard_checks_absolute_and_change_from_baseline():
     assert RobotMotion._force_exceeded((12.0, 0.0, 0.0), (0.0, 0.0, 0.0), 12.0, 5.0)
     assert RobotMotion._force_exceeded((6.1, 0.0, 0.0), (1.0, 0.0, 0.0), 12.0, 5.0)
     assert not RobotMotion._force_exceeded(None, None, 12.0, 5.0)
+
+
+def test_force_guard_ignores_gravity_rotating_in_the_sensor_frame():
+    # A J5/J6 reorientation rotates the static ~14 N gravity/bias load in the
+    # wrist sensor frame.  The vector difference here is ~19.8 N, which used
+    # to trip the 5 N delta guard in free space (live run failure); the
+    # magnitude is unchanged, so the guard must stay quiet.
+    assert not RobotMotion._force_exceeded(
+        (0.0, 14.0, 0.0), (14.0, 0.0, 0.0), 18.0, 5.0
+    )
+    # Genuine contact changes the magnitude and must still trip.
+    assert RobotMotion._force_exceeded(
+        (0.0, 19.5, 0.0), (14.0, 0.0, 0.0), 25.0, 5.0
+    )

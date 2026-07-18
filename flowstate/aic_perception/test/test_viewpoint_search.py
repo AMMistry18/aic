@@ -1,794 +1,892 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from aic_perception.board_visibility import MaskReport
-from aic_perception.viewpoint_search import ActionKind, AdaptiveViewpointPlanner
+from aic_perception.viewpoint_search import (
+    ActionKind,
+    AdaptiveViewpointPlanner,
+)
 
 
 def report(
     *,
-    edges=(),
-    area=0.13,
-    seen=True,
-    full=False,
-    center=(0.0, 0.0),
-    bottom=False,
-    rectangularity=0.8,
-):
+    seen: bool = True,
+    full: bool = False,
+    center: tuple[float, float] = (0.0, 0.0),
+    area: float = 0.20,
+    edges: tuple[str, ...] = (),
+    rectangularity: float = 0.9,
+    bottom_contact: bool = False,
+    orientation: float = 0.0,
+    long_axis_ratio: float = 1.4,
+    logo: bool = False,
+    logo_center: tuple[float, float] = (0.4, 0.0),
+    failure_reasons: tuple[str, ...] = (),
+    clearance: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
+    context_pad: float = 0.0,
+) -> MaskReport:
     return MaskReport(
-        seen=seen, full=full, edges=frozenset(edges), area_frac=area,
-        rectangularity=rectangularity, center_error=center,
-        artificial_bottom_contact=bottom,
+        seen=seen,
+        full=full,
+        edges=frozenset(edges),
+        area_frac=area,
+        rectangularity=rectangularity,
+        artificial_bottom_contact=bottom_contact,
+        center_error=center,
+        quality_score=0.5,
+        clearance_px=clearance,
+        context_pad_px=context_pad,
+        failure_reasons=failure_reasons,
+        orientation_deg=orientation,
+        long_axis_ratio=long_axis_ratio,
+        logo_seen=logo,
+        logo_center_error=logo_center,
+        logo_area_frac=0.01 if logo else 0.0,
     )
 
 
 def views(center: MaskReport, left: MaskReport | None = None, right: MaskReport | None = None):
-    result = {"center_camera": center}
+    reports = {"center_camera": center}
     if left is not None:
-        result["left_camera"] = left
+        reports["left_camera"] = left
     if right is not None:
-        result["right_camera"] = right
-    return result
+        reports["right_camera"] = right
+    return reports
 
 
-def confirm_j1(planner: AdaptiveViewpointPlanner, reports):
-    """Supply the two fresh center-camera frames required to leave J1."""
-
-    confirmation = planner.next_action(reports)
-    assert confirmation.kind is ActionKind.OBSERVE
-    return planner.next_action(reports)
+def make_planner(**overrides) -> AdaptiveViewpointPlanner:
+    return AdaptiveViewpointPlanner(**overrides)
 
 
-def test_one_complete_camera_finishes_without_all_three():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(views(report(full=True), report(area=0.01), report(area=0.01)))
+def reach_ascend(planner: AdaptiveViewpointPlanner) -> None:
+    """Drive the planner through CENTER with two confirmed centered frames."""
+
+    centered = views(report(center=(0.02, 0.1), area=0.30, edges=("top",)))
+    assert planner.next_action(centered).kind is ActionKind.OBSERVE
+    action = planner.next_action(centered)
+    assert action.moves_robot
+    assert planner.phase == "ascend_clearance"
+
+
+# ----------------------------------------------------------------------
+# Terminal conditions
+
+
+def test_complete_view_terminates_done():
+    planner = make_planner()
+    action = planner.next_action(views(report(full=True, area=0.20)))
     assert action.kind is ActionKind.DONE
-    assert action.camera == "center_camera"
+    assert action.terminal
+    assert planner.terminal and planner.coverage_achieved
+    assert planner.selected_camera == "center_camera"
 
 
-def test_exact_workflow_is_j1_then_j2_then_j3_then_j4():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    # J1: board is horizontally off-center.
-    j1 = planner.next_action(views(report(center=(0.5, 0.4), bottom=True, edges=("bottom", "top"))))
-    assert j1.kind is ActionKind.BASE_YAW
-    # J1 aligned in two fresh frames: J2 is next and probes clearance.
-    aligned = views(report(center=(0.0, 0.4), bottom=True, edges=("bottom", "top")))
-    j2 = confirm_j1(planner, aligned)
-    assert j2.kind is ActionKind.BACKOFF
-    # Lower edge must hold in a second fresh frame before J3 moves.
-    lower_ready = views(report(center=(0.0, 0.4), edges=("top",)))
-    assert planner.next_action(lower_ready).kind is ActionKind.OBSERVE
-    j3 = planner.next_action(lower_ready)
-    assert j3.kind is ActionKind.UP_CLEARANCE
-    # Upper edge independently holds twice before J4 roll is allowed.
-    all_edges_visible = views(report(center=(0.0, 0.0)))
-    assert planner.next_action(all_edges_visible).kind is ActionKind.OBSERVE
-    j4 = planner.next_action(all_edges_visible)
-    assert j4.kind is ActionKind.CAMERA_ROLL
-    assert j4.aim_direction[1] == 0.0
+def test_full_view_outside_area_bounds_is_not_done():
+    planner = make_planner()
+    action = planner.next_action(views(report(full=True, area=0.60)))
+    assert action.kind is not ActionKind.DONE
 
 
-def test_j2_never_reverses_direction_from_noisy_image_feedback():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    aligned = views(report(center=(0.0, 0.4), bottom=True, edges=("bottom",)))
-    first = confirm_j1(planner, aligned)
-    assert first.kind is ActionKind.BACKOFF
-    # Still clipped after a regressive frame: clearance remains away from the
-    # board. Mask noise must never make J2 drive back toward it.
-    second = planner.next_action(views(report(center=(0.0, 0.4), bottom=True, edges=("bottom",), area=0.7)))
-    assert second.kind is ActionKind.BACKOFF
-    assert second.axial_direction == first.axial_direction == 1.0
-
-
-def test_yaw_uses_center_camera_not_three_camera_area_gate():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(views(
-        report(center=(-0.4, 0.0)), report(area=0.01), report(area=0.01)
-    ))
-    assert action.kind is ActionKind.BASE_YAW
-
-
-def test_live_false_gripper_blob_does_not_end_j1_or_reverse_once():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    board_corner = report(
-        edges=("left", "top"),
-        area=0.027,
-        center=(-0.896, -0.697),
-    )
-    first = planner.next_action(views(board_corner))
-    assert first.kind is ActionKind.BASE_YAW
-
-    # Exact center-camera report from the failed run after the first yaw: the
-    # centered 2.1% bottom-contacting component was the gripper, not the board.
-    false_gripper = report(
-        area=0.021,
-        center=(0.011, 0.928),
-        bottom=True,
-    )
-    second = planner.next_action(views(false_gripper))
-
-    assert second.kind is ActionKind.BASE_YAW
-    assert second.aim_direction[0] == first.aim_direction[0]
-
-
-def test_losing_center_alignment_after_j2_restarts_at_j1_before_roll():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    j2 = confirm_j1(
-        planner,
-        views(report(area=0.12, center=(0.0, 0.4), bottom=True, edges=("bottom", "top"))),
-    )
-    assert j2.kind is ActionKind.BACKOFF
-
-    shifted = report(area=0.10, center=(-0.7, 0.2), edges=("left",))
-    next_action = planner.next_action(views(shifted))
-
-    assert next_action.kind is ActionKind.BASE_YAW
-    assert "J1 horizontal yaw" in next_action.reason
-
-
-def test_losing_center_mask_twice_reverses_without_frame_by_frame_chatter():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    first = planner.next_action(
-        views(report(area=0.03, center=(-0.8, -0.5), edges=("left",)))
-    )
-    second = planner.next_action(
-        {},
-    )
-    third = planner.next_action(
-        {},
-    )
-
-    assert first.kind is second.kind is third.kind is ActionKind.BASE_YAW
-    assert second.aim_direction[0] == first.aim_direction[0]
-    assert third.aim_direction[0] == -first.aim_direction[0]
-
-
-@pytest.mark.parametrize(
-    ("center_x", "edge", "expected_sign"),
-    ((-0.166, "left", 1.0), (0.566, "right", -1.0)),
-)
-def test_j1_polarity_reduces_live_center_camera_error(
-    center_x, edge, expected_sign
-):
-    """The live plant moves image x with the commanded J1 sign."""
-
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(
-        views(report(area=0.124, center=(center_x, 0.20), edges=(edge,)))
-    )
-
-    assert action.kind is ActionKind.BASE_YAW
-    assert action.aim_direction[0] == expected_sign
-    moved_x = center_x + expected_sign * 0.05
-    assert abs(moved_x) < abs(center_x)
-
-
-def test_live_j1_closed_loop_converges_without_a_direction_reversal():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    center_x = -0.166
-    signs = []
-
-    for _ in range(8):
-        action = planner.next_action(
-            views(report(area=0.124, center=(center_x, 0.20)))
-        )
-        if action.kind is ActionKind.OBSERVE:
-            break
-        assert action.kind is ActionKind.BASE_YAW
-        signs.append(action.aim_direction[0])
-        next_x = center_x + action.aim_direction[0] * 0.05
-        assert abs(next_x) < abs(center_x)
-        center_x = next_x
-
-    assert signs
-    assert set(signs) == {1.0}
-    assert action.kind is ActionKind.OBSERVE
-
-
-def test_start_relative_yaw_boundary_changes_geometry_instead_of_oscillating():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(
-        views(report(area=0.11, center=(-0.7, -0.5), edges=("left", "top")))
-    )
-    planner.mark_yaw_unavailable(
-        action,
-        reason="start-relative joint-1 envelope reached",
-    )
-    recovery = planner.next_action(
-        views(report(area=0.11, center=(-0.7, -0.5), edges=("left", "top")))
-    )
-
-    assert recovery.kind is ActionKind.BACKOFF
-    assert not recovery.terminal
-    assert planner.phase == "j2_bottom_clearance"
-
-
-def test_global_yaw_travel_boundary_is_terminal():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(
-        views(report(area=0.11, center=(-0.7, -0.5), edges=("left", "top")))
-    )
-    planner.mark_yaw_unavailable(
-        action,
-        reason="cumulative travel envelope reached",
-        global_unavailable=True,
-    )
-
-    terminal = planner.next_action(
-        views(report(area=0.11, center=(-0.7, -0.5), edges=("left", "top")))
-    )
-    assert terminal.kind is ActionKind.STAGNATED
-    assert terminal.terminal
-    assert "cannot continue" in terminal.reason
-
-
-def test_repeated_start_relative_yaw_rejections_use_bounded_recovery_ladder():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=1,
-    )
-    clipped = views(
-        report(area=0.11, center=(-0.7, -0.5), edges=("left", "top"))
-    )
-    top_clipped = views(report(area=0.11, center=(0.0, 0.0), edges=("top",)))
-    clear = views(report(area=0.11, center=(0.0, 0.0)))
-    shifted_high_quality = views(
-        report(area=0.20, center=(-0.3, 0.0), rectangularity=0.95)
-    )
-
-    first_yaw = planner.next_action(clipped)
-    planner.mark_yaw_unavailable(first_yaw, reason="J1 envelope reached")
-    first_recovery = planner.next_action(clipped)
-    assert first_recovery.kind is ActionKind.BACKOFF
-    assert planner.next_action(top_clipped).kind is ActionKind.UP_CLEARANCE
-    assert planner.next_action(clear).kind is ActionKind.CAMERA_ROLL
-
-    second_yaw = planner.next_action(shifted_high_quality)
-    assert second_yaw.kind is ActionKind.BASE_YAW
-    planner.mark_yaw_unavailable(second_yaw, reason="J1 envelope reached")
-    second_recovery = planner.next_action(shifted_high_quality)
-    assert second_recovery.kind is ActionKind.UP_CLEARANCE
-    assert planner.next_action(clear).kind is ActionKind.CAMERA_ROLL
-
-    third_yaw = planner.next_action(shifted_high_quality)
-    assert third_yaw.kind is ActionKind.BASE_YAW
-    planner.mark_yaw_unavailable(third_yaw, reason="J1 envelope reached")
-    terminal = planner.next_action(clipped)
-
-    assert [first_recovery.kind, second_recovery.kind] == [
-        ActionKind.BACKOFF,
-        ActionKind.UP_CLEARANCE,
-    ]
-    assert terminal.kind is ActionKind.STAGNATED
-
-
-def test_centered_oversized_board_stops_yaw_and_requests_standoff():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    failed_run_view = report(
-        area=0.636,
-        center=(0.049, -0.039),
-        edges=("left", "right", "top"),
-    )
-
-    action = confirm_j1(planner, views(failed_run_view))
-
-    assert action.kind is ActionKind.BACKOFF
-    assert "J2 relative clearance" in action.reason
-
-
-def test_j2_does_not_use_a_fixed_move_count_while_board_is_oversized():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    oversized = views(
-        report(
-            area=0.62,
-            center=(0.03, -0.05),
-            edges=("left", "right", "top"),
-        )
-    )
-
-    first = confirm_j1(planner, oversized)
-    actions = [first] + [planner.next_action(oversized) for _ in range(6)]
-
-    assert all(action.kind is ActionKind.BACKOFF for action in actions)
-
-
-def test_later_clearance_uses_alignment_hysteresis_instead_of_restarting_yaw():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    aligned = views(report(area=0.30, center=(0.05, -0.3), edges=("top",)))
-    first_up = confirm_j1(
-        planner,
-        aligned,
-    )
-    # First fresh lower-edge frame is confirmation only; the second can move.
-    assert first_up.kind is ActionKind.OBSERVE
-    first_up = planner.next_action(aligned)
-    slightly_shifted = planner.next_action(
-        views(report(area=0.28, center=(0.12, -0.28), edges=("top",)))
-    )
-
-    assert first_up.kind is ActionKind.UP_CLEARANCE
-    assert slightly_shifted.kind is ActionKind.UP_CLEARANCE
-
-
-def test_side_camera_cannot_end_or_take_over_center_camera_yaw():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    center = report(
-        area=0.14,
-        center=(0.48, 0.68),
-        edges=("right",),
-        bottom=True,
-    )
-    left = report(
-        area=0.26,
-        center=(-0.119, 0.2),
-        edges=(),
-        bottom=True,
-    )
-
-    first = planner.next_action(views(center, left=left))
-    assert first.kind is ActionKind.BASE_YAW
-    assert first.camera == "center_camera"
-
-    # Exact shape of the failed transition: the left camera satisfies the old
-    # scalar gate while center is still +0.340 and clipped on the right.
-    second = planner.next_action(
-        views(
-            report(area=0.329, center=(0.340, 0.4), edges=("right",), bottom=True),
-            left=report(area=0.262, center=(-0.119, 0.2), bottom=True),
-        )
-    )
-    assert second.kind is ActionKind.BASE_YAW
-    assert second.camera == "center_camera"
-
-
-def test_single_horizontal_edge_cannot_pass_j1_even_near_center():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(
-        views(report(area=0.30, center=(0.05, 0.0), edges=("right",)))
-    )
-
-    assert action.kind is ActionKind.BASE_YAW
-
-
-def test_normal_view_uses_tight_point_one_center_gate():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-
-    outside = planner.next_action(views(report(area=0.30, center=(0.11, 0.0))))
-
-    assert outside.kind is ActionKind.BASE_YAW
-
-
-def test_j2_center_drift_returns_to_j1_before_another_clearance_move():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    aligned = views(
-        report(area=0.60, center=(0.05, 0.0), edges=("left", "right", "top"))
-    )
-    j2 = confirm_j1(planner, aligned)
-    assert j2.kind is ActionKind.BACKOFF
-
-    drifted = planner.next_action(
-        views(report(area=0.52, center=(0.24, 0.0), edges=("left", "right", "top")))
-    )
-
-    assert drifted.kind is ActionKind.BASE_YAW
-
-
-def test_repeatable_j2_drift_is_precompensated_instead_of_cycling():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    oversized = lambda x: views(
-        report(
-            area=0.60,
-            center=(x, 0.0),
-            edges=("left", "right", "top"),
-        )
-    )
-
-    assert planner.next_action(oversized(0.05)).kind is ActionKind.OBSERVE
-    assert planner.next_action(oversized(0.05)).kind is ActionKind.BACKOFF
-    # J2 produced a repeatable +0.19 normalized image shift.
-    assert planner.next_action(oversized(0.24)).kind is ActionKind.BASE_YAW
-
-    # Returning merely to zero is intentionally no longer sufficient: J1
-    # learns a small opposite offset so the next J2 step lands inside the
-    # exit hysteresis instead of starting the same cycle again.
-    assert planner.next_action(oversized(0.05)).kind is ActionKind.BASE_YAW
-    assert planner.next_action(oversized(-0.08)).kind is ActionKind.OBSERVE
-    assert planner.next_action(oversized(-0.08)).kind is ActionKind.BACKOFF
-
-    after_compensated_j2 = planner.next_action(oversized(0.11))
-    assert after_compensated_j2.kind is ActionKind.BACKOFF
-    assert planner.phase == "j2_bottom_clearance"
-
-
-def test_one_regressive_frame_does_not_reverse_yaw():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    first = planner.next_action(
-        views(report(area=0.20, center=(0.50, 0.0), edges=("right",)))
-    )
-    noisy = planner.next_action(
-        views(report(area=0.19, center=(0.52, 0.0), edges=("right",)))
-    )
-
-    assert noisy.kind is ActionKind.BASE_YAW
-    assert noisy.aim_direction[0] == first.aim_direction[0]
-
-
-def test_failed_alignment_confirmation_uses_new_frame_direction():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    candidate = planner.next_action(
-        views(report(area=0.30, center=(0.08, 0.0)))
-    )
-    correction = planner.next_action(
-        views(report(area=0.30, center=(-0.13, 0.0)))
-    )
-
-    assert candidate.kind is ActionKind.OBSERVE
-    assert correction.kind is ActionKind.BASE_YAW
-    assert correction.aim_direction[0] > 0.0
-
-
-def test_unstable_centered_masks_cannot_prematurely_leave_j1():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    first = planner.next_action(
-        views(report(area=0.12, center=(-0.08, 0.65)))
-    )
-    swapped = planner.next_action(
-        views(report(area=0.13, center=(0.07, -0.62)))
-    )
-
-    assert first.kind is ActionKind.OBSERVE
-    assert swapped.kind is ActionKind.OBSERVE
-    assert planner.phase == "j1_yaw_alignment"
-
-    # Two stable frames for the new component may now advance, but the first
-    # discontinuous pair never did.
-    advanced = planner.next_action(
-        views(report(area=0.13, center=(0.06, -0.61)))
-    )
-    assert advanced.kind is ActionKind.OBSERVE
-    assert planner.phase == "j2_bottom_clearance"
-
-
-def test_j2_and_j3_require_independent_stable_confirmation_windows():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=2,
-    )
-    ready = views(report(area=0.20, center=(0.0, 0.0)))
-
-    assert planner.next_action(ready).kind is ActionKind.OBSERVE  # J2 frame 1
-    assert planner.next_action(ready).kind is ActionKind.OBSERVE  # J3 frame 1
-    assert planner.phase == "j3_top_clearance"
-    assert planner.next_action(ready).kind is ActionKind.CAMERA_ROLL
-
-
-def test_unstable_clearance_masks_restart_confirmation_not_phase():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=2,
-    )
-    first = planner.next_action(
-        views(report(area=0.20, center=(0.0, 0.55)))
-    )
-    jumped = planner.next_action(
-        views(report(area=0.34, center=(0.0, -0.55)))
-    )
-
-    assert first.kind is ActionKind.OBSERVE
-    assert jumped.kind is ActionKind.OBSERVE
-    assert planner.phase == "j2_bottom_clearance"
-
-
-def test_non_global_boundary_forces_clearance_even_for_small_mask():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    small = views(
-        report(area=0.02, center=(-0.7, -0.5), edges=("left", "top"))
-    )
-    action = planner.next_action(small)
-    assert action.kind is ActionKind.BASE_YAW
-
-    planner.mark_yaw_unavailable(
-        action,
-        reason="start-relative joint-1 envelope reached",
-    )
-    recovery = planner.next_action(small)
-
-    assert recovery.kind is ActionKind.BACKOFF
-    assert recovery.axial_direction == 1.0
-
-
-def test_stable_deep_gripper_component_cannot_prematurely_leave_j1():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    gripper = views(
-        report(
-            area=0.07,
-            center=(0.0, 0.92),
-            edges=("bottom",),
-            bottom=True,
-            rectangularity=0.15,
-        )
-    )
-
-    first = planner.next_action(gripper)
-    second = planner.next_action(gripper)
-
-    assert first.kind is ActionKind.BASE_YAW
-    assert second.kind is ActionKind.BASE_YAW
-    assert planner.phase == "j1_yaw_alignment"
-
-
-def test_no_view_yaw_cycles_use_j2_then_j3_and_terminate():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    actions = []
-    for _ in range(20):
-        action = planner.next_action({})
-        actions.append(action)
-        if action.terminal:
-            break
-
-    recovery_kinds = [
-        item.kind
-        for item in actions
-        if item.kind in {ActionKind.BACKOFF, ActionKind.UP_CLEARANCE}
-    ]
-    assert recovery_kinds == [ActionKind.BACKOFF, ActionKind.UP_CLEARANCE]
-    assert actions[-1].kind is ActionKind.STAGNATED
-    assert len(actions) < 20
-
-
-def test_j3_falls_back_to_monotonic_j2_when_bottom_is_lost():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=1,
-    )
-    top_clipped = views(report(area=0.20, center=(0.0, 0.0), edges=("top",)))
-    assert planner.next_action(top_clipped).kind is ActionKind.UP_CLEARANCE
-
-    bottom_lost = planner.next_action(
-        views(
-            report(
-                area=0.20,
-                center=(0.0, 0.0),
-                edges=("bottom", "top"),
-                bottom=True,
-            )
-        )
-    )
-    assert bottom_lost.kind is ActionKind.BACKOFF
-    assert bottom_lost.axial_direction == 1.0
-    assert planner.phase == "j2_bottom_clearance"
-
-
-def test_j4_roll_is_bounded_to_one_reversal_then_geometry_recovery():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=1,
-        max_roll_moves=6,
-    )
-    flat = views(report(area=0.20, center=(0.0, 0.0)))
-    actions = [planner.next_action(flat) for _ in range(5)]
-
-    assert actions[0].kind is ActionKind.CAMERA_ROLL
-    assert actions[1].kind is ActionKind.CAMERA_ROLL
-    assert actions[2].kind is ActionKind.CAMERA_ROLL
-    assert actions[2].aim_direction[0] == -actions[1].aim_direction[0]
-    assert actions[3].kind is ActionKind.CAMERA_ROLL
-    # Equal current quality is kept; an unnecessary rollback would add motion
-    # without restoring anything better.
-    assert actions[4].kind is ActionKind.BACKOFF
-    assert not actions[4].request_rollback
-    assert "keep the best current roll view" in actions[4].reason
-
-    tail = [planner.next_action(flat) for _ in range(3)]
-    assert tail[-1].kind is ActionKind.STAGNATED
-    assert tail[-1].terminal
-
-
-def test_j4_monotonic_improvement_still_has_a_finite_excursion():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=1,
-        max_roll_moves=3,
-    )
-    actions = []
-    for area in (0.15, 0.18, 0.21, 0.24):
-        actions.append(
-            planner.next_action(
-                views(report(area=area, center=(0.0, 0.0)))
-            )
-        )
-
-    assert [item.kind for item in actions[:3]] == [
-        ActionKind.CAMERA_ROLL,
-        ActionKind.CAMERA_ROLL,
-        ActionKind.CAMERA_ROLL,
-    ]
-    assert actions[3].kind is ActionKind.BACKOFF
-    assert "keep the best current roll view" in actions[3].reason
-    terminal = planner.next_action(
-        views(report(area=0.25, center=(0.0, 0.0)))
-    )
-    assert terminal.kind is ActionKind.STAGNATED
-
-
-def test_j3_j4_edge_flicker_cannot_reset_global_roll_limit():
-    planner = AdaptiveViewpointPlanner(
-        min_goal_area_frac=0.06,
-        alignment_confirmation_frames=1,
-        phase_confirmation_frames=1,
-        max_roll_moves=2,
-    )
-    clear = views(report(area=0.20, center=(0.0, 0.0)))
-    top_lost = views(
-        report(area=0.20, center=(0.0, 0.0), edges=("top",))
-    )
-
-    actions = [
-        planner.next_action(clear),
-        planner.next_action(top_lost),
-        planner.next_action(clear),
-        planner.next_action(top_lost),
-        planner.next_action(clear),
-    ]
-
-    assert [item.kind for item in actions].count(ActionKind.CAMERA_ROLL) == 2
-    assert actions[-1].kind is ActionKind.BACKOFF
-    # A J3/J4 re-entry did not reset the two-command global excursion.
-    assert planner.next_action(clear).kind is ActionKind.STAGNATED
-
-
-def test_unexpected_camera_cannot_complete_or_steer_policy():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
+def test_unexpected_camera_name_cannot_finish():
+    planner = make_planner()
     action = planner.next_action({"rogue_camera": report(full=True, area=0.2)})
-
     assert action.kind is ActionKind.BASE_YAW
     assert not planner.coverage_achieved
 
 
-def test_stale_yaw_rejection_cannot_overwrite_terminal_state():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    action = planner.next_action(
-        views(report(area=0.2, center=(0.5, 0.0), edges=("right",)))
-    )
-    terminal = planner.next_action({}, deadline_reached=True)
-
-    planner.mark_yaw_unavailable(action, reason="late controller response")
-    assert planner.next_action({}) is terminal
-    assert terminal.kind is ActionKind.DEADLINE
-
-
-def test_mismatched_nonterminal_yaw_rejection_is_refused():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    old = planner.next_action(
-        views(report(area=0.2, center=(0.5, 0.0), edges=("right",)))
-    )
-    current = planner.next_action(
-        views(report(area=0.21, center=(0.4, 0.0), edges=("right",)))
-    )
-    assert current.kind is ActionKind.BASE_YAW
-
-    with pytest.raises(ValueError, match="stale"):
-        planner.mark_yaw_unavailable(old, reason="late rejection")
-
-
-def _drive_live_fragment_boundary(planner: AdaptiveViewpointPlanner):
-    """Replay center-camera reports immediately before the live oscillation."""
-
-    trace = (
-        report(area=0.124, center=(-0.166, 0.706), bottom=True),
-        report(area=0.141, center=(-0.209, 0.676), bottom=True),
-        report(area=0.158, center=(-0.255, 0.646), bottom=True),
-        report(area=0.142, center=(-0.211, 0.673), bottom=True),
-        report(area=0.131, center=(-0.183, 0.693), bottom=True),
-        report(area=0.120, center=(-0.155, 0.712), bottom=True),
-    )
-    actions = [planner.next_action(views(item)) for item in trace]
-    assert all(action.kind is ActionKind.BASE_YAW for action in actions)
-    return trace[-1], actions[-1]
-
-
-def test_live_center_component_swap_locks_out_yaw_and_uses_j2():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    continuous_view, boundary_move = _drive_live_fragment_boundary(planner)
-    swapped_fragment = report(
-        area=0.121,
-        center=(0.588, -0.691),
-        edges=("right", "top"),
-    )
-
-    recovery = planner.next_action(views(swapped_fragment))
-
-    assert recovery.kind is ActionKind.BACKOFF
-    assert not recovery.request_rollback
-    assert "identity discontinuity" in recovery.reason
-    assert planner.phase == "j2_bottom_clearance"
-
-    # Even though this new component has a large horizontal error, J1 stays
-    # locked out until the prescribed J2/J3 geometry ladder is complete.
-    same_fragment = views(swapped_fragment)
-    assert planner.next_action(same_fragment).kind is ActionKind.OBSERVE
-    assert planner.next_action(same_fragment).kind is ActionKind.UP_CLEARANCE
-
-
-def test_smooth_center_crossing_is_not_mistaken_for_component_swap():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    _drive_live_fragment_boundary(planner)
-    smooth_crossing = report(
-        area=0.125,
-        center=(0.080, 0.690),
-        bottom=True,
-    )
-
-    action = planner.next_action(views(smooth_crossing))
-
-    assert action.kind is ActionKind.OBSERVE
-
-
-def test_slow_cumulative_j1_regression_reverses_once_then_uses_clearance():
-    planner = AdaptiveViewpointPlanner(min_goal_area_frac=0.06)
-    first_leg = (0.56, 0.57, 0.58, 0.595, 0.61)
-    first_actions = [
-        planner.next_action(
-            views(report(area=0.20, center=(x, 0.10), edges=("right",)))
-        )
-        for x in first_leg
-    ]
-
-    # Every individual regression is small, but the cumulative regression is
-    # unambiguous. It must reverse within four feedback frames.
-    assert [item.aim_direction[0] for item in first_actions] == [
-        -1.0,
-        -1.0,
-        -1.0,
-        -1.0,
-        1.0,
-    ]
-
-    recovery = None
-    for x in (0.625, 0.64, 0.62, 0.60, 0.58, 0.56, 0.54, 0.56, 0.58):
-        recovery = planner.next_action(
-            views(report(area=0.20, center=(x, 0.10), edges=("right",)))
-        )
-        if recovery.kind is ActionKind.ROLLBACK:
-            break
-
-    assert recovery.kind is ActionKind.ROLLBACK
-    assert recovery.request_rollback
-    assert "second yaw reversal" in recovery.reason
-
-    # A rollback is not trusted blindly: if the camera returns a different
-    # component, yaw stays locked out and recovery changes geometry.
-    after_bad_restore = planner.next_action(
-        views(report(area=0.20, center=(-0.60, -0.60), edges=("left", "top")))
-    )
-    assert after_bad_restore.kind is ActionKind.BACKOFF
-    assert "rollback camera validation failed" in after_bad_restore.reason
-
-
 def test_deadline_is_terminal_and_sticky():
-    planner = AdaptiveViewpointPlanner()
+    planner = make_planner()
+    action = planner.next_action(views(report(center=(0.6, 0.0))))
+    assert action.kind is ActionKind.BASE_YAW
     terminal = planner.next_action({}, deadline_reached=True)
-    assert terminal.kind is ActionKind.DEADLINE
+    assert terminal.kind is ActionKind.DEADLINE and terminal.terminal
     assert planner.next_action(views(report())) is terminal
 
 
-def test_parameter_validation():
+# ----------------------------------------------------------------------
+# ACQUIRE sweep
+
+
+def test_sweep_without_evidence_uses_stable_direction():
+    planner = make_planner()
+    first = planner.next_action(views(report(seen=False)))
+    second = planner.next_action(views(report(seen=False)))
+    assert first.kind is second.kind is ActionKind.BASE_YAW
+    assert first.aim_direction == second.aim_direction
+    assert first.angular_scale == 1.0
+    assert planner.phase == "acquire_sweep"
+
+
+def test_sweep_direction_seeded_by_side_camera():
+    planner = make_planner()
+    right_view = report(edges=("right",), area=0.10)
+    action = planner.next_action(views(report(seen=False), right=right_view))
+    assert action.kind is ActionKind.BASE_YAW
+    assert action.aim_direction[0] == -1.0
+
+
+def test_gripper_blob_is_not_board_evidence():
+    planner = make_planner()
+    gripper = report(center=(0.02, 0.93), bottom_contact=True, area=0.05)
+    action = planner.next_action(views(gripper))
+    assert action.kind is ActionKind.BASE_YAW
+    assert planner.phase == "acquire_sweep"
+
+
+def test_gripper_blob_with_logo_is_board_evidence():
+    planner = make_planner()
+    anchored = report(center=(0.6, 0.93), bottom_contact=True, logo=True)
+    action = planner.next_action(views(anchored))
+    assert action.kind is ActionKind.BASE_YAW
+    assert planner.phase == "j1_center"
+
+
+# ----------------------------------------------------------------------
+# CENTER: proportional yaw
+
+
+def test_yaw_direction_opposes_error_sign():
+    planner = make_planner()
+    action = planner.next_action(views(report(center=(0.6, 0.0))))
+    assert action.kind is ActionKind.BASE_YAW
+    assert action.aim_direction[0] == -1.0
+
+    planner = make_planner()
+    action = planner.next_action(views(report(center=(-0.6, 0.0))))
+    assert action.aim_direction[0] == 1.0
+
+
+def test_yaw_scale_is_proportional_and_clamped():
+    planner = make_planner()
+    large = planner.next_action(views(report(center=(0.9, 0.0))))
+    assert large.angular_scale == pytest.approx(1.35)
+
+    planner = make_planner()
+    moderate = planner.next_action(views(report(center=(-0.3, 0.0))))
+    assert moderate.angular_scale == pytest.approx(0.45)
+
+    planner = make_planner()
+    capped = planner.next_action(views(report(center=(1.4, 0.0))))
+    assert capped.angular_scale == pytest.approx(1.5)
+
+    planner = make_planner()
+    floored = planner.next_action(views(report(center=(0.16, 0.0))))
+    assert floored.angular_scale == pytest.approx(0.24)
+
+
+def test_centering_requires_two_fresh_frames():
+    planner = make_planner()
+    centered = views(report(center=(0.05, 0.0), area=0.30, edges=("top",)))
+    first = planner.next_action(centered)
+    assert first.kind is ActionKind.OBSERVE
+    second = planner.next_action(centered)
+    assert second.kind is ActionKind.UP_CLEARANCE
+    assert planner.phase == "ascend_clearance"
+
+
+def test_regressed_frame_resets_center_confirmation():
+    planner = make_planner()
+    assert planner.next_action(
+        views(report(center=(0.05, 0.0)))
+    ).kind is ActionKind.OBSERVE
+    drifted = planner.next_action(views(report(center=(0.4, 0.0))))
+    assert drifted.kind is ActionKind.BASE_YAW
+    assert planner.next_action(
+        views(report(center=(0.05, 0.0), area=0.3))
+    ).kind is ActionKind.OBSERVE
+
+
+def test_logo_only_view_increases_standoff_instead_of_chasing_logo():
+    planner = make_planner()
+    logo_only = views(report(seen=False, logo=True, logo_center=(0.1, 0.2)))
+    action = planner.next_action(logo_only)
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.axial_direction == 1.0
+    assert action.translation_scale == pytest.approx(2.0)
+    assert planner.phase == "ascend_clearance"
+
+
+def test_center_phase_only_moves_j1_even_when_rotated():
+    # Strict ordering: no J6 during centering, no matter how credible the
+    # long-side estimate is.
+    planner = make_planner()
+    rotated_offcenter = views(
+        report(center=(0.5, 0.0), area=0.30, orientation=40.0)
+    )
+    action = planner.next_action(rotated_offcenter)
+    assert action.kind is ActionKind.BASE_YAW
+    assert planner.phase == "j1_center"
+
+
+def test_align_phase_follows_confirmed_centering():
+    planner = make_planner()
+    centered_rotated = views(
+        report(center=(0.02, 0.0), area=0.30, orientation=40.0)
+    )
+    # First frame confirms centering and counts as the first long-side
+    # observation; the second consistent frame may command J6.
+    assert planner.next_action(centered_rotated).kind is ActionKind.OBSERVE
+    action = planner.next_action(centered_rotated)
+    assert action.kind is ActionKind.CAMERA_ROLL
+    assert action.aim_direction[0] == 1.0
+    assert planner.phase == "j6_align"
+
+
+def test_live_low_aspect_trace_commands_j6_before_any_clearance():
+    planner = make_planner()
+    # Iterations 11-12 from the live trace: the long edge is only moderately
+    # elongated, but its -46-degree sign is stable in consecutive fresh frames.
+    first = views(
+        report(
+            center=(-0.130, 0.114),
+            area=0.286,
+            edges=("left",),
+            bottom_contact=True,
+            orientation=-45.9,
+            long_axis_ratio=1.23,
+            logo=True,
+        )
+    )
+    second = views(
+        report(
+            center=(-0.131, 0.115),
+            area=0.286,
+            edges=("left",),
+            bottom_contact=True,
+            orientation=-46.0,
+            long_axis_ratio=1.23,
+            logo=True,
+        )
+    )
+
+    assert planner.next_action(first).kind is ActionKind.OBSERVE
+    action = planner.next_action(second)
+    assert action.kind is ActionKind.CAMERA_ROLL
+    assert action.aim_direction[0] == -1.0
+    assert "J6 long-side alignment" in action.reason
+
+
+def test_align_phase_never_acts_on_a_single_frame_estimate():
+    planner = make_planner()
+    centered_aligned = views(report(center=(0.02, 0.0), area=0.30))
+    assert planner.next_action(centered_aligned).kind is ActionKind.OBSERVE
+    # Rotation appears only on the confirmation frame: centering completes,
+    # but J6 must wait for a second consistent estimate.
+    centered_rotated = views(
+        report(center=(0.02, 0.0), area=0.30, orientation=40.0)
+    )
+    waiting = planner.next_action(centered_rotated)
+    assert waiting.kind is ActionKind.OBSERVE
+    assert planner.phase == "j6_align"
+    confirmed = planner.next_action(centered_rotated)
+    assert confirmed.kind is ActionKind.CAMERA_ROLL
+
+
+def test_align_phase_sign_flip_restarts_confirmation():
+    planner = make_planner()
+    positive = views(report(center=(0.02, 0.0), area=0.30, orientation=40.0))
+    negative = views(report(center=(0.02, 0.0), area=0.30, orientation=-40.0))
+    assert planner.next_action(positive).kind is ActionKind.OBSERVE
+    assert planner.next_action(negative).kind is ActionKind.OBSERVE
+    action = planner.next_action(negative)
+    assert action.kind is ActionKind.CAMERA_ROLL
+    assert action.aim_direction[0] == -1.0
+
+
+def test_align_phase_skips_ambiguous_or_aligned_boards():
+    planner = make_planner()
+    centered_ambiguous = views(
+        report(
+            center=(0.02, 0.0),
+            area=0.30,
+            orientation=45.0,
+            long_axis_ratio=1.05,
+            edges=("top",),
+        )
+    )
+    assert planner.next_action(centered_ambiguous).kind is ActionKind.OBSERVE
+    action = planner.next_action(centered_ambiguous)
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert planner.phase == "ascend_clearance"
+
+
+def test_ratio_just_below_live_reliability_gate_remains_ambiguous():
+    planner = make_planner()
+    centered = views(
+        report(
+            center=(0.02, 0.0),
+            area=0.30,
+            orientation=-46.0,
+            long_axis_ratio=1.14,
+            edges=("top",),
+        )
+    )
+    assert planner.next_action(centered).kind is ActionKind.OBSERVE
+    action = planner.next_action(centered)
+    assert action.kind is ActionKind.UP_CLEARANCE
+
+
+# ----------------------------------------------------------------------
+# CENTER: standoff-first guards (yaw provably cannot help)
+
+
+def test_left_and_right_clipped_moves_away_instead_of_yawing():
+    planner = make_planner()
+    action = planner.next_action(
+        views(report(center=(0.5, 0.0), area=0.30, edges=("left", "right")))
+    )
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert planner.phase == "ascend_clearance"
+
+
+def test_top_pinned_mass_moves_away_instead_of_yawing():
+    # The live run-1 signature: camera in front of the board, only its near
+    # strip visible at the top of the frame; yaw burned the whole workspace
+    # envelope chasing an uncenterable sliver.
+    planner = make_planner()
+    action = planner.next_action(
+        views(report(center=(-0.725, -0.633), area=0.094, edges=("left", "top")))
+    )
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert planner.phase == "ascend_clearance"
+
+
+def test_oversized_mask_moves_away_instead_of_yawing():
+    planner = make_planner()
+    action = planner.next_action(views(report(center=(0.5, 0.0), area=0.60)))
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert planner.phase == "ascend_clearance"
+
+
+# ----------------------------------------------------------------------
+# ASCEND: monotonic clearance
+
+
+def test_oversized_board_ascends_with_scaled_step():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(views(report(center=(0.0, 0.1), area=0.90)))
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.translation_scale == pytest.approx(2.0)
+
+
+def test_ascend_step_scale_is_capped():
+    planner = make_planner(max_ascend_scale=2.5)
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(area=0.45 * 4.0, edges=("left", "right")))
+    )
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.translation_scale == pytest.approx(2.5)
+
+
+def test_bottom_contact_with_clear_top_retreats_along_optical_axis():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(center=(0.0, 0.4), area=0.30, edges=("bottom",)))
+    )
+    assert action.kind is ActionKind.BACKOFF
+    assert action.axial_direction == 1.0
+
+
+def test_gripper_band_contact_with_clear_top_retreats():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(center=(0.0, 0.4), area=0.30, bottom_contact=True))
+    )
+    assert action.kind is ActionKind.BACKOFF
+
+
+def test_opposite_edges_ascend_rather_than_retreat():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(area=0.30, edges=("top", "bottom")))
+    )
+    assert action.kind is ActionKind.UP_CLEARANCE
+
+
+def test_side_clipping_alone_still_ascends():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(views(report(area=0.30, edges=("left",))))
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.translation_scale == pytest.approx(1.5)
+
+
+def test_logo_only_view_during_ascend_keeps_ascending():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(views(report(seen=False, logo=True)))
+    assert action.kind is ActionKind.UP_CLEARANCE
+
+
+def test_drift_during_ascend_recenters_within_budget():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(center=(0.5, 0.0), area=0.30, edges=("top",)))
+    )
+    assert action.kind is ActionKind.BASE_YAW
+    assert planner.phase == "j1_center"
+
+
+def test_recenter_budget_is_bounded():
+    planner = make_planner(max_recenter_entries=1)
+    reach_ascend(planner)
+    drifted = views(report(center=(0.5, 0.0), area=0.30, edges=("top",)))
+    assert planner.next_action(drifted).kind is ActionKind.BASE_YAW
+    centered = views(report(center=(0.02, 0.0), area=0.30, edges=("top",)))
+    assert planner.next_action(centered).kind is ActionKind.OBSERVE
+    assert planner.next_action(centered).kind is ActionKind.UP_CLEARANCE
+    # Budget exhausted: a second drift no longer interrupts the ascent.
+    assert planner.next_action(drifted).kind is ActionKind.UP_CLEARANCE
+
+
+def test_framed_but_incomplete_board_stalls_honestly():
+    planner = make_planner(max_stall_frames=3)
+    reach_ascend(planner)
+    framed = views(
+        report(
+            area=0.20,
+            rectangularity=0.3,
+            failure_reasons=("nonrectangular_board",),
+        )
+    )
+    assert planner.next_action(framed).kind is ActionKind.OBSERVE
+    assert planner.next_action(framed).kind is ActionKind.OBSERVE
+    terminal = planner.next_action(framed)
+    assert terminal.kind is ActionKind.STAGNATED
+    assert "nonrectangular_board" in terminal.reason
+
+
+def test_undersized_framed_board_terminates_without_approach():
+    planner = make_planner()
+    reach_ascend(planner)
+    terminal = planner.next_action(views(report(area=0.02)))
+    assert terminal.kind is ActionKind.STAGNATED
+    assert "never approaches" in terminal.reason
+
+
+# ----------------------------------------------------------------------
+# ASCEND: camera-roll alignment assist
+
+
+def test_roll_assist_directly_corrects_long_axis_error():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(center=(0.0, 0.3), area=0.30, bottom_contact=True, orientation=30.0)
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    probe = planner.next_action(rotated)
+    assert probe.kind is ActionKind.CAMERA_ROLL
+    assert probe.aim_direction[0] == 1.0
+    assert probe.angular_scale == pytest.approx(3.0)
+
+    improved = views(
+        report(center=(0.0, 0.3), area=0.30, bottom_contact=True, orientation=15.0)
+    )
+    second = planner.next_action(improved)
+    assert second.kind is ActionKind.CAMERA_ROLL
+    assert second.aim_direction[0] == 1.0
+    assert second.angular_scale == pytest.approx(math.radians(15.0) / 0.10)
+
+
+def test_roll_assist_sign_flip_requires_reconfirmation():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(center=(0.0, 0.3), area=0.30, bottom_contact=True, orientation=30.0)
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    assert planner.next_action(rotated).kind is ActionKind.CAMERA_ROLL
+    crossed = views(
+        report(center=(0.0, 0.3), area=0.30, bottom_contact=True, orientation=-20.0)
+    )
+    # A sign change is re-confirmed on a fresh frame before commanding J6.
+    assert planner.next_action(crossed).kind is ActionKind.OBSERVE
+    corrected = planner.next_action(crossed)
+    assert corrected.kind is ActionKind.CAMERA_ROLL
+    assert corrected.aim_direction[0] == -1.0
+    assert corrected.angular_scale == pytest.approx(3.0)
+
+
+def test_default_roll_budget_can_cover_full_quarter_turn_in_safe_steps():
+    planner = make_planner()
+    reach_ascend(planner)
+
+    confirm = views(
+        report(center=(0.0, 0.3), area=0.30, bottom_contact=True, orientation=89.0)
+    )
+    assert planner.next_action(confirm).kind is ActionKind.OBSERVE
+    # Each fresh frame still has a reliable long edge.  A near-90-degree
+    # initial error needs more than the old three-move budget when every direct
+    # J6 command is deliberately capped at 0.30 rad.
+    for orientation_deg in (89.0, 72.0, 55.0, 38.0, 21.0, 13.0):
+        action = planner.next_action(
+            views(
+                report(
+                    center=(0.0, 0.3),
+                    area=0.30,
+                    bottom_contact=True,
+                    orientation=orientation_deg,
+                )
+            )
+        )
+        assert action.kind is ActionKind.CAMERA_ROLL
+        assert 0.0 < action.angular_scale <= 3.0
+
+
+def test_roll_assist_when_framed_but_rotated():
+    planner = make_planner()
+    reach_ascend(planner)
+    framed = views(report(area=0.20, rectangularity=0.4, orientation=40.0))
+    assert planner.next_action(framed).kind is ActionKind.OBSERVE
+    assert planner.next_action(framed).kind is ActionKind.CAMERA_ROLL
+
+
+def test_negative_orientation_rolls_negative_first():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(area=0.30, bottom_contact=True, orientation=-30.0)
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    action = planner.next_action(rotated)
+    assert action.kind is ActionKind.CAMERA_ROLL
+    assert action.aim_direction[0] == -1.0
+
+
+def test_aligned_board_never_rolls():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(report(area=0.30, bottom_contact=True, orientation=5.0))
+    )
+    assert action.kind is ActionKind.BACKOFF
+
+
+def test_ambiguous_near_square_mask_never_chooses_an_edge_to_roll():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(
+            report(
+                area=0.30,
+                bottom_contact=True,
+                orientation=45.0,
+                long_axis_ratio=1.05,
+            )
+        )
+    )
+    assert action.kind is ActionKind.BACKOFF
+    assert "long/short edge ambiguous" in action.reason
+
+
+def test_ambiguous_j6_uses_j1_when_horizontal_error_has_a_direction():
+    planner = make_planner()
+    reach_ascend(planner)
+    action = planner.next_action(
+        views(
+            report(
+                center=(0.25, 0.3),
+                area=0.30,
+                bottom_contact=True,
+                orientation=45.0,
+                long_axis_ratio=1.05,
+            )
+        )
+    )
+    assert action.kind is ActionKind.BASE_YAW
+    assert action.aim_direction[0] == -1.0
+    assert "J1 fallback" in action.reason
+
+
+def test_ambiguous_centered_j6_zoom_is_bounded_then_changes_clearance_axis():
+    planner = make_planner(max_zoom_out_backoffs=2)
+    reach_ascend(planner)
+    ambiguous = views(
+        report(
+            center=(0.0, 0.3),
+            area=0.30,
+            bottom_contact=True,
+            orientation=45.0,
+            long_axis_ratio=1.05,
+        )
+    )
+    assert planner.next_action(ambiguous).kind is ActionKind.BACKOFF
+    assert planner.next_action(ambiguous).kind is ActionKind.BACKOFF
+    changed = planner.next_action(ambiguous)
+    assert changed.kind is ActionKind.UP_CLEARANCE
+    assert "instead of repeating" in changed.reason
+
+
+def test_reliable_long_edge_after_zoom_returns_to_j6_alignment():
+    planner = make_planner()
+    reach_ascend(planner)
+    ambiguous = views(
+        report(
+            area=0.30,
+            bottom_contact=True,
+            orientation=45.0,
+            long_axis_ratio=1.05,
+        )
+    )
+    assert planner.next_action(ambiguous).kind is ActionKind.BACKOFF
+    reliable = views(
+        report(
+            area=0.24,
+            bottom_contact=True,
+            orientation=-25.0,
+            long_axis_ratio=1.35,
+        )
+    )
+    assert planner.next_action(reliable).kind is ActionKind.OBSERVE
+    action = planner.next_action(reliable)
+    assert action.kind is ActionKind.CAMERA_ROLL
+    assert action.aim_direction[0] == -1.0
+
+
+def test_aligned_lower_edge_backoff_is_bounded_instead_of_looping():
+    planner = make_planner(max_zoom_out_backoffs=2)
+    reach_ascend(planner)
+    aligned = views(
+        report(
+            area=0.30,
+            bottom_contact=True,
+            orientation=2.0,
+            long_axis_ratio=1.4,
+        )
+    )
+    assert planner.next_action(aligned).kind is ActionKind.BACKOFF
+    assert planner.next_action(aligned).kind is ActionKind.BACKOFF
+    clearance = planner.next_action(aligned)
+    assert clearance.kind is ActionKind.UP_CLEARANCE
+    assert clearance.translation_scale == pytest.approx(2.5)
+
+
+def test_tight_ivm_component_context_continues_clearance_ladder():
+    planner = make_planner(max_zoom_out_backoffs=2)
+    reach_ascend(planner)
+    tight = views(
+        report(
+            area=0.20,
+            orientation=2.0,
+            long_axis_ratio=1.4,
+            clearance=(100.0, 100.0, 100.0, 39.0),
+            context_pad=36.0,
+        )
+    )
+    assert planner.next_action(tight).kind is ActionKind.BACKOFF
+    assert planner.next_action(tight).kind is ActionKind.BACKOFF
+    clearance = planner.next_action(tight)
+    assert clearance.kind is ActionKind.UP_CLEARANCE
+    assert "IVM survey context" in clearance.reason
+
+
+def test_unavailable_j6_falls_back_to_j1_for_useful_horizontal_error():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(
+            center=(0.25, 0.3),
+            area=0.30,
+            bottom_contact=True,
+            orientation=45.0,
+        )
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    roll = planner.next_action(rotated)
+    assert roll.kind is ActionKind.CAMERA_ROLL
+    planner.mark_roll_unavailable(roll, reason="joint mode rejected")
+
+    fallback = planner.next_action(rotated)
+    assert fallback.kind is ActionKind.BASE_YAW
+    assert "J1 fallback" in fallback.reason
+
+
+def test_unavailable_centered_j6_falls_back_to_joints_2_4_zoom():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(
+            center=(0.0, 0.3),
+            area=0.30,
+            bottom_contact=True,
+            orientation=-45.0,
+        )
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    roll = planner.next_action(rotated)
+    assert roll.kind is ActionKind.CAMERA_ROLL
+    planner.mark_roll_unavailable(roll, reason="joint mode rejected")
+
+    fallback = planner.next_action(rotated)
+    assert fallback.kind is ActionKind.BACKOFF
+    assert "joint mode rejected" in fallback.reason
+
+
+def test_global_j6_envelope_skips_j1_and_uses_zoom():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(
+            center=(0.25, 0.3),
+            area=0.30,
+            bottom_contact=True,
+            orientation=45.0,
+        )
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    roll = planner.next_action(rotated)
+    assert roll.kind is ActionKind.CAMERA_ROLL
+    planner.mark_roll_unavailable(
+        roll,
+        reason="global angular envelope exhausted",
+        allow_j1_fallback=False,
+    )
+
+    fallback = planner.next_action(rotated)
+    assert fallback.kind is ActionKind.BACKOFF
+    assert "global angular envelope exhausted" in fallback.reason
+
+
+def test_stale_or_non_roll_rejection_is_refused():
+    planner = make_planner()
+    reach_ascend(planner)
+    rotated = views(
+        report(
+            center=(0.0, 0.3),
+            area=0.30,
+            bottom_contact=True,
+            orientation=45.0,
+        )
+    )
+    assert planner.next_action(rotated).kind is ActionKind.OBSERVE
+    old = planner.next_action(rotated)
+    current = planner.next_action(rotated)
+    assert old.kind is current.kind is ActionKind.CAMERA_ROLL
+    assert old.action_id != current.action_id
+    with pytest.raises(ValueError, match="stale"):
+        planner.mark_roll_unavailable(old, reason="late rejection")
+
+    planner = make_planner()
+    yaw = planner.next_action(views(report(center=(0.6, 0.0))))
+    with pytest.raises(ValueError, match="camera-roll"):
+        planner.mark_roll_unavailable(yaw, reason="wrong action")
+
+
+# ----------------------------------------------------------------------
+# Envelope rejections
+
+
+def test_sweep_reverses_once_then_terminates():
+    planner = make_planner()
+    nothing = views(report(seen=False))
+    first = planner.next_action(nothing)
+    planner.mark_yaw_unavailable(first, reason="J1 envelope reached")
+    assert not planner.terminal
+    second = planner.next_action(nothing)
+    assert second.kind is ActionKind.BASE_YAW
+    assert second.aim_direction[0] == -first.aim_direction[0]
+    planner.mark_yaw_unavailable(second, reason="J1 envelope reached")
+    assert planner.terminal
+    assert planner.next_action(nothing).kind is ActionKind.STAGNATED
+
+
+def test_global_travel_exhaustion_terminates_immediately():
+    planner = make_planner()
+    action = planner.next_action(views(report(seen=False)))
+    planner.mark_yaw_unavailable(
+        action, reason="cumulative travel", global_unavailable=True
+    )
+    assert planner.terminal
+    assert planner.next_action({}).kind is ActionKind.STAGNATED
+
+
+def test_centering_envelope_rejection_falls_back_to_ascend_once():
+    planner = make_planner()
+    clipped = views(report(center=(0.7, 0.0), area=0.30, edges=("left",)))
+    action = planner.next_action(clipped)
+    assert action.kind is ActionKind.BASE_YAW
+    planner.mark_yaw_unavailable(action, reason="J1 envelope reached")
+    assert not planner.terminal
+    fallback = planner.next_action(clipped)
+    assert fallback.kind is ActionKind.UP_CLEARANCE
+    # After one clearance evaluation the drift path may yaw again; a second
+    # envelope rejection is terminal.
+    again = planner.next_action(clipped)
+    assert again.kind is ActionKind.BASE_YAW
+    planner.mark_yaw_unavailable(again, reason="J1 envelope reached")
+    assert planner.terminal
+    assert planner.next_action(clipped).kind is ActionKind.STAGNATED
+
+
+def test_evidence_resets_sweep_reversal_budget():
+    planner = make_planner()
+    nothing = views(report(seen=False))
+    first = planner.next_action(nothing)
+    planner.mark_yaw_unavailable(first, reason="J1 envelope reached")
+    planner.next_action(views(report(center=(0.6, 0.0))))
+    # Board evidence appeared, so a later acquisition loss gets a fresh budget.
+    lost = planner.next_action(nothing)
+    planner.mark_yaw_unavailable(lost, reason="J1 envelope reached")
+    assert not planner.terminal
+
+
+def test_stale_yaw_rejection_raises():
+    planner = make_planner()
+    old = planner.next_action(views(report(seen=False)))
+    current = planner.next_action(views(report(seen=False)))
+    assert current.action_id != old.action_id
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(expected_cameras=())
+        planner.mark_yaw_unavailable(old, reason="late rejection")
+
+
+def test_non_yaw_rejection_raises():
+    planner = make_planner()
+    action = planner.next_action(views(report(seen=False, logo=True)))
+    assert action.kind is ActionKind.UP_CLEARANCE
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(min_goal_area_frac=0.5, max_goal_area_frac=0.4)
+        planner.mark_yaw_unavailable(action, reason="not a yaw")
+
+
+# ----------------------------------------------------------------------
+# Constructor validation
+
+
+def test_constructor_rejects_invalid_limits():
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(yaw_probe_scale=0.0)
+        make_planner(min_goal_area_frac=0.5, max_goal_area_frac=0.4)
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(horizontal_coverage_area_frac=0.0)
+        make_planner(expected_cameras=())
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(horizontal_center_threshold=0.3, horizontal_exit_threshold=0.2)
+        make_planner(center_threshold=0.5, recenter_threshold=0.4)
     with pytest.raises(ValueError):
-        AdaptiveViewpointPlanner(max_roll_moves=1)
+        make_planner(confirmation_frames=0)
+    with pytest.raises(ValueError):
+        make_planner(yaw_gain=0.0)
+    with pytest.raises(ValueError):
+        make_planner(min_yaw_scale=0.5, max_yaw_scale=0.4)
+    with pytest.raises(ValueError):
+        make_planner(max_ascend_scale=0.5)
+    with pytest.raises(ValueError):
+        make_planner(max_stall_frames=0)
+    with pytest.raises(ValueError):
+        make_planner(roll_align_threshold_deg=0.0)
+    with pytest.raises(ValueError):
+        make_planner(max_roll_moves=-1)
+    with pytest.raises(ValueError):
+        make_planner(roll_probe_scale=8.0, max_roll_scale=6.0)
+    with pytest.raises(ValueError):
+        make_planner(min_long_axis_ratio=1.0)
+    with pytest.raises(ValueError):
+        make_planner(roll_confirmation_frames=0)
+    with pytest.raises(ValueError):
+        make_planner(max_zoom_out_backoffs=-1)

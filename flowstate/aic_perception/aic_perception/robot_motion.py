@@ -471,55 +471,191 @@ class RobotMotion:
                     return None
                 self._condition.wait(timeout=remaining)
 
+    def current_joint(
+        self, joint_index: int, timeout_sec: float = 0.25
+    ) -> float | None:
+        """Expose one measured arm joint after validating its vector index."""
+
+        if joint_index < 0:
+            raise ValueError("joint_index must be non-negative")
+        reference = self._current_joint_reference(timeout_sec)
+        if reference is None or joint_index >= len(reference.positions):
+            return None
+        return float(reference.positions[joint_index])
+
     def current_joint1(self, timeout_sec: float = 0.25) -> float | None:
         """Expose measured shoulder-pan position as a readiness signal."""
 
-        reference = self._current_joint_reference(timeout_sec)
-        return None if reference is None else float(reference.positions[0])
+        return self.current_joint(0, timeout_sec)
+
+    def _reported_target_mode(self, max_age_sec: float = 0.5) -> int | None:
+        """Latest controller-reported target mode, or None when stale."""
+
+        now = time.monotonic()
+        with self._condition:
+            if now - self._target_mode_received_at <= max_age_sec:
+                return self._target_mode
+        return None
+
+    def _await_reported_target_mode(
+        self, mode: int, timeout_sec: float
+    ) -> bool:
+        """Wait until /aic_controller/controller_state reports ``mode``."""
+
+        deadline = time.monotonic() + timeout_sec
+        with self._condition:
+            while True:
+                if (
+                    self._target_mode == mode
+                    and time.monotonic() - self._target_mode_received_at <= 0.5
+                ):
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._condition.wait(timeout=remaining)
+
+    def _publish_mode_hold_command(self, reported_mode: int | None) -> bool:
+        """Re-target the controller at its own measured state, once.
+
+        The deployed controller build can reject target-mode changes while it
+        considers an execution in flight (the repository source carries that
+        exact todo).  Commanding "stay where you are" in the mode the
+        controller reports completes any leftover execution immediately and
+        is the documented no-risk command in that mode.
+        """
+
+        if reported_mode == self._mode_joint:
+            reference = self._current_joint_reference(0.3)
+            if reference is None or not reference.positions:
+                return False
+            self._joint_publisher.publish(
+                self._joint_command(reference.positions)
+            )
+            return True
+        state = self._current_state(0.3)
+        if state is None:
+            return False
+        self._publisher.publish(
+            self._command(state.position, state.orientation)
+        )
+        return True
+
+    def prepare_controller_handoff(self) -> bool:
+        """End this skill's command stream at the measured arm state.
+
+        This does not own or release the Flowstate ``arm`` lease; that lease is
+        held by the AIC controller bridge and is released by the immediately
+        following ``Switch To Default Controller`` process node.  Publishing a
+        final measured-state target ensures there is no trajectory in flight
+        when that controller switch begins.
+        """
+
+        return self._publish_mode_hold_command(self._reported_target_mode())
+
+    def _request_target_mode(
+        self,
+        mode: int,
+        label: str,
+        timeout_sec: float,
+        *,
+        min_attempts: int = 4,
+    ) -> tuple[bool, str]:
+        """Drive the controller's *reported* mode to ``mode``.
+
+        The service response alone is not trustworthy in either direction:
+        the repository controller source never rejects a valid mode, yet the
+        live build returned rejections around in-flight executions, and a
+        first-of-execution request has been observed to time out while still
+        taking effect.  The documented controller_state topic reports the
+        active mode, so that report is the acceptance criterion.  Requests
+        already satisfied by the report are skipped entirely; after two
+        failed attempts a measured-state hold command is published in the
+        reported mode to complete any leftover execution that may be
+        blocking the switch.
+        """
+
+        if self._reported_target_mode() == mode:
+            return True, ""
+        overall_deadline = time.monotonic() + max(float(timeout_sec), 8.0)
+        logger = self._node.get_logger()
+        attempt = 0
+        last_error = f"{label} target-mode request was never attempted"
+        while attempt < min_attempts or time.monotonic() < overall_deadline:
+            attempt += 1
+            remaining = max(0.5, overall_deadline - time.monotonic())
+            response_accepted = False
+            if not self._mode_client.wait_for_service(
+                timeout_sec=min(1.5, remaining)
+            ):
+                last_error = f"{label} target-mode service is unavailable"
+            else:
+                request = self._ChangeTargetMode.Request()
+                request.target_mode.mode = mode
+                future = self._mode_client.call_async(request)
+                call_deadline = time.monotonic() + min(1.5, remaining)
+                while not future.done() and time.monotonic() < call_deadline:
+                    time.sleep(0.01)
+                if not future.done():
+                    future.cancel()
+                    last_error = f"timed out switching to {label} target mode"
+                else:
+                    try:
+                        response = future.result()
+                    except Exception as error:
+                        last_error = (
+                            f"{label} target-mode request failed: {error}"
+                        )
+                    else:
+                        if response is not None and response.success:
+                            response_accepted = True
+                        else:
+                            last_error = (
+                                f"controller rejected {label} target mode"
+                            )
+            # The reported mode is the acceptance criterion regardless of
+            # what the service said.
+            if self._await_reported_target_mode(
+                mode, 1.5 if response_accepted else 0.8
+            ):
+                return True, ""
+            reported = self._reported_target_mode()
+            if response_accepted and reported is None:
+                # No fresh state report exists to contradict an accepted
+                # request; trust the response rather than stalling.
+                return True, ""
+            if response_accepted:
+                last_error = (
+                    f"state report stayed in mode {reported} while "
+                    f"confirming {label} target mode"
+                )
+            logger.warning(
+                f"{label} target-mode attempt {attempt} unresolved: "
+                f"{last_error} (controller reports mode {reported})"
+            )
+            if attempt >= 2:
+                self._publish_mode_hold_command(reported)
+            if attempt >= min_attempts and time.monotonic() >= overall_deadline:
+                break
+            time.sleep(0.25)
+        reported = self._reported_target_mode()
+        return False, f"{last_error} (controller reports mode {reported})"
 
     def _ensure_cartesian_mode(self, timeout_sec: float) -> tuple[bool, str]:
         from aic_control_interfaces.msg import TargetMode
 
-        if not self._mode_client.wait_for_service(timeout_sec=timeout_sec):
-            return False, "Cartesian target-mode service is unavailable"
-        request = self._ChangeTargetMode.Request()
-        request.target_mode.mode = TargetMode.MODE_CARTESIAN
-        future = self._mode_client.call_async(request)
-        deadline = time.monotonic() + timeout_sec
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not future.done():
-            return False, "timed out switching to Cartesian target mode"
-        try:
-            response = future.result()
-        except Exception as error:  # surfaced as a safe motion failure
-            return False, f"Cartesian target-mode request failed: {error}"
-        if response is None or not response.success:
-            return False, "controller rejected Cartesian target mode"
-        return True, ""
+        return self._request_target_mode(
+            TargetMode.MODE_CARTESIAN, "Cartesian", timeout_sec
+        )
 
     def _ensure_joint_mode(self, timeout_sec: float) -> tuple[bool, str]:
         """Switch the documented AIC controller to joint target mode."""
 
         from aic_control_interfaces.msg import TargetMode
 
-        if not self._mode_client.wait_for_service(timeout_sec=timeout_sec):
-            return False, "joint target-mode service is unavailable"
-        request = self._ChangeTargetMode.Request()
-        request.target_mode.mode = TargetMode.MODE_JOINT
-        future = self._mode_client.call_async(request)
-        deadline = time.monotonic() + timeout_sec
-        while not future.done() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not future.done():
-            return False, "timed out switching to joint target mode"
-        try:
-            response = future.result()
-        except Exception as error:
-            return False, f"joint target-mode request failed: {error}"
-        if response is None or not response.success:
-            return False, "controller rejected joint target mode"
-        return True, ""
+        return self._request_target_mode(
+            TargetMode.MODE_JOINT, "joint", timeout_sec
+        )
 
     @staticmethod
     def _diagonal(values: tuple[float, ...]) -> list[float]:
@@ -576,11 +712,19 @@ class RobotMotion:
             raise ValueError("joint command positions must be finite and non-empty")
         message = self._JointMotionUpdate()
         message.target_state.positions = list(values)
-        # These are the repository's documented conservative joint-position
-        # defaults.  All arrays exactly match the controller-reported joint
-        # vector length so the controller cannot silently reject the update.
-        message.target_stiffness = [85.0] * len(values)
-        message.target_damping = [75.0] * len(values)
+        if len(values) == 6:
+            # Match the controller's own configured joint_impedance defaults
+            # (aic_ros2_controllers.yaml): stiff arm joints, light wrists.
+            # The earlier uniform 85/75 gains over-damped wrist_3 five-fold
+            # against its configured 15 and produced a visible jerk on the
+            # first joint-mode command of every J6 attempt.
+            message.target_stiffness = [
+                100.0, 100.0, 100.0, 50.0, 50.0, 50.0
+            ]
+            message.target_damping = [40.0, 40.0, 40.0, 15.0, 15.0, 15.0]
+        else:
+            message.target_stiffness = [85.0] * len(values)
+            message.target_damping = [75.0] * len(values)
         message.target_feedforward_torque = [0.0] * len(values)
         message.trajectory_generation_mode.mode = (
             TrajectoryGenerationMode.MODE_POSITION
@@ -691,8 +835,19 @@ class RobotMotion:
             return True
         if baseline_xyz is None:
             return False
+        # The wrist sensor reports its static ~14 N gravity/bias load in the
+        # sensor frame, so any tool reorientation rotates that vector even in
+        # free space (a 0.30 rad wrist yaw moves it by ~4 N against a 5 N
+        # threshold).  Compare magnitudes instead: the norm of a constant
+        # load is rotation-invariant, while genuine contact changes it.
         baseline = np.asarray(baseline_xyz, dtype=float)
-        return float(np.linalg.norm(force - baseline)) >= force_delta_n
+        return (
+            abs(
+                float(np.linalg.norm(force))
+                - float(np.linalg.norm(baseline))
+            )
+            >= force_delta_n
+        )
 
     def _retreat_to_step_start(
         self,
@@ -735,15 +890,17 @@ class RobotMotion:
         max_force_n: float,
         force_delta_n: float,
         cancelled: Callable[[], bool],
+        _joint_index: int = 0,
+        _joint_label: str = "joint 1",
     ) -> MotionOutcome:
-        """Yaw joint 1 while preserving every other controller reference.
+        """Move one yaw joint while preserving every other measured reference.
 
-        The primitive reads the complete measured vector from documented
-        ``/joint_states`` and changes shoulder-pan only.  It never invents
-        targets for the remaining joints.  ControllerState confirms target
-        mode and supplies TCP speed.  A force, cancel, stale-force, or
-        stale-controller guard returns the full vector to the saved measured
-        start before reporting failure.
+        The public J1 entry point uses index 0. ``move_joint6_yaw`` below uses
+        index 5 for UR5e ``wrist_3_joint``. The primitive reads the complete
+        measured vector from documented ``/joint_states`` and changes only the
+        requested element. It never invents targets for the remaining joints.
+        A force, cancel, stale-force, or stale-controller guard returns the full
+        vector to the saved measured start before reporting failure.
         """
 
         numeric_parameters = (
@@ -758,9 +915,11 @@ class RobotMotion:
         )
         if not all(math.isfinite(float(value)) for value in numeric_parameters):
             return MotionOutcome(False, "joint-yaw parameters must be finite")
+        if _joint_index < 0:
+            return MotionOutcome(False, "joint-yaw index must be non-negative")
         if not 0.0 < max_speed_radps <= 0.12:
             return MotionOutcome(
-                False, "joint-1 yaw speed must be in (0, 0.12] rad/s"
+                False, f"{_joint_label} yaw speed must be in (0, 0.12] rad/s"
             )
         if publish_hz <= 0.0 or timeout_sec <= 0.0:
             return MotionOutcome(False, "publish rate and timeout must be positive")
@@ -769,7 +928,10 @@ class RobotMotion:
         # Viewpoint corrections are intentionally small.  Larger base sweeps
         # need a collision-aware motion planner rather than this local servo.
         if abs(delta_rad) > 0.30 + 1e-9:
-            return MotionOutcome(False, "joint-1 yaw step exceeds 0.30 rad safety bound")
+            return MotionOutcome(
+                False,
+                f"{_joint_label} yaw step exceeds 0.30 rad safety bound",
+            )
 
         if self._joint_publisher.get_subscription_count() < 1:
             deadline = time.monotonic() + min(timeout_sec, 2.0)
@@ -819,13 +981,23 @@ class RobotMotion:
             )
         if not start.positions:
             return finish(MotionOutcome(False, "measured arm joint state is empty"))
+        if _joint_index >= len(start.positions):
+            return finish(
+                MotionOutcome(
+                    False,
+                    f"measured arm vector has no {_joint_label} index "
+                    f"{_joint_index}",
+                )
+            )
         if abs(delta_rad) <= settle_tolerance_rad:
             return finish(
-                MotionOutcome(True, "joint-1 target already within tolerance")
+                MotionOutcome(
+                    True, f"{_joint_label} target already within tolerance"
+                )
             )
 
         target_values = list(start.positions)
-        target_values[0] += float(delta_rad)
+        target_values[_joint_index] += float(delta_rad)
         target = tuple(target_values)
         # Peak velocity for minimum-jerk interpolation is 1.875 * distance / T.
         duration = max(0.35, 1.875 * abs(delta_rad) / max_speed_radps)
@@ -833,7 +1005,19 @@ class RobotMotion:
             return finish(
                 MotionOutcome(
                     False,
-                    "joint-1 motion profile exceeds per-move timeout",
+                    f"{_joint_label} motion profile exceeds per-move timeout",
+                    joint_distance_rad=abs(delta_rad),
+                )
+            )
+
+        if self._camera_rig.wait_for_force_xyz(
+            timeout_sec=min(1.0, timeout_sec), max_age_sec=0.5
+        ) is None:
+            return finish(
+                MotionOutcome(
+                    False,
+                    f"no fresh wrist-force sample before {_joint_label} yaw; "
+                    "motion refused",
                     joint_distance_rad=abs(delta_rad),
                 )
             )
@@ -879,20 +1063,20 @@ class RobotMotion:
                 start, last_commanded, max_speed_radps, publish_hz
             )
             messages = {
-                "cancelled": "joint-1 yaw cancelled and reversed",
+                "cancelled": f"{_joint_label} yaw cancelled and reversed",
                 "stale_force": (
-                    "wrist force feedback became stale; joint-1 yaw reversed"
+                    f"wrist force feedback became stale; {_joint_label} yaw reversed"
                 ),
                 "stale_controller": (
-                    "measured joint feedback became stale; joint-1 yaw reversed"
+                    f"measured joint feedback became stale; {_joint_label} yaw reversed"
                 ),
-                "force": "wrist force guard triggered; joint-1 yaw reversed",
+                "force": f"wrist force guard triggered; {_joint_label} yaw reversed",
             }
             return finish(
                 MotionOutcome(
                     False,
                     messages.get(
-                        guard_reason or "", "joint-1 yaw stopped and reversed"
+                        guard_reason or "", f"{_joint_label} yaw stopped and reversed"
                     ),
                     joint_distance_rad=abs(delta_rad),
                     force_abort=guard_reason == "force",
@@ -909,23 +1093,26 @@ class RobotMotion:
                     start, target, max_speed_radps, publish_hz
                 )
                 messages = {
-                    "cancelled": "joint-1 yaw cancelled while settling and reversed",
+                    "cancelled": (
+                        f"{_joint_label} yaw cancelled while settling and reversed"
+                    ),
                     "stale_force": (
-                        "wrist force feedback became stale; joint-1 yaw reversed"
+                        f"wrist force feedback became stale; {_joint_label} yaw reversed"
                     ),
                     "stale_controller": (
-                        "measured joint feedback became stale; joint-1 yaw reversed"
+                        f"measured joint feedback became stale; {_joint_label} yaw reversed"
                     ),
                     "force": (
                         "wrist force guard triggered while settling; "
-                        "joint-1 yaw reversed"
+                        f"{_joint_label} yaw reversed"
                     ),
                 }
                 return finish(
                     MotionOutcome(
                         False,
                         messages.get(
-                            guard_reason or "", "joint-1 yaw stopped and reversed"
+                            guard_reason or "",
+                            f"{_joint_label} yaw stopped and reversed",
                         ),
                         joint_distance_rad=abs(delta_rad),
                         force_abort=guard_reason == "force",
@@ -949,12 +1136,16 @@ class RobotMotion:
                     return finish(
                         MotionOutcome(
                             False,
-                            "measured joint vector size changed; joint-1 yaw reversed",
+                            "measured joint vector size changed; "
+                            f"{_joint_label} yaw reversed",
                             joint_distance_rad=abs(delta_rad),
                         )
                     )
                 if (
-                    abs(reference.positions[0] - target[0])
+                    abs(
+                        reference.positions[_joint_index]
+                        - target[_joint_index]
+                    )
                     <= settle_tolerance_rad
                     and reference.tcp_speed_mps <= settle_tcp_speed_mps
                 ):
@@ -963,7 +1154,7 @@ class RobotMotion:
                         return finish(
                             MotionOutcome(
                                 True,
-                                "measured joint 1 settled at yaw target",
+                                f"measured {_joint_label} settled at yaw target",
                                 joint_distance_rad=abs(delta_rad),
                             )
                         )
@@ -975,9 +1166,41 @@ class RobotMotion:
         return finish(
             MotionOutcome(
                 False,
-                "measured joint 1 did not settle before timeout; yaw reversed",
+                f"measured {_joint_label} did not settle before timeout; "
+                "yaw reversed",
                 joint_distance_rad=abs(delta_rad),
             )
+        )
+
+    def move_joint6_yaw(
+        self,
+        delta_rad: float,
+        *,
+        max_speed_radps: float = 0.12,
+        publish_hz: float,
+        settle_tolerance_rad: float = 0.01,
+        settle_tcp_speed_mps: float = 0.02,
+        timeout_sec: float,
+        baseline_force_xyz: tuple[float, float, float] | None,
+        max_force_n: float,
+        force_delta_n: float,
+        cancelled: Callable[[], bool],
+    ) -> MotionOutcome:
+        """Yaw UR5e wrist joint 6 while holding joints 1-5 measured targets."""
+
+        return self.move_joint1_yaw(
+            delta_rad,
+            max_speed_radps=max_speed_radps,
+            publish_hz=publish_hz,
+            settle_tolerance_rad=settle_tolerance_rad,
+            settle_tcp_speed_mps=settle_tcp_speed_mps,
+            timeout_sec=timeout_sec,
+            baseline_force_xyz=baseline_force_xyz,
+            max_force_n=max_force_n,
+            force_delta_n=force_delta_n,
+            cancelled=cancelled,
+            _joint_index=5,
+            _joint_label="joint 6 (wrist_3_joint)",
         )
 
     def move_smooth(
@@ -1084,6 +1307,17 @@ class RobotMotion:
             return MotionOutcome(
                 False,
                 "motion profile exceeds per-move timeout",
+                angular_distance_rad=angular_distance,
+            )
+
+
+        if self._camera_rig.wait_for_force_xyz(
+            timeout_sec=min(1.0, timeout_sec), max_age_sec=0.5
+        ) is None:
+            return MotionOutcome(
+                False,
+                "no fresh wrist-force sample before Cartesian motion; "
+                "motion refused",
                 angular_distance_rad=angular_distance,
             )
 
@@ -1214,6 +1448,7 @@ class RobotMotion:
         # that demonstrably arrived at the viewpoint merely because the last
         # few velocity samples did not become exactly quiet.
         state = self._current_state(0.15)
+        timeout_diagnostic = "no fresh controller TCP state at timeout"
         if state is not None:
             position_error = float(
                 np.linalg.norm(target - np.asarray(state.position, dtype=float))
@@ -1239,6 +1474,17 @@ class RobotMotion:
             angular_velocity_safe = (
                 state.angular_speed_radps is None
                 or state.angular_speed_radps <= max(0.08, settle_angular_speed_radps)
+            )
+            angular_speed_text = (
+                "unknown"
+                if state.angular_speed_radps is None
+                else f"{state.angular_speed_radps:.4f}rad/s"
+            )
+            timeout_diagnostic = (
+                f"position_error={position_error:.4f}m "
+                f"orientation_error={orientation_error:.4f}rad "
+                f"linear_speed={state.speed_mps:.4f}m/s "
+                f"angular_speed={angular_speed_text}"
             )
             if state.speed_mps <= 0.02 and angular_velocity_safe:
                 # A joint/workspace limit can make the controller stop short
@@ -1266,6 +1512,7 @@ class RobotMotion:
         self._retreat_to_step_start(start, publish_hz)
         return MotionOutcome(
             False,
-            "measured TCP pose did not settle before timeout; move reversed",
+            "measured TCP pose did not settle before timeout "
+            f"({timeout_diagnostic}); move reversed",
             angular_distance_rad=angular_distance,
         )

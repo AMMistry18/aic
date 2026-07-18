@@ -131,6 +131,7 @@ class CameraRig:
         with self._condition:
             self._force_xyz = values
             self._force_received_at = time.monotonic()
+            self._condition.notify_all()
 
     def latest_force_xyz(
         self, max_age_sec: float | None = None
@@ -152,6 +153,37 @@ class CameraRig:
         if values is None:
             return None
         return float(np.linalg.norm(np.asarray(values, dtype=float)))
+
+    def wait_for_force_xyz(
+        self,
+        timeout_sec: float,
+        max_age_sec: float = 0.5,
+    ) -> tuple[float, float, float] | None:
+        """Wait for a valid force sample satisfying the freshness contract.
+
+        Image and wrench topics are independent best-effort streams.  Waiting
+        here closes the harmless race where a new image arrives just before
+        the next wrench callback, without ever accepting an old force value.
+        """
+
+        if timeout_sec < 0.0:
+            raise ValueError("timeout_sec must be non-negative")
+        if max_age_sec <= 0.0:
+            raise ValueError("max_age_sec must be positive")
+        deadline = time.monotonic() + timeout_sec
+        with self._condition:
+            while True:
+                if (
+                    self._force_xyz is not None
+                    and self._force_received_at is not None
+                    and time.monotonic() - self._force_received_at
+                    <= max_age_sec
+                ):
+                    return self._force_xyz
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                self._condition.wait(timeout=remaining)
 
     def grab(
         self,
