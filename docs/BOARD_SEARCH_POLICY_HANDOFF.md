@@ -6,21 +6,27 @@ Branch: `board-search`
 
 ## Delivery status
 
-The current source is committed and pushed to `origin/board-search` at:
+The implementation source used for the installed bundle is committed and
+pushed to `origin/board-search` at:
 
 ```text
-9c9765043702514b5785a927bc6913b7fe6ed43f
+6b612e6a9cbce7caf04cb3ddb072b054bea2386b
 ```
 
 It was built and installed in the running **Work on this** solution on cluster
 `vmp-efe2-hv8d2ahu` as the existing v4 skill:
 
 ```text
-ai.tar2.check_board_visibility_skill_v4.0.0.1+56b2c76bb0b225bb32ceb98fb684d2365bb604313491ab9cd6513e859243e2be
+ai.tar2.check_board_visibility_skill_v4.0.0.1+9090ff0afdffa69d0e35897dcef204c82c744d663f793ceddffd935592b3c960
 ```
 
-The install completed on 2026-07-18 at approximately 22:06 CDT. The solution
+The install completed on 2026-07-18 at approximately 22:33 CDT. The solution
 remained `SOLUTION_STATE_RUNNING_IN_SIM`. No other skill or service was rebound.
+
+```text
+image tar SHA-256:  09b8377b6991f7f8c8f7b4bd534cb9569a7f0663a5da36cc29987981e4b04b1d
+bundle tar SHA-256: 9332ed00cab8129e69e8c4557309d002210fcbe8c4d3026dee17cc582ff3cc98
+```
 
 ## Required behavior
 
@@ -30,17 +36,20 @@ The policy is a measured, camera-driven phase machine:
 ACQUIRE/CENTER (J1)
         -> ALIGN LONG EDGE (J6, <= 2 degrees)
         -> LEVEL CENTER CAMERA STRAIGHT DOWN (primarily J2-J4)
-        -> FRAME THE COMPLETE BOARD (J2-J4)
-        -> DONE on the first full center-camera board mask
+        -> CLEAR THE GRIPPER MASK + SET 26-36% SCALE (J2-J4)
+        -> DONE after two strict center-camera survey frames
 ```
 
 Left and right cameras are acquisition hints. They may help select the initial
 J1 direction, but they never satisfy completion. Completion is based on the
 center camera only, after J6 alignment and a fresh physical top-down TF check.
 
-The gripper masks exclude calibrated robot pixels before board component
-selection. Contact with the conservative mask boundary remains diagnostic; it
-does not veto a complete real board boundary.
+The gripper masks still exclude calibrated robot pixels before board component
+selection, but they are no longer diagnostic-only. The selected board convex
+hull is expanded by the component-context padding to create a protected survey
+envelope. Completion requires zero overlap between that envelope and the mask
+and at least 20 pixels of separation. The report's measured escape vector
+drives J2-J4 away from the mask.
 
 ## Root cause of the no-motion run
 
@@ -113,7 +122,7 @@ File: `flowstate/aic_perception/check_board_visibility_skill.py`
 - Leveling continues while it makes measured top-down progress; it no longer
   fails after an arbitrary five-stage count.
 
-### J6 accuracy and completion
+### J6 accuracy and strict completion
 
 File: `flowstate/aic_perception/aic_perception/viewpoint_search.py`
 
@@ -126,9 +135,12 @@ File: `flowstate/aic_perception/aic_perception/viewpoint_search.py`
   `0.02 rad` (`1.15 degrees`).
 - A correction transaction may cover up to `0.45 rad` (`25.8 degrees`) before
   the next measured image, reducing unnecessary mode switches on large errors.
-- After J1, J6, and top-down leveling are established, the terminal predicate
-  is exactly a full center-camera board mask. It does not rerun the noisy
-  long-axis estimator on the terminal image and does not add a stability delay.
+- After J1, J6, and top-down leveling, terminal evidence is deliberately
+  rechecked in two consecutive fresh center-camera frames. Both must contain
+  the full board and component context, logo identity, rectangularity >= 0.72,
+  26-36% board area, long-axis ratio >= 1.15, orientation error <= 2 degrees,
+  top-down TF, zero protected-envelope mask overlap, and >= 20 px mask
+  separation.
 
 ### Vertical J2-J4 visual servo
 
@@ -164,6 +176,43 @@ The revised policy now:
 The camera orientation target remains physically top-down during these moves;
 vertical centering is not achieved by accepting a slanted terminal camera.
 
+### Deterministic gripper-clear survey controller
+
+The 22:10 live run proved that the old terminal predicate was too weak. It
+accepted a geometrically complete and top-down center view at area `0.291`,
+rectangularity `0.77`, orientation error `0.7 degrees`, and long-axis ratio
+`1.56`, but it also logged `gripper_mask_contact=True`. IVM returned estimates,
+yet the NIC filter found only three physical rails because the gripper still
+occluded the lower-right detail region. The rail filter correctly refused to
+invent the two missing cards; score/count thresholds were not relaxed.
+
+The revised controller adds these measured quantities to every center-camera
+report and log line:
+
+- `gripper_overlap_px`: overlap between the calibrated mask and the protected
+  board/component envelope;
+- `gripper_clearance_px`: minimum separation after overlap reaches zero; and
+- `gripper_escape_direction`: normalized desired board-image displacement away
+  from the mask.
+
+While leveling and during the final survey phase, the camera moves opposite
+that image escape vector through J2-J4. The next fresh frame validates overlap
+and clearance; if separation worsens, the image-Y polarity reverses. Once the
+mask is clear, the old generic vertical-centering servo no longer pulls the
+board back behind the gripper unless a physical/context edge is actually
+clipped or the vertical displacement exceeds 35% of the image.
+
+The final scale controller backs away above 36% board area and makes up to
+three bounded approaches below 26%. Expanded component context must clear all
+four physical image edges by at least `1.25 * context_pad_px`. These constraints
+keep all five NIC rails and both SC rail/port regions usable without guessing
+from partial detections.
+
+J1 centering also learns the observed horizontal image response per signed
+command scale. After the first measured correction, later J1 steps use that
+live response with a bounded 85% correction target, reducing repeated small
+motions while retaining fresh-frame verification.
+
 ## Limits that remain
 
 The policy intentionally retains execution correctness requirements:
@@ -193,7 +242,7 @@ python -m pytest -q flowstate/aic_perception/test
 Result for this revision:
 
 ```text
-134 passed
+140 passed
 ```
 
 The tests include regressions for:
@@ -205,7 +254,11 @@ The tests include regressions for:
 - two-degree J6 tolerance and fine correction size;
 - strict phase order;
 - side cameras never finishing the search;
-- first full post-level center frame finishing immediately;
+- two consecutive strict post-level center frames being required;
+- protected-envelope mask overlap, clearance, and escape direction;
+- mask-escape polarity reversal when a fresh frame gets worse;
+- bounded approach when a complete board is too small for IVM detail;
+- learned J1 image response increasing centering efficiency;
 - top-down completion being checked from fresh TF; and
 - high/low vertical correction, fresh-frame polarity validation, and reversal
   after a wrong-way response; and
@@ -234,7 +287,11 @@ The first retest should show:
 7. If the board is still high/low, `action=translate` occurs before backoff.
 8. The next fresh frame either validates the direction or logs
    `reversing image-y polarity` and commands the opposite direction.
-9. Immediate success on the first full center-camera board mask.
+9. `gripper_overlap` decreases to zero and `gripper_clearance` reaches at least
+   20 px while physical component context remains clear.
+10. Two consecutive strict survey candidates are observed, then the skill
+    succeeds and releases its controller/arm resources in the existing
+    finalizer.
 
 The old message below must not recur merely at the 0.5-second mark:
 
@@ -269,16 +326,16 @@ the manifest and code changed.
 
 ## Known limitations and next-agent guidance
 
-- The bundle/install and service-start smoke checks passed. The new vertical
-  response controller still requires a task run to validate its physical
-  direction and convergence in the simulator.
+- The bundle/install and service-start smoke checks passed. The new
+  protected-envelope controller still requires a task run to validate its
+  physical mask-clear convergence and downstream five-NIC/SC detection yield.
 - The wrapper still contains legacy envelope branches. They are inert because
   runtime envelope values are infinite after parameter validation. Removing
   that dead compatibility code is optional cleanup, not required for the next
   test.
-- Do not change masking or segmentation thresholds in response to the no-motion
-  trace. Perception successfully selected the center board and the planner
-  requested the correct J1 direction.
+- Do not relax the NIC filter's five-rail requirement. A missing rail now means
+  the survey view still failed to expose all physical cards; inspect the new
+  overlap/clearance/scale diagnostics first.
 - Do not relax the two-degree J6 goal. If convergence oscillates, inspect the
   signed angle and measured J6 delta first.
 - Do not reinstall the last asset identity expecting new code. Flowstate assets
