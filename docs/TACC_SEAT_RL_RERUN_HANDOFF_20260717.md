@@ -8,7 +8,7 @@ all new work is:
 
 ```text
 branch: flowstate-rl-deploy-and-docs
-pipeline commit: 5ffeb57fbc941dbde6972d987c157dcbc2d0d589
+pipeline commit: fe1bc1a3cfa1837773be6318a5f7727c033e36f6
 remote checkout: /work2/11590/satya_a/stampede3/aic-seat-rerun-20260718-cb0a209
 TACC user/account: satya_a / IRI26004
 partition: rtx-small
@@ -44,6 +44,10 @@ Other implemented safety and selection behavior:
   `best_seat_actor.ts` with numerical parity validation.
 - `evaluate_seat_checkpoints.py` compares SB3 checkpoints and TorchScript actors
   on the identical frozen cases.
+- `live_metrics.jsonl` preserves update ratio, reset class, compiled contact
+  variant, termination, and reward telemetry independently of W&B. The smoke
+  writes `smoke_gate.json` and fails unless update:data is 0.9–1.1 and every
+  required reset class and compiled contact variant was observed.
 - The deploy-side action contract now matches training's seat-action scaling,
   port-frame residual accumulation, residual clamp, and 1-degree yaw clip.
 
@@ -89,7 +93,7 @@ The mandatory 16-environment smoke is submitted:
 ```text
 job: 3324435
 name: seat-smoke16
-source commit: 5ffeb57fbc941dbde6972d987c157dcbc2d0d589
+source commit: fe1bc1a3cfa1837773be6318a5f7727c033e36f6
 stdout: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
 stderr: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.err
 ```
@@ -455,6 +459,8 @@ config.json
 progress.json
 train.log
 submitted.slurm
+live_metrics.jsonl
+smoke_gate.json for 8 and 16 environments
 smoke_meta.txt for 8 and 16 environments
 exact git SHA, Slurm job IDs, W&B URLs, and scratch paths
 ```
