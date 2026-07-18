@@ -7,7 +7,9 @@ import numpy as np
 import pytest
 
 from RL.student_teacher.seat_env import (
+    DEPLOYMENT_RESET_CLASSES,
     FORCE_SOFT_START_N,
+    ROTATION_GUARD_RAD,
     SEATED_SUCCESS_BONUS,
     STAGES,
     SeatEnv,
@@ -277,7 +279,8 @@ def test_validator_rejects_unsafe_probe_terminations(monkeypatch):
     assert env._start_safety_reason(penetrating) == "bad_collision_penetration"
 
 
-def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
+def _reward_case(
+        before_rel, rel, info, *, prev_f_lateral=0.0, commanded=None):
     """Exercise the numerical reward without constructing a MuJoCo scene."""
     env = object.__new__(SeatEnv)
     env._prev_action = np.zeros(6, dtype=np.float64)
@@ -286,7 +289,8 @@ def _reward_case(before_rel, rel, info, *, prev_f_lateral=0.0):
     reward = env._seat_reward(
         np.asarray(before_rel, dtype=np.float64),
         np.asarray(rel, dtype=np.float64),
-        np.zeros(6, dtype=np.float64),
+        (np.zeros(6, dtype=np.float64) if commanded is None
+         else np.asarray(commanded, dtype=np.float64)),
         dict(info),
     )
     return reward, env._last_reward_terms
@@ -373,14 +377,14 @@ def test_seat_reward_signs():
     assert reward < 0.0
 
 
-def test_squareness_penalty_is_depth_ramped_and_sign_safe():
+def test_squareness_penalty_starts_at_entry_and_is_sign_safe():
     zero = np.zeros(6, dtype=np.float64)
     base = {
         "f_z": 0.0,
         "f_lateral": 0.0,
         "contact_force_norm": 0.0,
         "term_status": None,
-        "plug_axis_error_rad": 0.3,
+        "plug_axis_error_rad": np.radians(2.0),
         "plug_roll_error_rad": 0.0,
     }
 
@@ -396,14 +400,69 @@ def test_squareness_penalty_is_depth_ramped_and_sign_safe():
             "plug_roll_error_rad": 0.0,
         })
 
-    assert deep["squareness"] < -2.0
-    assert shallow["squareness"] == pytest.approx(0.0)
+    assert deep["squareness"] < -0.5
+    assert shallow["squareness"] < 0.0
+    assert deep["squareness"] < shallow["squareness"]
     assert square["squareness"] == pytest.approx(0.0)
 
     _reward, more_crooked = _reward_case(
         zero, zero, {**base, "depth_norm": 0.45,
-                     "plug_axis_error_rad": 0.34})
+                     "plug_axis_error_rad": np.radians(4.0)})
     assert more_crooked["squareness"] < deep["squareness"]
+
+
+def test_inward_square_beats_inward_rotating_and_square_does_not_rotate():
+    before = np.zeros(6, dtype=np.float64)
+    after = before.copy()
+    after[2] = 0.5e-3
+    common = {
+        "depth_norm": 0.14,
+        "f_z": 2.0,
+        "f_lateral": 1.0,
+        "contact_force_norm": 2.5,
+        "term_status": None,
+        "plug_roll_error_rad": 0.0,
+    }
+    square_reward, _ = _reward_case(
+        before, after, {**common, "plug_axis_error_rad": 0.0})
+    rotating_reward, _ = _reward_case(
+        before, after, {
+            **common, "plug_axis_error_rad": 0.8 * ROTATION_GUARD_RAD})
+    assert square_reward > rotating_reward
+
+    hold_reward, _ = _reward_case(
+        before, before, {**common, "plug_axis_error_rad": 0.0})
+    needless_rotation_reward, _ = _reward_case(
+        before, before, {**common, "plug_axis_error_rad": 0.0},
+        commanded=np.array([0.0, 0.0, 0.0, 0.2, 0.0, 0.0]))
+    assert hold_reward > needless_rotation_reward
+
+
+@pytest.mark.parametrize("reset_class", tuple(DEPLOYMENT_RESET_CLASSES))
+def test_deployment_reset_class_delivers_actor_and_physical_contract(reset_class):
+    index = tuple(DEPLOYMENT_RESET_CLASSES).index(reset_class)
+    env = make_seat_env("deployment", seed=index, domain_randomization=True)
+    try:
+        obs, info = env.reset(
+            seed=91_000 + index,
+            options={"seat_reset_class": reset_class},
+        )
+        spec = DEPLOYMENT_RESET_CLASSES[reset_class]
+        assert info["seat_reset_validated"]
+        assert info["seat_reset_validation_mode"] == (
+            "physical_and_actor_delivered_state")
+        assert spec.depth_range_m[0] <= (
+            info["seat_reset_delivered_depth_m"]) <= spec.depth_range_m[1]
+        assert spec.actor_lateral_range_m[0] <= (
+            info["seat_reset_delivered_actor_lateral_m"]
+        ) <= spec.actor_lateral_range_m[1]
+        assert info["seat_reset_delivered_physical_lateral_m"] <= 1.2e-3
+        assert info["contact_force_norm"] <= 10.0
+        assert info["off_limit_contacts"] == 0
+        assert obs["actor"].shape == (8, 34)
+        assert obs["privileged"].shape == (32,)
+    finally:
+        env.close()
 
 
 def test_wedge_random_vs_lateral_nudge_feasibility():

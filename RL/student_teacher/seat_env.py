@@ -1,4 +1,4 @@
-"""Force-reactive seat environment starting from a validated lateral wedge."""
+"""Force-reactive seat environment with deployment-matched reset classes."""
 from __future__ import annotations
 
 import copy
@@ -103,9 +103,9 @@ K_LAT_HOLD = 20.0
 # free at the mouth and becomes important only as the plug approaches the gate.
 W_SQUARE_AXIS = 4.0
 W_SQUARE_ROLL = 4.0
-SQUARE_AXIS_REF_RAD = 0.35
-SQUARE_ROLL_REF_RAD = 0.35
-SQUARE_DEPTH_ONSET = 0.15
+SQUARE_AXIS_REF_RAD = float(np.radians(5.0))
+SQUARE_ROLL_REF_RAD = float(np.radians(5.0))
+SQUARE_DEPTH_ONSET = 0.0
 SQUARE_DEPTH_GATE = 0.45
 W_FORCE_DIRECTION = 0.50
 FORCE_RELIEF_DEPTH_REF_M = 0.5e-3
@@ -118,7 +118,42 @@ K_ACTION = 0.02
 K_ACTION_RATE = 0.05
 SEATED_SUCCESS_BONUS = 50.0
 FAIL_PENALTY = 20.0
-FAIL_STATUSES = frozenset(("force_abort", "bad_collision", "off_limit"))
+FAIL_STATUSES = frozenset((
+    "force_abort", "bad_collision", "off_limit", "rotation_guard"))
+ROTATION_GUARD_RAD = float(np.radians(5.0))
+ROTATION_GUARD_PENALTY = 20.0
+
+# Direct pose offsets larger than roughly 1 mm settle back toward the center in
+# the calibrated contact model.  Deployment, however, observes a 0.9--2.7 mm
+# lateral error because the perceived mouth and the true contact geometry are
+# biased relative to one another.  New reset classes therefore validate both
+# quantities separately: a physically safe settled pose and the actor-visible
+# deployment error created through the existing per-episode perception bias.
+RESET_SETTLE_DEPTH_OFFSET_M = 0.7e-3
+RESET_MAX_PHYSICAL_LATERAL_M = 1.2e-3
+RESET_MAX_DELIVERED_ROTATION_RAD = float(np.radians(2.0))
+RESET_MAX_ATTEMPTS = 8
+
+
+@dataclass(frozen=True)
+class SeatResetClass:
+    name: str
+    weight: float
+    depth_range_m: tuple[float, float]
+    actor_lateral_range_m: tuple[float, float]
+    preferred_direction: str | None
+
+
+DEPLOYMENT_RESET_CLASSES = {
+    "live_shallow": SeatResetClass(
+        "live_shallow", 0.70, (3e-3, 8e-3), (0.9e-3, 2.7e-3), "minus_x"),
+    "centered_shallow": SeatResetClass(
+        "centered_shallow", 0.15, (3e-3, 8e-3), (0.0, 0.9e-3), None),
+    "mid_tail": SeatResetClass(
+        "mid_tail", 0.10, (8e-3, 22e-3), (0.9e-3, 2.7e-3), None),
+    "mastered_deep": SeatResetClass(
+        "mastered_deep", 0.05, (22e-3, 42e-3), (0.0, 1.2e-3), None),
+}
 
 
 @dataclass(frozen=True)
@@ -132,6 +167,7 @@ class SeatStage:
     perception_noise: float
     grasp_noise: float
     max_steps: int
+    reset_profile: str = "legacy"
 
 
 _CANONICAL_STAGES = {
@@ -156,6 +192,14 @@ STAGES = {
     "tight": _CANONICAL_STAGES["near_seated"],
     "band": _CANONICAL_STAGES["mid"],
     "full": _CANONICAL_STAGES["wedge"],
+    "bootstrap": SeatStage(
+        "bootstrap", 0.08, (0.03, 0.48), (0.0, 2.7e-3),
+        (0.0, RESET_MAX_PHYSICAL_LATERAL_M), (0.0, 0.0),
+        0.0, 0.0, 400, "sbc"),
+    "deployment": SeatStage(
+        "deployment", 0.40, (0.03, 0.48), (0.0, 2.7e-3),
+        (0.0, RESET_MAX_PHYSICAL_LATERAL_M), (0.0, 0.0),
+        0.0, 0.10, 400, "deployment"),
 }
 
 
@@ -195,6 +239,7 @@ class SeatEnv(gym.Wrapper):
             # shallow/middle/deep hand-off anchors, and the vector ensemble
             # therefore retains the complete deployment range.
             self._reset_level = FULL_HANDOFF_LEVEL_BY_COMPILED_SEED[compiled_seed]
+        self._curriculum_easy_max_mm = 42.0
         self._validation_seed_base = {
             20260715: 1112,
             20260721: 20264753,
@@ -224,6 +269,14 @@ class SeatEnv(gym.Wrapper):
         self._pool_build_rejections = 0
         self._steps_since_reset = 0
         self._current_reset_metrics: dict = {}
+
+    def set_curriculum_easy_max_mm(self, easy_max_mm: float) -> float:
+        """Set the synchronized SBC easy boundary for this worker."""
+        self._curriculum_easy_max_mm = float(np.clip(easy_max_mm, 8.0, 42.0))
+        return self._curriculum_easy_max_mm
+
+    def get_curriculum_easy_max_mm(self) -> float:
+        return float(self._curriculum_easy_max_mm)
 
     def _privileged(self) -> np.ndarray:
         teacher = np.asarray(build_teacher_obs21(self.scene), dtype=np.float64)
@@ -641,11 +694,253 @@ class SeatEnv(gym.Wrapper):
         raw = self.scene._obs()
         return self.env._build_obs69(raw)
 
+    def _sample_distributed_spec(self, options: dict) -> dict:
+        forced_class = options.get("seat_reset_class")
+        if self.stage.reset_profile == "deployment":
+            if forced_class is None:
+                names = tuple(DEPLOYMENT_RESET_CLASSES)
+                weights = np.asarray([
+                    DEPLOYMENT_RESET_CLASSES[name].weight for name in names
+                ], dtype=np.float64)
+                reset_class = DEPLOYMENT_RESET_CLASSES[str(
+                    self._reset_rng.choice(names, p=weights / weights.sum()))]
+            else:
+                if forced_class not in DEPLOYMENT_RESET_CLASSES:
+                    raise ValueError(f"unknown seat reset class: {forced_class!r}")
+                reset_class = DEPLOYMENT_RESET_CLASSES[str(forced_class)]
+            depth_lo, depth_hi = reset_class.depth_range_m
+            lateral_lo, lateral_hi = reset_class.actor_lateral_range_m
+            class_name = reset_class.name
+            preferred_direction = reset_class.preferred_direction
+        else:
+            depth_lo, depth_hi = 3e-3, 1e-3 * self._curriculum_easy_max_mm
+            biased = bool(
+                forced_class == "sbc_live"
+                or (forced_class is None and self._reset_rng.uniform() < 0.70)
+            )
+            if forced_class not in (None, "sbc_live", "sbc_centered"):
+                raise ValueError(f"unknown SBC reset class: {forced_class!r}")
+            class_name = "sbc_live" if biased else "sbc_centered"
+            lateral_lo, lateral_hi = (
+                (0.9e-3, 2.7e-3) if biased else (0.0, 0.9e-3))
+            preferred_direction = "minus_x" if biased else None
+
+        depth_margin = min(0.25e-3, 0.2 * max(depth_hi - depth_lo, 0.0))
+        lateral_margin = min(
+            0.05e-3, 0.2 * max(lateral_hi - lateral_lo, 0.0))
+        requested_depth = options.get("seat_reset_depth_m")
+        if requested_depth is None:
+            requested_depth = float(self._reset_rng.uniform(
+                depth_lo + depth_margin, depth_hi - depth_margin))
+        else:
+            requested_depth = float(requested_depth)
+        requested_lateral = options.get("seat_reset_lateral_m")
+        if requested_lateral is None:
+            requested_lateral = float(self._reset_rng.uniform(
+                lateral_lo + lateral_margin,
+                max(lateral_lo + lateral_margin, lateral_hi - lateral_margin),
+            ))
+        else:
+            requested_lateral = float(requested_lateral)
+
+        direction_name = options.get("seat_reset_direction")
+        if direction_name is None:
+            direction_name = preferred_direction or tuple(
+                ("plus_x", "minus_x", "plus_y", "minus_y"))[
+                    int(self._reset_rng.integers(0, 4))]
+        direction = self._direction(str(direction_name))
+        return {
+            "class": class_name,
+            "depth_bounds_m": (float(depth_lo), float(depth_hi)),
+            "lateral_bounds_m": (float(lateral_lo), float(lateral_hi)),
+            "requested_depth_m": requested_depth,
+            "requested_lateral_m": requested_lateral,
+            "direction": str(direction_name),
+            "desired_actor_xy_m": direction * requested_lateral,
+        }
+
+    def _distributed_safety_reason(self, info: dict) -> str | None:
+        values = np.asarray([
+            info.get("insertion_depth_m", np.nan),
+            info.get("lateral_error_m", np.nan),
+            info.get("contact_force_norm", np.nan),
+            info.get("plug_axis_error_rad", np.nan),
+            info.get("plug_roll_error_rad", np.nan),
+        ], dtype=np.float64)
+        if not bool(np.all(np.isfinite(values))):
+            return "non_finite_delivered_state"
+        if float(info["contact_force_norm"]) > WEDGE_LOW_FORCE_MAX_N:
+            return "force_out_of_range"
+        if float(info["lateral_error_m"]) > RESET_MAX_PHYSICAL_LATERAL_M:
+            return "physical_lateral_out_of_range"
+        if max(abs(float(info["plug_axis_error_rad"])),
+               abs(float(info["plug_roll_error_rad"]))) > (
+                   RESET_MAX_DELIVERED_ROTATION_RAD):
+            return "rotation_out_of_range"
+        if int(info.get("off_limit_contacts", 0)) > 0:
+            return "off_limit"
+        if float(info.get("plug_port_penetration_excess_m", 0.0)) > (
+                self.scene.cfg.bad_collision_penetration_excess_m):
+            return "bad_collision_penetration"
+        if float(info.get("overinsert_m", 0.0)) > (
+                self.scene.cfg.bad_collision_overinsert_m):
+            return "bad_collision_overinsert"
+        return None
+
+    def _apply_actor_visible_lateral(
+            self, desired_actor_xy_m: np.ndarray) -> np.ndarray:
+        """Set the existing perception bias to a requested actor-visible XY."""
+        _axial, true_lateral = self.scene._tip_port_errors()
+        desired = np.asarray(desired_actor_xy_m, dtype=np.float64).reshape(2)
+        delta = np.asarray(true_lateral, dtype=np.float64) - desired
+        self.env._pos_bias = (
+            self.scene._lat_x * delta[0] + self.scene._lat_y * delta[1])
+        self.env._rot_bias = np.zeros(3, dtype=np.float64)
+        raw = self.scene._obs()
+        return self.env._build_obs69(raw)
+
+    def _reset_distributed(
+            self, requested_seed: int | None, options: dict) -> tuple[dict, dict]:
+        if requested_seed is not None:
+            self._reset_rng = np.random.default_rng(int(requested_seed))
+        spec = self._sample_distributed_spec(options)
+        rejected: list[dict] = []
+        accepted = None
+        requested_depth = float(spec["requested_depth_m"])
+        commanded_depth = max(
+            0.0, requested_depth - RESET_SETTLE_DEPTH_OFFSET_M)
+        physically_biased = float(spec["requested_lateral_m"]) >= 0.9e-3
+        physical_command_m = (
+            (0.9e-3 if self._compiled_seed == 20260731 else 2.0e-3)
+            if physically_biased else 0.0)
+        base_seed = int(
+            requested_seed if requested_seed is not None
+            else self._reset_rng.integers(1, 2**31 - 1))
+        for attempt in range(RESET_MAX_ATTEMPTS):
+            self._reset_level = float(np.clip(
+                (self.scene.cfg.seated_depth_m - commanded_depth)
+                / self.scene.cfg.last_inch_m,
+                *self.stage.level_range,
+            ))
+            # The deepest compiled variant ejects from a 2.7 mm commanded pose
+            # at the mouth.  Its actor-visible bias still reproduces deployment,
+            # while this smaller physical command remains safely in contact.
+            candidate = {
+                "direction": spec["direction"],
+                "offset_xy_m": self._direction(spec["direction"])
+                * physical_command_m,
+                "commanded_offset_m": physical_command_m,
+                "tilt_xy_rad": np.zeros(2, dtype=np.float64),
+                "commanded_tilt_rad": 0.0,
+            }
+            obs69, prepared_info, reset_info, ended = self._prepare_candidate(
+                base_seed, candidate)
+            reason = (
+                "terminated_while_settling" if ended
+                else self._distributed_safety_reason(prepared_info))
+            if reason is None:
+                obs69 = self._apply_actor_visible_lateral(
+                    spec["desired_actor_xy_m"])
+                rel = np.asarray(obs69[32:38], dtype=np.float64)
+                actor_depth = float(rel[2])
+                actor_lateral = _lat_err(rel)
+                actor_rotation = _rot_err(rel)
+                depth_lo, depth_hi = spec["depth_bounds_m"]
+                lateral_lo, lateral_hi = spec["lateral_bounds_m"]
+                if not depth_lo <= actor_depth <= depth_hi:
+                    reason = "actor_depth_out_of_class"
+                    commanded_depth = float(np.clip(
+                        commanded_depth + requested_depth - actor_depth,
+                        0.0, self.scene.cfg.seated_depth_m))
+                elif not lateral_lo <= actor_lateral <= lateral_hi:
+                    reason = "actor_lateral_out_of_class"
+                elif actor_rotation > ROTATION_GUARD_RAD:
+                    reason = "actor_rotation_guard"
+                else:
+                    accepted = (
+                        obs69, prepared_info, reset_info, candidate, attempt,
+                        base_seed, actor_depth, actor_lateral, actor_rotation,
+                    )
+                    break
+            if reason == "physical_lateral_out_of_range":
+                physical_command_m *= 0.5
+            rejected.append({"attempt": attempt + 1, "reason": reason})
+        if accepted is None:
+            raise RuntimeError(
+                f"failed to deliver reset class {spec['class']}: {rejected}")
+
+        (obs69, prepared_info, reset_info, candidate, attempt, base_seed,
+         actor_depth, actor_lateral, actor_rotation) = accepted
+        obs69 = self._normalize_accepted_reset(obs69)
+        # Normalization rebuilds the observation; reapply the exact class bias.
+        obs69 = self._apply_actor_visible_lateral(spec["desired_actor_xy_m"])
+        rel = np.asarray(obs69[32:38], dtype=np.float64)
+        actor_depth, actor_lateral, actor_rotation = (
+            float(rel[2]), _lat_err(rel), _rot_err(rel))
+        self._reset_count += 1
+        self._reset_resample_count += attempt
+        info = dict(reset_info)
+        info.update(prepared_info)
+        info["reset_diag"] = dict(prepared_info)
+        info.update({
+            "term_status": None,
+            "curriculum_level": self._reset_level,
+            "seat_reset_stage": self.stage.name,
+            "seat_reset_profile": self.stage.reset_profile,
+            "seat_reset_class": spec["class"],
+            "seat_reset_seed": base_seed,
+            "seat_reset_attempts": attempt + 1,
+            "seat_reset_resample_count": attempt,
+            "seat_reset_used_fallback": True,
+            "seat_reset_cache_hit": False,
+            "seat_reset_validation_mode": "physical_and_actor_delivered_state",
+            "seat_reset_rejected": rejected,
+            "seat_reset_validated": True,
+            "seat_reset_requested_depth_m": spec["requested_depth_m"],
+            "seat_reset_delivered_depth_m": actor_depth,
+            "seat_reset_requested_lateral_m": spec["requested_lateral_m"],
+            "seat_reset_delivered_actor_lateral_m": actor_lateral,
+            "seat_reset_delivered_physical_lateral_m": float(
+                prepared_info["lateral_error_m"]),
+            "seat_reset_delivered_actor_rotation_rad": actor_rotation,
+            "seat_reset_delivered_physical_rotation_rad": max(
+                abs(float(prepared_info["plug_axis_error_rad"])),
+                abs(float(prepared_info["plug_roll_error_rad"]))),
+            "seat_reset_commanded_offset_m": candidate["commanded_offset_m"],
+            "seat_reset_commanded_tilt_rad": 0.0,
+            "seat_reset_direction": spec["direction"],
+            "seat_reset_curriculum_easy_max_mm": (
+                self._curriculum_easy_max_mm),
+        })
+        self._current_obs69 = np.asarray(obs69, dtype=np.float32).copy()
+        self._last_info = dict(info)
+        self._last_dt = float(getattr(self.scene, "_policy_dt_s", 0.05))
+        self._wrench_ema[:] = 0.0
+        self._prev_action[:] = 0.0
+        self._prev_f_lateral = 0.0
+        self._last_reward_terms = {}
+        self._steps_since_reset = 0
+        self._current_reset_metrics = {
+            key: info[key] for key in (
+                "seat_reset_attempts", "seat_reset_used_fallback",
+                "seat_reset_class", "seat_reset_delivered_depth_m",
+                "seat_reset_delivered_actor_lateral_m",
+                "seat_reset_delivered_physical_lateral_m",
+                "seat_reset_delivered_actor_rotation_rad",
+            )
+        }
+        first = self._frame(obs69)
+        self._frames = deque(
+            (first.copy() for _ in range(HISTORY)), maxlen=HISTORY)
+        return self._observation(obs69, append=False), info
+
     def reset(self, **kwargs):
         requested_seed = kwargs.pop("seed", None)
-        kwargs.pop("options", None)
+        options = dict(kwargs.pop("options", None) or {})
         if kwargs:
             raise TypeError(f"unsupported reset arguments: {sorted(kwargs)}")
+        if self.stage.reset_profile in ("sbc", "deployment"):
+            return self._reset_distributed(requested_seed, options)
         if requested_seed is not None:
             self._reset_rng = np.random.default_rng(int(requested_seed))
 
@@ -708,7 +1003,8 @@ class SeatEnv(gym.Wrapper):
             "seat_reset_commanded_offset_m": candidate["commanded_offset_m"],
             "seat_reset_commanded_tilt_rad": candidate["commanded_tilt_rad"],
             "seat_reset_direction": candidate["direction"],
-            "seat_reset_true_lateral_wedge": True,
+            "seat_reset_true_lateral_wedge": bool(
+                validation.get("true_lateral_wedge", False)),
             "seat_reset_probe": validation,
             "seat_reset_cumulative_resample_rate": (
                 self._reset_resample_count
@@ -740,6 +1036,12 @@ class SeatEnv(gym.Wrapper):
         self._last_info = dict(info)
         self._last_dt = float(info.get("policy_dt_s", self._last_dt))
         rel = np.asarray(obs69[32:38], dtype=np.float64)
+        if (_rot_err(rel) >= ROTATION_GUARD_RAD
+                and info.get("term_status") != "success"):
+            terminated = True
+            truncated = False
+            info = dict(info)
+            info["term_status"] = "rotation_guard"
         reward = self._seat_reward(before_rel, rel, commanded, info)
         self._prev_action = commanded.copy()
         info = dict(info)
@@ -794,7 +1096,7 @@ class SeatEnv(gym.Wrapper):
                         - K_LAT_HOLD * lat_now)
 
         depth_norm = max(0.0, self._finite(info.get("depth_norm", 0.0)))
-        depth_ramp = float(np.clip(
+        depth_ramp = 0.25 + 0.75 * float(np.clip(
             (depth_norm - SQUARE_DEPTH_ONSET)
             / (SQUARE_DEPTH_GATE - SQUARE_DEPTH_ONSET), 0.0, 1.0)) ** 2
         axis_error = abs(self._finite(info.get("plug_axis_error_rad", 0.0)))
@@ -829,7 +1131,10 @@ class SeatEnv(gym.Wrapper):
 
         term_status = info.get("term_status")
         success_term = SEATED_SUCCESS_BONUS if term_status == "success" else 0.0
-        fail_term = -FAIL_PENALTY if term_status in FAIL_STATUSES else 0.0
+        fail_term = (
+            -ROTATION_GUARD_PENALTY if term_status == "rotation_guard"
+            else -FAIL_PENALTY if term_status in FAIL_STATUSES
+            else 0.0)
 
         terms = {
             "depth": depth_term,
@@ -859,6 +1164,8 @@ def _compiled_seed_for_stage(seed: int, stage: SeatStage) -> int:
         # Hard workers span the clean Phase-1 wedge distribution rather than
         # collapsing back to a single mouth-depth geometry.
         "wedge": (20260715, 20260740, 20260731),
+        "bootstrap": (20260715, 20260740, 20260731),
+        "deployment": (20260715, 20260740, 20260731),
     }[stage.name]
     return int(proven[int(seed) % len(proven)])
 
@@ -897,7 +1204,8 @@ def make_seat_env(stage: str = "full", *, seed: int | None = None,
 
 
 __all__ = [
-    "ACTOR_FRAME_DIM", "HISTORY", "PRIVILEGED_DIM", "SEAT_LEVEL",
+    "ACTOR_FRAME_DIM", "DEPLOYMENT_RESET_CLASSES", "HISTORY",
+    "PRIVILEGED_DIM", "ROTATION_GUARD_RAD", "SEAT_LEVEL",
     "SEAT_ACTION_GAIN", "SEAT_RETRACTION_FROM_SEATED_M", "STAGES",
-    "SeatEnv", "make_seat_env",
+    "SeatEnv", "SeatResetClass", "make_seat_env",
 ]
