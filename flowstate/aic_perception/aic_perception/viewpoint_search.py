@@ -7,11 +7,12 @@ then may the planner increase top-view clearance.  If J6 is unavailable or
 displaces the projection, one bounded J1 fallback explicitly returns through
 CENTER before alignment can be accepted; no J1 or J6 is used after LEVEL.
 
-Completion is deliberately narrow and immediate.  Only a usable ``full``
-report from ``center_camera`` can finish the search, and it can do so only
-after leveling has completed.  Side cameras are acquisition hints, not goal
-cameras.  The first qualifying post-level center frame returns ``DONE``;
-there is no survey-context multiplier or extra confirmation delay.
+Completion is a synchronized three-camera survey contract.  The center camera
+must retain the strict top-down, scale, long-axis, context, and gripper-clear
+view.  Every configured side camera must simultaneously retain board identity,
+usable component context, and quantitative separation from its own calibrated
+gripper mask.  Side cameras still cannot complete the policy by themselves;
+they contribute required evidence and camera-plane correction directions.
 """
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ class AdaptiveViewpointPlanner:
         *,
         min_goal_area_frac: float = 0.04,
         max_goal_area_frac: float = 0.45,
-        expected_cameras: Sequence[str] = ("left_camera", "center_camera", "right_camera"),
+        expected_cameras: Sequence[str] = ("center_camera",),
         center_threshold: float = 0.15,
         recenter_threshold: float = 0.35,
         confirmation_frames: int = 2,
@@ -120,6 +121,11 @@ class AdaptiveViewpointPlanner:
         max_occlusion_translates: int = 6,
         max_scale_adjustments: int = 3,
         min_gripper_clearance_px: float = 20.0,
+        auxiliary_min_area_frac: float = 0.08,
+        auxiliary_min_rectangularity: float = 0.55,
+        auxiliary_min_gripper_clearance_px: float = 12.0,
+        auxiliary_context_scale: float = 0.75,
+        max_auxiliary_translates: int = 8,
         survey_confirmation_frames: int = 2,
         # Live trace: the plate's true stable estimate sits at ratio
         # 1.16-1.24 at working standoff, while square-noise flicker stays
@@ -133,6 +139,8 @@ class AdaptiveViewpointPlanner:
         cameras = tuple(str(item) for item in expected_cameras)
         if not cameras or len(set(cameras)) != len(cameras):
             raise ValueError("expected_cameras must be non-empty and unique")
+        if "center_camera" not in cameras:
+            raise ValueError("expected_cameras must include center_camera")
         if not 0.0 < center_threshold <= recenter_threshold <= 1.0:
             raise ValueError(
                 "thresholds must satisfy 0 < center <= recenter <= 1"
@@ -165,6 +173,18 @@ class AdaptiveViewpointPlanner:
             raise ValueError("max_scale_adjustments must be non-negative")
         if min_gripper_clearance_px < 0.0:
             raise ValueError("min_gripper_clearance_px must be non-negative")
+        if not 0.0 <= auxiliary_min_area_frac < 1.0:
+            raise ValueError("auxiliary_min_area_frac must be in [0, 1)")
+        if not 0.0 <= auxiliary_min_rectangularity <= 1.0:
+            raise ValueError("auxiliary_min_rectangularity must be in [0, 1]")
+        if auxiliary_min_gripper_clearance_px < 0.0:
+            raise ValueError(
+                "auxiliary_min_gripper_clearance_px must be non-negative"
+            )
+        if not 0.0 <= auxiliary_context_scale <= 2.0:
+            raise ValueError("auxiliary_context_scale must be in [0, 2]")
+        if max_auxiliary_translates < 0:
+            raise ValueError("max_auxiliary_translates must be non-negative")
         if survey_confirmation_frames < 1:
             raise ValueError("survey_confirmation_frames must be positive")
         if min_long_axis_ratio <= 1.0:
@@ -195,6 +215,15 @@ class AdaptiveViewpointPlanner:
         self.max_occlusion_translates = int(max_occlusion_translates)
         self.max_scale_adjustments = int(max_scale_adjustments)
         self.min_gripper_clearance_px = float(min_gripper_clearance_px)
+        self.auxiliary_min_area_frac = float(auxiliary_min_area_frac)
+        self.auxiliary_min_rectangularity = float(
+            auxiliary_min_rectangularity
+        )
+        self.auxiliary_min_gripper_clearance_px = float(
+            auxiliary_min_gripper_clearance_px
+        )
+        self.auxiliary_context_scale = float(auxiliary_context_scale)
+        self.max_auxiliary_translates = int(max_auxiliary_translates)
         self.survey_confirmation_frames = int(survey_confirmation_frames)
         self.min_long_axis_ratio = float(min_long_axis_ratio)
         self.roll_confirmation_frames = int(roll_confirmation_frames)
@@ -224,10 +253,15 @@ class AdaptiveViewpointPlanner:
         self._clearance_zoom_backoffs = 0
         self._postlevel_translates = 0
         self._occlusion_translates = 0
+        self._auxiliary_translates = 0
         self._scale_adjustments = 0
         self._survey_ready_streak = 0
-        self._gripper_motion_polarity = 1.0
-        self._pending_gripper_sample: tuple[int, float, float] | None = None
+        self._gripper_motion_polarity = {
+            camera: 1.0 for camera in self.expected_cameras
+        }
+        self._pending_gripper_sample: (
+            tuple[str, int, float, float] | None
+        ) = None
         self._pending_yaw_feedback: tuple[float, float] | None = None
         self._yaw_error_per_scale: float | None = None
         # Camera-plane +Y normally moves a fixed board upward in the image.
@@ -274,12 +308,12 @@ class AdaptiveViewpointPlanner:
         # Completion is evaluated only after the wrapper has acknowledged
         # the joints-2--4 leveling move.  This intentionally ignores a full
         # side-camera frame and a pre-level full center frame.
-        if self._phase is _Phase.ASCEND and self._center_is_goal(center):
+        if self._phase is _Phase.ASCEND and self._survey_is_goal(reports):
             self._survey_ready_streak += 1
             if self._survey_ready_streak >= self.survey_confirmation_frames:
                 return self._terminate(
                     ActionKind.DONE,
-                    "strict gripper-clear IVM survey view confirmed in "
+                    "strict synchronized multi-camera IVM survey confirmed in "
                     f"{self.survey_confirmation_frames} fresh center-camera "
                     "frames",
                     "center_camera",
@@ -288,9 +322,9 @@ class AdaptiveViewpointPlanner:
                 ActionKind.OBSERVE,
                 "center_camera",
                 reason=(
-                    "strict center-camera survey candidate: confirm full "
-                    "board scale, alignment, context, and gripper clearance "
-                    "in one more fresh frame"
+                    "strict synchronized survey candidate: confirm center "
+                    "alignment/scale plus side-camera context and gripper "
+                    "clearance in one more fresh frame"
                 ),
             )
         self._survey_ready_streak = 0
@@ -311,7 +345,7 @@ class AdaptiveViewpointPlanner:
             )
 
         if self._phase is _Phase.ASCEND:
-            return self._ascend(center)
+            return self._ascend(center, reports)
 
         if self._phase is _Phase.ACQUIRE:
             if not self._board_evidence(center):
@@ -705,8 +739,12 @@ class AdaptiveViewpointPlanner:
             ),
         )
 
-    def _ascend(self, report: MaskReport | None) -> ViewpointAction:
-        """Increase top-view clearance without revisiting J1 or J6."""
+    def _ascend(
+        self,
+        report: MaskReport | None,
+        reports: Mapping[str, MaskReport],
+    ) -> ViewpointAction:
+        """Converge the synchronized survey without revisiting J1 or J6."""
 
         if self._partial_clearance_reason is not None:
             # The reached measured pose is safe.  Do not blindly replace +Z
@@ -730,7 +768,7 @@ class AdaptiveViewpointPlanner:
             )
 
         response_note = self._consume_vertical_response(report)
-        gripper_response_note = self._consume_gripper_response(report)
+        gripper_response_note = self._consume_gripper_response(reports)
         required_context = 1.25 * float(report.context_pad_px)
         context_edges = {
             edge
@@ -767,46 +805,29 @@ class AdaptiveViewpointPlanner:
             and not oversized
             and self._occlusion_translates < self.max_occlusion_translates
         ):
-            escape_x, escape_y = report.gripper_escape_direction
-            escape_norm = math.hypot(escape_x, escape_y)
-            if escape_norm < 1e-9:
-                escape_x, escape_y, escape_norm = 0.0, -1.0, 1.0
-            camera_x = (
-                -float(escape_x) / escape_norm * self._gripper_motion_polarity
-            )
-            camera_y = (
-                -float(escape_y) / escape_norm * self._gripper_motion_polarity
-            )
             self._occlusion_translates += 1
             self._stall_streak = 0
             overlap_scale = min(
                 1.5,
                 max(1.0, 1.0 + int(report.gripper_overlap_px) / 20000.0),
             )
-            action = self._emit(
-                ActionKind.TRANSLATE,
+            return self._emit_mask_escape(
                 "center_camera",
-                image=(camera_x, camera_y),
+                report,
                 scale=overlap_scale,
-                reason=(
-                    "protected task-board envelope intersects the calibrated "
-                    f"gripper mask (overlap={int(report.gripper_overlap_px)}px, "
-                    f"clearance={float(report.gripper_clearance_px):.1f}px); "
-                    "move the J2-4 camera projection along the shortest "
-                    "mask-escape direction"
-                    + (
-                        f"; {gripper_response_note}"
-                        if gripper_response_note
-                        else ""
-                    )
-                ),
+                response_note=gripper_response_note,
             )
-            self._pending_gripper_sample = (
-                int(report.gripper_overlap_px),
-                float(report.gripper_clearance_px),
-                float(action.image_direction[1]),
+
+        # Do not release IVM merely because the center projection is ideal.
+        # Once it is strict, repair whichever auxiliary camera has the worst
+        # mask/context evidence using that camera's calibrated image axes.
+        if self._center_is_goal(report):
+            auxiliary_action = self._auxiliary_survey_action(
+                reports,
+                response_note=gripper_response_note,
             )
-            return action
+            if auxiliary_action is not None:
+                return auxiliary_action
 
         # Once top-down, a plate that is high or low in the center image is a
         # camera-position error, not a standoff error.  Move the camera in its
@@ -1022,14 +1043,19 @@ class AdaptiveViewpointPlanner:
             f"image-y {commanded_direction:+.1f}); polarity reversed"
         )
 
-    def _consume_gripper_response(self, report: MaskReport) -> str:
-        """Validate mask-escape polarity from the next fresh center frame."""
+    def _consume_gripper_response(
+        self, reports: Mapping[str, MaskReport]
+    ) -> str:
+        """Validate one camera's mask escape from its next fresh frame."""
 
         pending = self._pending_gripper_sample
         if pending is None:
             return ""
         self._pending_gripper_sample = None
-        previous_overlap, previous_clearance, commanded_y = pending
+        camera, previous_overlap, previous_clearance, commanded_y = pending
+        report = reports.get(camera)
+        if report is None or not report.seen:
+            return f"{camera} fresh-frame mask response was unavailable"
         current_overlap = int(report.gripper_overlap_px)
         current_clearance = float(report.gripper_clearance_px)
         worsened = (
@@ -1042,17 +1068,211 @@ class AdaptiveViewpointPlanner:
         )
         if not worsened:
             return (
-                "fresh frame validated mask escape "
+                f"{camera} fresh frame validated mask escape "
                 f"(overlap {previous_overlap}->{current_overlap}px, "
                 f"clearance {previous_clearance:.1f}->{current_clearance:.1f}px)"
             )
-        self._gripper_motion_polarity *= -1.0
+        self._gripper_motion_polarity[camera] = -self._gripper_motion_polarity.get(
+            camera, 1.0
+        )
         return (
-            "fresh frame showed worse mask separation "
+            f"{camera} fresh frame showed worse mask separation "
             f"(overlap {previous_overlap}->{current_overlap}px, "
             f"clearance {previous_clearance:.1f}->{current_clearance:.1f}px, "
             f"commanded image-y {commanded_y:+.1f}); polarity reversed"
         )
+
+    def _emit_mask_escape(
+        self,
+        camera: str,
+        report: MaskReport,
+        *,
+        scale: float,
+        response_note: str = "",
+    ) -> ViewpointAction:
+        """Move through one camera's TF opposite its measured board escape."""
+
+        escape_x, escape_y = report.gripper_escape_direction
+        escape_norm = math.hypot(escape_x, escape_y)
+        if escape_norm < 1e-9:
+            escape_x, escape_y, escape_norm = 0.0, -1.0, 1.0
+        polarity = self._gripper_motion_polarity.get(camera, 1.0)
+        camera_x = -float(escape_x) / escape_norm * polarity
+        camera_y = -float(escape_y) / escape_norm * polarity
+        action = self._emit(
+            ActionKind.TRANSLATE,
+            camera,
+            image=(camera_x, camera_y),
+            scale=scale,
+            reason=(
+                f"{camera} protected task-board envelope intersects its "
+                f"calibrated gripper mask (overlap="
+                f"{int(report.gripper_overlap_px)}px, clearance="
+                f"{float(report.gripper_clearance_px):.1f}px); move J2-4 "
+                "through that camera's calibrated mask-escape direction"
+                + (f"; {response_note}" if response_note else "")
+            ),
+        )
+        self._pending_gripper_sample = (
+            camera,
+            int(report.gripper_overlap_px),
+            float(report.gripper_clearance_px),
+            float(action.image_direction[1]),
+        )
+        return action
+
+    def _auxiliary_survey_action(
+        self,
+        reports: Mapping[str, MaskReport],
+        *,
+        response_note: str = "",
+    ) -> ViewpointAction | None:
+        """Repair the worst configured side-camera survey projection."""
+
+        auxiliary = [
+            camera
+            for camera in self.expected_cameras
+            if camera != "center_camera"
+        ]
+        if not auxiliary:
+            return None
+
+        missing = [
+            camera
+            for camera in auxiliary
+            if camera not in reports or not reports[camera].seen
+        ]
+        if missing:
+            self._stall_streak += 1
+            if (
+                self._auxiliary_translates < self.max_auxiliary_translates
+                and self._stall_streak == 1
+            ):
+                self._auxiliary_translates += 1
+                return self._emit(
+                    ActionKind.UP_CLEARANCE,
+                    "center_camera",
+                    axial=1.0,
+                    scale=1.0,
+                    reason=(
+                        "configured IVM survey cameras lack board evidence "
+                        f"({missing}); add one shared J2-4 clearance step"
+                    ),
+                )
+            return self._emit(
+                ActionKind.OBSERVE,
+                "center_camera",
+                reason=(
+                    "waiting for board evidence in configured IVM survey "
+                    f"cameras {missing}"
+                ),
+            )
+
+        blocked = [
+            camera
+            for camera in auxiliary
+            if self._auxiliary_gripper_blocked(reports[camera])
+        ]
+        if blocked:
+            camera = max(
+                blocked,
+                key=lambda name: (
+                    int(reports[name].gripper_overlap_px),
+                    -float(reports[name].gripper_clearance_px),
+                ),
+            )
+            if self._auxiliary_translates >= self.max_auxiliary_translates:
+                return self._terminate(
+                    ActionKind.STAGNATED,
+                    "side-camera gripper separation did not converge after "
+                    f"{self.max_auxiliary_translates} measured J2-4 steps",
+                    camera,
+                )
+            self._auxiliary_translates += 1
+            self._stall_streak = 0
+            report = reports[camera]
+            scale = min(
+                1.0,
+                max(0.60, 0.60 + int(report.gripper_overlap_px) / 30000.0),
+            )
+            return self._emit_mask_escape(
+                camera,
+                report,
+                scale=scale,
+                response_note=response_note,
+            )
+
+        tight = [
+            camera
+            for camera in auxiliary
+            if not self._auxiliary_camera_is_goal(reports[camera])
+            and self._auxiliary_context_edges(reports[camera])
+        ]
+        if tight:
+            camera = max(
+                tight,
+                key=lambda name: len(self._auxiliary_context_edges(reports[name])),
+            )
+            report = reports[camera]
+            edges = self._auxiliary_context_edges(report)
+            direction_x = (
+                (-1.0 if "left" in edges else 0.0)
+                + (1.0 if "right" in edges else 0.0)
+            )
+            direction_y = (
+                (-1.0 if "top" in edges else 0.0)
+                + (1.0 if "bottom" in edges else 0.0)
+            )
+            norm = math.hypot(direction_x, direction_y)
+            if norm > 1e-9:
+                if self._auxiliary_translates >= self.max_auxiliary_translates:
+                    return self._terminate(
+                        ActionKind.STAGNATED,
+                        "side-camera component context did not converge after "
+                        f"{self.max_auxiliary_translates} measured J2-4 steps",
+                        camera,
+                    )
+                self._auxiliary_translates += 1
+                self._stall_streak = 0
+                return self._emit(
+                    ActionKind.TRANSLATE,
+                    camera,
+                    image=(direction_x / norm, direction_y / norm),
+                    scale=0.60,
+                    reason=(
+                        f"{camera} survey context is tight at {sorted(edges)}; "
+                        "apply a small correction in that camera's image plane"
+                    ),
+                )
+
+        not_ready = [
+            camera
+            for camera in auxiliary
+            if not self._auxiliary_camera_is_goal(reports[camera])
+        ]
+        if not_ready:
+            self._stall_streak += 1
+            if self._stall_streak >= self.max_stall_frames:
+                details = {
+                    camera: self._auxiliary_rejection_reasons(reports[camera])
+                    for camera in not_ready
+                }
+                return self._terminate(
+                    ActionKind.STAGNATED,
+                    f"side-camera survey evidence remained unusable: {details}",
+                    not_ready[0],
+                )
+            return self._emit(
+                ActionKind.OBSERVE,
+                "center_camera",
+                reason=(
+                    "side-camera geometry is framed but needs a fresh stable "
+                    f"observation: {not_ready}"
+                ),
+            )
+
+        self._stall_streak = 0
+        return None
 
     def _consume_yaw_response(self, error_x: float) -> str:
         """Learn center-error response per signed J1 command scale."""
@@ -1177,12 +1397,7 @@ class AdaptiveViewpointPlanner:
     # Evidence helpers
 
     def _center_is_goal(self, report: MaskReport | None) -> bool:
-        """Completion is exactly the post-level full center-board mask.
-
-        Phase ordering already proves that J1 centering, two-degree J6
-        alignment, and physical top-down leveling completed.  Do not make the
-        terminal image pass the noisy long-axis estimator a second time.
-        """
+        """Return whether the center camera satisfies its strict survey role."""
 
         if report is None or not report.seen or not report.full:
             return False
@@ -1203,6 +1418,58 @@ class AdaptiveViewpointPlanner:
             >= self.min_gripper_clearance_px
             and min(report.clearance_px) >= required_context
         )
+
+    def _survey_is_goal(self, reports: Mapping[str, MaskReport]) -> bool:
+        """Require simultaneous usable evidence from every IVM camera."""
+
+        if set(self.expected_cameras) - set(reports):
+            return False
+        if not self._center_is_goal(reports.get("center_camera")):
+            return False
+        return all(
+            camera == "center_camera"
+            or self._auxiliary_camera_is_goal(reports.get(camera))
+            for camera in self.expected_cameras
+        )
+
+    def _auxiliary_context_edges(self, report: MaskReport) -> frozenset[str]:
+        required = self.auxiliary_context_scale * float(report.context_pad_px)
+        return frozenset(
+            edge
+            for edge, clearance in zip(
+                ("left", "right", "top", "bottom"), report.clearance_px
+            )
+            if float(clearance) < required
+        )
+
+    def _auxiliary_gripper_blocked(self, report: MaskReport) -> bool:
+        return bool(
+            report.artificial_bottom_contact
+            or int(report.gripper_overlap_px) > 0
+            or float(report.gripper_clearance_px)
+            < self.auxiliary_min_gripper_clearance_px
+        )
+
+    def _auxiliary_rejection_reasons(
+        self, report: MaskReport | None
+    ) -> tuple[str, ...]:
+        if report is None or not report.seen:
+            return ("board_not_seen",)
+        reasons: list[str] = []
+        if not report.logo_seen:
+            reasons.append("logo_not_seen")
+        if float(report.area_frac) < self.auxiliary_min_area_frac:
+            reasons.append("insufficient_detail")
+        if float(report.rectangularity) < self.auxiliary_min_rectangularity:
+            reasons.append("unstable_board_shape")
+        if self._auxiliary_context_edges(report):
+            reasons.append("component_context_tight")
+        if self._auxiliary_gripper_blocked(report):
+            reasons.append("gripper_mask_contact")
+        return tuple(reasons)
+
+    def _auxiliary_camera_is_goal(self, report: MaskReport | None) -> bool:
+        return not self._auxiliary_rejection_reasons(report)
 
     def _board_evidence(self, report: MaskReport | None) -> bool:
         if report is None:

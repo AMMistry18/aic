@@ -70,6 +70,21 @@ def strict_report(**changes) -> MaskReport:
     return report(**values)
 
 
+def auxiliary_report(**changes) -> MaskReport:
+    values = dict(
+        full=True,
+        area=0.15,
+        rectangularity=0.70,
+        clearance=(80.0, 80.0, 80.0, 80.0),
+        context_pad=30.0,
+        gripper_overlap=0,
+        gripper_clearance=20.0,
+        logo=True,
+    )
+    values.update(changes)
+    return report(**values)
+
+
 def views(
     center: MaskReport,
     left: MaskReport | None = None,
@@ -322,6 +337,114 @@ def test_postlevel_survey_requires_two_fresh_strict_frames():
     assert planner.coverage_achieved
     assert planner.selected_camera == "center_camera"
     assert planner.next_action({}) is done
+
+
+def test_three_camera_survey_requires_both_auxiliary_views():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=(
+            "left_camera",
+            "center_camera",
+            "right_camera",
+        )
+    )
+    enter_ascend(planner)
+    synchronized = views(
+        strict_report(),
+        left=auxiliary_report(),
+        right=auxiliary_report(),
+    )
+
+    assert planner.next_action(synchronized).kind is ActionKind.OBSERVE
+    assert planner.next_action(synchronized).kind is ActionKind.DONE
+
+
+def test_auxiliary_gripper_overlap_drives_that_camera_image_plane():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=(
+            "left_camera",
+            "center_camera",
+            "right_camera",
+        )
+    )
+    enter_ascend(planner)
+    action = planner.next_action(
+        views(
+            strict_report(),
+            left=auxiliary_report(
+                gripper_overlap=8000,
+                gripper_clearance=0.0,
+                gripper_escape=(0.3, -0.95),
+            ),
+            right=auxiliary_report(),
+        )
+    )
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.camera == "left_camera"
+    assert action.image_direction[0] < 0.0
+    assert action.image_direction[1] > 0.0
+
+
+def test_auxiliary_mask_escape_reverses_per_camera_on_worse_frame():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=(
+            "left_camera",
+            "center_camera",
+            "right_camera",
+        )
+    )
+    enter_ascend(planner)
+    first = planner.next_action(
+        views(
+            strict_report(),
+            left=auxiliary_report(
+                gripper_overlap=1000,
+                gripper_clearance=0.0,
+                gripper_escape=(0.0, -1.0),
+            ),
+            right=auxiliary_report(),
+        )
+    )
+    second = planner.next_action(
+        views(
+            strict_report(),
+            left=auxiliary_report(
+                gripper_overlap=3000,
+                gripper_clearance=0.0,
+                gripper_escape=(0.0, -1.0),
+            ),
+            right=auxiliary_report(),
+        )
+    )
+
+    assert first.camera == second.camera == "left_camera"
+    assert first.image_direction[1] == -second.image_direction[1]
+    assert "polarity reversed" in second.reason
+
+
+def test_auxiliary_tight_context_uses_small_camera_specific_translation():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=(
+            "left_camera",
+            "center_camera",
+            "right_camera",
+        )
+    )
+    enter_ascend(planner)
+    action = planner.next_action(
+        views(
+            strict_report(),
+            left=auxiliary_report(
+                clearance=(80.0, 80.0, 10.0, 80.0),
+            ),
+            right=auxiliary_report(),
+        )
+    )
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.camera == "left_camera"
+    assert action.image_direction[1] < 0.0
+    assert action.translation_scale == pytest.approx(0.60)
 
 
 def test_qualifying_fresh_frame_wins_at_deadline_boundary():

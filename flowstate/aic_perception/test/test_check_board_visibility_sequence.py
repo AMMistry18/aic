@@ -77,7 +77,7 @@ def test_leveling_is_phase_gated_and_completion_is_planner_confirmed():
     assert "ivm_survey_ready" not in source
 
 
-def test_only_center_camera_full_evidence_reaches_planner():
+def test_center_topdown_and_side_full_evidence_reach_planner():
     source, execute_inner = execute_inner_source()
 
     full_keywords = [
@@ -97,7 +97,7 @@ def test_only_center_camera_full_evidence_reaches_planner():
     assert isinstance(full_keywords[0].args[0], ast.BoolOp)
     assert isinstance(full_keywords[0].args[0].op, ast.And)
     full_gate = ast.unparse(full_keywords[0])
-    assert "name == 'center_camera'" in full_gate
+    assert "name != 'center_camera'" in full_gate
     assert "item.full" in full_gate
     assert "center_top_down" in full_gate
 
@@ -105,7 +105,7 @@ def test_only_center_camera_full_evidence_reaches_planner():
     planner_lines = call_lines(execute_inner, "next_action")
     assert min(axes_lines) < planner_lines[0]
     assert call_lines(execute_inner, "request_relevel")
-    assert "Two consecutive strict survey frames" in source
+    assert "synchronized three-camera survey" in source
 
 
 def test_component_coverage_is_true_only_on_done():

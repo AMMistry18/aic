@@ -246,6 +246,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             min_goal_area_frac=max(0.26, min_detail_area_frac),
             max_goal_area_frac=0.36,
             min_gripper_clearance_px=20.0,
+            auxiliary_min_area_frac=0.08,
+            auxiliary_min_rectangularity=0.55,
+            auxiliary_min_gripper_clearance_px=12.0,
+            auxiliary_context_scale=0.75,
+            max_auxiliary_translates=8,
             survey_confirmation_frames=2,
             expected_cameras=tuple(sorted(self.config.camera_frames)),
         )
@@ -256,7 +261,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             "stable_frames_configured=%d j6_min_ratio=%.2f "
             "j6_confirm_frames=%d j6_tolerance=%.1fdeg "
             "motion_envelopes=controller_native "
-            "completion=two_fresh_strict_gripper_clear_center_survey_frames",
+            "completion=two_fresh_synchronized_three_camera_survey_frames",
             sorted(self.config.camera_frames),
             margin_px,
             context_margin_frac,
@@ -522,12 +527,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.rectangularity = float(report.rectangularity)
                 result.view_quality = float(view_quality(report))
 
-            # Side cameras may seed acquisition, but they can never finish the
-            # search.  ``MaskReport.full`` already proves that the real board
-            # boundary, detail envelope, shape, and requested context are in
-            # frame; calibrated gripper-mask contact remains diagnostic only.
-            # The planner additionally requires completed J6 alignment and
-            # center-camera top-down leveling before it can return DONE.
+            # Side cameras may seed acquisition and are mandatory supporting
+            # evidence for IVM, but can never finish the search by themselves.
+            # The planner requires center-camera J6/top-down geometry plus
+            # simultaneous context and gripper clearance in all three views.
             result.component_coverage_ready = False
 
             # Check any available force sample before success.  A missing
@@ -591,16 +594,18 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         "clearance; returning to joints 2-4 leveling"
                     )
 
-            # Restrict terminal evidence to a freshly verified top-down center
-            # frame.  Two consecutive strict survey frames are required before
-            # releasing the arm to downstream IVM and pregrasp.
+            # Gate only the center report on physical top-down TF. Side reports
+            # retain their own full/context evidence so the planner can require
+            # a synchronized three-camera survey before releasing the arm.
             planning_reports = {
                 name: replace(
                     item,
                     full=bool(
-                        name == "center_camera"
-                        and item.full
-                        and center_top_down
+                        item.full
+                        and (
+                            name != "center_camera"
+                            or center_top_down
+                        )
                     ),
                 )
                 for name, item in reports.items()
@@ -618,9 +623,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.steer_camera = "center_camera"
                 result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
                 result.message = (
-                    "center camera confirmed the complete, aligned, "
-                    "gripper-clear IVM survey view in two fresh top-down "
-                    "frames after "
+                    "all three cameras confirmed synchronized board context "
+                    "and gripper clearance while the center retained its "
+                    "aligned top-down IVM view in two fresh frames after "
                     f"{result.moves_executed} adaptive moves"
                 )
                 return
