@@ -1,14 +1,136 @@
 # TACC seat-RL rerun handoff — 2026-07-17
 
+## 2026-07-18 execution update (supersedes the pre-implementation plan below)
+
+The required reset-mixture, curriculum, checkpoint-selection, and evaluator
+changes are implemented, tested, committed, and pushed. The source of truth for
+all new work is:
+
+```text
+branch: flowstate-rl-deploy-and-docs
+commit: 587249a39c416e78c88a5f6ef8092e6c9b23fbcd
+remote checkout: /work2/11590/satya_a/stampede3/aic-seat-rerun-20260718-cb0a209
+TACC user/account: satya_a / IRI26004
+partition: rtx-small
+```
+
+Do not reimplement the older clean/mild/wedge proposal later in this document.
+It was replaced after examining the deployment handoff logs and measuring what
+the simulator actually delivers. The implemented deployment-stage mixture is:
+
+| Reset class | Probability | Depth | Actor-visible lateral error |
+| --- | ---: | ---: | ---: |
+| `live_shallow` | 70% | 3–8 mm | 0.9–2.7 mm |
+| `centered_shallow` | 15% | 3–8 mm | 0.0–0.9 mm |
+| `mid_tail` | 10% | 8–22 mm | 0.9–2.7 mm |
+| `mastered_deep` | 5% | 22–42 mm | 0.0–1.2 mm |
+
+The bootstrap stage uses synchronized reverse curriculum over depth. It starts
+with a 42 mm easy boundary and samples down to the hard 3 mm boundary. Across a
+shared 100-episode window, success above 80% moves the easy boundary 5 mm toward
+the hard boundary; success below 10% moves it 3 mm back. The boundary is clamped
+to 8–42 mm and persisted in `curriculum_state.json`.
+
+Other implemented safety and selection behavior:
+
+- The 5-degree deployment rotation guard is applied during training and fixed
+  evaluation, with an explicit `rotation_guard` termination and failure cost.
+- Periodic evaluation uses the same frozen 60-case suite for every checkpoint;
+  final selection uses a frozen 180-case suite. Seeds do not depend on training
+  timestep.
+- Checkpoints are versioned and resume-compatible. `best_model.zip` is ranked by
+  success, then safety-failure rate, then p95 force, and exports to
+  `best_seat_actor.ts` with numerical parity validation.
+- `evaluate_seat_checkpoints.py` compares SB3 checkpoints and TorchScript actors
+  on the identical frozen cases.
+- The deploy-side action contract now matches training's seat-action scaling,
+  port-frame residual accumulation, residual clamp, and 1-degree yaw clip.
+
+Local validation completed at this commit: 26 focused tests passed, Python and
+Slurm syntax checks passed, forced examples of all four reset classes passed,
+and an online W&B end-to-end plumbing smoke produced versioned/best/final
+artifacts. That tiny random-policy smoke is not policy-quality evidence.
+
+### W&B routing
+
+W&B rejects direct run logging to the organization slug. The authenticated
+writable run entity is the `tar2` team, while the requested organization is
+recorded in configuration and run metadata:
+
+```text
+WANDB_ENTITY=tar2
+WANDB_ORGANIZATION=anshulmistry1-the-university-of-texas-at-austin-org
+WANDB_PROJECT=aic-seat-rl
+WANDB_MODE=online
+```
+
+Online authentication check:
+`https://wandb.ai/tar2/aic-seat-rl/runs/kne12nvy`
+
+Local end-to-end plumbing smoke:
+`https://wandb.ai/tar2/aic-seat-rl/runs/4lp5xqd0`
+
+The checked-in launchers require online W&B and fail instead of silently
+falling back offline.
+
+### TACC environment and live queue state
+
+The fresh checkout's `pixi.lock` and `pixi.toml` exactly match the previously
+validated environment at
+`/work2/11590/satya_a/stampede3/aic-seat-rl-20260713/.pixi`. A fresh login-node
+Pixi backend build exceeded login-node memory/thread limits, so the new checkout
+uses a symlink to that lock-identical environment and launchers set
+`SKIP_PIXI_INSTALL=1`. Do not remove the symlink or retry the ROS build on a
+login node.
+
+The mandatory 16-environment smoke is submitted:
+
+```text
+job: 3324435
+name: seat-smoke16
+source commit: 587249a39c416e78c88a5f6ef8092e6c9b23fbcd
+stdout: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
+stderr: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.err
+```
+
+It is pending with `QOSMaxJobsPerUserLimit` because unrelated job `3319555`
+(`simdist2`) already occupies the account's single running GPU-job slot. Do not
+cancel or alter `3319555`. The QOS also prevents a second pending submission, so
+submit the 8-environment comparison only after job `3324435` completes and the
+submission slot reopens. Monitor with:
+
+```bash
+squeue -j 3324435 -o '%.18i %.12P %.28j %.8u %.2t %.10M %.10l %.6D %R'
+tail -n 100 -f /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
+sacct -j 3324435 --format=JobID,State,Elapsed,AllocCPUS,MaxRSS,ExitCode
+```
+
+Select 16 workers only if the smoke is stable, the update:data ratio is
+0.9–1.1, and its useful post-warmup throughput is at least 1.25 times the
+identical 8-worker smoke. Test 12 only if 8 versus 16 leaves the choice unclear.
+Run seed 0 through the first-hour gate before submitting seeds 1 and 2.
+
+### Deploy candidate staging
+
+The actor-enabled deploy integration is staged separately in the local
+`aic-board-search` worktree at commit
+`617970c7be5f2141979a7abfbec7e797a6d6db1b`. It is intentionally not pushed or
+deployed yet. Preserve the current script-only runtime until a trained actor
+wins the fixed held-out evaluation and passes guarded local/Flowstate checks.
+
+---
+
+The remainder of this document is the original pre-implementation handoff. It
+is retained as provenance; wherever it conflicts with the execution update
+above, the update above wins.
+
 This is the execution handoff for the next Codex agent and the person running
 the job on their own TACC account. The objective is a new plain-SAC seat policy
 that continues straight down when the plug is already centered in the port but
 can still recover mild and hard lateral wedges.
 
-Do not launch the full training run immediately after cloning. The current
-trainer still labels every full-stage start as a true lateral wedge, evaluates
-successive checkpoints on different random cases, and overwrites the checkpoint
-used for resume. Complete the implementation and validation gates below first.
+The warning below described the trainer before the 2026-07-18 implementation.
+Those changes are now complete; use the execution update above for launch work.
 
 ## Source and immutable boundaries
 

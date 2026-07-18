@@ -10,13 +10,14 @@
 #SBATCH --output=/scratch/11590/satya_a/aic/slurm/%x-%j.out
 #SBATCH --error=/scratch/11590/satya_a/aic/slurm/%x-%j.err
 
-# One exclusive-node job runs seed 0's full nominal-to-full curriculum.  rtx-small
-# has two GPUs per node but no Slurm GPU GRES, so CUDA_VISIBLE_DEVICES=0 exposes
-# exactly one GPU to the job.  W&B credentials are inherited from the environment.
+# One exclusive-node job runs one seed's bootstrap-to-deployment curriculum.
+# rtx-small has two GPUs per node but no Slurm GPU GRES, so
+# CUDA_VISIBLE_DEVICES=0 exposes exactly one GPU to the job. W&B credentials are
+# inherited from the environment.
 
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-$WORK/aic-seat-rl-20260713}"
+: "${PROJECT_DIR:?set PROJECT_DIR to the checked-out repository}"
 STEPS_BOOTSTRAP="${STEPS_BOOTSTRAP:-200000}"
 STEPS_DEPLOYMENT="${STEPS_DEPLOYMENT:-400000}"
 NUM_ENVS="${NUM_ENVS:-8}"
