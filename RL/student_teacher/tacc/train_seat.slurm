@@ -51,7 +51,12 @@ mkdir -p "$SCRATCH/aic/slurm"
 
 echo "[wandb] online required entity=$WANDB_ENTITY organization=$WANDB_ORGANIZATION"
 
-pixi install --locked
+if [[ "${SKIP_PIXI_INSTALL:-0}" == "1" ]]; then
+  test -x .pixi/envs/default/bin/python
+  echo "[pixi] reusing prevalidated lock-identical environment"
+else
+  pixi install --locked
+fi
 pixi run --as-is python -m py_compile \
   RL/student_teacher/seat_env.py \
   RL/student_teacher/student_v3_sac.py \
