@@ -4,7 +4,9 @@
 #SBATCH --cpus-per-task=20
 #SBATCH --time=04:00:00
 
-# Portable 8-vs-16 worker feasibility smoke for the seat SAC trainer.
+# Portable 16-then-8 worker feasibility smoke for the seat SAC trainer.
+# The same allocation runs the comparison sequentially by default so a
+# one-submitted-job RTX QOS does not block the required second measurement.
 # Supply the TACC allocation, partition, and log paths on the sbatch command
 # line; do not add --gres/--gpus-per-task on Stampede3.
 
@@ -18,6 +20,7 @@ SMOKE_STEPS="${SMOKE_STEPS:-20000}"
 SMOKE_EVAL_EPISODES="${SMOKE_EVAL_EPISODES:-9}"
 SMOKE_TAG="${SMOKE_TAG:-seat_smoke_${NUM_ENVS}env_${SLURM_JOB_ID}}"
 SMOKE_OUT="${SMOKE_OUT:-$SCRATCH/aic/$SMOKE_TAG}"
+COMPARE_NUM_ENVS="${COMPARE_NUM_ENVS:-8}"
 WANDB_MODE="${WANDB_MODE:-online}"
 WANDB_ENTITY="${WANDB_ENTITY:-tar2}"
 WANDB_ORGANIZATION="${WANDB_ORGANIZATION:-anshulmistry1-the-university-of-texas-at-austin-org}"
@@ -87,6 +90,7 @@ pixi run --as-is python -u -m RL.student_teacher.train_seat \
   --eval-episodes "$SMOKE_EVAL_EPISODES" \
   --final-eval-episodes "$SMOKE_EVAL_EPISODES" \
   --wandb-log-freq 1000 \
+  --wandb-run-name "seat_smoke_${NUM_ENVS}env_job${SLURM_JOB_ID}" \
   --wandb-entity "$WANDB_ENTITY" \
   --wandb-organization "$WANDB_ORGANIZATION" \
   --require-online-wandb \
@@ -107,3 +111,25 @@ test -f "$SMOKE_OUT/final_selection_evaluation.json"
   echo "effective_steps_per_second=$(awk -v steps="$SMOKE_STEPS" -v seconds="$elapsed_seconds" 'BEGIN { if (seconds > 0) printf "%.6f", steps / seconds; else print "nan" }')"
   echo "result=PASS"
 } | tee -a "$SMOKE_OUT/smoke_meta.txt"
+
+if [[ "${_SEAT_SMOKE_COMPARISON_CHILD:-0}" != "1" \
+      && "$COMPARE_NUM_ENVS" != "0" \
+      && "$COMPARE_NUM_ENVS" != "$NUM_ENVS" ]]; then
+  comparison_tag="seat_smoke_${COMPARE_NUM_ENVS}env_${SLURM_JOB_ID}"
+  comparison_out="${SMOKE_COMPARE_OUT:-$SCRATCH/aic/$comparison_tag}"
+  echo "[compare] starting ${COMPARE_NUM_ENVS}-env smoke at $comparison_out"
+  env \
+    NUM_ENVS="$COMPARE_NUM_ENVS" \
+    SMOKE_STEPS="$SMOKE_STEPS" \
+    SMOKE_EVAL_EPISODES="$SMOKE_EVAL_EPISODES" \
+    SMOKE_TAG="$comparison_tag" \
+    SMOKE_OUT="$comparison_out" \
+    COMPARE_NUM_ENVS=0 \
+    _SEAT_SMOKE_COMPARISON_CHILD=1 \
+    bash "$PROJECT_DIR/RL/student_teacher/tacc/smoke_train_seat.slurm"
+  {
+    echo "comparison_num_envs=$COMPARE_NUM_ENVS"
+    echo "comparison_out=$comparison_out"
+    echo "comparison_result=PASS"
+  } | tee -a "$SMOKE_OUT/smoke_meta.txt"
+fi
