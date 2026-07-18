@@ -8,7 +8,7 @@ all new work is:
 
 ```text
 branch: flowstate-rl-deploy-and-docs
-pipeline commit: 8b8dc0e0d7eea3248a487e407ef8f4fa2ea6b058
+pipeline commit: 5ffeb57fbc941dbde6972d987c157dcbc2d0d589
 remote checkout: /work2/11590/satya_a/stampede3/aic-seat-rerun-20260718-cb0a209
 TACC user/account: satya_a / IRI26004
 partition: rtx-small
@@ -89,7 +89,7 @@ The mandatory 16-environment smoke is submitted:
 ```text
 job: 3324435
 name: seat-smoke16
-source commit: 8b8dc0e0d7eea3248a487e407ef8f4fa2ea6b058
+source commit: 5ffeb57fbc941dbde6972d987c157dcbc2d0d589
 stdout: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
 stderr: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.err
 ```
@@ -97,8 +97,8 @@ stderr: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.err
 It is pending with `QOSMaxJobsPerUserLimit` because unrelated job `3319555`
 (`simdist2`) already occupies the account's single running GPU-job slot. Do not
 cancel or alter `3319555`. The QOS also prevents a second pending submission, so
-submit the 8-environment comparison only after job `3324435` completes and the
-submission slot reopens. Monitor with:
+job `3324435` runs the 16-env smoke and then the identical 8-env comparison
+sequentially inside the same allocation. Monitor with:
 
 ```bash
 squeue -j 3324435 -o '%.18i %.12P %.28j %.8u %.2t %.10M %.10l %.6D %R'
@@ -106,7 +106,9 @@ tail -n 100 -f /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
 sacct -j 3324435 --format=JobID,State,Elapsed,AllocCPUS,MaxRSS,ExitCode
 ```
 
-Select 16 workers only if the smoke is stable, the update:data ratio is
+The comparison writes its separate artifacts under
+`/scratch/11590/satya_a/aic/seat_smoke_8env_3324435`. Select 16 workers only if
+the smoke is stable, the update:data ratio is
 0.9–1.1, and its useful post-warmup throughput is at least 1.25 times the
 identical 8-worker smoke. Test 12 only if 8 versus 16 leaves the choice unclear.
 Run seed 0 through the first-hour gate before submitting seeds 1 and 2.
