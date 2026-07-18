@@ -8,7 +8,7 @@ all new work is:
 
 ```text
 branch: flowstate-rl-deploy-and-docs
-commit: 587249a39c416e78c88a5f6ef8092e6c9b23fbcd
+pipeline commit: 8b8dc0e0d7eea3248a487e407ef8f4fa2ea6b058
 remote checkout: /work2/11590/satya_a/stampede3/aic-seat-rerun-20260718-cb0a209
 TACC user/account: satya_a / IRI26004
 partition: rtx-small
@@ -37,7 +37,8 @@ Other implemented safety and selection behavior:
   evaluation, with an explicit `rotation_guard` termination and failure cost.
 - Periodic evaluation uses the same frozen 60-case suite for every checkpoint;
   final selection uses a frozen 180-case suite. Seeds do not depend on training
-  timestep.
+  timestep, and each suite balances all three compiled contact geometries both
+  overall and within every reset class.
 - Checkpoints are versioned and resume-compatible. `best_model.zip` is ranked by
   success, then safety-failure rate, then p95 force, and exports to
   `best_seat_actor.ts` with numerical parity validation.
@@ -46,7 +47,7 @@ Other implemented safety and selection behavior:
 - The deploy-side action contract now matches training's seat-action scaling,
   port-frame residual accumulation, residual clamp, and 1-degree yaw clip.
 
-Local validation completed at this commit: 26 focused tests passed, Python and
+Local validation completed at this commit: 28 focused tests passed, Python and
 Slurm syntax checks passed, forced examples of all four reset classes passed,
 and an online W&B end-to-end plumbing smoke produced versioned/best/final
 artifacts. That tiny random-policy smoke is not policy-quality evidence.
@@ -88,7 +89,7 @@ The mandatory 16-environment smoke is submitted:
 ```text
 job: 3324435
 name: seat-smoke16
-source commit: 587249a39c416e78c88a5f6ef8092e6c9b23fbcd
+source commit: 8b8dc0e0d7eea3248a487e407ef8f4fa2ea6b058
 stdout: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.out
 stderr: /scratch/11590/satya_a/aic/slurm/seat-smoke16-3324435.err
 ```
