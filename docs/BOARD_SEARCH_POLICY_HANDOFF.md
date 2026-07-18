@@ -10,22 +10,22 @@ The implementation source used for the installed bundle is committed and
 pushed to `origin/board-search` at:
 
 ```text
-6b612e6a9cbce7caf04cb3ddb072b054bea2386b
+31499c7ac26dfdfd108a7c766c5dbd175911ea21
 ```
 
 It was built and installed in the running **Work on this** solution on cluster
 `vmp-efe2-hv8d2ahu` as the existing v4 skill:
 
 ```text
-ai.tar2.check_board_visibility_skill_v4.0.0.1+9090ff0afdffa69d0e35897dcef204c82c744d663f793ceddffd935592b3c960
+ai.tar2.check_board_visibility_skill_v4.0.0.1+872b09c0a4b9854b25b954737fce4fe8eced07bccb5d423f3497eb8ed4cb969d
 ```
 
-The install completed on 2026-07-18 at approximately 22:33 CDT. The solution
+The install completed on 2026-07-18 at approximately 23:13 CDT. The solution
 remained `SOLUTION_STATE_RUNNING_IN_SIM`. No other skill or service was rebound.
 
 ```text
-image tar SHA-256:  09b8377b6991f7f8c8f7b4bd534cb9569a7f0663a5da36cc29987981e4b04b1d
-bundle tar SHA-256: 9332ed00cab8129e69e8c4557309d002210fcbe8c4d3026dee17cc582ff3cc98
+image tar SHA-256:  67eb2f8757e36d3406a45f93d25c503565b90c20f1570a4405607e909dc99340
+bundle tar SHA-256: 543e4298f6437f8e54c0b93075ebc7d3bc0c5b9ff3ec6fea550a6db4f73cb07b
 ```
 
 ## Required behavior
@@ -37,12 +37,15 @@ ACQUIRE/CENTER (J1)
         -> ALIGN LONG EDGE (J6, <= 2 degrees)
         -> LEVEL CENTER CAMERA STRAIGHT DOWN (primarily J2-J4)
         -> CLEAR THE GRIPPER MASK + SET 26-36% SCALE (J2-J4)
-        -> DONE after two strict center-camera survey frames
+        -> CLEAR BOTH SIDE-CAMERA SURVEY REGIONS (J2-J4)
+        -> DONE after two synchronized three-camera survey frames
 ```
 
-Left and right cameras are acquisition hints. They may help select the initial
-J1 direction, but they never satisfy completion. Completion is based on the
-center camera only, after J6 alignment and a fresh physical top-down TF check.
+Left and right cameras may help select the initial J1 direction and now provide
+mandatory supporting evidence for completion. Neither side can finish the
+search by itself. The center still owns J1/J6 alignment, scale, identity, and
+the fresh physical top-down TF check; both sides must simultaneously retain
+usable context and gripper separation for multi-camera IVM.
 
 The gripper masks still exclude calibrated robot pixels before board component
 selection, but they are no longer diagnostic-only. The selected board convex
@@ -136,11 +139,13 @@ File: `flowstate/aic_perception/aic_perception/viewpoint_search.py`
 - A correction transaction may cover up to `0.45 rad` (`25.8 degrees`) before
   the next measured image, reducing unnecessary mode switches on large errors.
 - After J1, J6, and top-down leveling, terminal evidence is deliberately
-  rechecked in two consecutive fresh center-camera frames. Both must contain
+  rechecked in two consecutive synchronized snapshots. The center must contain
   the full board and component context, logo identity, rectangularity >= 0.72,
   26-36% board area, long-axis ratio >= 1.15, orientation error <= 2 degrees,
-  top-down TF, zero protected-envelope mask overlap, and >= 20 px mask
-  separation.
+  top-down TF, zero protected-envelope mask overlap, and >= 20 px separation.
+  Each side camera must simultaneously retain logo/board evidence, >= 8% area,
+  rectangularity >= 0.55, usable component context, zero mask overlap, and
+  >= 12 px separation.
 
 ### Vertical J2-J4 visual servo
 
@@ -213,6 +218,32 @@ command scale. After the first measured correction, later J1 steps use that
 live response with a bounded 85% correction target, reducing repeated small
 motions while retaining fresh-frame verification.
 
+### Synchronized three-camera survey
+
+The subsequent 22:54 IVM run captured all three cameras but returned only four
+distinct NIC rail candidates (`[-142.6, -95.9, -54.3, -22.5] mm`). The center
+image showed the complete board, while both oblique side images still placed
+the lower NIC region against their camera-fixed gripper silhouettes. This is a
+policy-exit gap, not a reason for the NIC filter to invent the missing rail.
+
+The current revision treats the three images as one synchronized terminal
+contract:
+
+- the center retains the strict top-down, 2-degree, 26-36% scale contract;
+- every configured side report must independently retain logo identity, at
+  least 8% board area, rectangularity >= 0.55, component context, zero
+  protected-envelope overlap, and >= 12 px gripper separation;
+- once the center is strict, the worst failing side view drives a small
+  0.6-1.0 scale translation using that side camera's own image axes and TF;
+- mask-escape polarity is learned independently for center, left, and right
+  from the next synchronized frame; and
+- any side correction that disturbs center geometry is repaired by the existing
+  center loop before completion can be reconsidered.
+
+Side reports are supporting constraints, never standalone success paths. This
+preserves the center camera as the survey reference while ensuring the exact
+three images submitted to IVM are simultaneously useful.
+
 ## Limits that remain
 
 The policy intentionally retains execution correctness requirements:
@@ -242,7 +273,7 @@ python -m pytest -q flowstate/aic_perception/test
 Result for this revision:
 
 ```text
-140 passed
+144 passed
 ```
 
 The tests include regressions for:
@@ -253,8 +284,10 @@ The tests include regressions for:
 - preserving all non-requested joints during direct J1 and J6 motion;
 - two-degree J6 tolerance and fine correction size;
 - strict phase order;
-- side cameras never finishing the search;
-- two consecutive strict post-level center frames being required;
+- side cameras never finishing the search by themselves;
+- two consecutive synchronized three-camera frames being required;
+- per-side mask/context corrections using the selected camera's image plane;
+- independent left/right mask-escape polarity validation and reversal;
 - protected-envelope mask overlap, clearance, and escape direction;
 - mask-escape polarity reversal when a fresh frame gets worse;
 - bounded approach when a complete board is too small for IVM detail;
@@ -287,10 +320,13 @@ The first retest should show:
 7. If the board is still high/low, `action=translate` occurs before backoff.
 8. The next fresh frame either validates the direction or logs
    `reversing image-y polarity` and commands the opposite direction.
-9. `gripper_overlap` decreases to zero and `gripper_clearance` reaches at least
-   20 px while physical component context remains clear.
-10. Two consecutive strict survey candidates are observed, then the skill
-    succeeds and releases its controller/arm resources in the existing
+9. Center `gripper_overlap` reaches zero and clearance reaches at least 20 px.
+10. Any failing side view logs a camera-specific `action=translate` at scale
+    0.6-1.0; its next frame validates or reverses that camera's polarity.
+11. Left and right simultaneously reach zero overlap, at least 12 px clearance,
+    and usable component context.
+12. Two consecutive synchronized survey candidates are observed, then the
+    skill succeeds and releases its controller/arm resources in the existing
     finalizer.
 
 The old message below must not recur merely at the 0.5-second mark:
