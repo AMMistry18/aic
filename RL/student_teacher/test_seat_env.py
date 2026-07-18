@@ -449,6 +449,8 @@ def test_deployment_reset_class_delivers_actor_and_physical_contract(reset_class
         )
         spec = DEPLOYMENT_RESET_CLASSES[reset_class]
         assert info["seat_reset_validated"]
+        assert info["seat_reset_compiled_seed"] == env._compiled_seed
+        assert not info["seat_reset_used_fallback"]
         assert info["seat_reset_validation_mode"] == (
             "physical_and_actor_delivered_state")
         assert spec.depth_range_m[0] <= (

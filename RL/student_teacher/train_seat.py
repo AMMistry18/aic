@@ -687,6 +687,7 @@ def main():
             self.reset_fallbacks = 0
             self.reset_pool_sizes: list[float] = []
             self.reset_classes: dict[str, int] = {}
+            self.reset_variants: dict[int, int] = {}
             self.reset_depths_mm: list[float] = []
             self.reset_actor_lateral_mm: list[float] = []
             self.reset_physical_lateral_mm: list[float] = []
@@ -717,6 +718,10 @@ def main():
                     reset_class = str(info.get("seat_reset_class", "legacy"))
                     self.reset_classes[reset_class] = (
                         self.reset_classes.get(reset_class, 0) + 1)
+                    compiled_seed = int(info.get(
+                        "seat_reset_compiled_seed", -1))
+                    self.reset_variants[compiled_seed] = (
+                        self.reset_variants.get(compiled_seed, 0) + 1)
                     self.reset_depths_mm.append(1e3 * float(info.get(
                         "seat_reset_delivered_depth_m", float("nan"))))
                     self.reset_actor_lateral_mm.append(1e3 * float(info.get(
@@ -743,6 +748,7 @@ def main():
             self.reset_fallbacks = 0
             self.reset_pool_sizes.clear()
             self.reset_classes.clear()
+            self.reset_variants.clear()
             self.reset_depths_mm.clear()
             self.reset_actor_lateral_mm.clear()
             self.reset_physical_lateral_mm.clear()
@@ -752,7 +758,7 @@ def main():
 
         def _on_step(self):
             self._accumulate_diagnostics()
-            if wandb_run is None or int(self.num_timesteps) < self.next_step:
+            if int(self.num_timesteps) < self.next_step:
                 return True
             payload = {"global_step": int(self.num_timesteps)}
             logger_values = self.model.logger.name_to_value
@@ -771,6 +777,7 @@ def main():
                     / float(learned_transitions)
                 )
             if self.reset_count:
+                payload["reset/count"] = self.reset_count
                 payload["reset/attempts_mean"] = (
                     self.reset_attempts / self.reset_count)
                 payload["reset/fallback_rate"] = (
@@ -794,8 +801,14 @@ def main():
                         payload[f"reset/{name}_min"] = float(np.min(finite))
                         payload[f"reset/{name}_max"] = float(np.max(finite))
                 for reset_class, count in self.reset_classes.items():
+                    payload[f"reset/class_{reset_class}_count"] = count
                     payload[f"reset/class_{reset_class}_fraction"] = (
                         count / self.reset_count)
+                for compiled_seed, count in self.reset_variants.items():
+                    if compiled_seed >= 0:
+                        payload[f"reset/contact_{compiled_seed}_count"] = count
+                        payload[f"reset/contact_{compiled_seed}_fraction"] = (
+                            count / self.reset_count)
             total_terms = sum(self.term_counts.values())
             if total_terms:
                 for status, count in self.term_counts.items():
@@ -805,7 +818,10 @@ def main():
                 for name, total in self.reward_sums.items():
                     payload[f"reward/{name}_mean"] = (
                         total / self.reward_samples)
-            wandb_run.log(payload)
+            with (args.out / "live_metrics.jsonl").open("a") as handle:
+                handle.write(json.dumps(payload) + "\n")
+            if wandb_run is not None:
+                wandb_run.log(payload)
             self._reset_interval()
             self.next_step = int(self.num_timesteps) + self.every_steps
             return True

@@ -105,6 +105,60 @@ test -f "$SMOKE_OUT/seat_actor.ts"
 test -f "$SMOKE_OUT/best_model.zip"
 test -f "$SMOKE_OUT/best_seat_actor.ts"
 test -f "$SMOKE_OUT/final_selection_evaluation.json"
+test -s "$SMOKE_OUT/live_metrics.jsonl"
+
+pixi run --as-is python - "$SMOKE_OUT" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+out = Path(sys.argv[1])
+rows = [
+    json.loads(line) for line in (out / "live_metrics.jsonl").read_text().splitlines()
+    if line.strip()
+]
+ratios = [
+    float(row["train/update_data_ratio"]) for row in rows
+    if "train/update_data_ratio" in row
+]
+if not ratios:
+    raise SystemExit("smoke produced no train/update_data_ratio samples")
+latest_ratio = ratios[-1]
+if not 0.9 <= latest_ratio <= 1.1:
+    raise SystemExit(
+        f"latest update:data ratio {latest_ratio:.6f} is outside [0.9, 1.1]")
+
+class_counts = {}
+contact_counts = {}
+for row in rows:
+    for key, value in row.items():
+        if key.startswith("reset/class_") and key.endswith("_count"):
+            name = key[len("reset/class_"):-len("_count")]
+            class_counts[name] = class_counts.get(name, 0) + int(value)
+        elif key.startswith("reset/contact_") and key.endswith("_count"):
+            name = key[len("reset/contact_"):-len("_count")]
+            contact_counts[name] = contact_counts.get(name, 0) + int(value)
+
+required_classes = {
+    "live_shallow", "centered_shallow", "mid_tail", "mastered_deep"}
+missing_classes = sorted(required_classes - set(class_counts))
+if missing_classes:
+    raise SystemExit(f"smoke missed reset classes: {missing_classes}")
+if len(contact_counts) != 3:
+    raise SystemExit(
+        f"smoke expected three compiled contact variants, got {contact_counts}")
+
+gate = {
+    "latest_update_data_ratio": latest_ratio,
+    "ratio_samples": len(ratios),
+    "reset_class_counts": class_counts,
+    "compiled_contact_counts": contact_counts,
+    "result": "PASS",
+}
+(out / "smoke_gate.json").write_text(json.dumps(gate, indent=2) + "\n")
+print("[gate] " + json.dumps(gate, sort_keys=True), flush=True)
+PY
+test -f "$SMOKE_OUT/smoke_gate.json"
 
 {
   echo "elapsed_seconds=$elapsed_seconds"

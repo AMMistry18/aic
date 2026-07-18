@@ -889,9 +889,10 @@ class SeatEnv(gym.Wrapper):
             "seat_reset_profile": self.stage.reset_profile,
             "seat_reset_class": spec["class"],
             "seat_reset_seed": base_seed,
+            "seat_reset_compiled_seed": int(self._compiled_seed),
             "seat_reset_attempts": attempt + 1,
             "seat_reset_resample_count": attempt,
-            "seat_reset_used_fallback": True,
+            "seat_reset_used_fallback": False,
             "seat_reset_cache_hit": False,
             "seat_reset_validation_mode": "physical_and_actor_delivered_state",
             "seat_reset_rejected": rejected,
@@ -923,7 +924,8 @@ class SeatEnv(gym.Wrapper):
         self._current_reset_metrics = {
             key: info[key] for key in (
                 "seat_reset_attempts", "seat_reset_used_fallback",
-                "seat_reset_class", "seat_reset_delivered_depth_m",
+                "seat_reset_class", "seat_reset_compiled_seed",
+                "seat_reset_delivered_depth_m",
                 "seat_reset_delivered_actor_lateral_m",
                 "seat_reset_delivered_physical_lateral_m",
                 "seat_reset_delivered_actor_rotation_rad",
