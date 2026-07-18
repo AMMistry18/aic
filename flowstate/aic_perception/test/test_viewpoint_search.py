@@ -404,19 +404,51 @@ def test_leveling_projection_shift_uses_bounded_joints_2_4_translation():
     assert "re-center" in action.reason
 
 
-def test_bottom_only_obstruction_gets_bounded_optical_backoff():
-    planner = AdaptiveViewpointPlanner(max_zoom_out_backoffs=1)
+def test_bottom_only_obstruction_is_centered_before_optical_backoff():
+    planner = AdaptiveViewpointPlanner(
+        max_zoom_out_backoffs=1,
+        max_postlevel_translates=1,
+    )
     enter_ascend(planner)
     blocked = views(
         report(full=False, area=0.3, edges=("bottom",), bottom_contact=True)
     )
-    assert planner.next_action(blocked).kind is ActionKind.BACKOFF
     assert planner.next_action(blocked).kind is ActionKind.TRANSLATE
+    assert planner.next_action(blocked).kind is ActionKind.BACKOFF
+
+
+def test_vertical_visual_servo_moves_both_directions_and_reverses_bad_sign():
+    low_planner = AdaptiveViewpointPlanner(max_postlevel_translates=2)
+    enter_ascend(low_planner)
+    low = views(
+        report(full=False, area=0.2, center=(0.0, 0.35), edges=("bottom",))
+    )
+    first = low_planner.next_action(low)
+    assert first.kind is ActionKind.TRANSLATE
+    assert first.image_direction[1] > 0.0
+
+    # A fresh frame proves the assumed image-Y polarity was wrong.  The next
+    # correction must reverse instead of repeating the same wrong-way roll.
+    worse = views(
+        report(full=False, area=0.2, center=(0.0, 0.45), edges=("bottom",))
+    )
+    reversed_action = low_planner.next_action(worse)
+    assert reversed_action.kind is ActionKind.TRANSLATE
+    assert reversed_action.image_direction[1] < 0.0
+    assert "polarity reversed" in reversed_action.reason
+
+    high_planner = AdaptiveViewpointPlanner(max_postlevel_translates=1)
+    enter_ascend(high_planner)
+    high = views(
+        report(full=False, area=0.2, center=(0.0, -0.35), edges=("top",))
+    )
+    assert high_planner.next_action(high).image_direction[1] < 0.0
 
 
 def test_alignment_zoom_does_not_consume_clearance_zoom_budget():
     planner = AdaptiveViewpointPlanner(
         max_zoom_out_backoffs=1,
+        max_postlevel_translates=0,
         max_recenter_entries=0,
     )
     ambiguous = views(

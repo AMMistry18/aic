@@ -207,6 +207,12 @@ class AdaptiveViewpointPlanner:
         self._alignment_zoom_backoffs = 0
         self._clearance_zoom_backoffs = 0
         self._postlevel_translates = 0
+        # Camera-plane +Y normally moves a fixed board upward in the image.
+        # Keep this polarity learned from fresh post-motion frames instead of
+        # assuming that every camera/controller calibration uses that sign.
+        self._vertical_image_polarity = 1.0
+        self._pending_vertical_sample: tuple[float, float] | None = None
+        self._vertical_direction_reversals = 0
         self._roll_confirm_sign = 0.0
         self._roll_confirm_streak = 0
         self._roll_confirm_observes = 0
@@ -675,6 +681,7 @@ class AdaptiveViewpointPlanner:
             self._partial_clearance_reason = None
 
         if report is None or not report.seen:
+            self._pending_vertical_sample = None
             self._stall_streak = 0
             return self._emit(
                 ActionKind.UP_CLEARANCE,
@@ -687,6 +694,7 @@ class AdaptiveViewpointPlanner:
                 ),
             )
 
+        response_note = self._consume_vertical_response(report)
         edges = report.edges
         bottom_blocked = (
             "bottom" in edges or report.artificial_bottom_contact
@@ -698,8 +706,66 @@ class AdaptiveViewpointPlanner:
         )
         clipped = bool(edges)
 
+        # Once top-down, a plate that is high or low in the center image is a
+        # camera-position error, not a standoff error.  Move the camera in its
+        # image plane through the J2--J4 Cartesian path before zooming out.
+        # This is deliberately bidirectional: positive center_error[1] means
+        # the board is low in the frame, negative means it is high.  The first
+        # fresh frame after every move validates the sign and flips the learned
+        # polarity if the absolute vertical error got materially worse.
+        error_y = float(report.center_error[1])
+        vertical_clipped = top_blocked or bottom_blocked
+        vertical_misaligned = (
+            abs(error_y) > self.center_threshold or vertical_clipped
+        )
+        if (
+            vertical_misaligned
+            and not oversized
+            and self._postlevel_translates < self.max_postlevel_translates
+        ):
+            direction_x = (
+                (-1.0 if "left" in edges else 0.0)
+                + (1.0 if "right" in edges else 0.0)
+            )
+            if abs(error_y) > 1e-6:
+                raw_direction_y = math.copysign(1.0, error_y)
+            else:
+                raw_direction_y = (
+                    (-1.0 if top_blocked else 0.0)
+                    + (1.0 if bottom_blocked else 0.0)
+                )
+            direction_y = raw_direction_y * self._vertical_image_polarity
+            direction_norm = math.hypot(direction_x, direction_y)
+            if direction_norm > 1e-9:
+                self._postlevel_translates += 1
+                self._stall_streak = 0
+                scale = min(1.5, max(1.0, 2.5 * abs(error_y)))
+                action = self._emit(
+                    ActionKind.TRANSLATE,
+                    "center_camera",
+                    image=(
+                        direction_x / direction_norm,
+                        direction_y / direction_norm,
+                    ),
+                    scale=scale,
+                    reason=(
+                        "post-level vertical visual servo: board is "
+                        f"{'low' if error_y >= 0.0 else 'high'} in the frame "
+                        f"(error {error_y:+.3f}); move the J2-4 camera "
+                        "projection to re-center it"
+                        + (f"; {response_note}" if response_note else "")
+                    ),
+                )
+                self._pending_vertical_sample = (
+                    error_y,
+                    float(action.image_direction[1]),
+                )
+                return action
+
         # A lower-edge-only obstruction benefits from a bounded optical-axis
-        # retreat.  It is a J2--J4 fallback, not an opportunity to retry J6.
+        # retreat only after the vertical visual servo has spent its bounded
+        # correction budget.  It is a J2--J4 fallback, not an opportunity to
+        # retry J6.
         if (
             bottom_blocked
             and not top_blocked
@@ -719,10 +785,10 @@ class AdaptiveViewpointPlanner:
                 ),
             )
 
-        # Leveling changes camera pitch about the TCP and can shift the board
-        # projection even though J1 and J6 remain fixed.  Repair a one-sided
-        # clip with bounded camera-plane motion through the post-level
-        # joints-2--4 Cartesian path before spending slow clearance moves.
+        # Repair any remaining horizontal-only projection shift with bounded
+        # camera-plane motion through the post-level joints-2--4 Cartesian
+        # path before spending slow clearance moves.  Vertical clipping was
+        # handled above so it can use signed image feedback.
         if (
             clipped
             and not oversized
@@ -733,8 +799,7 @@ class AdaptiveViewpointPlanner:
                 + (1.0 if "right" in edges else 0.0)
             )
             direction_y = (
-                (-1.0 if "top" in edges else 0.0)
-                + (1.0 if "bottom" in edges else 0.0)
+                0.0
             )
             direction_norm = math.hypot(direction_x, direction_y)
             if direction_norm > 1e-9:
@@ -812,6 +877,32 @@ class AdaptiveViewpointPlanner:
                 "board boundary is framed but not yet usable; re-check a "
                 "fresh center-camera frame"
             ),
+        )
+
+    def _consume_vertical_response(self, report: MaskReport) -> str:
+        """Learn camera-plane vertical polarity from the next fresh frame."""
+
+        pending = self._pending_vertical_sample
+        if pending is None:
+            return ""
+        self._pending_vertical_sample = None
+        previous_error, commanded_direction = pending
+        current_error = float(report.center_error[1])
+        worsened = (
+            previous_error * current_error > 0.0
+            and abs(current_error) > abs(previous_error) + 0.03
+        )
+        if not worsened:
+            return (
+                "previous vertical correction was validated by the fresh "
+                f"frame ({previous_error:+.3f} -> {current_error:+.3f})"
+            )
+        self._vertical_image_polarity *= -1.0
+        self._vertical_direction_reversals += 1
+        return (
+            "previous vertical correction worsened the fresh-frame error "
+            f"({previous_error:+.3f} -> {current_error:+.3f}, commanded "
+            f"image-y {commanded_direction:+.1f}); polarity reversed"
         )
 
     # ------------------------------------------------------------------

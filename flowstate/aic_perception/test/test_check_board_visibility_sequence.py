@@ -144,6 +144,23 @@ def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
     )
 
 
+def test_leveling_uses_fresh_vertical_image_feedback_and_can_reverse():
+    source, _ = execute_inner_source()
+
+    for contract in (
+        "level_vertical_polarity",
+        "pending_level_vertical_sample",
+        "center_report.center_error[1]",
+        "level_image_down",
+        "level_center_delta",
+        "reversing image-y polarity",
+    ):
+        assert contract in source
+    assert source.index("pending_level_vertical_sample is not None") < source.index(
+        'if planner.phase == "j2_4_level":'
+    )
+
+
 def test_force_is_acquired_only_after_planning_and_before_motion():
     source, execute_inner = execute_inner_source()
 

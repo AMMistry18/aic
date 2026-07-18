@@ -285,6 +285,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         leveling_moves = 0
         level_anchor_joint1 = None
         level_anchor_joint6 = None
+        level_vertical_polarity = 1.0
+        pending_level_vertical_sample = None
 
         def motion_cancelled() -> bool:
             return bool(cancelled() or time.monotonic() >= deadline)
@@ -424,6 +426,45 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     frame["stamp_ns"],
                 )
 
+            # Validate the image-plane component of the preceding leveling
+            # move against this genuinely fresh center frame.  If the board
+            # moved farther toward the same vertical edge, invert the camera
+            # image-Y polarity for the next J2--J4 correction.  This makes the
+            # controller independent of a mount/TF sign convention and avoids
+            # repeating the wrong-way J4 roll seen in the live trace.
+            center_report = reports.get("center_camera")
+            if (
+                pending_level_vertical_sample is not None
+                and center_report is not None
+                and center_report.seen
+            ):
+                previous_level_y, commanded_level_y = (
+                    pending_level_vertical_sample
+                )
+                current_level_y = float(center_report.center_error[1])
+                if (
+                    previous_level_y * current_level_y > 0.0
+                    and abs(current_level_y)
+                    > abs(previous_level_y) + 0.03
+                ):
+                    level_vertical_polarity *= -1.0
+                    logging.warning(
+                        "leveling vertical correction moved the board farther "
+                        "toward the frame edge (%+.3f -> %+.3f, commanded "
+                        "image-y %+.1f); reversing image-y polarity",
+                        previous_level_y,
+                        current_level_y,
+                        commanded_level_y,
+                    )
+                else:
+                    logging.info(
+                        "leveling vertical correction validated by fresh "
+                        "center frame: %+.3f -> %+.3f",
+                        previous_level_y,
+                        current_level_y,
+                    )
+                pending_level_vertical_sample = None
+
             result.seen = any(item.seen for item in reports.values())
             done, camera, report = combine_cameras(reports)
             result.done = False
@@ -553,9 +594,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     level_position, level_orientation = self._gripper_pose(
                         timeout_sec
                     )
-                    _, _, camera_back_away = self._camera_axes_in_base(
-                        "center_camera", timeout_sec
-                    )
+                    (
+                        _level_image_right,
+                        level_image_down,
+                        camera_back_away,
+                    ) = self._camera_axes_in_base("center_camera", timeout_sec)
                 except Exception as error:
                     result.success = False
                     result.message = (
@@ -629,18 +672,47 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         level_step_rad,
                     )
                     level_clearance_m = min(0.02, backoff_step_m)
-                    level_target_position = (
-                        float(level_position[0]),
-                        float(level_position[1]),
-                        float(level_position[2] + level_clearance_m),
+                    level_center_y = 0.0
+                    level_image_y_direction = 0.0
+                    level_center_delta = np.zeros(3, dtype=float)
+                    if center_report is not None and center_report.seen:
+                        level_center_y = float(center_report.center_error[1])
+                        if abs(level_center_y) > 0.10:
+                            level_image_y_direction = (
+                                math.copysign(1.0, level_center_y)
+                                * level_vertical_polarity
+                            )
+                            level_center_scale = min(
+                                1.5, max(1.0, abs(level_center_y) / 0.20)
+                            )
+                            level_center_delta = (
+                                np.asarray(level_image_down, dtype=float)
+                                * step_m
+                                * level_center_scale
+                                * level_image_y_direction
+                            )
+                    level_target_position_array = (
+                        np.asarray(level_position, dtype=float)
+                        + np.array((0.0, 0.0, level_clearance_m), dtype=float)
+                        + level_center_delta
+                    )
+                    level_target_position = tuple(
+                        float(value) for value in level_target_position_array
                     )
                     logging.info(
                         "joints 2-4 top-view leveling after J6: center-camera "
-                        "tilt=%.3frad step=%.3frad clearance=%.3fm; keeping "
+                        "tilt=%.3frad step=%.3frad clearance=%.3fm "
+                        "vertical_error=%+.3f image_y_direction=%+.1f "
+                        "camera_plane_delta=(%+.4f,%+.4f,%+.4f)m; keeping "
                         "J1/J6 phase references fixed",
                         tilt_rad,
                         level_step_rad,
                         level_clearance_m,
+                        level_center_y,
+                        level_image_y_direction,
+                        float(level_center_delta[0]),
+                        float(level_center_delta[1]),
+                        float(level_center_delta[2]),
                     )
                     motion_snapshot = require_motion_force(snapshot)
                     if motion_snapshot is None:
@@ -713,6 +785,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     result.angular_travel_rad = next_angular_travel_rad
                     result.moved = True
                     result.last_action = "camera_level"
+                    if abs(level_image_y_direction) > 0.0:
+                        pending_level_vertical_sample = (
+                            level_center_y,
+                            level_image_y_direction,
+                        )
                     try:
                         _, _, residual_back_away = self._camera_axes_in_base(
                             "center_camera", timeout_sec
