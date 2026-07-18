@@ -6,19 +6,21 @@ Branch: `board-search`
 
 ## Delivery status
 
-This revision is committed to GitHub source only. It was deliberately **not**
-built, installed, rebound, or uploaded to Flowstate.
-
-The last policy tested by the user before this source revision was:
+The current source is committed and pushed to `origin/board-search` at:
 
 ```text
-ai.tar2.check_board_visibility_skill_v4.0.0.1+
-39b51791bebcde1b4b842434d4b502622ccf32e9d005333bb178bac5e2b0a704
+9c9765043702514b5785a927bc6913b7fe6ed43f
 ```
 
-That deployed policy planned the correct first J1 move but reversed it before
-visible motion. Nothing in this document should be interpreted as proof that
-the new GitHub revision has run on the live Flowstate simulator.
+It was built and installed in the running **Work on this** solution on cluster
+`vmp-efe2-hv8d2ahu` as the existing v4 skill:
+
+```text
+ai.tar2.check_board_visibility_skill_v4.0.0.1+56b2c76bb0b225bb32ceb98fb684d2365bb604313491ab9cd6513e859243e2be
+```
+
+The install completed on 2026-07-18 at approximately 22:06 CDT. The solution
+remained `SOLUTION_STATE_RUNNING_IN_SIM`. No other skill or service was rebound.
 
 ## Required behavior
 
@@ -128,6 +130,40 @@ File: `flowstate/aic_perception/aic_perception/viewpoint_search.py`
   is exactly a full center-camera board mask. It does not rerun the noisy
   long-axis estimator on the terminal image and does not add a stability delay.
 
+### Vertical J2-J4 visual servo
+
+Files:
+
+- `flowstate/aic_perception/check_board_visibility_skill.py`
+- `flowstate/aic_perception/aic_perception/viewpoint_search.py`
+
+The 21:52 live trace proved that geometric top-down leveling reduced camera
+tilt correctly but moved the board the wrong way in the image:
+
+```text
+before leveling: center_y=+0.241, tilt=0.202 rad
+after stage 1:   center_y=+0.344, tilt=0.109 rad
+after stage 2:   center_y=+0.423, tilt=0.027 rad
+```
+
+The old ASCEND ordering then selected optical-axis backoff before vertical
+camera-plane centering. Backoff preserved the bad lower-edge projection and
+introduced enough J1/J6 IK drift to restart alignment.
+
+The revised policy now:
+
+- adds signed image-plane vertical correction to each top-down leveling stage;
+- interprets positive center Y as a board low in frame and negative center Y
+  as a board high in frame;
+- prioritizes bounded bidirectional camera-plane centering through J2-J4 before
+  optical backoff;
+- compares the next fresh center frame with the pre-move vertical error; and
+- reverses the learned image-Y polarity when the absolute error worsens toward
+  the same edge, preventing repeated wrong-way J4/arm compensation.
+
+The camera orientation target remains physically top-down during these moves;
+vertical centering is not achieved by accepting a slanted terminal camera.
+
 ## Limits that remain
 
 The policy intentionally retains execution correctness requirements:
@@ -157,7 +193,7 @@ python -m pytest -q flowstate/aic_perception/test
 Result for this revision:
 
 ```text
-132 passed
+134 passed
 ```
 
 The tests include regressions for:
@@ -171,6 +207,8 @@ The tests include regressions for:
 - side cameras never finishing the search;
 - first full post-level center frame finishing immediately;
 - top-down completion being checked from fresh TF; and
+- high/low vertical correction, fresh-frame polarity validation, and reversal
+  after a wrong-way response; and
 - controller handoff finalization order.
 
 Also run before any future bundle:
@@ -192,8 +230,11 @@ The first retest should show:
 3. A fresh center frame and further J1 correction or centering confirmation.
 4. J6 sign confirmation, then direct J6 corrections.
 5. J6 accepted only at `<= 2.0deg`.
-6. J2-J4 top-down leveling.
-7. Immediate success on the first full center-camera board mask.
+6. J2-J4 top-down leveling with a logged signed vertical correction.
+7. If the board is still high/low, `action=translate` occurs before backoff.
+8. The next fresh frame either validates the direction or logs
+   `reversing image-y polarity` and commands the opposite direction.
+9. Immediate success on the first full center-camera board mask.
 
 The old message below must not recur merely at the 0.5-second mark:
 
@@ -205,7 +246,7 @@ If it does recur, compare actual `/joint_states` receipt timestamps rather than
 loosening mode timing again; the revised message now means the measured joint
 stream itself was unavailable.
 
-## Flowstate wiring, when deployment is later authorized
+## Flowstate wiring
 
 Keep the behavior-tree controller handoff serial:
 
@@ -228,7 +269,9 @@ the manifest and code changed.
 
 ## Known limitations and next-agent guidance
 
-- This revision has source/unit verification but no live simulator evidence.
+- The bundle/install and service-start smoke checks passed. The new vertical
+  response controller still requires a task run to validate its physical
+  direction and convergence in the simulator.
 - The wrapper still contains legacy envelope branches. They are inert because
   runtime envelope values are infinite after parameter validation. Removing
   that dead compatibility code is optional cleanup, not required for the next
