@@ -3,8 +3,9 @@
 
 The skill consumes only documented wrist-camera, measured joint-state,
 controller-state, wrist-force, and robot-mounted TF data. It performs
-image-feedback shoulder-pan centering followed by fixed-orientation upward
-clearance through the documented AIC controller interface.
+image-feedback shoulder-pan centering, wrist-3 long-axis alignment, center-
+camera top-down leveling, and upward clearance through the documented AIC
+controller interface.
 TF lookups are hard-coded to the gripper TCP and the three robot-mounted camera
 optical frames relative to ``base_link``; object and scoring frames are never
 requested.
@@ -145,12 +146,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         from aic_perception.board_visibility import (
             analyze_board,
             combine_cameras,
-            ivm_survey_ready,
             ivm_survey_rejection_reasons,
             rotation_matrix_from_quaternion,
             view_quality,
         )
         from aic_perception.robot_motion import (
+            MotionFailure,
             base_yaw_target_pose,
             normalize_quaternion,
             quaternion_angular_distance,
@@ -173,20 +174,20 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # Official scoring penalizes >20 N sustained for >1 second. Keep a
         # 2 N margin while allowing the observed unloaded ~14 N wrist norm.
         max_force_n = float(params.max_force_n or 18.0)
-        max_speed_mps = float(params.max_speed_mps or 0.04)
+        max_speed_mps = float(params.max_speed_mps or 0.05)
         publish_hz = float(params.publish_hz or 20.0)
         # The AIC controller continues small corrective motion after a profile
         # completes.  A 6 mm / 8 s default accepts a reached, held viewpoint
         # without treating that harmless residual correction as a collision.
-        settle_tolerance_m = float(params.settle_tolerance_m or 0.006)
-        move_timeout_sec = float(params.move_timeout_seconds or 8.0)
+        settle_tolerance_m = float(params.settle_tolerance_m or 0.008)
+        move_timeout_sec = float(params.move_timeout_seconds or 6.0)
         max_travel_m = float(params.max_travel_m or 0.80)
         force_delta_n = float(params.force_delta_n or 5.0)
         # The clean live trace spent roughly 25 seconds leveling/centering and
         # then consumed the old 90-second budget on 8-second settling cycles.
         # Workspace, travel, force, and per-move limits remain independently
         # bounded, so extend only the overall observation/motion budget.
-        search_timeout_sec = float(params.search_timeout_seconds or 150.0)
+        search_timeout_sec = float(params.search_timeout_seconds or 90.0)
         max_displacement_m = float(params.max_displacement_m or 0.50)
         angular_step_rad = float(params.angular_step_rad or 0.10)
         max_angular_displacement_rad = float(
@@ -200,7 +201,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         min_detail_area_frac = float(params.min_detail_area_frac or 0.06)
         min_rectangularity = float(params.min_rectangularity or 0.50)
         stable_frames = int(params.stable_frames or 2)
-        max_angular_speed_rps = float(params.max_angular_speed_rps or 0.20)
+        max_angular_speed_rps = float(params.max_angular_speed_rps or 0.30)
         settle_orientation_tolerance_rad = float(
             params.settle_orientation_tolerance_rad or 0.05
         )
@@ -231,6 +232,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             max_angular_speed_rps=max_angular_speed_rps,
             settle_orientation_tolerance_rad=settle_orientation_tolerance_rad,
         )
+        # Legacy start-relative and cumulative envelopes repeatedly rejected
+        # useful viewpoint corrections even though the controller already
+        # enforces URDF joint/velocity limits.  Keep accepting the proto fields
+        # for backward-compatible Flowstate nodes, but do not use them as
+        # policy termination conditions.  Motion remains incremental, measured,
+        # cancellable, deadline-bound, and guarded by fresh wrist force.
+        max_travel_m = math.inf
+        max_displacement_m = math.inf
+        max_angular_displacement_rad = math.inf
+        max_angular_travel_rad = math.inf
         planner = AdaptiveViewpointPlanner(
             min_goal_area_frac=min_detail_area_frac,
             max_goal_area_frac=0.45,
@@ -240,8 +251,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             "active search parameters: cameras=%s margin_px=%d context=%.3f "
             "ignore_bottom=%.3f step=%.3fm angular_step=%.3frad "
             "settle=%.3fm/%.3frad move_timeout=%.1fs search_timeout=%.1fs "
-            "stable_frames=%d j6_min_ratio=%.2f j6_confirm_frames=%d "
-            "completion=center_camera_ivm_survey",
+            "stable_frames_configured=%d j6_min_ratio=%.2f "
+            "j6_confirm_frames=%d j6_tolerance=%.1fdeg "
+            "motion_envelopes=controller_native "
+            "completion=first_fresh_center_full_top_view",
             sorted(self.config.camera_frames),
             margin_px,
             context_margin_frac,
@@ -255,6 +268,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             stable_frames,
             planner.min_long_axis_ratio,
             planner.roll_confirmation_frames,
+            planner.roll_align_threshold_deg,
         )
         started_at = time.monotonic()
         deadline = started_at + search_timeout_sec
@@ -263,17 +277,51 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         initial_joint1 = None
         initial_joint6 = None
         saved_action_poses = {}
-        complete_camera = None
-        complete_streak = 0
-        complete_streaks = {
-            name: 0 for name in self.config.camera_frames
-        }
         iteration = 0
-        camera_leveled = False
         joint_yaw_available = True
+        top_down_tolerance_rad = 0.06
+        level_joint_drift_tolerance_rad = 0.02
+        min_level_progress_rad = 0.01
+        leveling_moves = 0
+        level_anchor_joint1 = None
+        level_anchor_joint6 = None
 
         def motion_cancelled() -> bool:
             return bool(cancelled() or time.monotonic() >= deadline)
+
+        def require_motion_force(current_snapshot):
+            """Return a snapshot with fresh force, but only when motion needs it.
+
+            A final complete image or a confirmation-only OBSERVE action does
+            not command the robot and must not fail merely because the
+            independent wrench subscriber missed that camera instant.  Every
+            actual motion still requires a genuinely fresh sample here and in
+            ``RobotMotion`` itself.
+            """
+
+            nonlocal baseline_force_xyz
+            if current_snapshot.force_xyz is not None:
+                if baseline_force_xyz is None:
+                    baseline_force_xyz = current_snapshot.force_xyz
+                return current_snapshot
+            force_wait_sec = min(
+                timeout_sec, max(0.0, deadline - time.monotonic())
+            )
+            logging.warning(
+                "robot motion requested without force in the camera snapshot; "
+                "waiting up to %.1fs for fresh wrist-force feedback",
+                force_wait_sec,
+            )
+            fresh_force = self.camera_rig.wait_for_force_xyz(
+                timeout_sec=force_wait_sec,
+                max_age_sec=0.5,
+            )
+            if fresh_force is None:
+                return None
+            if baseline_force_xyz is None:
+                baseline_force_xyz = fresh_force
+            logging.info("fresh wrist-force feedback recovered before motion")
+            return replace(current_snapshot, force_xyz=fresh_force)
 
         while True:
             result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
@@ -300,39 +348,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
 
-            # Images and wrench use independent best-effort subscriptions.  In
-            # addition to the narrow frame/wrench race, switching from the
-            # default controller to the AIC controller can briefly interrupt
-            # the F/T broadcaster while the controller bridge acquires the
-            # arm.  Use the caller's documented sensor/TF budget rather than a
-            # hard-coded two seconds so that serial controller handoff can
-            # settle.  No motion is allowed unless a genuinely fresh sample
-            # arrives; the motion layer independently repeats this guard.
+            # Images and wrench arrive independently.  Perception-only work is
+            # allowed to continue without a force sample; the sample becomes a
+            # hard prerequisite only after the planner requests real motion.
             if snapshot.force_xyz is None:
-                force_wait_sec = min(
-                    timeout_sec, max(0.0, deadline - time.monotonic())
-                )
-                logging.warning(
-                    "camera snapshot arrived before wrist-force feedback; "
-                    "waiting up to %.1fs for controller/FTS handoff",
-                    force_wait_sec,
-                )
-                fresh_force = self.camera_rig.wait_for_force_xyz(
-                    timeout_sec=force_wait_sec,
-                    max_age_sec=0.5,
-                )
-                if fresh_force is None:
-                    result.success = False
-                    result.message = (
-                        f"no fresh wrist-force sample after waiting "
-                        f"{force_wait_sec:.1f}s; refusing Cartesian motion"
-                    )
-                    return
-                snapshot = replace(snapshot, force_xyz=fresh_force)
                 logging.info(
-                    "fresh wrist-force feedback recovered after camera snapshot"
+                    "camera snapshot has no simultaneous fresh wrist-force "
+                    "sample; evaluating completion before requesting one"
                 )
-            if baseline_force_xyz is None:
+            elif baseline_force_xyz is None:
                 baseline_force_xyz = snapshot.force_xyz
 
             result.target_valid = False
@@ -365,12 +389,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 reports[camera_name] = camera_report
                 survey_reasons = ivm_survey_rejection_reasons(camera_report)
-                survey_ready = bool(
-                    camera_name == "center_camera" and not survey_reasons
-                )
                 logging.info(
                     "iteration=%d %s: seen=%s plate_full=%s "
-                    "survey_ready=%s survey_reasons=%s edges=%s area=%.3f "
+                    "diagnostic_survey_reasons=%s edges=%s area=%.3f "
                     "rect=%.2f quality=%.3f center=(%.3f,%.3f) "
                     "long_axis_error=%+.1fdeg long_ratio=%.2f logo=%s "
                     "logo_center=(%.3f,%.3f) logo_area=%.4f reasons=%s "
@@ -380,7 +401,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     camera_name,
                     camera_report.seen,
                     camera_report.full,
-                    survey_ready,
                     survey_reasons,
                     sorted(camera_report.edges),
                     camera_report.area_frac,
@@ -415,52 +435,17 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.rectangularity = float(report.rectangularity)
                 result.view_quality = float(view_quality(report))
 
-            # Side cameras remain valuable acquisition evidence, but an
-            # oblique side view is not a terminal survey pose. The 2026-07-17
-            # trace exited on right_camera with a 65-degree long-axis error and
-            # gripper contact while center_camera was still clipped; downstream
-            # IVM consequently found only four of five NIC rails. Require the
-            # center camera to hold the stricter IVM survey predicate across
-            # fresh frames.
-            ready_candidates = [
-                (name, item)
-                for name, item in reports.items()
-                if name == "center_camera"
-                and ivm_survey_ready(item)
-            ]
-            if ready_candidates:
-                ready_by_name = dict(ready_candidates)
-                for name in complete_streaks:
-                    complete_streaks[name] = (
-                        complete_streaks[name] + 1
-                        if name in ready_by_name
-                        else 0
-                    )
-                ready_camera, ready_report = max(
-                    ready_candidates,
-                    key=lambda item: (
-                        complete_streaks.get(item[0], 0),
-                        view_quality(item[1]),
-                    ),
-                )
-                complete_camera = ready_camera
-                complete_streak = complete_streaks.get(ready_camera, 0)
-                result.component_coverage_ready = True
-                result.steer_camera = ready_camera
-                result.edges = ""
-                result.area_frac = float(ready_report.area_frac)
-                result.rectangularity = float(ready_report.rectangularity)
-                result.view_quality = float(view_quality(ready_report))
-            else:
-                for name in complete_streaks:
-                    complete_streaks[name] = 0
-                complete_camera = None
-                complete_streak = 0
-                result.component_coverage_ready = False
+            # Side cameras may seed acquisition, but they can never finish the
+            # search.  ``MaskReport.full`` already proves that the real board
+            # boundary, detail envelope, shape, and requested context are in
+            # frame; calibrated gripper-mask contact remains diagnostic only.
+            # The planner additionally requires completed J6 alignment and
+            # center-camera top-down leveling before it can return DONE.
+            result.component_coverage_ready = False
 
-            # A visually complete frame never overrides the force guard.
-            # Evaluate it before either success or the stability-frame
-            # ``continue`` so a high-force second frame cannot be released.
+            # Check any available force sample before success.  A missing
+            # sample may not block a no-motion terminal frame, but every
+            # movement path below calls ``require_motion_force`` first.
             if self._force_exceeded(
                 snapshot.force_xyz,
                 baseline_force_xyz,
@@ -475,72 +460,161 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
 
-            if complete_streak >= stable_frames and camera_leveled:
-                result.done = True
-                result.success = True
-                result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
-                result.message = (
-                    f"centered, aligned, gripper-clear NIC/SFP/SC survey view "
-                    f"held in {complete_camera} for {complete_streak} fresh "
-                    f"frames after {result.moves_executed} adaptive moves"
-                )
-                return
-            if complete_streak and camera_leveled:
-                logging.info(
-                    "coverage-ready stability %d/%d in %s; capturing again",
-                    complete_streak,
-                    stable_frames,
-                    complete_camera,
-                )
-                continue
-
-            # Level the module first, in bounded stages, by pointing TCP/tool
-            # +Z straight down (base -Z).  The earlier live failure at this
-            # step was a single-shot target-mode request timing out, not the
-            # ordering; mode requests are now retried inside RobotMotion.
-            # The center camera is mounted 15 degrees off the tool axis, so
-            # leveling its optical frame instead would leave the physical
-            # wrist and camera module visibly slanted.  J1 centering and J6
-            # long-side alignment then run on a vertical tool axis, and every
-            # later policy motion preserves this pitch.
-            if not camera_leveled:
+            # Completion needs a fresh physical top-down check, not a sticky
+            # acknowledgement from an earlier leveling iteration.  If later
+            # clearance IK tilts the camera, return to LEVEL immediately.
+            center_top_down = False
+            if planner.phase == "ascend_clearance":
                 try:
-                    level_position, level_orientation = self._gripper_pose(
-                        timeout_sec
+                    _, _, completion_back_away = self._camera_axes_in_base(
+                        "center_camera", timeout_sec
                     )
                 except Exception as error:
                     result.success = False
                     result.message = (
-                        "permitted TCP TF unavailable for camera-module "
+                        "permitted center-camera TF unavailable for fresh "
+                        f"top-down completion check: {error}"
+                    )
+                    return
+                completion_tilt_rad = math.acos(
+                    float(
+                        np.clip(
+                            np.dot(
+                                np.asarray(completion_back_away, dtype=float),
+                                np.array([0.0, 0.0, 1.0]),
+                            ),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
+                center_top_down = (
+                    completion_tilt_rad <= top_down_tolerance_rad
+                )
+                logging.info(
+                    "fresh center-camera completion tilt=%.3frad "
+                    "top_down=%s",
+                    completion_tilt_rad,
+                    center_top_down,
+                )
+                if not center_top_down:
+                    planner.request_relevel()
+                    logging.warning(
+                        "center camera lost top-down alignment during "
+                        "clearance; returning to joints 2-4 leveling"
+                    )
+
+            # Restrict terminal evidence to a freshly verified top-down center
+            # frame.  There is no later IVM survey predicate or stability streak:
+            # the first qualifying frame exits in this same iteration.
+            planning_reports = {
+                name: replace(
+                    item,
+                    full=bool(
+                        name == "center_camera"
+                        and item.full
+                        and center_top_down
+                    ),
+                )
+                for name, item in reports.items()
+            }
+            action = planner.next_action(
+                planning_reports,
+                deadline_reached=time.monotonic() >= deadline,
+            )
+            result.last_action = action.kind.value
+
+            if action.kind == ActionKind.DONE:
+                result.done = True
+                result.success = True
+                result.component_coverage_ready = True
+                result.steer_camera = "center_camera"
+                result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
+                result.message = (
+                    "center camera has the complete board in the first fresh "
+                    "aligned top-down frame after "
+                    f"{result.moves_executed} adaptive moves"
+                )
+                return
+            if action.terminal:
+                result.success = False
+                result.message = action.reason
+                return
+
+            # Level only after J1 centering and J6 long-axis alignment.  The
+            # terminal view belongs to the center camera, so level its optical
+            # axis rather than the TCP +Z axis (the camera is mounted about
+            # 15 degrees off the tool axis).  The bounded Cartesian correction
+            # and small +Z clearance are realized primarily through joints
+            # 2-4 while the already-measured J1/J6 references remain the search
+            # envelope anchors.
+            if planner.phase == "j2_4_level":
+                try:
+                    level_position, level_orientation = self._gripper_pose(
+                        timeout_sec
+                    )
+                    _, _, camera_back_away = self._camera_axes_in_base(
+                        "center_camera", timeout_sec
+                    )
+                except Exception as error:
+                    result.success = False
+                    result.message = (
+                        "permitted center-camera/TCP TF unavailable for "
                         f"leveling: {error}"
                     )
                     return
-                tcp_tool_axis = rotation_matrix_from_quaternion(
-                    *level_orientation
-                )[:, 2]
-                straight_down = np.array([0.0, 0.0, -1.0])
+                current_level_joint1 = self.robot_motion.current_joint1(
+                    min(timeout_sec, 2.0)
+                )
+                current_level_joint6 = self.robot_motion.current_joint(
+                    5, min(timeout_sec, 2.0)
+                )
+                if current_level_joint1 is None or current_level_joint6 is None:
+                    result.success = False
+                    result.message = (
+                        "fresh measured J1/J6 references unavailable at the "
+                        "joints 2-4 leveling boundary"
+                    )
+                    return
+                if level_anchor_joint1 is None:
+                    level_anchor_joint1 = current_level_joint1
+                if level_anchor_joint6 is None:
+                    level_anchor_joint6 = current_level_joint6
+                if initial_joint1 is None:
+                    initial_joint1 = current_level_joint1
+                if initial_joint6 is None:
+                    initial_joint6 = current_level_joint6
+                camera_back_away = np.asarray(camera_back_away, dtype=float)
+                straight_up = np.array([0.0, 0.0, 1.0])
                 tilt_rad = math.acos(
                     float(
                         np.clip(
-                            np.dot(tcp_tool_axis, straight_down), -1.0, 1.0
+                            np.dot(camera_back_away, straight_up), -1.0, 1.0
                         )
                     )
                 )
                 if tilt_rad > 1.30:
                     result.success = False
                     result.message = (
-                        f"TCP tool axis is {tilt_rad:.2f}rad from "
-                        "straight down; the survey pose pitch is outside the "
+                        f"center camera is {tilt_rad:.2f}rad from "
+                        "straight down; the survey pitch is outside the "
                         "leveling range"
                     )
                     return
-                if tilt_rad > 0.06:
-                    level_axis = np.cross(tcp_tool_axis, straight_down)
+                if tilt_rad > top_down_tolerance_rad:
+                    if initial_pose is None:
+                        initial_pose = (
+                            np.asarray(level_position, dtype=float),
+                            normalize_quaternion(level_orientation),
+                        )
+                    pre_level_joint1 = current_level_joint1
+                    pre_level_joint6 = current_level_joint6
+                    level_axis = np.cross(camera_back_away, straight_up)
                     axis_norm = float(np.linalg.norm(level_axis))
                     if axis_norm < 1e-9:
                         result.success = False
                         result.message = (
-                            "camera-module leveling axis is degenerate; aborting"
+                            "center-camera leveling axis is degenerate; aborting"
                         )
                         return
                     # Fixed-position orientation-only IK stalled in the live
@@ -561,13 +635,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         float(level_position[2] + level_clearance_m),
                     )
                     logging.info(
-                        "camera-module leveling at search start: TCP "
+                        "joints 2-4 top-view leveling after J6: center-camera "
                         "tilt=%.3frad step=%.3frad clearance=%.3fm; keeping "
-                        "J6 free for yaw",
+                        "J1/J6 phase references fixed",
                         tilt_rad,
                         level_step_rad,
                         level_clearance_m,
                     )
+                    motion_snapshot = require_motion_force(snapshot)
+                    if motion_snapshot is None:
+                        result.success = False
+                        result.message = (
+                            "no fresh wrist-force sample after waiting; "
+                            "refusing joints 2-4 camera-leveling motion"
+                        )
+                        return
+                    snapshot = motion_snapshot
+                    result.force_n = float(snapshot.force_norm or 0.0)
                     outcome = self.robot_motion.move_smooth(
                         level_target_position,
                         target_orientation=level_target_orientation,
@@ -598,114 +682,141 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         result.force_abort = outcome.force_abort
                         result.message = outcome.message
                         return
-                    result.moves_executed += 1
-                    result.travel_m += float(outcome.distance_m)
-                    result.angular_travel_rad += float(
-                        outcome.angular_distance_rad
+                    next_travel_m = result.travel_m + float(
+                        outcome.distance_m
                     )
+                    next_angular_travel_rad = (
+                        result.angular_travel_rad
+                        + float(outcome.angular_distance_rad)
+                    )
+                    if next_travel_m > max_travel_m + 1e-9:
+                        result.success = False
+                        result.message = (
+                            "joints 2-4 leveling reached the "
+                            f"{max_travel_m:.3f}m cumulative translation envelope"
+                        )
+                        return
+                    if (
+                        next_angular_travel_rad
+                        > max_angular_travel_rad + 1e-9
+                    ):
+                        result.success = False
+                        result.message = (
+                            "joints 2-4 leveling reached the "
+                            f"{max_angular_travel_rad:.3f}rad cumulative angular "
+                            "envelope"
+                        )
+                        return
+                    result.moves_executed += 1
+                    leveling_moves += 1
+                    result.travel_m = next_travel_m
+                    result.angular_travel_rad = next_angular_travel_rad
                     result.moved = True
                     result.last_action = "camera_level"
-                    # The leveled pose is the reference for start-relative
-                    # envelopes: the setup correction must not consume the
-                    # search workspace budget.
                     try:
-                        leveled_position, leveled_orientation = (
-                            self._gripper_pose(timeout_sec)
+                        _, _, residual_back_away = self._camera_axes_in_base(
+                            "center_camera", timeout_sec
                         )
                     except Exception as error:
                         result.success = False
                         result.message = (
-                            "permitted gripper TF unavailable after module "
+                            "permitted center-camera TF unavailable after "
                             f"leveling: {error}"
                         )
                         return
-                    initial_pose = (
-                        np.asarray(leveled_position, dtype=float),
-                        normalize_quaternion(leveled_orientation),
-                    )
-                    initial_joint1 = self.robot_motion.current_joint1(
-                        min(timeout_sec, 2.0)
-                    )
-                    if initial_joint1 is None:
-                        result.success = False
-                        result.message = (
-                            "fresh measured /joint_states arm pose "
-                            "unavailable after camera leveling"
-                        )
-                        return
-                    initial_joint6 = self.robot_motion.current_joint(
-                        5, min(timeout_sec, 2.0)
-                    )
-                    if initial_joint6 is None:
-                        result.success = False
-                        result.message = (
-                            "fresh measured wrist_3_joint unavailable after "
-                            "camera leveling"
-                        )
-                        return
-                    residual_tool_axis = rotation_matrix_from_quaternion(
-                        *leveled_orientation
-                    )[:, 2]
                     residual_tilt = math.acos(
                         float(
                             np.clip(
-                                np.dot(residual_tool_axis, straight_down),
+                                np.dot(
+                                    np.asarray(residual_back_away, dtype=float),
+                                    straight_up,
+                                ),
                                 -1.0,
                                 1.0,
                             )
                         )
                     )
+                    post_level_joint1 = self.robot_motion.current_joint1(
+                        min(timeout_sec, 0.5)
+                    )
+                    post_level_joint6 = self.robot_motion.current_joint(
+                        5, min(timeout_sec, 0.5)
+                    )
+                    if post_level_joint1 is None or post_level_joint6 is None:
+                        result.success = False
+                        result.message = (
+                            "fresh measured J1/J6 references unavailable after "
+                            "joints 2-4 camera leveling"
+                        )
+                        return
+                    level_step_joint1_drift = (
+                        post_level_joint1 - pre_level_joint1
+                    )
+                    level_step_joint6_drift = (
+                        post_level_joint6 - pre_level_joint6
+                    )
+                    level_joint1_drift = (
+                        post_level_joint1 - level_anchor_joint1
+                    )
+                    level_joint6_drift = (
+                        post_level_joint6 - level_anchor_joint6
+                    )
                     logging.info(
-                        "camera-module leveling complete: residual TCP "
-                        "tilt=%.3frad "
-                        "angle_moved=%.3frad",
+                        "joints 2-4 top-view stage complete: residual center "
+                        "camera tilt=%.3frad angle_moved=%.3frad "
+                        "target_reached=%s step_j1_drift=%+.4frad "
+                        "step_j6_drift=%+.4frad cumulative_j1_drift=%+.4frad "
+                        "cumulative_j6_drift=%+.4frad",
                         residual_tilt,
                         outcome.angular_distance_rad,
+                        outcome.target_reached,
+                        level_step_joint1_drift,
+                        level_step_joint6_drift,
+                        level_joint1_drift,
+                        level_joint6_drift,
                     )
-                    camera_leveled = residual_tilt <= 0.06
-                    for name in complete_streaks:
-                        complete_streaks[name] = 0
-                    complete_camera = None
-                    complete_streak = 0
+                    if (
+                        abs(level_joint1_drift)
+                        > level_joint_drift_tolerance_rad
+                        or abs(level_joint6_drift)
+                        > level_joint_drift_tolerance_rad
+                    ):
+                        planner.request_recenter()
+                        logging.warning(
+                            "joints 2-4 leveling changed J1/J6 by "
+                            "%+.4f/%+.4frad; returning to visual J1/J6 "
+                            "correction instead of failing",
+                            level_joint1_drift,
+                            level_joint6_drift,
+                        )
+                        iteration += 1
+                        continue
+                    if (
+                        residual_tilt > top_down_tolerance_rad
+                        and residual_tilt
+                        >= tilt_rad - min_level_progress_rad
+                    ):
+                        result.success = False
+                        result.message = (
+                            "joints 2-4 leveling made less than 0.01rad "
+                            "top-down progress; refusing to repeat the same "
+                            "Cartesian request until the deadline"
+                        )
+                        return
+                    if residual_tilt <= top_down_tolerance_rad:
+                        planner.mark_level_complete()
                     iteration += 1
                     continue
 
-                # The tool was already within the leveling tolerance.  Keep
-                # stability confirmation in the wrapper; do not pass a single
-                # ready frame to the planner's immediate DONE terminal.
-                camera_leveled = True
-                if complete_streak:
-                    logging.info(
-                        "coverage-ready stability %d/%d in %s after "
-                        "camera-module leveling check; capturing again",
-                        complete_streak,
-                        stable_frames,
-                        complete_camera,
-                    )
-                    continue
-
-            # Only a perception-ready center frame may terminate the planner.
-            # Side-camera ``full`` reports continue to influence acquisition,
-            # but are cleared here so they cannot become DONE terminals.
-            planning_reports = {
-                name: replace(
-                    item,
-                    full=bool(
-                        name == "center_camera"
-                        and ivm_survey_ready(item)
-                    ),
+                # Even when no leveling motion is needed, transition the
+                # planner and capture one genuinely fresh terminal frame.
+                planner.mark_level_complete()
+                logging.info(
+                    "center camera already top-down after J6; capturing the "
+                    "first fresh completion frame"
                 )
-                for name, item in reports.items()
-            }
-            action = planner.next_action(
-                planning_reports,
-                deadline_reached=time.monotonic() >= deadline,
-            )
-            result.last_action = action.kind.value
-            if action.terminal:
-                result.success = False
-                result.message = action.reason
-                return
+                iteration += 1
+                continue
 
             if action.kind == ActionKind.OBSERVE:
                 # J1 uses this no-motion action to require alignment in two
@@ -721,6 +832,18 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 iteration += 1
                 continue
+
+            if action.moves_robot:
+                motion_snapshot = require_motion_force(snapshot)
+                if motion_snapshot is None:
+                    result.success = False
+                    result.message = (
+                        "no fresh wrist-force sample after waiting; refusing "
+                        f"{action.kind.value} motion"
+                    )
+                    return
+                snapshot = motion_snapshot
+                result.force_n = float(snapshot.force_norm or 0.0)
 
             if action.kind == ActionKind.CAMERA_ROLL:
                 # J6 is UR5e wrist_3_joint. A Cartesian orientation request can
@@ -865,7 +988,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 outcome = self.robot_motion.move_joint6_yaw(
                     joint_delta,
-                    max_speed_radps=min(max_angular_speed_rps, 0.12),
+                    max_speed_radps=min(max_angular_speed_rps, 0.20),
                     publish_hz=publish_hz,
                     settle_tolerance_rad=min(
                         0.015, max(0.006, 0.20 * abs(joint_delta))
@@ -889,19 +1012,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                     return
                 if not outcome.success:
-                    recoverable_j6_failure = any(
-                        token in outcome.message
-                        for token in (
-                            "joint pose command has no subscriber",
-                            "target-mode service is unavailable",
-                            "switching to joint target mode",
-                            "joint target-mode request failed",
-                            "rejected joint target mode",
-                            "confirming joint target mode",
-                            "motion profile exceeds per-move timeout",
-                            "did not settle before timeout",
-                        )
-                    )
+                    recoverable_j6_failure = outcome.failure in {
+                        MotionFailure.CONTROLLER_UNAVAILABLE,
+                        MotionFailure.MODE_UNAVAILABLE,
+                        MotionFailure.MODE_CHANGED,
+                        MotionFailure.TARGET_TIMEOUT,
+                    }
                     cartesian_restore_failed = (
                         "Cartesian target mode" in outcome.message
                         or "Cartesian target-mode" in outcome.message
@@ -1194,7 +1310,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                     outcome = self.robot_motion.move_joint1_yaw(
                         joint_delta,
-                        max_speed_radps=min(max_angular_speed_rps, 0.12),
+                        max_speed_radps=min(max_angular_speed_rps, 0.20),
                         publish_hz=publish_hz,
                         settle_tolerance_rad=min(
                             0.015, max(0.006, 0.20 * abs(joint_delta))
@@ -1218,17 +1334,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         )
                         return
                     if not outcome.success:
-                        recoverable_j1_failure = any(
-                            token in outcome.message
-                            for token in (
-                                "joint pose command has no subscriber",
-                                "target-mode service is unavailable",
-                                "switching to joint target mode",
-                                "joint target-mode request failed",
-                                "rejected joint target mode",
-                                "confirming joint target mode",
-                            )
-                        )
+                        recoverable_j1_failure = outcome.failure in {
+                            MotionFailure.CONTROLLER_UNAVAILABLE,
+                            MotionFailure.MODE_UNAVAILABLE,
+                            MotionFailure.MODE_CHANGED,
+                        }
                         cartesian_restore_failed = (
                             "Cartesian target mode" in outcome.message
                             or "Cartesian target-mode" in outcome.message
@@ -1410,8 +1520,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 outcome = self.robot_motion.move_smooth(
                     tuple(float(value) for value in predicted_position),
                     target_orientation=target_orientation,
-                    max_speed_mps=min(max_speed_mps, 0.04),
-                    max_angular_speed_radps=min(max_angular_speed_rps, 0.20),
+                    max_speed_mps=min(max_speed_mps, 0.05),
+                    max_angular_speed_radps=min(max_angular_speed_rps, 0.30),
                     publish_hz=publish_hz,
                     settle_tolerance_m=settle_tolerance_m,
                     settle_angular_tolerance_rad=min(
@@ -1806,6 +1916,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.force_abort = outcome.force_abort
                 result.message = outcome.message
                 return
+            if (
+                action.kind == ActionKind.UP_CLEARANCE
+                and not outcome.target_reached
+            ):
+                planner.mark_clearance_partial(
+                    action,
+                    reason=outcome.message,
+                )
+                logging.warning(
+                    "base +Z clearance stopped short after %.4fm; replanning "
+                    "from the measured pose and a fresh center image",
+                    outcome.distance_m,
+                )
             post_motion_joint1 = self.robot_motion.current_joint1(
                 min(timeout_sec, 0.5)
             )
@@ -1816,6 +1939,49 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     f"{action.kind.value} motion"
                 )
                 return
+            if (
+                level_anchor_joint1 is not None
+                and level_anchor_joint6 is not None
+                and planner.phase == "ascend_clearance"
+            ):
+                post_motion_joint6 = self.robot_motion.current_joint(
+                    5, min(timeout_sec, 0.5)
+                )
+                if post_motion_joint6 is None:
+                    result.success = False
+                    result.message = (
+                        "fresh measured joint 6 unavailable after post-level "
+                        f"{action.kind.value} motion"
+                    )
+                    return
+                post_level_joint1_drift = (
+                    float(post_motion_joint1) - level_anchor_joint1
+                )
+                post_level_joint6_drift = (
+                    float(post_motion_joint6) - level_anchor_joint6
+                )
+                logging.info(
+                    "post-level joints 2-4 motion preserved phase anchors: "
+                    "j1_drift=%+.4frad j6_drift=%+.4frad",
+                    post_level_joint1_drift,
+                    post_level_joint6_drift,
+                )
+                if (
+                    abs(post_level_joint1_drift)
+                    > level_joint_drift_tolerance_rad
+                    or abs(post_level_joint6_drift)
+                    > level_joint_drift_tolerance_rad
+                ):
+                    planner.request_recenter()
+                    logging.warning(
+                        "post-level %s motion changed J1/J6 by "
+                        "%+.4f/%+.4frad; returning to visual correction",
+                        action.kind.value,
+                        post_level_joint1_drift,
+                        post_level_joint6_drift,
+                    )
+                    iteration += 1
+                    continue
             if (
                 initial_joint1 is not None
                 and abs(float(post_motion_joint1) - initial_joint1)

@@ -20,7 +20,7 @@ message CheckBoardVisibilitySkillParams {
   uint32 margin_px = 2;
   // Optional extra bottom exclusion beyond calibrated per-camera masks. 0 -> none.
   double ignore_bottom_frac = 3;
-  // Maximum camera-plane translation per internal iteration. 0 -> 0.02 m.
+  // Base camera-plane translation per internal iteration. 0 -> 0.04 m.
   double step_m = 4;
   // Retreat when the board touches opposite edges. 0 -> step_m.
   double backoff_step_m = 5;
@@ -34,28 +34,28 @@ message CheckBoardVisibilitySkillParams {
   // Deprecated compatibility field. The adaptive search no longer stops after
   // a fixed number of moves.
   uint32 max_moves = 9;
-  // Maximum Cartesian setpoint speed. 0 -> 0.025 m/s.
+  // Maximum Cartesian setpoint speed. 0 -> 0.05 m/s.
   double max_speed_mps = 10;
   // Minimum-jerk setpoint publication frequency. 0 -> 20 Hz.
   double publish_hz = 11;
-  // Measured TCP position tolerance after each move. 0 -> 0.003 m.
+  // Measured TCP position tolerance after each move. 0 -> 0.008 m.
   double settle_tolerance_m = 12;
-  // Motion and settling budget for one internal move. 0 -> 5 seconds.
+  // Motion and settling budget for one internal move. 0 -> 6 seconds.
   double move_timeout_seconds = 13;
-  // Maximum cumulative TCP translation in one invocation. 0 -> 0.80 m.
+  // Deprecated compatibility field; controller-native limits are used.
   double max_travel_m = 14;
   // Abort when force changes this much from the initial baseline. 0 -> 5 N.
   double force_delta_n = 15;
-  // Overall adaptive-search deadline. 0 -> 150 seconds.
+  // Overall adaptive-search deadline. 0 -> 90 seconds.
   double search_timeout_seconds = 16;
-  // Maximum start-relative TCP displacement. 0 -> 0.50 m.
+  // Deprecated compatibility field; controller-native limits are used.
   double max_displacement_m = 17;
   // Base scale for one image-feedback shoulder-pan correction. 0 -> 0.10 rad.
   // The normal visible-board probe uses a fraction of this value.
   double angular_step_rad = 18;
-  // Maximum shoulder-pan change from the starting joint pose. 0 -> 1.60 rad.
+  // Deprecated compatibility field; controller-native limits are used.
   double max_angular_displacement_rad = 19;
-  // Maximum accumulated shoulder-pan travel including reversals. 0 -> 2.20 rad.
+  // Deprecated compatibility field; controller-native limits are used.
   double max_angular_travel_rad = 20;
   // Dynamic frame clearance reserved for protruding NIC/SC hardware. 0 -> 0.05.
   double context_margin_frac = 21;
@@ -63,11 +63,13 @@ message CheckBoardVisibilitySkillParams {
   double min_detail_area_frac = 22;
   // Minimum clean board silhouette quality. 0 -> 0.50.
   double min_rectangularity = 23;
-  // Consecutive fresh snapshots required before success. 0 -> 2.
+  // Deprecated compatibility field. Completion uses the first full post-level
+  // center-camera mask; J1 and J6 confirmations are internal policy constants.
   uint32 stable_frames = 24;
-  // Maximum angular setpoint speed. 0 -> 0.12 rad/s.
+  // Maximum angular setpoint speed. 0 -> 0.30 rad/s. Direct joints use at most
+  // 0.20 rad/s.
   double max_angular_speed_rps = 25;
-  // Measured TCP orientation tolerance during fixed-orientation clearance. 0 -> 0.025 rad.
+  // Measured TCP orientation tolerance during Cartesian moves. 0 -> 0.05 rad.
   double settle_orientation_tolerance_rad = 26;
 }
 

@@ -11,6 +11,8 @@ from aic_perception.robot_motion import (
     base_yaw_target_pose,
     ControllerPose,
     JointReference,
+    MotionFailure,
+    MotionOutcome,
     RobotMotion,
     interpolated_joint_positions,
     interpolated_poses,
@@ -20,6 +22,13 @@ from aic_perception.robot_motion import (
     quaternion_angular_distance,
     quaternion_slerp,
 )
+
+
+def test_motion_outcome_target_reached_defaults_false_for_compatibility():
+    outcome = MotionOutcome(True, "legacy safe completion")
+
+    assert outcome.success
+    assert not outcome.target_reached
 
 
 def test_base_yaw_target_pose_rotates_position_and_orientation_together():
@@ -310,6 +319,7 @@ def test_move_smooth_settles_rotation_without_angular_velocity(monkeypatch):
     )
 
     assert outcome.success
+    assert outcome.target_reached
     assert outcome.distance_m == pytest.approx(0.0)
     assert outcome.angular_distance_rad == pytest.approx(0.2)
     assert captured["args"][2] == start.orientation
@@ -365,6 +375,7 @@ def test_move_smooth_replans_from_safe_measured_pose_when_controller_stops_short
 
     outcome = motion.move_smooth(
         (0.01, 0.0, 0.0),
+        target_orientation=start.orientation,
         max_speed_mps=0.025,
         publish_hz=20.0,
         settle_tolerance_m=0.001,
@@ -376,9 +387,82 @@ def test_move_smooth_replans_from_safe_measured_pose_when_controller_stops_short
     )
 
     assert outcome.success
+    assert not outcome.target_reached
     assert "replanning" in outcome.message
     assert outcome.distance_m == pytest.approx(0.004)
     assert motion._publisher.messages[-1][0] == stopped_short.position
+
+
+def test_move_smooth_reverses_when_stopped_pose_misses_requested_orientation(
+    monkeypatch,
+):
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+        @staticmethod
+        def publish(_message):
+            pass
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._publisher = Publisher()
+    motion._camera_rig = SimpleNamespace(
+        wait_for_force_xyz=lambda **_kwargs: (0.0, 0.0, 0.0),
+        latest_force_xyz=lambda **_kwargs: (0.0, 0.0, 0.0),
+    )
+    monkeypatch.setattr(motion, "_ensure_cartesian_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion, "_command", lambda position, orientation: (position, orientation)
+    )
+    monkeypatch.setattr(motion, "_publish_profile", lambda *args, **kwargs: True)
+
+    start = ControllerPose(
+        position=(0.0, 0.0, 0.0),
+        orientation=(0.0, 0.0, 0.0, 1.0),
+        speed_mps=0.0,
+        received_at=0.0,
+    )
+    stopped_wrong_orientation = ControllerPose(
+        position=(0.004, 0.0, 0.0),
+        orientation=start.orientation,
+        speed_mps=0.0,
+        received_at=0.0,
+        angular_speed_radps=0.0,
+    )
+    states = iter((start, stopped_wrong_orientation))
+    monkeypatch.setattr(motion, "_current_state", lambda _: next(states))
+    times = iter((0.0, 1.0))
+    monkeypatch.setattr(
+        "aic_perception.robot_motion.time.monotonic", lambda: next(times)
+    )
+    retreats = []
+    monkeypatch.setattr(
+        motion,
+        "_retreat_to_step_start",
+        lambda saved, hz: retreats.append((saved, hz)),
+    )
+    target_orientation = (0.0, math.sin(0.1), 0.0, math.cos(0.1))
+
+    outcome = motion.move_smooth(
+        (0.01, 0.0, 0.0),
+        target_orientation=target_orientation,
+        max_speed_mps=0.025,
+        max_angular_speed_radps=0.5,
+        publish_hz=20.0,
+        settle_tolerance_m=0.001,
+        settle_angular_tolerance_rad=0.02,
+        timeout_sec=0.5,
+        baseline_force_xyz=(0.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert not outcome.success
+    assert not outcome.target_reached
+    assert "did not settle" in outcome.message
+    assert retreats and retreats[0][0] is start
 
 
 def test_move_smooth_waits_for_fresh_force_before_publishing(monkeypatch):
@@ -493,6 +577,9 @@ def test_single_joint_yaw_preserves_all_other_controller_references(
         return joint_mode_start if target_mode == 2 else start
 
     monkeypatch.setattr(motion, "_current_joint_reference", current_reference)
+    # An aged/unknown asynchronous controller-mode report must not invalidate
+    # an otherwise fresh measured joint stream after mode was confirmed.
+    monkeypatch.setattr(motion, "_reported_target_mode", lambda: None)
     monkeypatch.setattr(
         motion,
         "_next_joint_reference",
@@ -517,6 +604,7 @@ def test_single_joint_yaw_preserves_all_other_controller_references(
     )
 
     assert outcome.success
+    assert outcome.target_reached
     assert outcome.joint_distance_rad == pytest.approx(0.06)
     assert captured["args"][0] == start.positions
     assert captured["args"][1] == pytest.approx(target)
@@ -533,11 +621,156 @@ def test_single_joint_yaw_preserves_all_other_controller_references(
     assert restores == [2.0]
 
 
+def test_joint_profile_outlives_mode_timestamp_when_joint_feedback_is_fresh(
+    monkeypatch,
+):
+    """Regression for the live 0.525 s reversal of a 0.981 s J1 profile."""
+
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+        @staticmethod
+        def publish(_message):
+            pass
+
+    class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+        @staticmethod
+        def latest_force_xyz(max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._joint_publisher = Publisher()
+    motion._camera_rig = CameraRig()
+    motion._mode_joint = 2
+    monkeypatch.setattr(motion, "_ensure_joint_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion, "_ensure_cartesian_mode", lambda _: (True, "")
+    )
+    monkeypatch.setattr(motion, "_joint_command", lambda positions: positions)
+    monkeypatch.setattr("aic_perception.robot_motion.time.sleep", lambda _: None)
+
+    start = JointReference(
+        (0.2, -0.4, 0.6, -0.8, 1.0, -1.2),
+        0.0,
+        1.0,
+        target_mode=None,
+    )
+    confirmed = JointReference(start.positions, 0.0, 2.0, target_mode=2)
+    target = list(start.positions)
+    target[0] += 0.0628
+    target = tuple(target)
+    settling = iter(
+        JointReference(target, 0.0, stamp, target_mode=None)
+        for stamp in (3.0, 4.0, 5.0)
+    )
+
+    # Fresh measured joints continue while the independent mode report has
+    # aged out to None.  This is the exact asynchronous condition from r20.
+    monkeypatch.setattr(
+        motion,
+        "_current_joint_reference",
+        lambda _timeout, target_mode=None: start if target_mode is None else None,
+    )
+    monkeypatch.setattr(motion, "_reported_target_mode", lambda: None)
+
+    def next_reference(_after, _timeout, target_mode=None):
+        if target_mode == 2:
+            return confirmed
+        return next(settling)
+
+    monkeypatch.setattr(motion, "_next_joint_reference", next_reference)
+
+    def profile(_start, profile_target, duration, _hz, stop):
+        assert duration == pytest.approx(1.875 * 0.0628 / 0.12)
+        assert duration > 0.5
+        for _ in range(30):
+            assert not stop()
+        return True, profile_target
+
+    monkeypatch.setattr(motion, "_publish_joint_profile", profile)
+
+    outcome = motion.move_joint1_yaw(
+        0.0628,
+        max_speed_radps=0.12,
+        publish_hz=20.0,
+        timeout_sec=3.0,
+        baseline_force_xyz=(0.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert outcome.success
+    assert outcome.target_reached
+    assert outcome.failure is None
+
+
+def test_joint_profile_reverses_on_explicit_fresh_mode_change(monkeypatch):
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+    class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+        @staticmethod
+        def latest_force_xyz(max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._joint_publisher = Publisher()
+    motion._camera_rig = CameraRig()
+    motion._mode_joint = 2
+    start = JointReference((0.2, -0.4, 0.6), 0.0, 1.0)
+    confirmed = JointReference(start.positions, 0.0, 2.0, target_mode=2)
+    monkeypatch.setattr(motion, "_ensure_joint_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion, "_ensure_cartesian_mode", lambda _: (True, "")
+    )
+    monkeypatch.setattr(
+        motion, "_current_joint_reference", lambda *_args, **_kwargs: start
+    )
+    monkeypatch.setattr(
+        motion, "_next_joint_reference", lambda *_args, **_kwargs: confirmed
+    )
+    monkeypatch.setattr(motion, "_reported_target_mode", lambda: 1)
+    monkeypatch.setattr(
+        motion,
+        "_publish_joint_profile",
+        lambda *args: (not args[4](), args[0]),
+    )
+    monkeypatch.setattr(motion, "_retreat_joint_target", lambda *args: None)
+
+    outcome = motion.move_joint1_yaw(
+        0.05,
+        max_speed_radps=0.20,
+        publish_hz=20.0,
+        timeout_sec=2.0,
+        baseline_force_xyz=(0.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert not outcome.success
+    assert outcome.failure is MotionFailure.MODE_CHANGED
+    assert "left joint target mode" in outcome.message
+
+
 def test_joint1_yaw_rejects_speed_above_documented_limit():
     motion = RobotMotion.__new__(RobotMotion)
     outcome = motion.move_joint1_yaw(
         0.05,
-        max_speed_radps=0.121,
+        max_speed_radps=0.201,
         publish_hz=20.0,
         timeout_sec=2.0,
         baseline_force_xyz=(0.0, 0.0, 0.0),
@@ -546,7 +779,8 @@ def test_joint1_yaw_rejects_speed_above_documented_limit():
         cancelled=lambda: False,
     )
     assert not outcome.success
-    assert "0.12" in outcome.message
+    assert "0.20" in outcome.message
+    assert outcome.failure is MotionFailure.INVALID_REQUEST
 
 
 def test_joint1_yaw_requires_newer_reference_confirming_joint_mode(monkeypatch):

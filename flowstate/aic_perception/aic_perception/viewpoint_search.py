@@ -1,38 +1,17 @@
-"""Deterministic insignia-anchored task-board viewpoint policy.
+"""Deterministic, strictly ordered task-board viewpoint policy.
 
-The policy is intentionally simple and ordered:
+The planner is a small phase machine.  J1 first acquires and coarsely centres
+the board, J6 then aligns the board's long edge, the wrapper levels joints
+2--4 and acknowledges that motion with :meth:`mark_level_complete`, and only
+then may the planner increase top-view clearance.  If J6 is unavailable or
+displaces the projection, one bounded J1 fallback explicitly returns through
+CENTER before alignment can be accepted; no J1 or J6 is used after LEVEL.
 
-1. ``ACQUIRE``  - no board evidence: sweep J1 in one direction (one bounded
-   reversal when an envelope rejects the sweep).
-2. ``CENTER``   - board evidence: proportional J1 yaw (one joint, one move)
-   on the board-component horizontal centroid until it is roughly
-   image-centered.  There is no area or edge-fit requirement here; the board
-   does not have to fit on screen.  When yaw provably cannot help (board
-   clipped on both sides, oversized, or its visible mass pinned at a clipped
-   top edge), the policy moves away first and re-centers later instead of
-   burning the joint envelope.
-3. ``ALIGN``    - J6 long-side alignment on its own, strictly after J1
-   centering is confirmed and before any clearance motion.  A correction is
-   only commanded after two consecutive fresh frames agree on its sign, so a
-   single flaky estimate can never move the wrist.
-4. ``ASCEND``   - move away from the board (base +Z, or an optical-axis
-   retreat when only the bottom edge blocks) until one camera reports a
-   complete view.  Both motions are monotonically away from the board, so
-   image noise cannot command an approach.  A bounded, equally-confirmed J6
-   assist remains available here for when misalignment only becomes
-   measurable after standoff clears the frame clipping.
-
-Board evidence is anchored to the magenta insignia whenever it is visible:
-the insignia is the only purple object in the workcell, so a purple detection
-is proof the board is in view even when the plate mask itself is rejected
-(for example when the plate fills the frame).  In that logo-only state the
-correct action is always to increase standoff, never to chase the logo with
-yaw - the insignia sits off-center on the plate by design.
-
-Before any search motion the wrapper levels the physical TCP/tool axis
-straight down in bounded stages (the J5-pitch fix). J6 alignment then yaws
-about that vertical tool axis, mapping the board's long plate edge to the
-image's longer pixel dimension without coupling yaw back into module pitch.
+Completion is deliberately narrow and immediate.  Only a usable ``full``
+report from ``center_camera`` can finish the search, and it can do so only
+after leveling has completed.  Side cameras are acquisition hints, not goal
+cameras.  The first qualifying post-level center frame returns ``DONE``;
+there is no survey-context multiplier or extra confirmation delay.
 """
 
 from __future__ import annotations
@@ -79,7 +58,9 @@ class _Phase(str, Enum):
     ACQUIRE = "acquire_sweep"
     CENTER = "j1_center"
     ALIGN = "j6_align"
+    LEVEL = "j2_4_level"
     ASCEND = "ascend_clearance"
+    DONE = "done"
 
 
 @dataclass(frozen=True)
@@ -107,7 +88,7 @@ def has_opposite_edges(edges: frozenset[str]) -> bool:
 
 
 class AdaptiveViewpointPlanner:
-    """ACQUIRE -> CENTER -> ASCEND with insignia-anchored evidence."""
+    """ACQUIRE -> CENTER -> ALIGN -> LEVEL -> ASCEND -> DONE."""
 
     def __init__(
         self,
@@ -124,14 +105,18 @@ class AdaptiveViewpointPlanner:
         max_yaw_scale: float = 1.5,
         max_ascend_scale: float = 3.0,
         max_stall_frames: int = 3,
-        roll_align_threshold_deg: float = 12.0,
-        # Six 0.30-rad bounded corrections cover the full 90-degree
-        # long-edge ambiguity without ever issuing the previous 0.60-rad
-        # one-shot wrist command.
-        max_roll_moves: int = 6,
-        roll_probe_scale: float = 1.5,
-        max_roll_scale: float = 3.0,
+        roll_align_threshold_deg: float = 2.0,
+        # Eight 0.30-rad bounded corrections cover the full 90-degree
+        # long-edge ambiguity plus re-alignment after later viewpoint
+        # changes, without ever issuing a large one-shot wrist command.
+        max_roll_moves: int = 8,
+        # Permit fine corrections below two degrees instead of forcing the
+        # previous 8.6-degree minimum wrist step.  Larger errors are corrected
+        # in efficient ~26-degree transactions and remeasured after each one.
+        roll_probe_scale: float = 0.20,
+        max_roll_scale: float = 4.5,
         max_zoom_out_backoffs: int = 2,
+        max_postlevel_translates: int = 4,
         # Live trace: the plate's true stable estimate sits at ratio
         # 1.16-1.24 at working standoff, while square-noise flicker stays
         # below ~1.10.  Trust above 1.15 and let the two-frame sign
@@ -168,6 +153,8 @@ class AdaptiveViewpointPlanner:
             raise ValueError("roll scales must satisfy 0 < probe <= max")
         if max_zoom_out_backoffs < 0:
             raise ValueError("max_zoom_out_backoffs must be non-negative")
+        if max_postlevel_translates < 0:
+            raise ValueError("max_postlevel_translates must be non-negative")
         if min_long_axis_ratio <= 1.0:
             raise ValueError("min_long_axis_ratio must exceed 1.0")
         if roll_confirmation_frames < 1:
@@ -192,6 +179,7 @@ class AdaptiveViewpointPlanner:
         self.roll_probe_scale = float(roll_probe_scale)
         self.max_roll_scale = float(max_roll_scale)
         self.max_zoom_out_backoffs = int(max_zoom_out_backoffs)
+        self.max_postlevel_translates = int(max_postlevel_translates)
         self.min_long_axis_ratio = float(min_long_axis_ratio)
         self.roll_confirmation_frames = int(roll_confirmation_frames)
         self.reset()
@@ -204,7 +192,10 @@ class AdaptiveViewpointPlanner:
         self._sweep_direction = 0.0
         self._sweep_reversals = 0
         self._pending_yaw_id: int | None = None
+        self._pending_clearance_id: int | None = None
+        self._partial_clearance_reason: str | None = None
         self._center_streak = 0
+        self._center_zoom_backoffs = 0
         self._recenter_entries = 0
         self._center_reject_fallbacks = 0
         self._force_ascend_once = False
@@ -213,10 +204,13 @@ class AdaptiveViewpointPlanner:
         self._pending_roll_id: int | None = None
         self._roll_unavailable_reason: str | None = None
         self._roll_j1_fallback_allowed = True
-        self._zoom_out_backoffs = 0
+        self._alignment_zoom_backoffs = 0
+        self._clearance_zoom_backoffs = 0
+        self._postlevel_translates = 0
         self._roll_confirm_sign = 0.0
         self._roll_confirm_streak = 0
         self._roll_confirm_observes = 0
+        self._aligned_confirm_streak = 0
 
     @property
     def selected_camera(self) -> str | None:
@@ -243,82 +237,92 @@ class AdaptiveViewpointPlanner:
         *,
         deadline_reached: bool = False,
     ) -> ViewpointAction:
+        center = reports.get("center_camera")
+        self._selected_camera = "center_camera"
         if self._terminal_action is not None:
             return self._terminal_action
+
+        # Completion is evaluated only after the wrapper has acknowledged
+        # the joints-2--4 leveling move.  This intentionally ignores a full
+        # side-camera frame and a pre-level full center frame.
+        if self._phase is _Phase.ASCEND and self._center_is_goal(center):
+            return self._terminate(
+                ActionKind.DONE,
+                "first complete usable post-level center-camera view",
+                "center_camera",
+            )
         if deadline_reached:
             return self._terminate(
                 ActionKind.DEADLINE,
                 "viewpoint-search deadline reached before a complete view",
             )
-        goal = self._goal_camera(reports)
-        if goal is not None:
-            self._selected_camera = goal
-            return self._terminate(
-                ActionKind.DONE, f"complete usable board view in {goal}", goal
+
+        if self._phase is _Phase.LEVEL:
+            return self._emit(
+                ActionKind.OBSERVE,
+                "center_camera",
+                reason=(
+                    "J1 centering and J6 long-axis alignment complete; "
+                    "waiting for joints 2-4 leveling acknowledgement"
+                ),
             )
 
-        center = reports.get("center_camera")
-        self._selected_camera = "center_camera"
-        if not self._board_evidence(center):
-            return self._sweep(reports)
-        self._sweep_reversals = 0
+        if self._phase is _Phase.ASCEND:
+            return self._ascend(center)
 
-        self._update_roll_confirmation(center)
-        error_x = self._steering_error(center)
         if self._phase is _Phase.ACQUIRE:
+            if not self._board_evidence(center):
+                return self._sweep(reports)
             self._phase = _Phase.CENTER
-
-        if (
-            self._phase in (_Phase.ALIGN, _Phase.ASCEND)
-            and error_x is not None
-            and abs(error_x) > self.recenter_threshold
-            and not self._yaw_cannot_help(center)
-            and not self._force_ascend_once
-        ):
-            if self._recenter_entries < self.max_recenter_entries:
-                self._recenter_entries += 1
-                self._phase = _Phase.CENTER
-                self._center_streak = 0
-            # Past the re-center budget, keep going: a complete view is
-            # judged by the mask predicate, not by perfect centering.
+            self._sweep_reversals = 0
 
         if self._phase is _Phase.CENTER:
-            if error_x is None:
-                # Logo-only evidence: the plate mask is unusable, which means
-                # the camera is far too close.  Yawing toward the off-center
-                # insignia would mis-center the board; standoff comes first.
-                self._phase = _Phase.ASCEND
+            if not self._board_evidence(center):
+                # Losing the board before J6 is allowed to return to the J1
+                # acquisition sweep.  Once ALIGN starts, this path is no
+                # longer reachable, which enforces the one-way joint order.
+                self._phase = _Phase.ACQUIRE
+                return self._sweep(reports)
+
+            error_x = self._steering_error(center)
+            if self._force_ascend_once:
+                self._force_ascend_once = False
                 self._center_streak = 0
                 return self._emit(
-                    ActionKind.UP_CLEARANCE,
+                    ActionKind.BACKOFF,
                     "center_camera",
                     axial=1.0,
-                    scale=2.0,
+                    scale=1.5,
                     reason=(
-                        "insignia visible but plate mask unusable; "
-                        "increase standoff before centering"
+                        "J1 centering reached its envelope; make one "
+                        "joints-2-4 zoom-out before retrying J1"
                     ),
                 )
-            if self._yaw_cannot_help(center):
-                # The visible mask is a clipped slice whose centroid yaw
-                # cannot drive to center (both sides clipped, oversized, or
-                # mass pinned at a clipped top edge).  Standoff first; the
-                # drift path re-enters centering after the view opens up.
-                self._phase = _Phase.ASCEND
+            if error_x is None or self._yaw_cannot_help(center):
+                # A clipped/oversized plate does not provide a trustworthy
+                # centroid.  Zoom out without changing phase, then retry J1;
+                # the logo itself is intentionally not used as a center
+                # target because it is offset on the board.
                 self._center_streak = 0
-            elif abs(error_x) <= self.center_threshold:
-                self._center_streak += 1
-                if self._center_streak < self.confirmation_frames:
-                    return self._emit(
-                        ActionKind.OBSERVE,
+                if self._center_zoom_backoffs >= self.max_zoom_out_backoffs:
+                    return self._terminate(
+                        ActionKind.STAGNATED,
+                        "cannot establish a usable center-camera board "
+                        "centroid after bounded joints-2-4 zoom-out",
                         "center_camera",
-                        reason=(
-                            "J1 center candidate: confirm in a fresh "
-                            "center-camera frame"
-                        ),
                     )
-                self._phase = _Phase.ALIGN
-            else:
+                self._center_zoom_backoffs += 1
+                return self._emit(
+                    ActionKind.BACKOFF,
+                    "center_camera",
+                    axial=1.0,
+                    scale=1.5,
+                    reason=(
+                        "board centroid is clipped or unavailable; zoom out "
+                        "with joints 2-4 before retrying J1 centering"
+                    ),
+                )
+            if abs(error_x) > self.center_threshold:
                 self._center_streak = 0
                 direction = -math.copysign(1.0, error_x)
                 scale = min(
@@ -334,22 +338,223 @@ class AdaptiveViewpointPlanner:
                     ),
                 )
 
-        if self._phase is _Phase.ALIGN:
-            # Strict ordering: J6 long-side alignment runs on its own, after
-            # J1 centering is confirmed and before any clearance motion.  A
-            # single-frame estimate is never acted on; two consecutive fresh
-            # frames must agree on the correction sign first.
-            if not self._roll_available(center):
-                self._phase = _Phase.ASCEND
-            elif self._roll_confirmed():
-                return self._emit_roll(center)
-            else:
-                return self._emit_roll_confirm_observe(
-                    "J6 long-side candidate: confirm the signed estimate "
-                    "in a second fresh frame"
+            self._center_streak += 1
+            if self._center_streak < self.confirmation_frames:
+                return self._emit(
+                    ActionKind.OBSERVE,
+                    "center_camera",
+                    reason=(
+                        "J1 center candidate: confirm in a fresh "
+                        "center-camera frame"
+                    ),
                 )
+            self._phase = _Phase.ALIGN
+            self._roll_confirm_sign = 0.0
+            self._roll_confirm_streak = 0
+            self._aligned_confirm_streak = 0
 
-        return self._ascend(center)
+        # ALIGN owns J6.  A bounded fallback may explicitly return to CENTER,
+        # but once alignment advances to LEVEL no later phase can issue J6 or J1.
+        if self._phase is _Phase.ALIGN:
+            return self._align(center)
+
+        raise RuntimeError(f"unhandled viewpoint-search phase {self._phase.value}")
+
+    def mark_level_complete(self) -> None:
+        """Acknowledge that the wrapper finished its joints-2--4 leveling.
+
+        The acknowledgement is deliberately explicit: a pre-level full frame
+        must never terminate the policy.  The next fresh center frame is then
+        evaluated immediately in ``ASCEND``.
+        """
+
+        if self._terminal_action is not None:
+            return
+        if self._phase is not _Phase.LEVEL:
+            raise ValueError(
+                "level completion is only valid in the j2_4_level phase"
+            )
+        self._phase = _Phase.ASCEND
+        self._stall_streak = 0
+
+    def request_relevel(self) -> None:
+        """Return ASCEND to LEVEL when fresh TF says top-down was lost."""
+
+        if self._terminal_action is not None:
+            return
+        if self._phase is not _Phase.ASCEND:
+            raise ValueError(
+                "re-leveling is only valid in the ascend_clearance phase"
+            )
+        self._phase = _Phase.LEVEL
+        self._stall_streak = 0
+
+    def request_recenter(self) -> None:
+        """Re-enter visual J1/J6 correction after Cartesian IK drift.
+
+        Leveling and clearance are requested through the Cartesian controller,
+        which may distribute a pose correction through J1 or J6.  That is not
+        a reason to fail the search: return to the measured visual loop and
+        restore centering and two-degree long-axis alignment before continuing.
+        """
+
+        if self._terminal_action is not None:
+            return
+        if self._phase not in {_Phase.LEVEL, _Phase.ASCEND}:
+            raise ValueError(
+                "re-centering is only valid after alignment has completed"
+            )
+        self._phase = _Phase.CENTER
+        self._center_streak = 0
+        self._aligned_confirm_streak = 0
+        self._roll_confirm_sign = 0.0
+        self._roll_confirm_streak = 0
+
+    def mark_clearance_partial(
+        self, action: ViewpointAction, *, reason: str
+    ) -> None:
+        """Acknowledge a safe partial +Z move and replan from fresh vision."""
+
+        if action.kind is not ActionKind.UP_CLEARANCE:
+            raise ValueError(
+                "partial clearance outcome does not match an UP_CLEARANCE action"
+            )
+        if self._terminal_action is not None:
+            return
+        if self._phase is not _Phase.ASCEND:
+            raise ValueError(
+                "partial clearance outcome is only valid during ASCEND"
+            )
+        if (
+            self._pending_clearance_id is None
+            or action.action_id != self._pending_clearance_id
+        ):
+            raise ValueError(
+                "partial clearance outcome is stale or does not match the "
+                "pending UP_CLEARANCE action"
+            )
+        self._pending_clearance_id = None
+        self._partial_clearance_reason = str(reason)
+
+    def _align(self, report: MaskReport | None) -> ViewpointAction:
+        """Align the board long axis with J6, or use bounded zoom fallback."""
+
+        if report is None or not report.seen:
+            self._aligned_confirm_streak = 0
+            return self._alignment_fallback(
+                report,
+                "center-camera plate estimate unavailable"
+            )
+
+        angle = float(report.orientation_deg)
+        reliable = report.long_axis_ratio >= self.min_long_axis_ratio
+        error_x = self._steering_error(report)
+        if (
+            reliable
+            and abs(angle) <= self.roll_align_threshold_deg
+            and error_x is not None
+            and abs(error_x) > self.center_threshold
+        ):
+            self._aligned_confirm_streak = 0
+            return self._alignment_fallback(
+                report,
+                "J6 changed the centered projection by "
+                f"{error_x:+.3f}",
+            )
+        if reliable and abs(angle) <= self.roll_align_threshold_deg:
+            self._aligned_confirm_streak += 1
+            if self._aligned_confirm_streak < self.roll_confirmation_frames:
+                return self._emit(
+                    ActionKind.OBSERVE,
+                    "center_camera",
+                    reason=(
+                        "J6 aligned candidate: confirm the long axis in a "
+                        "second fresh center-camera frame"
+                    ),
+                )
+            self._phase = _Phase.LEVEL
+            return self._emit(
+                ActionKind.OBSERVE,
+                "center_camera",
+                reason=(
+                    f"J6 long axis aligned within {self.roll_align_threshold_deg:.1f} "
+                    "deg; waiting for joints 2-4 leveling"
+                ),
+            )
+
+        self._aligned_confirm_streak = 0
+        if not reliable:
+            return self._alignment_fallback(
+                report,
+                "long/short edge ambiguous at ratio "
+                f"{report.long_axis_ratio:.2f}"
+            )
+
+        if self._roll_moves >= self.max_roll_moves:
+            return self._alignment_fallback(
+                report,
+                self._roll_unavailable_reason
+                or "bounded J6 alignment budget exhausted",
+            )
+
+        if self._roll_confirm_observes >= 6:
+            return self._alignment_fallback(
+                report,
+                "signed J6 estimate did not stabilize across fresh frames",
+            )
+
+        self._update_roll_confirmation(report)
+        if self._roll_confirmed():
+            return self._emit_roll(report)
+        return self._emit_roll_confirm_observe(
+            "J6 long-side candidate: confirm the signed estimate in a "
+            "second fresh frame"
+        )
+
+    def _alignment_fallback(
+        self, report: MaskReport | None, detail: str
+    ) -> ViewpointAction:
+        error_x = self._steering_error(report) if report is not None else None
+        if (
+            self._roll_j1_fallback_allowed
+            and error_x is not None
+            and abs(error_x) > self.center_threshold
+            and self._recenter_entries < self.max_recenter_entries
+        ):
+            self._recenter_entries += 1
+            self._phase = _Phase.CENTER
+            self._center_streak = 0
+            direction = -math.copysign(1.0, error_x)
+            scale = min(
+                self.max_yaw_scale,
+                max(self.min_yaw_scale, self.yaw_gain * abs(error_x)),
+            )
+            return self._emit_yaw(
+                direction,
+                scale,
+                reason=(
+                    f"J6 alignment fallback ({detail}); bounded J1 "
+                    f"re-centering for horizontal error {error_x:+.3f}"
+                ),
+            )
+        if self._alignment_zoom_backoffs < self.max_zoom_out_backoffs:
+            self._alignment_zoom_backoffs += 1
+            return self._emit(
+                ActionKind.BACKOFF,
+                "center_camera",
+                axial=1.0,
+                scale=1.5,
+                reason=(
+                    f"J6 alignment fallback: {detail}; bounded joints-2-4 "
+                    "zoom-out and re-estimate"
+                ),
+            )
+        return self._terminate(
+            ActionKind.STAGNATED,
+            "cannot establish a reliable, aligned center-camera long axis "
+            f"after bounded J1/J2-4 fallback ({detail})",
+            "center_camera",
+        )
 
     def mark_yaw_unavailable(
         self,
@@ -397,7 +602,7 @@ class AdaptiveViewpointPlanner:
             # Increasing standoff shrinks the projection, so less yaw is
             # needed afterwards; try that once before giving up.
             self._center_reject_fallbacks += 1
-            self._phase = _Phase.ASCEND
+            self._phase = _Phase.CENTER
             self._center_streak = 0
             self._force_ascend_once = True
             return
@@ -417,9 +622,9 @@ class AdaptiveViewpointPlanner:
         """Disable J6 for this search and route the next frame to fallback.
 
         The wrapper calls this only after a direct J6 preflight rejection or a
-        safely reversed J6 command. A useful horizontal error may then use J1;
-        otherwise ASCEND enlarges the view through the joints 2-4 Cartesian
-        standoff path.
+        safely reversed J6 command.  J6 is then permanently disabled for this
+        search, but bounded J1/zoom fallback must still establish an aligned
+        image before the one-way phase machine may advance to LEVEL.
         """
 
         if action.kind is not ActionKind.CAMERA_ROLL:
@@ -437,8 +642,9 @@ class AdaptiveViewpointPlanner:
         self._roll_moves = self.max_roll_moves
         self._roll_unavailable_reason = str(reason)
         self._roll_j1_fallback_allowed = bool(allow_j1_fallback)
-        self._phase = _Phase.ASCEND
+        self._phase = _Phase.ALIGN
         self._stall_streak = 0
+        self._aligned_confirm_streak = 0
 
     # ------------------------------------------------------------------
     # Phase bodies
@@ -446,6 +652,7 @@ class AdaptiveViewpointPlanner:
     def _sweep(self, reports: Mapping[str, MaskReport]) -> ViewpointAction:
         self._phase = _Phase.ACQUIRE
         self._center_streak = 0
+        self._aligned_confirm_streak = 0
         direction = self._sweep_direction or self._side_camera_yaw_hint(reports)
         self._sweep_direction = direction
         return self._emit_yaw(
@@ -457,19 +664,29 @@ class AdaptiveViewpointPlanner:
             ),
         )
 
-    def _ascend(self, report: MaskReport) -> ViewpointAction:
-        self._force_ascend_once = False
-        if not report.seen:
+    def _ascend(self, report: MaskReport | None) -> ViewpointAction:
+        """Increase top-view clearance without revisiting J1 or J6."""
+
+        if self._partial_clearance_reason is not None:
+            # The reached measured pose is safe.  Do not blindly replace +Z
+            # with optical back-away: once top-down, those vectors are nearly
+            # identical.  Clear the diagnostic and let this fresh report pick
+            # translation, clearance, observation, or immediate completion.
+            self._partial_clearance_reason = None
+
+        if report is None or not report.seen:
+            self._stall_streak = 0
             return self._emit(
                 ActionKind.UP_CLEARANCE,
                 "center_camera",
                 axial=1.0,
                 scale=2.0,
                 reason=(
-                    "insignia-only view during ascend: plate mask unusable; "
-                    "continue increasing standoff"
+                    "post-level center view has no usable plate mask; "
+                    "increase joints-2-4 top-view clearance"
                 ),
             )
+
         edges = report.edges
         bottom_blocked = (
             "bottom" in edges or report.artificial_bottom_contact
@@ -479,209 +696,121 @@ class AdaptiveViewpointPlanner:
             report.area_frac > self.max_goal_area_frac
             or has_opposite_edges(edges)
         )
-        clipped = bool(edges) or report.artificial_bottom_contact
-        # ``MaskReport.full`` uses the base context pad. Downstream IVM needs
-        # additional room for NIC cards and SC hardware which protrude beyond
-        # the dark plate component. If the plate only barely clears that pad,
-        # continue the same bounded retreat/clearance ladder instead of
-        # observing until stagnation.
-        survey_context_tight = (
-            min(report.clearance_px)
-            < 1.50 * float(report.context_pad_px)
-        )
-        roll_available = self._roll_available(report)
-        orientation_ambiguous = (
-            report.long_axis_ratio < self.min_long_axis_ratio
-        )
-        roll_exhausted = (
-            self._roll_moves >= self.max_roll_moves
-            and abs(report.orientation_deg) > self.roll_align_threshold_deg
-        )
-        j6_unavailable = orientation_ambiguous or roll_exhausted
+        clipped = bool(edges)
 
-        # If J6 cannot select a trustworthy long edge, use a measured
-        # horizontal error to improve the view with J1 instead.  This lower
-        # threshold is intentional: the fallback should not leave a moderately
-        # off-center board parked against the gripper mask merely because the
-        # normal ascend re-center threshold has not yet been crossed.
-        fallback_error_x = self._steering_error(report)
+        # A lower-edge-only obstruction benefits from a bounded optical-axis
+        # retreat.  It is a J2--J4 fallback, not an opportunity to retry J6.
         if (
-            j6_unavailable
-            and self._roll_j1_fallback_allowed
-            and fallback_error_x is not None
-            and abs(fallback_error_x) > self.center_threshold
-            and not self._yaw_cannot_help(report)
-            and self._recenter_entries < self.max_recenter_entries
+            bottom_blocked
+            and not top_blocked
+            and not oversized
+            and self._clearance_zoom_backoffs < self.max_zoom_out_backoffs
         ):
-            self._recenter_entries += 1
-            self._phase = _Phase.CENTER
-            self._center_streak = 0
-            direction = -math.copysign(1.0, fallback_error_x)
-            scale = min(
-                self.max_yaw_scale,
-                max(
-                    self.min_yaw_scale,
-                    self.yaw_gain * abs(fallback_error_x),
-                ),
-            )
-            return self._emit_yaw(
-                direction,
-                scale,
-                reason=(
-                    "J6 long-edge alignment unavailable; J1 fallback for "
-                    f"horizontal error {fallback_error_x:+.3f}"
-                ),
-            )
-
-        # With no useful J1 correction, enlarge the view through an
-        # optical-axis retreat (the joints 2-4 zoom-out path) and re-estimate
-        # the plate aspect before allowing another J6 decision.
-        if (
-            j6_unavailable
-            and self._zoom_out_backoffs < self.max_zoom_out_backoffs
-            and report.area_frac >= self.min_goal_area_frac
-            and (bottom_blocked or not clipped)
-        ):
-            self._zoom_out_backoffs += 1
-            detail = (
-                f"long/short edge ambiguous at ratio {report.long_axis_ratio:.2f}"
-                if orientation_ambiguous
-                else (
-                    self._roll_unavailable_reason
-                    or "bounded J6 correction budget exhausted"
-                )
-            )
+            self._clearance_zoom_backoffs += 1
+            self._stall_streak = 0
             return self._emit(
                 ActionKind.BACKOFF,
                 "center_camera",
                 axial=1.0,
                 scale=1.5,
                 reason=(
-                    f"J6 alignment fallback: {detail}; zoom out with the "
-                    "joints 2-4 Cartesian path and re-estimate"
+                    "post-level lower-edge obstruction; bounded joints-2-4 "
+                    "optical-axis zoom-out"
                 ),
             )
+
+        # Leveling changes camera pitch about the TCP and can shift the board
+        # projection even though J1 and J6 remain fixed.  Repair a one-sided
+        # clip with bounded camera-plane motion through the post-level
+        # joints-2--4 Cartesian path before spending slow clearance moves.
         if (
-            not clipped
-            and survey_context_tight
-            and report.area_frac >= self.min_goal_area_frac
+            clipped
+            and not oversized
+            and self._postlevel_translates < self.max_postlevel_translates
         ):
-            zoom_exhausted = (
-                self._zoom_out_backoffs >= self.max_zoom_out_backoffs
+            direction_x = (
+                (-1.0 if "left" in edges else 0.0)
+                + (1.0 if "right" in edges else 0.0)
             )
-            if not zoom_exhausted:
-                self._zoom_out_backoffs += 1
+            direction_y = (
+                (-1.0 if "top" in edges else 0.0)
+                + (1.0 if "bottom" in edges else 0.0)
+            )
+            direction_norm = math.hypot(direction_x, direction_y)
+            if direction_norm > 1e-9:
+                self._postlevel_translates += 1
+                self._stall_streak = 0
+                error_scale = max(
+                    abs(float(report.center_error[0])),
+                    abs(float(report.center_error[1])),
+                )
+                scale = min(2.0, max(1.0, 2.0 * error_scale))
+                return self._emit(
+                    ActionKind.TRANSLATE,
+                    "center_camera",
+                    image=(
+                        direction_x / direction_norm,
+                        direction_y / direction_norm,
+                    ),
+                    scale=scale,
+                    reason=(
+                        "post-level board projection is clipped on one side; "
+                        "re-center with bounded joints 2-4 camera-plane motion"
+                    ),
+                )
+
+        if clipped or oversized or bottom_blocked:
+            self._stall_streak = 0
+            scale = 1.5
+            if oversized and self.max_goal_area_frac > 0.0:
+                scale = min(
+                    self.max_ascend_scale,
+                    max(1.5, report.area_frac / self.max_goal_area_frac),
+                )
+            if (
+                bottom_blocked
+                and self._clearance_zoom_backoffs
+                >= self.max_zoom_out_backoffs
+            ):
+                scale = max(scale, 2.5)
             return self._emit(
-                (
-                    ActionKind.UP_CLEARANCE
-                    if zoom_exhausted
-                    else ActionKind.BACKOFF
-                ),
+                ActionKind.UP_CLEARANCE,
                 "center_camera",
                 axial=1.0,
-                scale=2.0 if zoom_exhausted else 1.5,
+                scale=scale,
                 reason=(
-                    "IVM survey context remains tight after bounded zoom; "
-                    "increase base +Z clearance"
-                    if zoom_exhausted
-                    else (
-                        "plate fits but NIC/SC component context is tight; "
-                        "zoom out with joints 2-4"
-                    )
+                    "ascend with joints 2-4 until the complete center-camera "
+                    "board boundary fits"
                 ),
             )
-        if not clipped and not oversized:
-            if report.area_frac < self.min_goal_area_frac:
-                return self._terminate(
-                    ActionKind.STAGNATED,
-                    "board is fully inside the frame but below the detail "
-                    f"threshold (area {report.area_frac:.3f} < "
-                    f"{self.min_goal_area_frac:.3f}); this policy never "
-                    "approaches the board - lower the survey standoff",
-                    "center_camera",
-                )
-            if roll_available:
-                if self._roll_confirmed():
-                    return self._emit_roll(report)
-                return self._emit_roll_confirm_observe(
-                    "J6 long-side candidate during clearance: confirm "
-                    "the signed estimate in a second fresh frame"
-                )
-            # Fully framed at usable scale yet not complete: the remaining
-            # blockers (shape, transient occlusion) are not clearance
-            # problems.  Confirm on fresh frames, then stop honestly.
-            self._stall_streak += 1
-            if self._stall_streak >= self.max_stall_frames:
-                return self._terminate(
-                    ActionKind.STAGNATED,
-                    "board framed at usable scale but the completeness "
-                    f"predicate still fails ({', '.join(report.failure_reasons) or 'unknown'})",
-                    "center_camera",
-                )
-            return self._emit(
-                ActionKind.OBSERVE,
+
+        if report.area_frac < self.min_goal_area_frac:
+            return self._terminate(
+                ActionKind.STAGNATED,
+                "board is fully inside the center frame but below the detail "
+                f"threshold (area {report.area_frac:.3f} < "
+                f"{self.min_goal_area_frac:.3f})",
                 "center_camera",
-                reason=(
-                    "board framed but not yet complete; re-checking on a "
-                    "fresh frame"
-                ),
             )
-        self._stall_streak = 0
-        if bottom_blocked and roll_available:
-            # Gripper/bottom-band overlap while the board is rotated in the
-            # image: aligning the board's long axis with the frame moves its
-            # body out of the gripper region far more cheaply than travel.
-            if self._roll_confirmed():
-                return self._emit_roll(report)
-            return self._emit_roll_confirm_observe(
-                "J6 long-side candidate under gripper overlap: confirm "
-                "the signed estimate in a second fresh frame"
-            )
-        if bottom_blocked and not top_blocked and not oversized:
-            # The board is drifting into the lower frame/gripper band while
-            # the top has clearance.  A pure optical-axis retreat shrinks the
-            # projection about its current position instead of pushing it
-            # further down-image the way a +Z step can.
-            zoom_exhausted = (
-                self._zoom_out_backoffs >= self.max_zoom_out_backoffs
-            )
-            if not zoom_exhausted:
-                self._zoom_out_backoffs += 1
-            return self._emit(
-                (
-                    ActionKind.UP_CLEARANCE
-                    if zoom_exhausted
-                    else ActionKind.BACKOFF
-                ),
+
+        # No clipping remains, but MaskReport.full still rejects shape or
+        # detail.  Motion cannot repair a transient segmentation result, so
+        # re-observe briefly rather than adding unrequested context margin.
+        self._stall_streak += 1
+        if self._stall_streak >= self.max_stall_frames:
+            return self._terminate(
+                ActionKind.STAGNATED,
+                "board boundary is framed but the center-camera full "
+                "predicate still fails "
+                f"({', '.join(report.failure_reasons) or 'unknown'})",
                 "center_camera",
-                axial=1.0,
-                # Settling dominates per-move wall time, so continuing +Z
-                # ascent takes larger steps than the bounded retreats.
-                scale=2.5 if zoom_exhausted else 1.5,
-                reason=(
-                    "bounded optical-axis zoom-out exhausted; use joints 2-4 "
-                    "base +Z clearance instead of repeating the same retreat"
-                    if zoom_exhausted
-                    else (
-                        "ascend: lower edge or gripper-band contact with a "
-                        "clear top edge; retreat along the optical axis"
-                    )
-                ),
-            )
-        scale = 1.5
-        if oversized and self.max_goal_area_frac > 0.0:
-            scale = min(
-                self.max_ascend_scale,
-                max(1.5, report.area_frac / self.max_goal_area_frac),
             )
         return self._emit(
-            ActionKind.UP_CLEARANCE,
+            ActionKind.OBSERVE,
             "center_camera",
-            axial=1.0,
-            scale=scale,
             reason=(
-                "ascend: increase base +Z clearance until the complete "
-                "board fits"
+                "board boundary is framed but not yet usable; re-check a "
+                "fresh center-camera frame"
             ),
         )
 
@@ -762,20 +891,19 @@ class AdaptiveViewpointPlanner:
     # ------------------------------------------------------------------
     # Evidence helpers
 
-    def _goal_camera(self, reports: Mapping[str, MaskReport]) -> str | None:
-        candidates = [
-            (name, report)
-            for name, report in reports.items()
-            if name in self.expected_cameras
-            if report.seen
+    def _center_is_goal(self, report: MaskReport | None) -> bool:
+        """Completion is exactly the post-level full center-board mask.
+
+        Phase ordering already proves that J1 centering, two-degree J6
+        alignment, and physical top-down leveling completed.  Do not make the
+        terminal image pass the noisy long-axis estimator a second time.
+        """
+
+        return bool(
+            report is not None
+            and report.seen
             and report.full
-            and self.min_goal_area_frac
-            <= report.area_frac
-            <= self.max_goal_area_frac
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item[1].quality_score)[0]
+        )
 
     def _board_evidence(self, report: MaskReport | None) -> bool:
         if report is None:
@@ -867,6 +995,7 @@ class AdaptiveViewpointPlanner:
         *,
         axial: float = 0.0,
         aim: tuple[float, float] = (0.0, 0.0),
+        image: tuple[float, float] = (0.0, 0.0),
         scale: float = 1.0,
         angular: float = 0.0,
         reason: str,
@@ -875,6 +1004,7 @@ class AdaptiveViewpointPlanner:
             self._next_action_id,
             kind,
             camera,
+            image_direction=image,
             axial_direction=axial,
             aim_direction=aim,
             translation_scale=scale,
@@ -886,11 +1016,27 @@ class AdaptiveViewpointPlanner:
             self._pending_yaw_id = None
         if kind is not ActionKind.CAMERA_ROLL:
             self._pending_roll_id = None
+        if kind is ActionKind.UP_CLEARANCE:
+            self._pending_clearance_id = action.action_id
+        else:
+            self._pending_clearance_id = None
+        if action.moves_robot:
+            # The viewpoint changes with every executed motion, so the
+            # signed J6 estimate must be confirmed again from fresh frames.
+            self._roll_confirm_observes = 0
+            self._roll_confirm_sign = 0.0
+            self._roll_confirm_streak = 0
+            self._aligned_confirm_streak = 0
         return action
 
     def _terminate(
         self, kind: ActionKind, reason: str, camera: str | None = None
     ) -> ViewpointAction:
+        if kind is ActionKind.DONE:
+            self._phase = _Phase.DONE
+        self._pending_yaw_id = None
+        self._pending_roll_id = None
+        self._pending_clearance_id = None
         self._terminal_action = ViewpointAction(
             self._next_action_id,
             kind,
