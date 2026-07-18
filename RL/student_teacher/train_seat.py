@@ -43,6 +43,7 @@ EVAL_CLASS_WEIGHTS = {
     "mid_tail": 0.10,
     "mastered_deep": 0.05,
 }
+EVAL_CONTACT_VARIANTS = 3
 
 
 def fixed_eval_class_sequence(episodes: int, seed: int) -> list[str]:
@@ -64,6 +65,27 @@ def fixed_eval_class_sequence(episodes: int, seed: int) -> list[str]:
     rng = np.random.default_rng(int(seed))
     rng.shuffle(classes)
     return classes
+
+
+def fixed_eval_case_sequence(
+        episodes: int, seed: int) -> list[tuple[str, int]]:
+    """Pair the exact class mix with balanced compiled contact variants."""
+    class_sequence = fixed_eval_class_sequence(episodes, seed)
+    class_counts = {
+        name: class_sequence.count(name) for name in EVAL_CLASS_WEIGHTS}
+    cases: list[tuple[str, int]] = []
+    for class_index, name in enumerate(EVAL_CLASS_WEIGHTS):
+        for occurrence in range(class_counts[name]):
+            # The 60- and 180-case suites have per-class counts divisible by
+            # three. The class offset also balances the three singleton strata
+            # in the nine-episode cluster smoke.
+            variant = (
+                occurrence + class_index + int(seed)
+            ) % EVAL_CONTACT_VARIANTS
+            cases.append((name, variant))
+    rng = np.random.default_rng(int(seed))
+    rng.shuffle(cases)
+    return cases
 
 
 def checkpoint_selection_score(metrics: dict[str, float]) -> tuple[float, ...]:
@@ -206,14 +228,25 @@ def evaluate_seat(model, *, stage: str, episodes: int, seed: int):
     """Run the fixed deployment-matched suite for checkpoint comparison."""
     from RL.student_teacher.seat_env import make_seat_env
 
-    env = make_seat_env("deployment", seed=seed, domain_randomization=True)
-    reset_classes = fixed_eval_class_sequence(episodes, seed)
+    # `_compiled_seed_for_stage` selects a contact geometry by seed modulo 3.
+    # Keep one persistent environment per geometry, then use the frozen case
+    # sequence to select among them. A single environment here would silently
+    # evaluate every checkpoint on only one compiled contact geometry.
+    variant_seed_base = int(seed) - int(seed) % EVAL_CONTACT_VARIANTS
+    envs = [
+        make_seat_env(
+            "deployment", seed=variant_seed_base + variant,
+            domain_randomization=True)
+        for variant in range(EVAL_CONTACT_VARIANTS)
+    ]
+    reset_cases = fixed_eval_case_sequence(episodes, seed)
     traces: list[dict[str, Any]] = []
     final_depths, max_forces, final_lateral, steps_to_seat = [], [], [], []
     status_counts: dict[str, int] = {}
     jam_count = 0
     try:
-        for episode, reset_class in enumerate(reset_classes):
+        for episode, (reset_class, variant) in enumerate(reset_cases):
+            env = envs[variant]
             obs, reset_info = env.reset(
                 seed=seed + episode,
                 options={"seat_reset_class": reset_class},
@@ -258,6 +291,8 @@ def evaluate_seat(model, *, stage: str, episodes: int, seed: int):
             traces.append({
                 "episode": episode,
                 "reset_class": reset_class,
+                "contact_variant_index": int(variant),
+                "compiled_contact_seed": int(env._compiled_seed),
                 "start_depth_mm": 1e3 * start_depth,
                 "start_actor_lateral_mm": 1e3 * float(reset_info.get(
                     "seat_reset_delivered_actor_lateral_m", float("nan"))),
@@ -268,7 +303,8 @@ def evaluate_seat(model, *, stage: str, episodes: int, seed: int):
                 "max_force_n": max_force,
             })
     finally:
-        env.close()
+        for env in envs:
+            env.close()
 
     n = max(int(episodes), 1)
     metrics = {
@@ -292,6 +328,27 @@ def evaluate_seat(model, *, stage: str, episodes: int, seed: int):
         successes = sum(row["status"] == "success" for row in rows)
         metrics[f"eval/{reset_class}_success_rate"] = (
             successes / len(rows) if rows else float("nan"))
+        for status in ("bad_collision", "force_abort", "rotation_guard"):
+            metrics[f"eval/{reset_class}_{status}_rate"] = (
+                sum(row["status"] == status for row in rows) / len(rows)
+                if rows else float("nan"))
+        metrics[f"eval/{reset_class}_max_force_n_p95"] = _finite_stats(
+            [row["max_force_n"] for row in rows], percentile=95)
+    for compiled_seed in sorted({
+            row["compiled_contact_seed"] for row in traces}):
+        rows = [
+            row for row in traces
+            if row["compiled_contact_seed"] == compiled_seed
+        ]
+        prefix = f"eval/contact_{compiled_seed}"
+        metrics[f"{prefix}_success_rate"] = (
+            sum(row["status"] == "success" for row in rows) / len(rows))
+        metrics[f"{prefix}_safety_failure_rate"] = (
+            sum(row["status"] in {
+                "bad_collision", "force_abort", "rotation_guard",
+            } for row in rows) / len(rows))
+        metrics[f"{prefix}_max_force_n_p95"] = _finite_stats(
+            [row["max_force_n"] for row in rows], percentile=95)
     return metrics, traces, status_counts
 
 
@@ -520,7 +577,8 @@ def main():
                     f"{int(self.num_timesteps)}\n")
             if wandb_run is not None:
                 columns = [
-                    "episode", "reset_class", "start_depth_mm",
+                    "episode", "reset_class", "compiled_contact_seed",
+                    "start_depth_mm",
                     "start_actor_lateral_mm", "start_physical_lateral_mm",
                     "max_depth_mm", "status", "max_force_n",
                 ]

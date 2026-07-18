@@ -3,6 +3,7 @@ from collections import Counter
 from RL.student_teacher.train_seat import (
     SeatCurriculumState,
     checkpoint_selection_score,
+    fixed_eval_case_sequence,
     fixed_eval_class_sequence,
 )
 
@@ -22,6 +23,28 @@ def test_fixed_evaluation_suite_has_exact_class_counts():
     }
     assert fixed_eval_class_sequence(60, 90_000) == (
         fixed_eval_class_sequence(60, 90_000))
+
+
+def test_fixed_evaluation_cases_balance_all_contact_variants():
+    for episodes, seed in ((9, 1_600), (60, 90_000), (180, 190_000)):
+        cases = fixed_eval_case_sequence(episodes, seed)
+        assert cases == fixed_eval_case_sequence(episodes, seed)
+        assert Counter(variant for _, variant in cases) == {
+            0: episodes // 3,
+            1: episodes // 3,
+            2: episodes // 3,
+        }
+
+    periodic = fixed_eval_case_sequence(60, 90_000)
+    for reset_class, count in {
+            "live_shallow": 42,
+            "centered_shallow": 9,
+            "mid_tail": 6,
+            "mastered_deep": 3,
+    }.items():
+        assert Counter(
+            variant for name, variant in periodic if name == reset_class
+        ) == {0: count // 3, 1: count // 3, 2: count // 3}
 
 
 def test_sbc_updates_only_on_shared_hundred_episode_windows():
