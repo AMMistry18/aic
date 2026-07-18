@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ai.tar2;
+
+// Minimal parameters for the fresh board-survey experiment. Add perception
+// and motion tuning fields only when the corresponding logic exists.
+message MoveToBoardSkillParams {
+  // Fresh camera snapshot wait budget. 0 uses 3 seconds.
+  double camera_timeout_seconds = 1;
+}
+
+message MoveToBoardSkillResult {
+  // True when the skill received fresh permitted camera images.
+  bool success = 1;
+  string message = 2;
+
+  // False until the future feedback loop declares the survey view ready.
+  bool done = 3;
+  uint32 num_cameras = 4;
+  repeated string camera_names = 5;
+  repeated string camera_summaries = 6;
+  double force_n = 7;
+}
