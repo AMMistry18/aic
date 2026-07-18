@@ -178,6 +178,38 @@ def test_board_above_finger_band_uses_physical_bottom_clearance():
     assert not report.artificial_bottom_contact
 
 
+def test_gripper_mask_reports_protected_envelope_overlap_and_escape():
+    ignore = np.zeros((240, 320), dtype=bool)
+    ignore[180:, :] = True
+
+    report = analyze_board(
+        frame(rect=(70, 50, 250, 180)),
+        ignore_bottom_frac=0.0,
+        context_pad_frac=0.05,
+        ignore_mask=ignore,
+    )
+
+    assert report.gripper_overlap_px > 0
+    assert report.gripper_clearance_px == 0.0
+    assert report.gripper_escape_direction[1] < -0.95
+    assert "gripper_mask_contact" in ivm_survey_rejection_reasons(report)
+
+
+def test_gripper_mask_reports_positive_clearance_when_separated():
+    ignore = np.zeros((240, 320), dtype=bool)
+    ignore[220:, :] = True
+
+    report = analyze_board(
+        frame(rect=(70, 50, 250, 180)),
+        ignore_bottom_frac=0.0,
+        context_pad_frac=0.05,
+        ignore_mask=ignore,
+    )
+
+    assert report.gripper_overlap_px == 0
+    assert report.gripper_clearance_px >= 20.0
+
+
 def test_dynamic_context_envelope_rejects_board_before_old_margin_contact():
     # The blob itself clears the old fixed 15px margin.  Its projected size asks
     # for more surrounding context so protruding components are not clipped.

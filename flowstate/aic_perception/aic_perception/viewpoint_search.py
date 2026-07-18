@@ -117,6 +117,10 @@ class AdaptiveViewpointPlanner:
         max_roll_scale: float = 4.5,
         max_zoom_out_backoffs: int = 2,
         max_postlevel_translates: int = 4,
+        max_occlusion_translates: int = 6,
+        max_scale_adjustments: int = 3,
+        min_gripper_clearance_px: float = 20.0,
+        survey_confirmation_frames: int = 2,
         # Live trace: the plate's true stable estimate sits at ratio
         # 1.16-1.24 at working standoff, while square-noise flicker stays
         # below ~1.10.  Trust above 1.15 and let the two-frame sign
@@ -155,6 +159,14 @@ class AdaptiveViewpointPlanner:
             raise ValueError("max_zoom_out_backoffs must be non-negative")
         if max_postlevel_translates < 0:
             raise ValueError("max_postlevel_translates must be non-negative")
+        if max_occlusion_translates < 0:
+            raise ValueError("max_occlusion_translates must be non-negative")
+        if max_scale_adjustments < 0:
+            raise ValueError("max_scale_adjustments must be non-negative")
+        if min_gripper_clearance_px < 0.0:
+            raise ValueError("min_gripper_clearance_px must be non-negative")
+        if survey_confirmation_frames < 1:
+            raise ValueError("survey_confirmation_frames must be positive")
         if min_long_axis_ratio <= 1.0:
             raise ValueError("min_long_axis_ratio must exceed 1.0")
         if roll_confirmation_frames < 1:
@@ -180,6 +192,10 @@ class AdaptiveViewpointPlanner:
         self.max_roll_scale = float(max_roll_scale)
         self.max_zoom_out_backoffs = int(max_zoom_out_backoffs)
         self.max_postlevel_translates = int(max_postlevel_translates)
+        self.max_occlusion_translates = int(max_occlusion_translates)
+        self.max_scale_adjustments = int(max_scale_adjustments)
+        self.min_gripper_clearance_px = float(min_gripper_clearance_px)
+        self.survey_confirmation_frames = int(survey_confirmation_frames)
         self.min_long_axis_ratio = float(min_long_axis_ratio)
         self.roll_confirmation_frames = int(roll_confirmation_frames)
         self.reset()
@@ -207,6 +223,13 @@ class AdaptiveViewpointPlanner:
         self._alignment_zoom_backoffs = 0
         self._clearance_zoom_backoffs = 0
         self._postlevel_translates = 0
+        self._occlusion_translates = 0
+        self._scale_adjustments = 0
+        self._survey_ready_streak = 0
+        self._gripper_motion_polarity = 1.0
+        self._pending_gripper_sample: tuple[int, float, float] | None = None
+        self._pending_yaw_feedback: tuple[float, float] | None = None
+        self._yaw_error_per_scale: float | None = None
         # Camera-plane +Y normally moves a fixed board upward in the image.
         # Keep this polarity learned from fresh post-motion frames instead of
         # assuming that every camera/controller calibration uses that sign.
@@ -252,11 +275,25 @@ class AdaptiveViewpointPlanner:
         # the joints-2--4 leveling move.  This intentionally ignores a full
         # side-camera frame and a pre-level full center frame.
         if self._phase is _Phase.ASCEND and self._center_is_goal(center):
-            return self._terminate(
-                ActionKind.DONE,
-                "first complete usable post-level center-camera view",
+            self._survey_ready_streak += 1
+            if self._survey_ready_streak >= self.survey_confirmation_frames:
+                return self._terminate(
+                    ActionKind.DONE,
+                    "strict gripper-clear IVM survey view confirmed in "
+                    f"{self.survey_confirmation_frames} fresh center-camera "
+                    "frames",
+                    "center_camera",
+                )
+            return self._emit(
+                ActionKind.OBSERVE,
                 "center_camera",
+                reason=(
+                    "strict center-camera survey candidate: confirm full "
+                    "board scale, alignment, context, and gripper clearance "
+                    "in one more fresh frame"
+                ),
             )
+        self._survey_ready_streak = 0
         if deadline_reached:
             return self._terminate(
                 ActionKind.DEADLINE,
@@ -291,6 +328,11 @@ class AdaptiveViewpointPlanner:
                 return self._sweep(reports)
 
             error_x = self._steering_error(center)
+            yaw_response_note = (
+                self._consume_yaw_response(error_x)
+                if error_x is not None
+                else ""
+            )
             if self._force_ascend_once:
                 self._force_ascend_once = False
                 self._center_streak = 0
@@ -330,17 +372,12 @@ class AdaptiveViewpointPlanner:
                 )
             if abs(error_x) > self.center_threshold:
                 self._center_streak = 0
-                direction = -math.copysign(1.0, error_x)
-                scale = min(
-                    self.max_yaw_scale,
-                    max(self.min_yaw_scale, self.yaw_gain * abs(error_x)),
-                )
-                return self._emit_yaw(
-                    direction,
-                    scale,
+                return self._emit_centering_yaw(
+                    error_x,
                     reason=(
                         f"J1 proportional centering: horizontal error "
                         f"{error_x:+.3f}"
+                        + (f"; {yaw_response_note}" if yaw_response_note else "")
                     ),
                 )
 
@@ -530,14 +567,8 @@ class AdaptiveViewpointPlanner:
             self._recenter_entries += 1
             self._phase = _Phase.CENTER
             self._center_streak = 0
-            direction = -math.copysign(1.0, error_x)
-            scale = min(
-                self.max_yaw_scale,
-                max(self.min_yaw_scale, self.yaw_gain * abs(error_x)),
-            )
-            return self._emit_yaw(
-                direction,
-                scale,
+            return self._emit_centering_yaw(
+                error_x,
                 reason=(
                     f"J6 alignment fallback ({detail}); bounded J1 "
                     f"re-centering for horizontal error {error_x:+.3f}"
@@ -581,6 +612,7 @@ class AdaptiveViewpointPlanner:
                 "yaw rejection is stale or does not match the pending action"
             )
         self._pending_yaw_id = None
+        self._pending_yaw_feedback = None
         if global_unavailable:
             self._terminate(
                 ActionKind.STAGNATED,
@@ -659,6 +691,9 @@ class AdaptiveViewpointPlanner:
         self._phase = _Phase.ACQUIRE
         self._center_streak = 0
         self._aligned_confirm_streak = 0
+        # An intervening acquisition sweep is not a response to the previous
+        # centering command, so it must not contaminate the learned J1 gain.
+        self._pending_yaw_feedback = None
         direction = self._sweep_direction or self._side_camera_yaw_hint(reports)
         self._sweep_direction = direction
         return self._emit_yaw(
@@ -695,7 +730,16 @@ class AdaptiveViewpointPlanner:
             )
 
         response_note = self._consume_vertical_response(report)
-        edges = report.edges
+        gripper_response_note = self._consume_gripper_response(report)
+        required_context = 1.25 * float(report.context_pad_px)
+        context_edges = {
+            edge
+            for edge, clearance in zip(
+                ("left", "top", "right", "bottom"), report.clearance_px
+            )
+            if float(clearance) < required_context
+        }
+        edges = frozenset(set(report.edges) | context_edges)
         bottom_blocked = (
             "bottom" in edges or report.artificial_bottom_contact
         )
@@ -706,6 +750,64 @@ class AdaptiveViewpointPlanner:
         )
         clipped = bool(edges)
 
+        # A complete plate silhouette is not enough for downstream NIC/SC
+        # perception when the camera-fixed gripper covers the task hardware.
+        # Move the protected board envelope away from the calibrated ignore
+        # mask before changing standoff.  The report supplies the desired board
+        # image displacement; a static board moves opposite the camera, hence
+        # the sign inversion below.
+        gripper_blocked = (
+            int(report.gripper_overlap_px) > 0
+            or float(report.gripper_clearance_px)
+            < self.min_gripper_clearance_px
+            or report.artificial_bottom_contact
+        )
+        if (
+            gripper_blocked
+            and not oversized
+            and self._occlusion_translates < self.max_occlusion_translates
+        ):
+            escape_x, escape_y = report.gripper_escape_direction
+            escape_norm = math.hypot(escape_x, escape_y)
+            if escape_norm < 1e-9:
+                escape_x, escape_y, escape_norm = 0.0, -1.0, 1.0
+            camera_x = (
+                -float(escape_x) / escape_norm * self._gripper_motion_polarity
+            )
+            camera_y = (
+                -float(escape_y) / escape_norm * self._gripper_motion_polarity
+            )
+            self._occlusion_translates += 1
+            self._stall_streak = 0
+            overlap_scale = min(
+                1.5,
+                max(1.0, 1.0 + int(report.gripper_overlap_px) / 20000.0),
+            )
+            action = self._emit(
+                ActionKind.TRANSLATE,
+                "center_camera",
+                image=(camera_x, camera_y),
+                scale=overlap_scale,
+                reason=(
+                    "protected task-board envelope intersects the calibrated "
+                    f"gripper mask (overlap={int(report.gripper_overlap_px)}px, "
+                    f"clearance={float(report.gripper_clearance_px):.1f}px); "
+                    "move the J2-4 camera projection along the shortest "
+                    "mask-escape direction"
+                    + (
+                        f"; {gripper_response_note}"
+                        if gripper_response_note
+                        else ""
+                    )
+                ),
+            )
+            self._pending_gripper_sample = (
+                int(report.gripper_overlap_px),
+                float(report.gripper_clearance_px),
+                float(action.image_direction[1]),
+            )
+            return action
+
         # Once top-down, a plate that is high or low in the center image is a
         # camera-position error, not a standoff error.  Move the camera in its
         # image plane through the J2--J4 Cartesian path before zooming out.
@@ -715,9 +817,11 @@ class AdaptiveViewpointPlanner:
         # polarity if the absolute vertical error got materially worse.
         error_y = float(report.center_error[1])
         vertical_clipped = top_blocked or bottom_blocked
-        vertical_misaligned = (
-            abs(error_y) > self.center_threshold or vertical_clipped
-        )
+        # Do not undo a deliberate mask-clear survey offset merely to put the
+        # board centroid at image Y=0.  Repair true edge/context clipping (or a
+        # gross >35% displacement); otherwise the protected-envelope servo is
+        # the authority for vertical placement.
+        vertical_misaligned = vertical_clipped or abs(error_y) > 0.35
         if (
             vertical_misaligned
             and not oversized
@@ -850,12 +954,25 @@ class AdaptiveViewpointPlanner:
             )
 
         if report.area_frac < self.min_goal_area_frac:
-            return self._terminate(
-                ActionKind.STAGNATED,
-                "board is fully inside the center frame but below the detail "
-                f"threshold (area {report.area_frac:.3f} < "
-                f"{self.min_goal_area_frac:.3f})",
+            if self._scale_adjustments >= self.max_scale_adjustments:
+                return self._terminate(
+                    ActionKind.STAGNATED,
+                    "board remains below the IVM detail scale after bounded "
+                    f"approach (area {report.area_frac:.3f} < "
+                    f"{self.min_goal_area_frac:.3f})",
+                    "center_camera",
+                )
+            self._scale_adjustments += 1
+            return self._emit(
+                ActionKind.APPROACH,
                 "center_camera",
+                axial=-1.0,
+                scale=1.0,
+                reason=(
+                    "board is fully framed but too small for robust NIC/SC "
+                    f"detail (area {report.area_frac:.3f}); bounded optical "
+                    "approach before rechecking gripper clearance"
+                ),
             )
 
         # No clipping remains, but MaskReport.full still rejects shape or
@@ -904,6 +1021,83 @@ class AdaptiveViewpointPlanner:
             f"({previous_error:+.3f} -> {current_error:+.3f}, commanded "
             f"image-y {commanded_direction:+.1f}); polarity reversed"
         )
+
+    def _consume_gripper_response(self, report: MaskReport) -> str:
+        """Validate mask-escape polarity from the next fresh center frame."""
+
+        pending = self._pending_gripper_sample
+        if pending is None:
+            return ""
+        self._pending_gripper_sample = None
+        previous_overlap, previous_clearance, commanded_y = pending
+        current_overlap = int(report.gripper_overlap_px)
+        current_clearance = float(report.gripper_clearance_px)
+        worsened = (
+            current_overlap > previous_overlap + 100
+            or (
+                previous_overlap == 0
+                and current_overlap == 0
+                and current_clearance + 2.0 < previous_clearance
+            )
+        )
+        if not worsened:
+            return (
+                "fresh frame validated mask escape "
+                f"(overlap {previous_overlap}->{current_overlap}px, "
+                f"clearance {previous_clearance:.1f}->{current_clearance:.1f}px)"
+            )
+        self._gripper_motion_polarity *= -1.0
+        return (
+            "fresh frame showed worse mask separation "
+            f"(overlap {previous_overlap}->{current_overlap}px, "
+            f"clearance {previous_clearance:.1f}->{current_clearance:.1f}px, "
+            f"commanded image-y {commanded_y:+.1f}); polarity reversed"
+        )
+
+    def _consume_yaw_response(self, error_x: float) -> str:
+        """Learn center-error response per signed J1 command scale."""
+
+        pending = self._pending_yaw_feedback
+        if pending is None:
+            return ""
+        self._pending_yaw_feedback = None
+        previous_error, signed_scale = pending
+        if abs(signed_scale) < 1e-9:
+            return ""
+        observed = (float(error_x) - previous_error) / signed_scale
+        if not math.isfinite(observed) or observed <= 0.02:
+            return "J1 response was not informative; retaining proportional gain"
+        if self._yaw_error_per_scale is None:
+            self._yaw_error_per_scale = observed
+        else:
+            self._yaw_error_per_scale = (
+                0.65 * self._yaw_error_per_scale + 0.35 * observed
+            )
+        return f"learned J1 image response {self._yaw_error_per_scale:.3f}/scale"
+
+    def _emit_centering_yaw(
+        self, error_x: float, *, reason: str
+    ) -> ViewpointAction:
+        """Issue a bounded J1 correction, using live response when known."""
+
+        direction = -math.copysign(1.0, error_x)
+        scale = min(
+            self.max_yaw_scale,
+            max(self.min_yaw_scale, self.yaw_gain * abs(error_x)),
+        )
+        if self._yaw_error_per_scale is not None:
+            desired_signed_scale = -0.85 * error_x / self._yaw_error_per_scale
+            direction = math.copysign(1.0, desired_signed_scale)
+            scale = min(
+                self.max_yaw_scale,
+                max(self.min_yaw_scale, abs(desired_signed_scale)),
+            )
+        action = self._emit_yaw(direction, scale, reason=reason)
+        self._pending_yaw_feedback = (
+            float(error_x),
+            float(action.aim_direction[0]) * float(action.angular_scale),
+        )
+        return action
 
     # ------------------------------------------------------------------
     # Roll alignment assist
@@ -990,10 +1184,24 @@ class AdaptiveViewpointPlanner:
         terminal image pass the noisy long-axis estimator a second time.
         """
 
+        if report is None or not report.seen or not report.full:
+            return False
+        required_context = 1.25 * float(report.context_pad_px)
         return bool(
-            report is not None
-            and report.seen
-            and report.full
+            self.min_goal_area_frac
+            <= float(report.area_frac)
+            <= self.max_goal_area_frac
+            and float(report.rectangularity) >= 0.72
+            and abs(float(report.center_error[0])) <= self.center_threshold
+            and report.logo_seen
+            and float(report.long_axis_ratio) >= self.min_long_axis_ratio
+            and abs(float(report.orientation_deg))
+            <= self.roll_align_threshold_deg
+            and not report.artificial_bottom_contact
+            and int(report.gripper_overlap_px) == 0
+            and float(report.gripper_clearance_px)
+            >= self.min_gripper_clearance_px
+            and min(report.clearance_px) >= required_context
         )
 
     def _board_evidence(self, report: MaskReport | None) -> bool:

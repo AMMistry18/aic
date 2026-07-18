@@ -243,8 +243,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         max_angular_displacement_rad = math.inf
         max_angular_travel_rad = math.inf
         planner = AdaptiveViewpointPlanner(
-            min_goal_area_frac=min_detail_area_frac,
-            max_goal_area_frac=0.45,
+            min_goal_area_frac=max(0.26, min_detail_area_frac),
+            max_goal_area_frac=0.36,
+            min_gripper_clearance_px=20.0,
+            survey_confirmation_frames=2,
             expected_cameras=tuple(sorted(self.config.camera_frames)),
         )
         logging.info(
@@ -254,7 +256,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             "stable_frames_configured=%d j6_min_ratio=%.2f "
             "j6_confirm_frames=%d j6_tolerance=%.1fdeg "
             "motion_envelopes=controller_native "
-            "completion=first_fresh_center_full_top_view",
+            "completion=two_fresh_strict_gripper_clear_center_survey_frames",
             sorted(self.config.camera_frames),
             margin_px,
             context_margin_frac,
@@ -398,7 +400,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     "long_axis_error=%+.1fdeg long_ratio=%.2f logo=%s "
                     "logo_center=(%.3f,%.3f) logo_area=%.4f reasons=%s "
                     "clearance=(%.0f,%.0f,%.0f,%.0f)px pad=%.0fpx "
-                    "gripper_mask_contact=%s stamp=%s",
+                    "gripper_mask_contact=%s gripper_overlap=%dpx "
+                    "gripper_clearance=%.1fpx escape=(%+.2f,%+.2f) stamp=%s",
                     iteration,
                     camera_name,
                     camera_report.seen,
@@ -423,6 +426,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     camera_report.clearance_px[3],
                     camera_report.context_pad_px,
                     camera_report.artificial_bottom_contact,
+                    camera_report.gripper_overlap_px,
+                    camera_report.gripper_clearance_px,
+                    camera_report.gripper_escape_direction[0],
+                    camera_report.gripper_escape_direction[1],
                     frame["stamp_ns"],
                 )
 
@@ -438,31 +445,70 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 and center_report is not None
                 and center_report.seen
             ):
-                previous_level_y, commanded_level_y = (
-                    pending_level_vertical_sample
-                )
-                current_level_y = float(center_report.center_error[1])
-                if (
-                    previous_level_y * current_level_y > 0.0
-                    and abs(current_level_y)
-                    > abs(previous_level_y) + 0.03
-                ):
-                    level_vertical_polarity *= -1.0
-                    logging.warning(
-                        "leveling vertical correction moved the board farther "
-                        "toward the frame edge (%+.3f -> %+.3f, commanded "
-                        "image-y %+.1f); reversing image-y polarity",
-                        previous_level_y,
-                        current_level_y,
-                        commanded_level_y,
+                feedback_mode = pending_level_vertical_sample[0]
+                if feedback_mode == "gripper":
+                    _, previous_overlap, previous_clearance, commanded_level_y = (
+                        pending_level_vertical_sample
                     )
+                    current_overlap = center_report.gripper_overlap_px
+                    current_clearance = center_report.gripper_clearance_px
+                    worsened = (
+                        current_overlap > previous_overlap + 100
+                        or (
+                            previous_overlap == 0
+                            and current_overlap == 0
+                            and current_clearance + 2.0 < previous_clearance
+                        )
+                    )
+                    if worsened:
+                        level_vertical_polarity *= -1.0
+                        logging.warning(
+                            "leveling mask escape worsened separation "
+                            "(overlap %d->%dpx, clearance %.1f->%.1fpx, "
+                            "commanded image-y %+.1f); reversing image-y "
+                            "polarity",
+                            previous_overlap,
+                            current_overlap,
+                            previous_clearance,
+                            current_clearance,
+                            commanded_level_y,
+                        )
+                    else:
+                        logging.info(
+                            "leveling mask escape validated by fresh center "
+                            "frame: overlap %d->%dpx clearance %.1f->%.1fpx",
+                            previous_overlap,
+                            current_overlap,
+                            previous_clearance,
+                            current_clearance,
+                        )
                 else:
-                    logging.info(
-                        "leveling vertical correction validated by fresh "
-                        "center frame: %+.3f -> %+.3f",
-                        previous_level_y,
-                        current_level_y,
+                    _, previous_level_y, commanded_level_y = (
+                        pending_level_vertical_sample
                     )
+                    current_level_y = float(center_report.center_error[1])
+                    if (
+                        previous_level_y * current_level_y > 0.0
+                        and abs(current_level_y)
+                        > abs(previous_level_y) + 0.03
+                    ):
+                        level_vertical_polarity *= -1.0
+                        logging.warning(
+                            "leveling vertical correction moved the board "
+                            "farther toward the frame edge (%+.3f -> %+.3f, "
+                            "commanded image-y %+.1f); reversing image-y "
+                            "polarity",
+                            previous_level_y,
+                            current_level_y,
+                            commanded_level_y,
+                        )
+                    else:
+                        logging.info(
+                            "leveling vertical correction validated by fresh "
+                            "center frame: %+.3f -> %+.3f",
+                            previous_level_y,
+                            current_level_y,
+                        )
                 pending_level_vertical_sample = None
 
             result.seen = any(item.seen for item in reports.values())
@@ -546,8 +592,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
 
             # Restrict terminal evidence to a freshly verified top-down center
-            # frame.  There is no later IVM survey predicate or stability streak:
-            # the first qualifying frame exits in this same iteration.
+            # frame.  Two consecutive strict survey frames are required before
+            # releasing the arm to downstream IVM and pregrasp.
             planning_reports = {
                 name: replace(
                     item,
@@ -572,8 +618,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.steer_camera = "center_camera"
                 result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
                 result.message = (
-                    "center camera has the complete board in the first fresh "
-                    "aligned top-down frame after "
+                    "center camera confirmed the complete, aligned, "
+                    "gripper-clear IVM survey view in two fresh top-down "
+                    "frames after "
                     f"{result.moves_executed} adaptive moves"
                 )
                 return
@@ -595,7 +642,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         timeout_sec
                     )
                     (
-                        _level_image_right,
+                        level_image_right,
                         level_image_down,
                         camera_back_away,
                     ) = self._camera_axes_in_base("center_camera", timeout_sec)
@@ -673,11 +720,61 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                     level_clearance_m = min(0.02, backoff_step_m)
                     level_center_y = 0.0
+                    level_image_x_direction = 0.0
                     level_image_y_direction = 0.0
+                    level_feedback_mode = "center"
+                    level_gripper_overlap = 0
+                    level_gripper_clearance = float("inf")
                     level_center_delta = np.zeros(3, dtype=float)
                     if center_report is not None and center_report.seen:
                         level_center_y = float(center_report.center_error[1])
-                        if abs(level_center_y) > 0.10:
+                        level_gripper_blocked = (
+                            center_report.artificial_bottom_contact
+                            or center_report.gripper_overlap_px > 0
+                            or center_report.gripper_clearance_px < 20.0
+                        )
+                        if level_gripper_blocked:
+                            level_feedback_mode = "gripper"
+                            level_gripper_overlap = (
+                                center_report.gripper_overlap_px
+                            )
+                            level_gripper_clearance = (
+                                center_report.gripper_clearance_px
+                            )
+                            escape_x, escape_y = (
+                                center_report.gripper_escape_direction
+                            )
+                            escape_norm = math.hypot(escape_x, escape_y)
+                            if escape_norm < 1e-9:
+                                escape_x, escape_y, escape_norm = 0.0, -1.0, 1.0
+                            # Static board image displacement is opposite the
+                            # camera-plane motion.  Apply the learned vertical
+                            # polarity to Y; X is directly calibrated by TF.
+                            level_image_x_direction = -escape_x / escape_norm
+                            level_image_y_direction = (
+                                -escape_y
+                                / escape_norm
+                                * level_vertical_polarity
+                            )
+                            level_center_scale = min(
+                                1.5,
+                                max(
+                                    1.0,
+                                    1.0
+                                    + center_report.gripper_overlap_px / 20000.0,
+                                ),
+                            )
+                            level_center_delta = (
+                                np.asarray(level_image_right, dtype=float)
+                                * step_m
+                                * level_center_scale
+                                * level_image_x_direction
+                                + np.asarray(level_image_down, dtype=float)
+                                * step_m
+                                * level_center_scale
+                                * level_image_y_direction
+                            )
+                        elif abs(level_center_y) > 0.35:
                             level_image_y_direction = (
                                 math.copysign(1.0, level_center_y)
                                 * level_vertical_polarity
@@ -702,13 +799,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     logging.info(
                         "joints 2-4 top-view leveling after J6: center-camera "
                         "tilt=%.3frad step=%.3frad clearance=%.3fm "
-                        "vertical_error=%+.3f image_y_direction=%+.1f "
+                        "vertical_error=%+.3f image_direction=(%+.2f,%+.2f) "
                         "camera_plane_delta=(%+.4f,%+.4f,%+.4f)m; keeping "
                         "J1/J6 phase references fixed",
                         tilt_rad,
                         level_step_rad,
                         level_clearance_m,
                         level_center_y,
+                        level_image_x_direction,
                         level_image_y_direction,
                         float(level_center_delta[0]),
                         float(level_center_delta[1]),
@@ -786,10 +884,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     result.moved = True
                     result.last_action = "camera_level"
                     if abs(level_image_y_direction) > 0.0:
-                        pending_level_vertical_sample = (
-                            level_center_y,
-                            level_image_y_direction,
-                        )
+                        if level_feedback_mode == "gripper":
+                            pending_level_vertical_sample = (
+                                "gripper",
+                                level_gripper_overlap,
+                                level_gripper_clearance,
+                                level_image_y_direction,
+                            )
+                        else:
+                            pending_level_vertical_sample = (
+                                "center",
+                                level_center_y,
+                                level_image_y_direction,
+                            )
                     try:
                         _, _, residual_back_away = self._camera_axes_in_base(
                             "center_camera", timeout_sec

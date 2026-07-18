@@ -96,6 +96,15 @@ class MaskReport:
     detail_ok: bool = False
     shape_ok: bool = False
     artificial_bottom_contact: bool = False
+    # Quantitative separation between a protected board envelope and the
+    # calibrated camera-fixed gripper silhouette.  The envelope is the board
+    # component's convex hull expanded by the normal component-context pad, so
+    # zero overlap protects protruding NIC/SC hardware rather than merely the
+    # dark base plate. ``gripper_escape_direction`` is the desired *board image*
+    # displacement away from the mask; camera-plane motion uses its negative.
+    gripper_overlap_px: int = 0
+    gripper_clearance_px: float = float("inf")
+    gripper_escape_direction: tuple[float, float] = (0.0, -1.0)
     center_error: tuple[float, float] = (0.0, 0.0)
     clearance_score: float = 0.0
     detail_score: float = 0.0
@@ -379,6 +388,9 @@ def analyze_board(
                 )
 
     rectangularity = 0.0
+    gripper_overlap_px = 0
+    gripper_clearance_px = float("inf")
+    gripper_escape_direction = (0.0, -1.0)
     contours, _ = cv2.findContours(
         component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -388,6 +400,56 @@ def analyze_board(
         rect_area = float(rect_width * rect_height)
         if rect_area > 0.0:
             rectangularity = min(1.0, area / rect_area)
+
+        # Treat the entire projected board footprint plus its component
+        # context as protected from the camera-fixed gripper.  This turns the
+        # calibrated ignore mask into a useful geometric terminal constraint:
+        # ignored pixels still cannot contaminate segmentation, and the policy
+        # can now move until the task hardware is genuinely outside that mask.
+        protected = np.zeros_like(component, dtype=np.uint8)
+        hull = cv2.convexHull(contour)
+        cv2.fillConvexPoly(protected, hull, 1)
+        envelope_pad_px = max(1, int(round(context_pad_px)))
+        envelope_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * envelope_pad_px + 1, 2 * envelope_pad_px + 1),
+        )
+        protected = cv2.dilate(protected, envelope_kernel, iterations=1)
+        protected_bool = protected.astype(bool)
+        overlap = protected_bool & ignored
+        gripper_overlap_px = int(np.count_nonzero(overlap))
+
+        ignored_count = int(np.count_nonzero(ignored))
+        if ignored_count > 0:
+            free_space = (~ignored).astype(np.uint8)
+            distance_to_gripper = cv2.distanceTransform(
+                free_space, cv2.DIST_L2, 5
+            )
+            protected_distances = distance_to_gripper[protected_bool]
+            if protected_distances.size > 0:
+                gripper_clearance_px = (
+                    0.0
+                    if gripper_overlap_px > 0
+                    else float(np.min(protected_distances))
+                )
+
+            protected_y, protected_x = np.nonzero(protected_bool)
+            ignored_y, ignored_x = np.nonzero(ignored)
+            if protected_x.size > 0 and ignored_x.size > 0:
+                escape = np.array(
+                    (
+                        float(protected_x.mean() - ignored_x.mean()),
+                        float(protected_y.mean() - ignored_y.mean()),
+                    ),
+                    dtype=float,
+                )
+                escape_norm = float(np.linalg.norm(escape))
+                if escape_norm > 1e-9:
+                    escape /= escape_norm
+                    gripper_escape_direction = (
+                        float(escape[0]),
+                        float(escape[1]),
+                    )
 
     orientation_deg = 0.0
     long_axis_ratio = 1.0
@@ -518,6 +580,9 @@ def analyze_board(
         detail_ok=detail_ok,
         shape_ok=shape_ok,
         artificial_bottom_contact=artificial_bottom_contact,
+        gripper_overlap_px=gripper_overlap_px,
+        gripper_clearance_px=gripper_clearance_px,
+        gripper_escape_direction=gripper_escape_direction,
         center_error=(float(center_error[0]), float(center_error[1])),
         clearance_score=clearance_score,
         detail_score=detail_score,
@@ -542,13 +607,14 @@ def view_quality(report: MaskReport) -> float:
 def ivm_survey_rejection_reasons(
     report: MaskReport,
     *,
-    max_area_frac: float = 0.45,
+    max_area_frac: float = 0.36,
     min_rectangularity: float = 0.70,
     max_center_error_x: float = 0.15,
     max_center_error_y: float = 0.25,
     min_long_axis_ratio: float = 1.15,
-    max_long_axis_error_deg: float = 12.0,
-    clearance_scale: float = 1.50,
+    max_long_axis_error_deg: float = 2.0,
+    clearance_scale: float = 1.25,
+    min_gripper_clearance_px: float = 20.0,
 ) -> tuple[str, ...]:
     """Explain why a frame is not yet suitable for downstream IVM.
 
@@ -576,7 +642,11 @@ def ivm_survey_rejection_reasons(
         reasons.append("horizontal_off_center")
     if abs(float(report.center_error[1])) > max_center_error_y:
         reasons.append("vertical_off_center")
-    if report.artificial_bottom_contact:
+    if (
+        report.artificial_bottom_contact
+        or int(report.gripper_overlap_px) > 0
+        or float(report.gripper_clearance_px) < min_gripper_clearance_px
+    ):
         reasons.append("gripper_mask_contact")
     if report.long_axis_ratio < min_long_axis_ratio:
         reasons.append("long_axis_ambiguous")

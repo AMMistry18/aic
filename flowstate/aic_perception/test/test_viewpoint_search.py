@@ -27,6 +27,9 @@ def report(
     failure_reasons: tuple[str, ...] = (),
     clearance: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0),
     context_pad: float = 0.0,
+    gripper_overlap: int = 0,
+    gripper_clearance: float = float("inf"),
+    gripper_escape: tuple[float, float] = (0.0, -1.0),
 ) -> MaskReport:
     return MaskReport(
         seen=seen,
@@ -35,6 +38,9 @@ def report(
         area_frac=area,
         rectangularity=rectangularity,
         artificial_bottom_contact=bottom_contact,
+        gripper_overlap_px=gripper_overlap,
+        gripper_clearance_px=gripper_clearance,
+        gripper_escape_direction=gripper_escape,
         center_error=center,
         quality_score=0.5,
         clearance_px=clearance,
@@ -46,6 +52,22 @@ def report(
         logo_center_error=(0.4, 0.0),
         logo_area_frac=0.01 if logo else 0.0,
     )
+
+
+def strict_report(**changes) -> MaskReport:
+    values = dict(
+        full=True,
+        area=0.30,
+        clearance=(100.0, 100.0, 100.0, 100.0),
+        context_pad=36.0,
+        gripper_overlap=0,
+        gripper_clearance=30.0,
+        orientation=0.5,
+        long_axis_ratio=1.4,
+        logo=True,
+    )
+    values.update(changes)
+    return report(**values)
 
 
 def views(
@@ -107,6 +129,20 @@ def test_j1_proportional_centering_precedes_j6():
     assert action.kind is ActionKind.BASE_YAW
     assert action.aim_direction[0] == -1.0
     assert planner.phase == "j1_center"
+
+
+def test_j1_centering_learns_live_image_response_for_faster_correction():
+    planner = AdaptiveViewpointPlanner()
+    first = planner.next_action(views(report(center=(0.60, 0.0))))
+    assert first.kind is ActionKind.BASE_YAW
+
+    # The fresh frame moved 0.20 normalized image units after one signed
+    # command scale.  The next correction should use that measured response,
+    # rather than another minimum-size blind increment.
+    second = planner.next_action(views(report(center=(0.40, 0.0))))
+    assert second.kind is ActionKind.BASE_YAW
+    assert "learned J1 image response" in second.reason
+    assert second.angular_scale > first.angular_scale
 
 
 def test_center_confirmation_enters_align_before_issuing_j6():
@@ -273,11 +309,13 @@ def test_prelevel_full_center_frame_cannot_finish():
     assert not planner.coverage_achieved
 
 
-def test_first_postlevel_full_center_frame_finishes_immediately():
+def test_postlevel_survey_requires_two_fresh_strict_frames():
     planner = AdaptiveViewpointPlanner()
     enter_level(planner)
     planner.mark_level_complete()
-    done = planner.next_action(views(report(full=True, area=0.2)))
+    candidate = planner.next_action(views(strict_report()))
+    assert candidate.kind is ActionKind.OBSERVE
+    done = planner.next_action(views(strict_report()))
     assert done.kind is ActionKind.DONE
     assert done.terminal
     assert planner.phase == "done"
@@ -290,9 +328,8 @@ def test_qualifying_fresh_frame_wins_at_deadline_boundary():
     planner = AdaptiveViewpointPlanner()
     enter_ascend(planner)
 
-    done = planner.next_action(
-        views(report(full=True, area=0.2)), deadline_reached=True
-    )
+    assert planner.next_action(views(strict_report())).kind is ActionKind.OBSERVE
+    done = planner.next_action(views(strict_report()), deadline_reached=True)
     assert done.kind is ActionKind.DONE
 
 
@@ -309,10 +346,10 @@ def test_full_side_camera_never_completes_after_level():
     assert not planner.coverage_achieved
 
 
-def test_base_full_predicate_passes_without_extra_ivm_context_margin():
+def test_strict_survey_requires_expanded_component_context_margin():
     planner = AdaptiveViewpointPlanner()
     enter_ascend(planner)
-    done = planner.next_action(
+    action = planner.next_action(
         views(
             report(
                 full=True,
@@ -322,22 +359,81 @@ def test_base_full_predicate_passes_without_extra_ivm_context_margin():
             )
         )
     )
-    assert done.kind is ActionKind.DONE
+    assert action.kind is ActionKind.UP_CLEARANCE
 
 
-def test_full_center_frame_finishes_even_when_it_fills_most_of_frame():
+def test_full_center_frame_that_is_too_large_gets_more_clearance():
     planner = AdaptiveViewpointPlanner()
     enter_ascend(planner)
     action = planner.next_action(views(report(full=True, area=0.60)))
-    assert action.kind is ActionKind.DONE
-    assert planner.coverage_achieved
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert not planner.coverage_achieved
+
+
+def test_strict_survey_rejects_gripper_overlap_then_escapes_from_mask():
+    planner = AdaptiveViewpointPlanner(max_occlusion_translates=2)
+    enter_ascend(planner)
+    blocked = strict_report(
+        gripper_overlap=12000,
+        gripper_clearance=0.0,
+        gripper_escape=(0.2, -0.98),
+    )
+
+    action = planner.next_action(views(blocked))
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.image_direction[0] < 0.0
+    assert action.image_direction[1] > 0.0
+    assert "protected task-board envelope" in action.reason
+
+
+def test_mask_escape_reverses_when_fresh_frame_gets_worse():
+    planner = AdaptiveViewpointPlanner(max_occlusion_translates=2)
+    enter_ascend(planner)
+    first = planner.next_action(
+        views(
+            strict_report(
+                gripper_overlap=1000,
+                gripper_clearance=0.0,
+                gripper_escape=(0.0, -1.0),
+            )
+        )
+    )
+    second = planner.next_action(
+        views(
+            strict_report(
+                gripper_overlap=3000,
+                gripper_clearance=0.0,
+                gripper_escape=(0.0, -1.0),
+            )
+        )
+    )
+
+    assert first.kind is second.kind is ActionKind.TRANSLATE
+    assert first.image_direction[1] == -second.image_direction[1]
+    assert "polarity reversed" in second.reason
+
+
+def test_fully_framed_board_below_detail_scale_uses_bounded_approach():
+    planner = AdaptiveViewpointPlanner(
+        min_goal_area_frac=0.26,
+        max_goal_area_frac=0.36,
+    )
+    enter_ascend(planner)
+
+    action = planner.next_action(
+        views(strict_report(full=False, area=0.20))
+    )
+
+    assert action.kind is ActionKind.APPROACH
+    assert action.axial_direction < 0.0
 
 
 @pytest.mark.parametrize(
     ("orientation", "ratio"),
     [(35.0, 1.4), (0.0, 1.05)],
 )
-def test_terminal_full_mask_does_not_repeat_long_axis_gate(
+def test_terminal_survey_rechecks_long_axis_gate(
     orientation: float, ratio: float
 ):
     planner = AdaptiveViewpointPlanner()
@@ -352,8 +448,8 @@ def test_terminal_full_mask_does_not_repeat_long_axis_gate(
             )
         )
     )
-    assert action.kind is ActionKind.DONE
-    assert planner.coverage_achieved
+    assert action.kind is not ActionKind.DONE
+    assert not planner.coverage_achieved
 
 
 def test_j6_alignment_tolerance_is_two_degrees_with_fine_correction():
@@ -408,11 +504,13 @@ def test_bottom_only_obstruction_is_centered_before_optical_backoff():
     planner = AdaptiveViewpointPlanner(
         max_zoom_out_backoffs=1,
         max_postlevel_translates=1,
+        max_occlusion_translates=1,
     )
     enter_ascend(planner)
     blocked = views(
         report(full=False, area=0.3, edges=("bottom",), bottom_contact=True)
     )
+    assert planner.next_action(blocked).kind is ActionKind.TRANSLATE
     assert planner.next_action(blocked).kind is ActionKind.TRANSLATE
     assert planner.next_action(blocked).kind is ActionKind.BACKOFF
 
@@ -449,6 +547,7 @@ def test_alignment_zoom_does_not_consume_clearance_zoom_budget():
     planner = AdaptiveViewpointPlanner(
         max_zoom_out_backoffs=1,
         max_postlevel_translates=0,
+        max_occlusion_translates=0,
         max_recenter_entries=0,
     )
     ambiguous = views(

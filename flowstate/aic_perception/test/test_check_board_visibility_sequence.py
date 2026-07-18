@@ -68,12 +68,12 @@ def test_planner_runs_before_any_cartesian_motion():
     assert planner_lines[0] < min(cartesian_lines)
 
 
-def test_leveling_is_phase_gated_and_completion_has_no_extra_streak():
+def test_leveling_is_phase_gated_and_completion_is_planner_confirmed():
     source, _ = execute_inner_source()
 
     assert 'if planner.phase == "j2_4_level":' in source
     assert "planner.mark_level_complete()" in source
-    assert "complete_streak" not in source
+    assert "survey_confirmation_frames=2" in source
     assert "ivm_survey_ready" not in source
 
 
@@ -105,7 +105,7 @@ def test_only_center_camera_full_evidence_reaches_planner():
     planner_lines = call_lines(execute_inner, "next_action")
     assert min(axes_lines) < planner_lines[0]
     assert call_lines(execute_inner, "request_relevel")
-    assert "the first qualifying frame exits in this same iteration" in source
+    assert "Two consecutive strict survey frames" in source
 
 
 def test_component_coverage_is_true_only_on_done():
@@ -152,8 +152,12 @@ def test_leveling_uses_fresh_vertical_image_feedback_and_can_reverse():
         "pending_level_vertical_sample",
         "center_report.center_error[1]",
         "level_image_down",
+        "level_image_right",
+        "gripper_escape_direction",
+        "gripper_overlap_px",
+        "gripper_clearance_px",
         "level_center_delta",
-        "reversing image-y polarity",
+        "reversing image-y",
     ):
         assert contract in source
     assert source.index("pending_level_vertical_sample is not None") < source.index(
