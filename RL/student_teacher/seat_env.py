@@ -133,6 +133,7 @@ RESET_SETTLE_DEPTH_OFFSET_M = 0.7e-3
 RESET_MAX_PHYSICAL_LATERAL_M = 1.2e-3
 RESET_MAX_DELIVERED_ROTATION_RAD = float(np.radians(2.0))
 RESET_MAX_ATTEMPTS = 8
+RESET_ATTEMPT_SEED_STRIDE = 1009
 
 
 @dataclass(frozen=True)
@@ -817,6 +818,15 @@ class SeatEnv(gym.Wrapper):
             requested_seed if requested_seed is not None
             else self._reset_rng.integers(1, 2**31 - 1))
         for attempt in range(RESET_MAX_ATTEMPTS):
+            # A rejected physical realization must not be reconstructed with
+            # the same episode randomization on every retry.  In particular,
+            # grasp noise can keep an otherwise centered command outside the
+            # physical lateral safety band even after its offset is reduced.
+            # Keep the retry sequence deterministic while giving each attempt
+            # an independent episode realization.
+            attempt_seed = 1 + (
+                base_seed - 1 + RESET_ATTEMPT_SEED_STRIDE * attempt
+            ) % (2**31 - 2)
             self._reset_level = float(np.clip(
                 (self.scene.cfg.seated_depth_m - commanded_depth)
                 / self.scene.cfg.last_inch_m,
@@ -834,7 +844,7 @@ class SeatEnv(gym.Wrapper):
                 "commanded_tilt_rad": 0.0,
             }
             obs69, prepared_info, reset_info, ended = self._prepare_candidate(
-                base_seed, candidate)
+                attempt_seed, candidate)
             reason = (
                 "terminated_while_settling" if ended
                 else self._distributed_safety_reason(prepared_info))
@@ -859,7 +869,7 @@ class SeatEnv(gym.Wrapper):
                 else:
                     accepted = (
                         obs69, prepared_info, reset_info, candidate, attempt,
-                        base_seed, actor_depth, actor_lateral, actor_rotation,
+                        attempt_seed, actor_depth, actor_lateral, actor_rotation,
                     )
                     break
             if reason == "physical_lateral_out_of_range":

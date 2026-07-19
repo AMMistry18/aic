@@ -9,6 +9,7 @@ import pytest
 from RL.student_teacher.seat_env import (
     DEPLOYMENT_RESET_CLASSES,
     FORCE_SOFT_START_N,
+    RESET_ATTEMPT_SEED_STRIDE,
     ROTATION_GUARD_RAD,
     SEATED_SUCCESS_BONUS,
     STAGES,
@@ -465,6 +466,84 @@ def test_deployment_reset_class_delivers_actor_and_physical_contract(reset_class
         assert obs["privileged"].shape == (32,)
     finally:
         env.close()
+
+
+def test_distributed_retry_changes_episode_randomization_seed(monkeypatch):
+    """A bad grasp realization is not reconstructed for all eight retries."""
+    env = object.__new__(SeatEnv)
+    env.stage = STAGES["deployment"]
+    env._compiled_seed = 20260715
+    env._reset_rng = np.random.default_rng(123)
+    env._curriculum_easy_max_mm = 42.0
+    env._reset_count = 0
+    env._reset_resample_count = 0
+    env._wrench_ema = np.zeros(6, dtype=np.float64)
+    env._prev_action = np.zeros(6, dtype=np.float64)
+    env._prev_f_lateral = 0.0
+    env._last_reward_terms = {}
+    env._steps_since_reset = 0
+    env.scene = SimpleNamespace(
+        cfg=SimpleNamespace(
+            seated_depth_m=45.8e-3,
+            last_inch_m=90e-3,
+            bad_collision_penetration_excess_m=1.5e-3,
+            bad_collision_overinsert_m=2.0e-3,
+        ),
+        _policy_dt_s=0.05,
+    )
+    spec = {
+        "class": "live_shallow",
+        "depth_bounds_m": (3e-3, 8e-3),
+        "lateral_bounds_m": (0.9e-3, 2.7e-3),
+        "requested_depth_m": 5e-3,
+        "requested_lateral_m": 1e-3,
+        "direction": "plus_x",
+        "desired_actor_xy_m": np.array([1e-3, 0.0]),
+    }
+    actor_obs = np.zeros(69, dtype=np.float32)
+    actor_obs[32] = 1e-3
+    actor_obs[34] = 5e-3
+    seen_seeds = []
+
+    monkeypatch.setattr(
+        env, "_sample_distributed_spec", lambda _options: spec)
+
+    def prepare(seed, _candidate):
+        seen_seeds.append(seed)
+        physical_lateral = 2e-3 if len(seen_seeds) == 1 else 0.5e-3
+        return actor_obs.copy(), {
+            "insertion_depth_m": 5e-3,
+            "lateral_error_m": physical_lateral,
+            "contact_force_norm": 1.0,
+            "plug_axis_error_rad": 0.0,
+            "plug_roll_error_rad": 0.0,
+            "off_limit_contacts": 0,
+            "plug_port_penetration_excess_m": 0.0,
+            "overinsert_m": 0.0,
+        }, {}, False
+
+    monkeypatch.setattr(env, "_prepare_candidate", prepare)
+    monkeypatch.setattr(
+        env, "_apply_actor_visible_lateral",
+        lambda _desired: actor_obs.copy())
+    monkeypatch.setattr(
+        env, "_normalize_accepted_reset", lambda obs: obs)
+    monkeypatch.setattr(
+        env, "_frame", lambda _obs: np.zeros(34, dtype=np.float32))
+    monkeypatch.setattr(
+        env, "_observation",
+        lambda _obs, append=True: {
+            "actor": np.zeros((8, 34), dtype=np.float32),
+            "privileged": np.zeros(32, dtype=np.float32),
+        })
+
+    _obs, info = env._reset_distributed(123, {})
+
+    assert seen_seeds == [123, 123 + RESET_ATTEMPT_SEED_STRIDE]
+    assert info["seat_reset_attempts"] == 2
+    assert info["seat_reset_seed"] == seen_seeds[-1]
+    assert info["seat_reset_rejected"] == [{
+        "attempt": 1, "reason": "physical_lateral_out_of_range"}]
 
 
 def test_wedge_random_vs_lateral_nudge_feasibility():
