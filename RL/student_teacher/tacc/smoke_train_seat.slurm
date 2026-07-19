@@ -2,7 +2,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 
 # Portable 16-then-8 worker feasibility smoke for the seat SAC trainer.
 # The same allocation runs the comparison sequentially by default so a

@@ -791,16 +791,32 @@ class SeatEnv(gym.Wrapper):
             return "bad_collision_overinsert"
         return None
 
-    def _apply_actor_visible_lateral(
-            self, desired_actor_xy_m: np.ndarray) -> np.ndarray:
-        """Set the existing perception bias to a requested actor-visible XY."""
-        _axial, true_lateral = self.scene._tip_port_errors()
-        desired = np.asarray(desired_actor_xy_m, dtype=np.float64).reshape(2)
-        delta = np.asarray(true_lateral, dtype=np.float64) - desired
-        self.env._pos_bias = (
-            self.scene._lat_x * delta[0] + self.scene._lat_y * delta[1])
+    def _apply_actor_visible_state(
+            self, desired_actor_xy_m: np.ndarray,
+            desired_actor_depth_m: float) -> np.ndarray:
+        """Set perception bias from the actual actor observation.
+
+        The deploy observation reconstructs the tip from TCP and includes the
+        episode's grasp-position bias.  Computing perception bias from the
+        physical MuJoCo tip therefore leaves that hidden grasp error in the
+        actor-visible lateral/depth state.  Build one unbiased actor
+        observation first, then close the loop on all three relative-position
+        components so the delivered state matches the requested reset class.
+        """
+        desired = np.array([
+            *np.asarray(desired_actor_xy_m, dtype=np.float64).reshape(2),
+            float(desired_actor_depth_m),
+        ])
+        self.env._pos_bias = np.zeros(3, dtype=np.float64)
         self.env._rot_bias = np.zeros(3, dtype=np.float64)
         raw = self.scene._obs()
+        unbiased = self.env._build_obs69(raw)
+        correction = np.asarray(unbiased[32:35], dtype=np.float64) - desired
+        self.env._pos_bias = (
+            self.scene._lat_x * correction[0]
+            + self.scene._lat_y * correction[1]
+            + self.scene._insert_axis * correction[2]
+        )
         return self.env._build_obs69(raw)
 
     def _reset_distributed(
@@ -852,8 +868,8 @@ class SeatEnv(gym.Wrapper):
                 "terminated_while_settling" if ended
                 else self._distributed_safety_reason(prepared_info))
             if reason is None:
-                obs69 = self._apply_actor_visible_lateral(
-                    spec["desired_actor_xy_m"])
+                obs69 = self._apply_actor_visible_state(
+                    spec["desired_actor_xy_m"], requested_depth)
                 rel = np.asarray(obs69[32:38], dtype=np.float64)
                 actor_depth = float(rel[2])
                 actor_lateral = _lat_err(rel)
@@ -886,7 +902,8 @@ class SeatEnv(gym.Wrapper):
          actor_depth, actor_lateral, actor_rotation) = accepted
         obs69 = self._normalize_accepted_reset(obs69)
         # Normalization rebuilds the observation; reapply the exact class bias.
-        obs69 = self._apply_actor_visible_lateral(spec["desired_actor_xy_m"])
+        obs69 = self._apply_actor_visible_state(
+            spec["desired_actor_xy_m"], requested_depth)
         rel = np.asarray(obs69[32:38], dtype=np.float64)
         actor_depth, actor_lateral, actor_rotation = (
             float(rel[2]), _lat_err(rel), _rot_err(rel))

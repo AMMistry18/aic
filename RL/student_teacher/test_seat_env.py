@@ -465,6 +465,38 @@ def test_distributed_reset_rotation_gate_matches_deployment_guard():
     }) == "rotation_out_of_range"
 
 
+def test_actor_visible_reset_closes_loop_on_observed_tip_bias():
+    """Perception correction includes hidden grasp error in XYZ."""
+    env = object.__new__(SeatEnv)
+    env.scene = SimpleNamespace(
+        _lat_x=np.array([1.0, 0.0, 0.0]),
+        _lat_y=np.array([0.0, 1.0, 0.0]),
+        _insert_axis=np.array([0.0, 0.0, 1.0]),
+        _obs=lambda: {},
+    )
+    wrapper = SimpleNamespace(
+        _pos_bias=np.zeros(3, dtype=np.float64),
+        _rot_bias=np.zeros(3, dtype=np.float64),
+    )
+    unbiased_rel = np.array([1.7e-3, -0.4e-3, 6.2e-3])
+
+    def build_obs(_raw):
+        obs = np.zeros(69, dtype=np.float32)
+        obs[32:35] = unbiased_rel - wrapper._pos_bias
+        return obs
+
+    wrapper._build_obs69 = build_obs
+    env.env = wrapper
+
+    obs = env._apply_actor_visible_state(
+        np.array([1.0e-3, 0.2e-3]), 5.0e-3)
+
+    np.testing.assert_allclose(
+        obs[32:35], [1.0e-3, 0.2e-3, 5.0e-3], atol=1e-9)
+    np.testing.assert_allclose(
+        wrapper._pos_bias, [0.7e-3, -0.6e-3, 1.2e-3], atol=1e-9)
+
+
 @pytest.mark.parametrize("reset_class", tuple(DEPLOYMENT_RESET_CLASSES))
 def test_deployment_reset_class_delivers_actor_and_physical_contract(reset_class):
     index = tuple(DEPLOYMENT_RESET_CLASSES).index(reset_class)
@@ -550,8 +582,8 @@ def test_distributed_retry_changes_episode_randomization_seed(monkeypatch):
 
     monkeypatch.setattr(env, "_prepare_candidate", prepare)
     monkeypatch.setattr(
-        env, "_apply_actor_visible_lateral",
-        lambda _desired: actor_obs.copy())
+        env, "_apply_actor_visible_state",
+        lambda _desired_xy, _desired_depth: actor_obs.copy())
     monkeypatch.setattr(
         env, "_normalize_accepted_reset", lambda obs: obs)
     monkeypatch.setattr(
