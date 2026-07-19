@@ -10,6 +10,7 @@ from RL.student_teacher.seat_env import (
     DEPLOYMENT_RESET_CLASSES,
     FORCE_SOFT_START_N,
     RESET_ATTEMPT_SEED_STRIDE,
+    RESET_MAX_DELIVERED_ROTATION_RAD,
     ROTATION_GUARD_RAD,
     SEATED_SUCCESS_BONUS,
     STAGES,
@@ -437,6 +438,31 @@ def test_inward_square_beats_inward_rotating_and_square_does_not_rotate():
         before, before, {**common, "plug_axis_error_rad": 0.0},
         commanded=np.array([0.0, 0.0, 0.0, 0.2, 0.0, 0.0]))
     assert hold_reward > needless_rotation_reward
+
+
+def test_distributed_reset_rotation_gate_matches_deployment_guard():
+    env = object.__new__(SeatEnv)
+    env.scene = SimpleNamespace(cfg=SimpleNamespace(
+        bad_collision_penetration_excess_m=1.5e-3,
+        bad_collision_overinsert_m=2.0e-3,
+    ))
+    safe = {
+        "insertion_depth_m": 30e-3,
+        "lateral_error_m": 0.5e-3,
+        "contact_force_norm": 2.0,
+        "plug_axis_error_rad": np.radians(4.0),
+        "plug_roll_error_rad": 0.0,
+        "off_limit_contacts": 0,
+        "plug_port_penetration_excess_m": 0.0,
+        "overinsert_m": 0.0,
+    }
+
+    assert RESET_MAX_DELIVERED_ROTATION_RAD == pytest.approx(
+        ROTATION_GUARD_RAD)
+    assert env._distributed_safety_reason(safe) is None
+    assert env._distributed_safety_reason({
+        **safe, "plug_axis_error_rad": np.radians(5.01),
+    }) == "rotation_out_of_range"
 
 
 @pytest.mark.parametrize("reset_class", tuple(DEPLOYMENT_RESET_CLASSES))

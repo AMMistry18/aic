@@ -131,7 +131,10 @@ ROTATION_GUARD_PENALTY = 20.0
 # deployment error created through the existing per-episode perception bias.
 RESET_SETTLE_DEPTH_OFFSET_M = 0.7e-3
 RESET_MAX_PHYSICAL_LATERAL_M = 1.2e-3
-RESET_MAX_DELIVERED_ROTATION_RAD = float(np.radians(2.0))
+# Match the deployment rotation guard used by training and fixed evaluation.
+# A stricter reset-only threshold can reject safe mastered-deep starts forever
+# even though the exact delivered actor state remains inside the 5-degree ABI.
+RESET_MAX_DELIVERED_ROTATION_RAD = float(np.radians(5.0))
 RESET_MAX_ATTEMPTS = 8
 RESET_ATTEMPT_SEED_STRIDE = 1009
 
