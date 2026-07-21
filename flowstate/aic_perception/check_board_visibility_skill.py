@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Flowstate skill that searches for a fully visible task board.
+"""Flowstate skill that searches for an IVM-ready task-component view.
 
 The skill consumes only documented wrist-camera, measured joint-state,
 controller-state, wrist-force, and robot-mounted TF data. It performs
 image-feedback shoulder-pan centering, wrist-3 long-axis alignment, center-
-camera top-down leveling, and upward clearance through the documented AIC
+camera oblique survey positioning, and upward clearance through the documented AIC
 controller interface.
 TF lookups are hard-coded to the gripper TCP and the three robot-mounted camera
 optical frames relative to ``base_link``; object and scoring frames are never
@@ -39,6 +39,26 @@ flags.DEFINE_string(
 
 class CheckBoardVisibilitySkill(skill_interface.Skill):
     """Search camera views and perform bounded internal robot motion."""
+
+    @staticmethod
+    def _resolve_survey_target(pb2, params) -> tuple[int, str]:
+        """Return a safe protobuf enum number/name pair for one invocation."""
+
+        raw_value = int(getattr(params, "survey_target", 0) or 0)
+        enum_wrapper = getattr(
+            pb2.CheckBoardVisibilitySkillParams, "SurveyTarget", None
+        )
+        if enum_wrapper is not None:
+            try:
+                return raw_value, str(enum_wrapper.Name(raw_value))
+            except ValueError:
+                logging.warning(
+                    "unknown survey_target enum value %d; using UNSPECIFIED",
+                    raw_value,
+                )
+        # The fallback also keeps the wrapper importable with a stale generated
+        # pb2 while a development workspace is being rebuilt.
+        return 0, "UNSPECIFIED"
 
     def __init__(self):
         super().__init__()
@@ -84,8 +104,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         from aic_perception import check_board_visibility_skill_pb2 as pb2
 
         result = pb2.CheckBoardVisibilitySkillResult(success=False)
+        survey_target_value, survey_target_name = self._resolve_survey_target(
+            pb2, request.params
+        )
         if not self._execute_lock.acquire(blocking=False):
-            result.message = "another board-visibility invocation is still running"
+            result.message = (
+                f"survey_target={survey_target_name}: another "
+                "board-visibility invocation is still running"
+            )
             return result
         try:
             context.canceller.ready()
@@ -93,6 +119,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 request.params,
                 result,
                 cancelled=lambda: context.canceller.cancelled,
+                survey_target_value=survey_target_value,
+                survey_target_name=survey_target_name,
             )
         except skill_interface.SkillCancelledError:
             raise
@@ -116,6 +144,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     error,
                 )
             self._execute_lock.release()
+        if not result.message.startswith("survey_target="):
+            result.message = (
+                f"survey_target={survey_target_name}: {result.message}"
+            )
         logging.info(
             "board visibility: success=%s seen=%s done=%s edges=%s cam=%s "
             "target=%s force=%.2fN msg=%s",
@@ -142,12 +174,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # use."  Cancellation still propagates through SkillCancelledError.
         return result
 
-    def _execute_inner(self, params, result, cancelled) -> None:
+    def _execute_inner(
+        self,
+        params,
+        result,
+        cancelled,
+        *,
+        survey_target_value: int,
+        survey_target_name: str,
+    ) -> None:
         from aic_perception.board_visibility import (
+            SurveyTargetMode,
             analyze_board,
             combine_cameras,
             ivm_survey_rejection_reasons,
+            normalize_survey_target,
             rotation_matrix_from_quaternion,
+            survey_view_requirements,
             view_quality,
         )
         from aic_perception.robot_motion import (
@@ -159,6 +202,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         from aic_perception.viewpoint_search import (
             ActionKind,
             AdaptiveViewpointPlanner,
+            survey_tilt_correction,
         )
 
         min_contrast = int(params.min_contrast or 30)
@@ -197,7 +241,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # Reserve a real edge margin, but do not require 20% of the projected
         # board size on every side.  That old dynamic pad rejected centered,
         # fully visible views as simultaneously clipped at top and bottom.
-        context_margin_frac = float(params.context_margin_frac or 0.05)
+        context_margin_frac = float(params.context_margin_frac or 0.02)
         min_detail_area_frac = float(params.min_detail_area_frac or 0.06)
         min_rectangularity = float(params.min_rectangularity or 0.50)
         stable_frames = int(params.stable_frames or 2)
@@ -205,6 +249,28 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         settle_orientation_tolerance_rad = float(
             params.settle_orientation_tolerance_rad or 0.05
         )
+        target_center_tilt_deg = float(params.target_center_tilt_deg or 32.0)
+        center_tilt_tolerance_deg = float(
+            params.center_tilt_tolerance_deg or 2.0
+        )
+        ivm_min_center_board_area_frac = float(
+            params.ivm_min_center_board_area_frac or 0.32
+        )
+        ivm_max_center_board_area_frac = float(
+            params.ivm_max_center_board_area_frac or 0.50
+        )
+
+        # Explicit component surveys own their camera geometry.  The old
+        # proto controls remain the legacy UNSPECIFIED escape hatch; applying
+        # a saved 32deg whole-board parameter to a staged SFP source would
+        # hide the module top in the lateral views that IVM fuses.
+        target_mode = normalize_survey_target(survey_target_name)
+        target_geometry_source = "legacy proto/default"
+        if target_mode is not SurveyTargetMode.UNSPECIFIED:
+            target_requirements = survey_view_requirements(target_mode)
+            target_center_tilt_deg = target_requirements.target_tilt_deg
+            center_tilt_tolerance_deg = target_requirements.tilt_tolerance_deg
+            target_geometry_source = "target-specific IVM profile"
         self._validate_parameters(
             min_contrast=min_contrast,
             margin_px=margin_px,
@@ -231,6 +297,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             stable_frames=stable_frames,
             max_angular_speed_rps=max_angular_speed_rps,
             settle_orientation_tolerance_rad=settle_orientation_tolerance_rad,
+            target_center_tilt_deg=target_center_tilt_deg,
+            center_tilt_tolerance_deg=center_tilt_tolerance_deg,
+            ivm_min_center_board_area_frac=ivm_min_center_board_area_frac,
+            ivm_max_center_board_area_frac=ivm_max_center_board_area_frac,
         )
         # Legacy start-relative and cumulative envelopes repeatedly rejected
         # useful viewpoint corrections even though the controller already
@@ -243,25 +313,35 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         max_angular_displacement_rad = math.inf
         max_angular_travel_rad = math.inf
         planner = AdaptiveViewpointPlanner(
-            min_goal_area_frac=max(0.26, min_detail_area_frac),
-            max_goal_area_frac=0.36,
-            min_gripper_clearance_px=20.0,
-            auxiliary_min_area_frac=0.08,
+            min_goal_area_frac=max(
+                ivm_min_center_board_area_frac, min_detail_area_frac
+            ),
+            max_goal_area_frac=ivm_max_center_board_area_frac,
+            min_gripper_clearance_px=32.0,
+            auxiliary_min_area_frac=0.12,
             auxiliary_min_rectangularity=0.55,
-            auxiliary_min_gripper_clearance_px=12.0,
-            auxiliary_context_scale=0.75,
-            max_auxiliary_translates=8,
+            auxiliary_min_gripper_clearance_px=32.0,
+            auxiliary_context_scale=1.50,
+            auxiliary_max_center_error_x=0.25,
+            auxiliary_max_center_error_y=0.25,
+            max_auxiliary_translates=10,
             survey_confirmation_frames=2,
             expected_cameras=tuple(sorted(self.config.camera_frames)),
+            survey_target=survey_target_name,
         )
         logging.info(
-            "active search parameters: cameras=%s margin_px=%d context=%.3f "
+            "active search parameters: survey_target=%s(%d) cameras=%s "
+            "margin_px=%d context=%.3f "
             "ignore_bottom=%.3f step=%.3fm angular_step=%.3frad "
             "settle=%.3fm/%.3frad move_timeout=%.1fs search_timeout=%.1fs "
             "stable_frames_configured=%d j6_min_ratio=%.2f "
             "j6_confirm_frames=%d j6_tolerance=%.1fdeg "
+            "center_survey_tilt=%.1f+/-%.1fdeg center_area=%.2f..%.2f "
+            "geometry_source=%s "
             "motion_envelopes=controller_native "
             "completion=two_fresh_synchronized_three_camera_survey_frames",
+            survey_target_name,
+            survey_target_value,
             sorted(self.config.camera_frames),
             margin_px,
             context_margin_frac,
@@ -276,6 +356,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             planner.min_long_axis_ratio,
             planner.roll_confirmation_frames,
             planner.roll_align_threshold_deg,
+            target_center_tilt_deg,
+            center_tilt_tolerance_deg,
+            planner.survey_view.min_area_frac,
+            planner.survey_view.max_area_frac,
+            target_geometry_source,
         )
         started_at = time.monotonic()
         deadline = started_at + search_timeout_sec
@@ -286,10 +371,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         saved_action_poses = {}
         iteration = 0
         joint_yaw_available = True
-        top_down_tolerance_rad = 0.06
-        level_joint_drift_tolerance_rad = 0.02
+        target_center_tilt_rad = math.radians(target_center_tilt_deg)
+        center_tilt_tolerance_rad = math.radians(center_tilt_tolerance_deg)
         min_level_progress_rad = 0.01
         leveling_moves = 0
+        level_clearance_applied = False
         level_anchor_joint1 = None
         level_anchor_joint6 = None
         level_vertical_polarity = 1.0
@@ -395,9 +481,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     min_detail_area_frac=min_detail_area_frac,
                     context_pad_frac=context_margin_frac,
                     ignore_mask=gripper_ignore,
+                    survey_target=survey_target_name,
                 )
                 reports[camera_name] = camera_report
-                survey_reasons = ivm_survey_rejection_reasons(camera_report)
+                survey_reasons = ivm_survey_rejection_reasons(
+                    camera_report,
+                    require_full_plate=False,
+                    max_area_frac=ivm_max_center_board_area_frac,
+                    clearance_scale=0.20,
+                )
                 logging.info(
                     "iteration=%d %s: seen=%s plate_full=%s "
                     "diagnostic_survey_reasons=%s edges=%s area=%.3f "
@@ -437,6 +529,30 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     camera_report.gripper_escape_direction[1],
                     frame["stamp_ns"],
                 )
+                if target_mode is not SurveyTargetMode.UNSPECIFIED:
+                    logging.info(
+                        "iteration=%d %s target_roi=%s seen=%s full=%s "
+                        "visible=%.3f(min center/side %.2f/%.2f) "
+                        "area=%.3f(range %.3f..%.3f) "
+                        "center=(%+.3f,%+.3f) "
+                        "edges=%s mask_overlap=%dpx mask_clearance=%.1fpx",
+                        iteration,
+                        camera_name,
+                        camera_report.survey_target,
+                        camera_report.target_region_seen,
+                        camera_report.target_region_full,
+                        camera_report.target_region_visible_frac,
+                        target_requirements.center_min_visible_frac,
+                        target_requirements.side_min_visible_frac,
+                        camera_report.target_region_area_frac,
+                        target_requirements.min_area_frac,
+                        target_requirements.max_area_frac,
+                        camera_report.target_region_center_error[0],
+                        camera_report.target_region_center_error[1],
+                        sorted(camera_report.target_region_edges),
+                        camera_report.target_region_gripper_overlap_px,
+                        camera_report.target_region_gripper_clearance_px,
+                    )
 
             # Validate the image-plane component of the preceding leveling
             # move against this genuinely fresh center frame.  If the board
@@ -529,7 +645,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
 
             # Side cameras may seed acquisition and are mandatory supporting
             # evidence for IVM, but can never finish the search by themselves.
-            # The planner requires center-camera J6/top-down geometry plus
+            # The planner requires center-camera J6/survey-tilt geometry plus
             # simultaneous context and gripper clearance in all three views.
             result.component_coverage_ready = False
 
@@ -550,20 +666,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
 
-            # Completion needs a fresh physical top-down check, not a sticky
-            # acknowledgement from an earlier leveling iteration.  If later
-            # clearance IK tilts the camera, return to LEVEL immediately.
-            center_top_down = False
+            # Completion needs a fresh physical survey-tilt check, not a
+            # sticky acknowledgement from an earlier positioning iteration.
+            # If later clearance IK leaves the configured oblique band, return
+            # to LEVEL immediately.
+            center_tilt_ready = False
             if planner.phase == "ascend_clearance":
                 try:
-                    _, _, completion_back_away = self._camera_axes_in_base(
-                        "center_camera", timeout_sec
+                    completion_image_right, _, completion_back_away = (
+                        self._camera_axes_in_base(
+                            "center_camera", timeout_sec
+                        )
                     )
                 except Exception as error:
                     result.success = False
                     result.message = (
                         "permitted center-camera TF unavailable for fresh "
-                        f"top-down completion check: {error}"
+                        f"survey-tilt completion check: {error}"
                     )
                     return
                 completion_tilt_rad = math.acos(
@@ -578,34 +697,41 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         )
                     )
                 )
-                center_top_down = (
-                    completion_tilt_rad <= top_down_tolerance_rad
+                _, completion_tilt_step, completion_survey_error = (
+                    survey_tilt_correction(
+                        completion_back_away,
+                        completion_image_right,
+                        target_center_tilt_rad,
+                        center_tilt_tolerance_rad,
+                    )
                 )
+                center_tilt_ready = completion_tilt_step == 0.0
                 logging.info(
                     "fresh center-camera completion tilt=%.3frad "
-                    "top_down=%s",
+                    "target=%.3frad survey_vector_error=%.3frad "
+                    "tolerance=%.3frad ready=%s",
                     completion_tilt_rad,
-                    center_top_down,
+                    target_center_tilt_rad,
+                    completion_survey_error,
+                    center_tilt_tolerance_rad,
+                    center_tilt_ready,
                 )
-                if not center_top_down:
+                if not center_tilt_ready:
                     planner.request_relevel()
                     logging.warning(
-                        "center camera lost top-down alignment during "
-                        "clearance; returning to joints 2-4 leveling"
+                        "center camera left the IVM survey-tilt band during "
+                        "clearance; returning to joints 2-4 positioning"
                     )
 
-            # Gate only the center report on physical top-down TF. Side reports
-            # retain their own full/context evidence so the planner can require
-            # a synchronized three-camera survey before releasing the arm.
+            # Attach the fresh physical survey-tilt gate to the center report.
+            # Do not overload ``full``: that image-only field includes the old
+            # padded whole-plate context which is intentionally unnecessary at
+            # the closer IVM component view.
             planning_reports = {
                 name: replace(
                     item,
-                    full=bool(
-                        item.full
-                        and (
-                            name != "center_camera"
-                            or center_top_down
-                        )
+                    survey_tilt_ready=bool(
+                        name != "center_camera" or center_tilt_ready
                     ),
                 )
                 for name, item in reports.items()
@@ -623,9 +749,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.steer_camera = "center_camera"
                 result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
                 result.message = (
-                    "all three cameras confirmed synchronized board context "
+                    "all three cameras confirmed synchronized target context "
                     "and gripper clearance while the center retained its "
-                    "aligned top-down IVM view in two fresh frames after "
+                    "aligned oblique IVM survey view in two fresh frames after "
                     f"{result.moves_executed} adaptive moves"
                 )
                 return
@@ -634,13 +760,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result.message = action.reason
                 return
 
-            # Level only after J1 centering and J6 long-axis alignment.  The
-            # terminal view belongs to the center camera, so level its optical
-            # axis rather than the TCP +Z axis (the camera is mounted about
-            # 15 degrees off the tool axis).  The bounded Cartesian correction
-            # and small +Z clearance are realized primarily through joints
-            # 2-4 while the already-measured J1/J6 references remain the search
-            # envelope anchors.
+            # Position the survey tilt only after J1 centering and J6 long-axis
+            # alignment. The terminal view belongs to the center camera, so
+            # control its optical axis rather than TCP +Z (the camera is
+            # mounted about 15 degrees off the tool axis). A controlled
+            # oblique angle preserves module depth cues that disappear in a
+            # perfectly vertical view. The bounded Cartesian correction and
+            # small +Z clearance are realized primarily through joints 2-4
+            # while the measured J1/J6 references remain phase anchors.
             if planner.phase == "j2_4_level":
                 try:
                     level_position, level_orientation = self._gripper_pose(
@@ -692,11 +819,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     result.success = False
                     result.message = (
                         f"center camera is {tilt_rad:.2f}rad from "
-                        "straight down; the survey pitch is outside the "
-                        "leveling range"
+                        "vertical; the survey pitch is outside the supported "
+                        "positioning range"
                     )
                     return
-                if tilt_rad > top_down_tolerance_rad:
+                (
+                    level_axis,
+                    tilt_correction_rad,
+                    survey_error_before,
+                ) = survey_tilt_correction(
+                    camera_back_away,
+                    level_image_right,
+                    target_center_tilt_rad,
+                    center_tilt_tolerance_rad,
+                )
+                if tilt_correction_rad != 0.0:
                     if initial_pose is None:
                         initial_pose = (
                             np.asarray(level_position, dtype=float),
@@ -704,26 +841,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         )
                     pre_level_joint1 = current_level_joint1
                     pre_level_joint6 = current_level_joint6
-                    level_axis = np.cross(camera_back_away, straight_up)
-                    axis_norm = float(np.linalg.norm(level_axis))
-                    if axis_norm < 1e-9:
-                        result.success = False
-                        result.message = (
-                            "center-camera leveling axis is degenerate; aborting"
-                        )
-                        return
-                    # Fixed-position orientation-only IK stalled in the live
-                    # run before J6 was ever reached. Make the pitch correction
-                    # in small bounded increments while adding a little base-Z
-                    # clearance so joints 2-4 can move away from the singular
-                    # posture instead of forcing the wrist to solve it alone.
-                    level_step_rad = min(0.12, tilt_rad)
+                    # Fixed-position orientation-only IK stalled in an earlier
+                    # live run. Give the first pitch request one small base-Z
+                    # singularity escape, then never accumulate clearance on
+                    # later pitch steps. Repeated 20 mm lifts were the reason
+                    # the previous survey finished above IVM's useful range.
                     level_target_orientation = self._rotate_orientation_in_base(
                         level_orientation,
-                        level_axis / axis_norm,
-                        level_step_rad,
+                        level_axis,
+                        tilt_correction_rad,
                     )
-                    level_clearance_m = min(0.02, backoff_step_m)
+                    level_clearance_m = (
+                        0.0
+                        if level_clearance_applied
+                        else min(0.015, backoff_step_m)
+                    )
                     level_center_y = 0.0
                     level_image_x_direction = 0.0
                     level_image_y_direction = 0.0
@@ -802,13 +934,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         float(value) for value in level_target_position_array
                     )
                     logging.info(
-                        "joints 2-4 top-view leveling after J6: center-camera "
-                        "tilt=%.3frad step=%.3frad clearance=%.3fm "
+                        "joints 2-4 IVM survey positioning after J6: "
+                        "center-camera tilt=%.3frad target=%.3frad "
+                        "survey_error=%.3frad step=%.3frad clearance=%.3fm "
                         "vertical_error=%+.3f image_direction=(%+.2f,%+.2f) "
                         "camera_plane_delta=(%+.4f,%+.4f,%+.4f)m; keeping "
                         "J1/J6 phase references fixed",
                         tilt_rad,
-                        level_step_rad,
+                        target_center_tilt_rad,
+                        survey_error_before,
+                        tilt_correction_rad,
                         level_clearance_m,
                         level_center_y,
                         level_image_x_direction,
@@ -884,6 +1019,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         return
                     result.moves_executed += 1
                     leveling_moves += 1
+                    level_clearance_applied = True
                     result.travel_m = next_travel_m
                     result.angular_travel_rad = next_angular_travel_rad
                     result.moved = True
@@ -903,7 +1039,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                                 level_image_y_direction,
                             )
                     try:
-                        _, _, residual_back_away = self._camera_axes_in_base(
+                        (
+                            residual_image_right,
+                            _,
+                            residual_back_away,
+                        ) = self._camera_axes_in_base(
                             "center_camera", timeout_sec
                         )
                     except Exception as error:
@@ -924,6 +1064,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                                 1.0,
                             )
                         )
+                    )
+                    (
+                        _,
+                        residual_tilt_step,
+                        residual_tilt_error,
+                    ) = survey_tilt_correction(
+                        residual_back_away,
+                        residual_image_right,
+                        target_center_tilt_rad,
+                        center_tilt_tolerance_rad,
                     )
                     post_level_joint1 = self.robot_motion.current_joint1(
                         min(timeout_sec, 0.5)
@@ -951,12 +1101,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         post_level_joint6 - level_anchor_joint6
                     )
                     logging.info(
-                        "joints 2-4 top-view stage complete: residual center "
-                        "camera tilt=%.3frad angle_moved=%.3frad "
+                        "joints 2-4 IVM survey stage complete: residual center "
+                        "camera tilt=%.3frad target=%.3frad error=%.3frad "
+                        "angle_moved=%.3frad "
                         "target_reached=%s step_j1_drift=%+.4frad "
                         "step_j6_drift=%+.4frad cumulative_j1_drift=%+.4frad "
                         "cumulative_j6_drift=%+.4frad",
                         residual_tilt,
+                        target_center_tilt_rad,
+                        residual_tilt_error,
                         outcome.angular_distance_rad,
                         outcome.target_reached,
                         level_step_joint1_drift,
@@ -964,35 +1117,26 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         level_joint1_drift,
                         level_joint6_drift,
                     )
+                    # Cartesian IK may redistribute J1/J6 while realizing the
+                    # requested camera pose.  Restarting CENTER/ALIGN here made
+                    # the live policy repeat J6 and leveling until the deadline.
+                    # Keep progressing from the measured pose: the fresh center
+                    # image remains the authority for horizontal centering and
+                    # the <=2-degree long-axis gate, with a final confirmed J6
+                    # trim available after component framing.
                     if (
-                        abs(level_joint1_drift)
-                        > level_joint_drift_tolerance_rad
-                        or abs(level_joint6_drift)
-                        > level_joint_drift_tolerance_rad
-                    ):
-                        planner.request_recenter()
-                        logging.warning(
-                            "joints 2-4 leveling changed J1/J6 by "
-                            "%+.4f/%+.4frad; returning to visual J1/J6 "
-                            "correction instead of failing",
-                            level_joint1_drift,
-                            level_joint6_drift,
-                        )
-                        iteration += 1
-                        continue
-                    if (
-                        residual_tilt > top_down_tolerance_rad
-                        and residual_tilt
-                        >= tilt_rad - min_level_progress_rad
+                        residual_tilt_step != 0.0
+                        and residual_tilt_error
+                        >= survey_error_before - min_level_progress_rad
                     ):
                         result.success = False
                         result.message = (
-                            "joints 2-4 leveling made less than 0.01rad "
-                            "top-down progress; refusing to repeat the same "
-                            "Cartesian request until the deadline"
+                            "joints 2-4 positioning made less than 0.01rad "
+                            "progress toward the IVM survey-tilt band; "
+                            "refusing to repeat the same Cartesian request"
                         )
                         return
-                    if residual_tilt <= top_down_tolerance_rad:
+                    if residual_tilt_step == 0.0:
                         planner.mark_level_complete()
                     iteration += 1
                     continue
@@ -1001,8 +1145,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 # planner and capture one genuinely fresh terminal frame.
                 planner.mark_level_complete()
                 logging.info(
-                    "center camera already top-down after J6; capturing the "
-                    "first fresh completion frame"
+                    "center camera already inside the IVM survey-tilt band "
+                    "after J6; capturing the first fresh completion frame"
                 )
                 iteration += 1
                 continue
@@ -2150,27 +2294,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     float(post_motion_joint6) - level_anchor_joint6
                 )
                 logging.info(
-                    "post-level joints 2-4 motion preserved phase anchors: "
+                    "post-level joints 2-4 motion measured against phase anchors: "
                     "j1_drift=%+.4frad j6_drift=%+.4frad",
                     post_level_joint1_drift,
                     post_level_joint6_drift,
                 )
-                if (
-                    abs(post_level_joint1_drift)
-                    > level_joint_drift_tolerance_rad
-                    or abs(post_level_joint6_drift)
-                    > level_joint_drift_tolerance_rad
-                ):
-                    planner.request_recenter()
-                    logging.warning(
-                        "post-level %s motion changed J1/J6 by "
-                        "%+.4f/%+.4frad; returning to visual correction",
-                        action.kind.value,
-                        post_level_joint1_drift,
-                        post_level_joint6_drift,
-                    )
-                    iteration += 1
-                    continue
+                # Do not restart J1/J6 solely from joint redistribution.  The
+                # next synchronized images decide whether centering/alignment
+                # actually changed and the ASCEND phase repairs only the failed
+                # image predicate at the final survey pose.
             if (
                 initial_joint1 is not None
                 and abs(float(post_motion_joint1) - initial_joint1)
@@ -2289,6 +2421,33 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         if not 0.005 <= values["settle_orientation_tolerance_rad"] <= 0.1:
             raise ValueError(
                 "settle_orientation_tolerance_rad must be in [0.005, 0.1]"
+            )
+        if not 5.0 <= values["target_center_tilt_deg"] <= 45.0:
+            raise ValueError("target_center_tilt_deg must be in [5, 45]")
+        if not 1.0 <= values["center_tilt_tolerance_deg"] <= 10.0:
+            raise ValueError("center_tilt_tolerance_deg must be in [1, 10]")
+        if (
+            values["center_tilt_tolerance_deg"]
+            >= values["target_center_tilt_deg"]
+        ):
+            raise ValueError(
+                "center_tilt_tolerance_deg must be below target_center_tilt_deg"
+            )
+        if not 0.05 <= values["ivm_min_center_board_area_frac"] <= 0.4:
+            raise ValueError(
+                "ivm_min_center_board_area_frac must be in [0.05, 0.4]"
+            )
+        if not 0.1 <= values["ivm_max_center_board_area_frac"] <= 0.6:
+            raise ValueError(
+                "ivm_max_center_board_area_frac must be in [0.1, 0.6]"
+            )
+        if (
+            values["ivm_min_center_board_area_frac"]
+            >= values["ivm_max_center_board_area_frac"]
+        ):
+            raise ValueError(
+                "ivm_min_center_board_area_frac must be below "
+                "ivm_max_center_board_area_frac"
             )
 
     @staticmethod

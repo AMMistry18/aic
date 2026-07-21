@@ -1,14 +1,22 @@
 # SC IVM filter scripts
 
+> **Node mapping:** `filter_estimates_sfp` must use section 2 and the staged
+> SC-module filter must use section 3. Section 1 is only for selecting a
+> destination `sc_port_N`; its `sc_port_([0-4])` parser must never be pasted
+> into either source-module node.
+
 These snippets are Flowstate Code Execution function bodies. Their inputs are
 different because only the destination has a task-selected numbered slot:
 
 - Destination SC port: `params.pose_estimates` and
   `params.selected_module_name`
-- SC plug/module: `params.pose_estimates` only
+- Staged SFP module: `params.pose_estimates` and
+  `params.selected_module_name`
+- SC plug/module: `params.pose_estimates` and
+  `params.selected_module_name`
 
-Both return one selected estimate in `output.pose_estimates` and its pose in
-`output.root_ts_target`, which can be connected directly to Create Object.
+All three return one selected estimate in `output.pose_estimates` and its pose
+in `output.root_ts_target`, which can be connected directly to Create Object.
 
 ## 1. Destination SC port (`sc_port_0` through `sc_port_4`)
 
@@ -284,20 +292,31 @@ output.root_ts_target.append(best.root_t_target)
 return output
 ```
 
-## 2. SC plug/module (no `selected_module_name` input)
+## 2. SFP module paired with the selected NIC rail
 
-This second filter is the SC equivalent of the staged SFP-module selector. It
-returns the one physical SC plug estimate for Create Object. The IVM can report
-the same plug from several cameras, so the filter first merges nearby estimates
-and retains the highest-score observation. It intentionally does not copy the
-SFP grasp/remove offsets; SC needs its own calibrated offsets.
+This is the source-side SFP selector. It preserves the existing calibrated
+grasp and removal offsets, but replaces score-only or hard-coded selection with
+the index parsed from `selected_module_name`.
 
 ```python
+import re
+
 import numpy as np
 
 
 MIN_SCORE = 0.4
-DUPLICATE_RADIUS_M = 0.018
+DUPLICATE_RAIL_RADIUS_M = 0.018
+NUM_MODULES = 5
+RAIL_AXIS_ROOT = np.array([0.0, 1.0, 0.0], dtype=float)
+
+# Phase 1 pairing: nic_card_mount_N -> staged SFP module N.
+MODULE_INDEX_FOR_NIC_RAIL = (0, 1, 2, 3, 4)
+
+GRASP_OFFSET_POS = np.array([0.0, 0.027, 0.0], dtype=float)
+GRASP_OFFSET_QUAT = np.array(
+    [-0.568, 0.023, -0.015, -0.822], dtype=float
+)
+REMOVE_OFFSET_POS = np.array([0.0, 0.077, 0.0], dtype=float)
 
 
 def position(estimate):
@@ -305,17 +324,31 @@ def position(estimate):
   return np.array([p.x, p.y, p.z], dtype=float)
 
 
+def orientation(estimate):
+  q = estimate.root_t_target.orientation
+  value = np.array([q.x, q.y, q.z, q.w], dtype=float)
+  norm = float(np.linalg.norm(value))
+  if norm < 1e-9:
+    raise RuntimeError("SFP estimate contains a zero-length quaternion")
+  return value / norm
+
+
+def rail_coordinate(estimate):
+  return float(np.dot(position(estimate), RAIL_AXIS_ROOT))
+
+
 def deduplicate(estimates):
-  """Merge multi-camera estimates of the same physical SC plug."""
+  """Retain the strongest observation of each physical SFP module."""
   selected = []
   for estimate in sorted(
       estimates,
       key=lambda item: float(item.score),
       reverse=True,
   ):
-    xyz = position(estimate)
+    coordinate = rail_coordinate(estimate)
     if all(
-        np.linalg.norm(xyz - position(existing)) >= DUPLICATE_RADIUS_M
+        abs(coordinate - rail_coordinate(existing))
+        >= DUPLICATE_RAIL_RADIUS_M
         for existing in selected
     ):
       selected.append(estimate)
@@ -330,12 +363,211 @@ def diagnostics(estimates):
               round(float(value), 1)
               for value in position(item) * 1000.0
           ],
+          "rail_y_mm": round(rail_coordinate(item) * 1000.0, 1),
+      }
+      for item in estimates
+  ]
+
+
+def quaternion_multiply(first, second):
+  x1, y1, z1, w1 = first
+  x2, y2, z2, w2 = second
+  return np.array([
+      w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+      w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+      w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+      w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+  ], dtype=float)
+
+
+def quaternion_rotate(quaternion, vector):
+  xyz = quaternion[:3]
+  return vector + 2.0 * np.cross(
+      xyz,
+      quaternion[3] * vector + np.cross(xyz, vector),
+  )
+
+
+output = code_execution_pb2.ReturnValue()
+
+target_name = params.selected_module_name.strip()
+match = re.fullmatch(r"nic_card_mount_([0-4])", target_name)
+if match is None:
+  raise RuntimeError(
+      f"Invalid selected_module_name {target_name!r}; expected "
+      "nic_card_mount_0 through nic_card_mount_4"
+  )
+nic_idx = int(match.group(1))
+module_idx = MODULE_INDEX_FOR_NIC_RAIL[nic_idx]
+
+confident = [
+    estimate
+    for estimate in params.pose_estimates
+    if float(estimate.score) >= MIN_SCORE
+]
+if not confident:
+  raise RuntimeError(
+      f"No SFP-module detections with score >= {MIN_SCORE}. "
+      f"Received scores: "
+      f"{[round(float(item.score), 3) for item in params.pose_estimates]}"
+  )
+
+candidates = deduplicate(confident)
+print(
+    "SFP-module filter input:",
+    f"requested_nic={target_name}",
+    f"paired_module_index={module_idx}",
+    f"total_estimates={len(params.pose_estimates)}",
+    f"confident_estimates={len(confident)}",
+    f"physical_candidates={len(candidates)}",
+    f"candidates={diagnostics(candidates)}",
+)
+
+if len(candidates) != NUM_MODULES:
+  raise RuntimeError(
+      f"Expected {NUM_MODULES} physical SFP modules to preserve absolute "
+      f"pairing with {target_name}, but found {len(candidates)}. "
+      f"Candidates: {diagnostics(candidates)}"
+  )
+
+ordered = sorted(candidates, key=rail_coordinate)
+best = ordered[module_idx]
+
+sfp_position = position(best)
+sfp_orientation = orientation(best)
+
+offset_orientation = GRASP_OFFSET_QUAT.copy()
+offset_orientation /= np.linalg.norm(offset_orientation)
+
+grasp_position = sfp_position + quaternion_rotate(
+    sfp_orientation,
+    GRASP_OFFSET_POS,
+)
+grasp_orientation = quaternion_multiply(
+    sfp_orientation,
+    offset_orientation,
+)
+grasp_orientation /= np.linalg.norm(grasp_orientation)
+
+remove_position = sfp_position + quaternion_rotate(
+    sfp_orientation,
+    REMOVE_OFFSET_POS,
+)
+
+print(
+    "SFP-module selection:",
+    f"requested_nic={target_name}",
+    f"paired_module_index={module_idx}",
+    f"ordered_y_mm="
+    f"{[round(rail_coordinate(item) * 1000.0, 1) for item in ordered]}",
+    f"selected_xyz_mm="
+    f"{[round(float(value), 1) for value in sfp_position * 1000.0]}",
+    f"selected_score={float(best.score):.3f}",
+)
+
+output.pose_estimates.append(best)
+output.root_ts_target.append(best.root_t_target)
+
+grasp_pose = output.grasp_poses.add()
+grasp_pose.position.x = float(grasp_position[0])
+grasp_pose.position.y = float(grasp_position[1])
+grasp_pose.position.z = float(grasp_position[2])
+grasp_pose.orientation.x = float(grasp_orientation[0])
+grasp_pose.orientation.y = float(grasp_orientation[1])
+grasp_pose.orientation.z = float(grasp_orientation[2])
+grasp_pose.orientation.w = float(grasp_orientation[3])
+
+remove_pose = output.remove_poses.add()
+remove_pose.position.x = float(remove_position[0])
+remove_pose.position.y = float(remove_position[1])
+remove_pose.position.z = float(remove_position[2])
+remove_pose.orientation.x = float(grasp_orientation[0])
+remove_pose.orientation.y = float(grasp_orientation[1])
+remove_pose.orientation.z = float(grasp_orientation[2])
+remove_pose.orientation.w = float(grasp_orientation[3])
+
+return output
+```
+
+## 3. SC plug/module paired with the selected NIC rail
+
+This filter parses the index from the task's selected NIC name, orders the five
+physical SC plug/module candidates along the same root-frame +Y rail axis, and
+returns the candidate with that index. The same `selected_module_name` input
+must be connected to both the SFP and SC filters. IVM may report one object from
+several cameras, so estimates are first deduplicated by their rail coordinate.
+It intentionally does not copy the SFP grasp/remove offsets; SC needs its own
+calibrated offsets.
+
+```python
+import re
+
+import numpy as np
+
+
+MIN_SCORE = 0.4
+DUPLICATE_RAIL_RADIUS_M = 0.018
+NUM_MODULES = 5
+RAIL_AXIS_ROOT = np.array([0.0, 1.0, 0.0], dtype=float)
+
+# Explicit Phase 1 pairing: nic_card_mount_N -> SC module N. If inspection of
+# the qualification board proves the physical ordering is reversed, change
+# only this tuple to (4, 3, 2, 1, 0).
+MODULE_INDEX_FOR_NIC_RAIL = (0, 1, 2, 3, 4)
+
+
+def position(estimate):
+  p = estimate.root_t_target.position
+  return np.array([p.x, p.y, p.z], dtype=float)
+
+
+def rail_coordinate(estimate):
+  return float(np.dot(position(estimate), RAIL_AXIS_ROOT))
+
+
+def deduplicate(estimates):
+  """Merge multi-camera estimates of the same physical SC plug."""
+  selected = []
+  for estimate in sorted(
+      estimates,
+      key=lambda item: float(item.score),
+      reverse=True,
+  ):
+    coordinate = rail_coordinate(estimate)
+    if all(
+        abs(coordinate - rail_coordinate(existing))
+        >= DUPLICATE_RAIL_RADIUS_M
+        for existing in selected
+    ):
+      selected.append(estimate)
+  return selected
+
+
+def diagnostics(estimates):
+  return [
+      {
+          "score": round(float(item.score), 3),
+          "xyz_mm": [
+              round(float(value), 1)
+              for value in position(item) * 1000.0
+          ],
+          "rail_y_mm": round(rail_coordinate(item) * 1000.0, 1),
       }
       for item in estimates
   ]
 
 
 output = code_execution_pb2.ReturnValue()
+
+target_name = params.selected_module_name.strip()
+match = re.fullmatch(r"nic_card_mount_([0-4])", target_name)
+if match is None:
+  raise RuntimeError(
+      f"Invalid selected_module_name {target_name!r}; expected "
+      "nic_card_mount_0 through nic_card_mount_4"
+  )
+nic_idx = int(match.group(1))
+module_idx = MODULE_INDEX_FOR_NIC_RAIL[nic_idx]
 
 confident = [
     estimate
@@ -352,23 +584,30 @@ if not confident:
 candidates = deduplicate(confident)
 print(
     "SC-plug filter input:",
+    f"requested_nic={target_name}",
+    f"paired_module_index={module_idx}",
     f"total_estimates={len(params.pose_estimates)}",
     f"confident_estimates={len(confident)}",
     f"physical_candidates={len(candidates)}",
     f"candidates={diagnostics(candidates)}",
 )
 
-if len(candidates) != 1:
+if len(candidates) != NUM_MODULES:
   raise RuntimeError(
-      "Expected one physical SC plug after merging multi-camera "
-      f"detections, but found {len(candidates)}. "
+      f"Expected {NUM_MODULES} physical SC modules to preserve absolute "
+      f"pairing with {target_name}, but found {len(candidates)}. "
       f"Candidates: {diagnostics(candidates)}"
   )
 
-best = candidates[0]
+ordered = sorted(candidates, key=rail_coordinate)
+best = ordered[module_idx]
 
 print(
     "SC-plug selection:",
+    f"requested_nic={target_name}",
+    f"paired_module_index={module_idx}",
+    f"ordered_y_mm="
+    f"{[round(rail_coordinate(item) * 1000.0, 1) for item in ordered]}",
     f"selected_xyz_mm="
     f"{[round(float(value), 1) for value in position(best) * 1000.0]}",
     f"selected_score={float(best.score):.3f}",

@@ -14,6 +14,16 @@ message ViewPose {
 }
 
 message CheckBoardVisibilitySkillParams {
+  // Component region that the adaptive camera survey should frame for IVM.
+  // Flowstate renders this enum-valued parameter as a dropdown. Existing
+  // behavior trees that omit it retain the legacy board-overview mode.
+  enum SurveyTarget {
+    UNSPECIFIED = 0;
+    STAGED_SFP_MODULE = 1;
+    NIC_SFP_DESTINATION = 2;
+    SC_DESTINATION_PORT = 3;
+  }
+
   // Required background/foreground brightness gap in grey levels. 0 -> 30.
   uint32 min_contrast = 1;
   // Clearance from each usable image edge. 0 -> 15 pixels.
@@ -57,7 +67,8 @@ message CheckBoardVisibilitySkillParams {
   double max_angular_displacement_rad = 19;
   // Deprecated compatibility field; controller-native limits are used.
   double max_angular_travel_rad = 20;
-  // Dynamic frame clearance reserved for protruding NIC/SC hardware. 0 -> 0.05.
+  // Dynamic frame clearance used while steering the board. 0 -> 0.02. Final
+  // completion uses the task-component window rather than a padded full plate.
   double context_margin_frac = 21;
   // Board pixels required for downstream component detail. 0 -> 0.06.
   double min_detail_area_frac = 22;
@@ -71,6 +82,19 @@ message CheckBoardVisibilitySkillParams {
   double max_angular_speed_rps = 25;
   // Measured TCP orientation tolerance during Cartesian moves. 0 -> 0.05 rad.
   double settle_orientation_tolerance_rad = 26;
+  // Desired center-camera optical-axis tilt from vertical for IVM depth cues.
+  // 0 -> 32 degrees.
+  double target_center_tilt_deg = 27;
+  // Accepted error around target_center_tilt_deg. 0 -> 2 degrees.
+  double center_tilt_tolerance_deg = 28;
+  // Minimum center-view board fraction for IVM component detail. 0 -> 0.32.
+  double ivm_min_center_board_area_frac = 29;
+  // Maximum center-view board fraction, retaining the component region in all
+  // three wrist cameras. 0 -> 0.50.
+  double ivm_max_center_board_area_frac = 30;
+  // IVM component region to frame. Unspecified preserves the legacy
+  // whole-board survey behavior for existing Flowstate nodes.
+  SurveyTarget survey_target = 31;
 }
 
 message CheckBoardVisibilitySkillResult {
@@ -78,7 +102,7 @@ message CheckBoardVisibilitySkillResult {
   bool success = 1;
   string message = 2;
 
-  // True when at least one camera sees the whole board with margin.
+  // True when the synchronized three-camera IVM component survey completes.
   bool done = 3;
 
   string steer_camera = 4;
@@ -105,9 +129,8 @@ message CheckBoardVisibilitySkillResult {
   double travel_m = 19;
   bool moved = 20;
   bool force_abort = 21;
-  // True after all three cameras met the horizontal area gate and the board
-  // silhouette plus padded task-component envelope are inside one usable
-  // camera frame at adequate scale and quality.
+  // True after all three cameras retain the task-component window at adequate
+  // scale and quality, with the center at the configured physical survey tilt.
   bool component_coverage_ready = 22;
   double view_quality = 23;
   double angular_travel_rad = 24;

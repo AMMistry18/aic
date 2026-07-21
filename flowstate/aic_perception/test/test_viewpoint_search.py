@@ -1,15 +1,65 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
-from aic_perception.board_visibility import MaskReport
+from aic_perception.board_visibility import MaskReport, SurveyTargetMode
 from aic_perception.viewpoint_search import (
     ActionKind,
     AdaptiveViewpointPlanner,
     ViewpointAction,
+    survey_tilt_correction,
 )
+
+
+def test_survey_tilt_correction_is_deterministic_and_bounded():
+    target = math.radians(20.0)
+    tolerance = math.radians(4.0)
+
+    axis, step, error = survey_tilt_correction(
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 0.0),
+        target,
+        tolerance,
+    )
+
+    assert axis == pytest.approx((-1.0, 0.0, 0.0))
+    assert step == pytest.approx(0.12)
+    assert error == pytest.approx(target)
+
+
+def test_survey_tilt_correction_stops_inside_target_band():
+    target = math.radians(20.0)
+    tolerance = math.radians(4.0)
+    target_direction = (0.0, math.sin(target), math.cos(target))
+
+    _, step, error = survey_tilt_correction(
+        target_direction,
+        (1.0, 0.0, 0.0),
+        target,
+        tolerance,
+    )
+
+    assert step == 0.0
+    assert error == pytest.approx(0.0)
+
+
+def test_survey_tilt_rejects_correct_magnitude_in_wrong_azimuth():
+    target = math.radians(20.0)
+    tolerance = math.radians(4.0)
+    wrong_direction = (0.0, -math.sin(target), math.cos(target))
+
+    _, step, error = survey_tilt_correction(
+        wrong_direction,
+        (1.0, 0.0, 0.0),
+        target,
+        tolerance,
+    )
+
+    assert step == pytest.approx(0.12)
+    assert error == pytest.approx(math.radians(40.0))
 
 
 def report(
@@ -83,6 +133,32 @@ def auxiliary_report(**changes) -> MaskReport:
     )
     values.update(changes)
     return report(**values)
+
+
+def target_report(
+    mode: SurveyTargetMode = SurveyTargetMode.STAGED_SFP_MODULE,
+    **changes,
+) -> MaskReport:
+    values = dict(
+        survey_target=mode.value,
+        target_region_seen=True,
+        target_region_full=True,
+        target_region_visible_frac=1.0,
+        target_region_area_frac=(
+            0.06 if mode is SurveyTargetMode.SC_DESTINATION_PORT else 0.12
+        ),
+        target_region_bbox=(200, 150, 600, 500),
+        target_region_centroid=(400.0, 300.0),
+        target_region_center_error=(0.0, 0.0),
+        target_region_edges=frozenset(),
+        target_region_clearance_px=(100.0, 100.0, 100.0, 100.0),
+        target_region_context_pad_px=32.0,
+        target_region_gripper_overlap_px=0,
+        target_region_gripper_clearance_px=30.0,
+        target_region_gripper_escape_direction=(0.0, -1.0),
+    )
+    values.update(changes)
+    return replace(strict_report(), **values)
 
 
 def views(
@@ -240,6 +316,23 @@ def test_clipped_center_uses_bounded_zoom_then_stagnates():
     terminal = planner.next_action(clipped)
     assert terminal.kind is ActionKind.STAGNATED
     assert "centroid" in terminal.reason
+
+
+def test_single_top_edge_keeps_usable_horizontal_centroid_for_j1():
+    planner = AdaptiveViewpointPlanner()
+    top_clipped = views(
+        report(
+            center=(0.10, -0.40),
+            area=0.34,
+            edges=("top",),
+            logo=True,
+        )
+    )
+
+    action = planner.next_action(top_clipped)
+
+    assert action.kind is ActionKind.OBSERVE
+    assert planner.phase == "j1_center"
 
 
 def test_flapping_j6_sign_uses_bounded_zoom_fallback():
@@ -422,7 +515,11 @@ def test_auxiliary_mask_escape_reverses_per_camera_on_worse_frame():
     assert "polarity reversed" in second.reason
 
 
-def test_auxiliary_tight_context_uses_small_camera_specific_translation():
+def test_auxiliary_tight_context_backs_off_for_shared_coverage():
+    # A clipped/tight side view means the board is too large for that offset
+    # camera. The correction is a shared optical-axis backoff (which opens
+    # margin in every camera at once), not a lateral nudge that only moves the
+    # clip to the opposite edge.
     planner = AdaptiveViewpointPlanner(
         expected_cameras=(
             "left_camera",
@@ -441,10 +538,10 @@ def test_auxiliary_tight_context_uses_small_camera_specific_translation():
         )
     )
 
-    assert action.kind is ActionKind.TRANSLATE
-    assert action.camera == "left_camera"
-    assert action.image_direction[1] < 0.0
-    assert action.translation_scale == pytest.approx(0.60)
+    assert action.kind is ActionKind.BACKOFF
+    assert action.camera == "center_camera"
+    assert action.axial_direction == pytest.approx(1.0)
+    assert "back off" in action.reason
 
 
 def test_qualifying_fresh_frame_wins_at_deadline_boundary():
@@ -469,20 +566,95 @@ def test_full_side_camera_never_completes_after_level():
     assert not planner.coverage_achieved
 
 
-def test_strict_survey_requires_expanded_component_context_margin():
+def test_component_window_does_not_require_report_full_above_margin():
     planner = AdaptiveViewpointPlanner()
     enter_ascend(planner)
     action = planner.next_action(
         views(
-            report(
-                full=True,
-                area=0.2,
-                clearance=(37.0, 37.0, 37.0, 37.0),
+            strict_report(
+                full=False,
+                clearance=(81.0, 81.0, 81.0, 81.0),
                 context_pad=36.0,
             )
         )
     )
-    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.kind is ActionKind.OBSERVE
+    done = planner.next_action(
+        views(
+            strict_report(
+                full=False,
+                clearance=(81.0, 81.0, 81.0, 81.0),
+                context_pad=36.0,
+            )
+        )
+    )
+    assert done.kind is ActionKind.DONE
+
+
+def test_component_window_reserves_real_margin_for_cable_module_row():
+    planner = AdaptiveViewpointPlanner(max_postlevel_translates=1)
+    enter_ascend(planner)
+    cable_edge_tight = strict_report(
+        clearance=(20.0, 100.0, 100.0, 100.0),
+        context_pad=16.0,
+    )
+
+    action = planner.next_action(views(cable_edge_tight))
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.image_direction[0] < 0.0
+
+
+def test_center_context_clearance_uses_left_right_top_bottom_order():
+    planner = AdaptiveViewpointPlanner(max_postlevel_translates=2)
+    enter_ascend(planner)
+
+    top_tight = strict_report(
+        clearance=(100.0, 100.0, 40.0, 100.0),
+        context_pad=16.0,
+    )
+    action = planner.next_action(views(top_tight))
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.image_direction[0] == pytest.approx(0.0)
+    assert action.image_direction[1] < 0.0
+
+
+def test_auxiliary_off_center_view_is_moved_before_completion():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=(
+            "left_camera",
+            "center_camera",
+            "right_camera",
+        ),
+        auxiliary_max_center_error_y=0.25,
+    )
+    enter_ascend(planner)
+    action = planner.next_action(
+        views(
+            strict_report(),
+            left=auxiliary_report(center=(0.0, -0.36)),
+            right=auxiliary_report(),
+        )
+    )
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.camera == "left_camera"
+    assert action.image_direction[1] < 0.0
+
+
+def test_postlevel_j6_residual_is_confirmed_at_final_framing_pose():
+    planner = AdaptiveViewpointPlanner(roll_confirmation_frames=2)
+    enter_ascend(planner)
+    framed_but_rotated = strict_report(orientation=3.0)
+
+    confirm = planner.next_action(views(framed_but_rotated))
+    trim = planner.next_action(views(framed_but_rotated))
+
+    assert confirm.kind is ActionKind.OBSERVE
+    assert "final-pose J6 trim" in confirm.reason
+    assert trim.kind is ActionKind.CAMERA_ROLL
+    assert trim.aim_direction[0] > 0.0
 
 
 def test_full_center_frame_that_is_too_large_gets_more_clearance():
@@ -740,3 +912,422 @@ def test_deadline_is_terminal_and_sticky():
     assert terminal.kind is ActionKind.DEADLINE
     assert terminal.terminal
     assert planner.next_action(views(report(full=True))) is terminal
+
+
+# ---------------------------------------------------------------------------
+# Component-targeted IVM surveys
+
+
+def test_nic_target_uses_j1_before_j6_or_j2_4_when_horizontally_offset():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    offset = target_report(
+        SurveyTargetMode.NIC_SFP_DESTINATION,
+        target_region_center_error=(0.25, 0.0),
+        orientation_deg=12.0,
+    )
+
+    action = planner.next_action(views(offset))
+
+    assert action.kind is ActionKind.BASE_YAW
+    assert "J1 proportional centering" in action.reason
+
+
+def test_j1_sign_flip_triggers_one_j2_4_relief_before_retrying_yaw():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    positive = target_report(
+        SurveyTargetMode.NIC_SFP_DESTINATION,
+        target_region_center_error=(0.25, 0.0),
+    )
+    negative = replace(
+        positive,
+        target_region_center_error=(-0.26, 0.0),
+    )
+
+    yaw = planner.next_action(views(positive))
+    relief = planner.next_action(views(negative))
+
+    assert yaw.kind is ActionKind.BASE_YAW
+    assert relief.kind is ActionKind.UP_CLEARANCE
+    assert relief.translation_scale == pytest.approx(0.75)
+    assert "before retrying yaw" in relief.reason
+
+    # A shortened force-safe relief still resumes CENTER from the measured
+    # pose; it must not accidentally enter the terminal ASCEND path.
+    planner.mark_clearance_partial(relief, reason="test partial relief")
+    retry = planner.next_action(views(negative))
+    assert retry.kind is ActionKind.BASE_YAW
+    assert planner.phase == "j1_center"
+
+    positive_again = replace(
+        negative,
+        target_region_center_error=(0.27, 0.0),
+    )
+    second_relief = planner.next_action(views(positive_again))
+    assert second_relief.kind is ActionKind.UP_CLEARANCE
+    planner.mark_clearance_partial(second_relief, reason="second partial relief")
+
+    # Two measured overshoots widen only this run's J1 deadband to 0.26, so a
+    # residual that previously oscillated now advances instead of reversing.
+    settled = replace(
+        positive_again,
+        target_region_center_error=(0.25, 0.0),
+    )
+    assert planner.next_action(views(settled)).kind is ActionKind.OBSERVE
+
+
+def test_every_j1_target_crossing_goes_to_clearance_before_another_reversal():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    positive = target_report(target_region_center_error=(0.35, 0.0))
+    negative = replace(positive, target_region_center_error=(-0.35, 0.0))
+
+    assert planner.next_action(views(positive)).kind is ActionKind.BASE_YAW
+    first_relief = planner.next_action(views(negative))
+    assert first_relief.kind is ActionKind.UP_CLEARANCE
+
+    # After the posture move, one new J1 attempt is allowed. If that attempt
+    # crosses again, the planner must go up immediately—not command J1 back.
+    assert planner.next_action(views(negative)).kind is ActionKind.BASE_YAW
+    second_relief = planner.next_action(views(positive))
+    assert second_relief.kind is ActionKind.UP_CLEARANCE
+    assert "before retrying yaw" in second_relief.reason
+
+
+def test_j6_crossing_once_goes_to_j2_4_clearance_not_reverse_roll():
+    planner = AdaptiveViewpointPlanner()
+    first_roll = emit_first_roll(planner)
+    assert first_roll.aim_direction[0] > 0.0
+
+    crossed = views(report(center=(0.02, 0.0), orientation=-20.0))
+    relief = planner.next_action(crossed)
+
+    assert relief.kind is ActionKind.UP_CLEARANCE
+    assert relief.translation_scale == pytest.approx(0.75)
+    assert "crossed the aligned long axis once" in relief.reason
+
+
+def test_j1_crossing_into_deadband_does_not_add_relief_motion():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    outside = target_report(
+        target_region_center_error=(0.25, 0.0),
+    )
+    inside = replace(
+        outside,
+        target_region_center_error=(-0.10, 0.0),
+    )
+
+    assert planner.next_action(views(outside)).kind is ActionKind.BASE_YAW
+    assert planner.next_action(views(inside)).kind is ActionKind.OBSERVE
+
+
+def test_sfp_postlevel_roll_residual_requires_confirmed_j6_trim():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    rotated = target_report(orientation_deg=5.0, long_axis_ratio=1.4)
+
+    confirm = planner.next_action(views(rotated, rotated, rotated))
+    trim = planner.next_action(views(rotated, rotated, rotated))
+
+    assert confirm.kind is ActionKind.OBSERVE
+    assert trim.kind is ActionKind.CAMERA_ROLL
+    assert "J6" in trim.reason
+
+
+def test_nic_side_mask_uses_shared_j2_4_relief_then_backoff_not_reversal():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    enter_ascend(planner)
+    clear = target_report(SurveyTargetMode.NIC_SFP_DESTINATION)
+    blocked = replace(
+        clear,
+        target_region_gripper_overlap_px=2000,
+        target_region_gripper_clearance_px=0.0,
+    )
+
+    relief = planner.next_action(views(clear, clear, blocked))
+
+    assert relief.kind is ActionKind.TRANSLATE
+    assert relief.camera == "center_camera"
+    assert relief.image_direction == pytest.approx((0.0, 1.0))
+    assert "shared J2-4" in relief.reason
+
+    worse = replace(blocked, target_region_gripper_overlap_px=2500)
+    fallback = planner.next_action(views(clear, clear, worse))
+
+    assert fallback.kind is ActionKind.BACKOFF
+    assert fallback.camera == "center_camera"
+    assert "without reversing J2-4" in fallback.reason
+
+
+def test_sfp_side_mask_uses_shared_center_relief_not_right_camera_axes():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    clear = target_report(
+        target_region_gripper_clearance_px=24.0,
+    )
+    blocked_right = replace(
+        clear,
+        target_region_gripper_overlap_px=1800,
+        target_region_gripper_clearance_px=0.0,
+    )
+
+    action = planner.next_action(views(clear, clear, blocked_right))
+
+    assert action.kind is ActionKind.TRANSLATE
+    assert action.camera == "center_camera"
+    assert action.image_direction == pytest.approx((0.0, 1.0))
+    assert "staged_sfp_module row upward in all cameras" in action.reason
+
+
+def test_sfp_missing_from_right_camera_keeps_recovering_not_observing_or_done():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    ready = target_report(target_region_gripper_clearance_px=24.0)
+    missing = replace(
+        ready,
+        target_region_seen=False,
+        target_region_visible_frac=0.0,
+    )
+
+    first = planner.next_action(views(ready, ready, missing))
+    second = planner.next_action(views(ready, ready, missing))
+
+    assert first.kind is ActionKind.BACKOFF
+    assert second.kind is ActionKind.BACKOFF
+    assert not first.terminal
+    assert not second.terminal
+    assert "full staged_sfp_module equipment band" in first.reason
+
+
+def test_sfp_survey_requires_complete_plate_outline_in_all_three_cameras():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    # A complete aggregate ROI cannot hide a cropped board edge.  The modules
+    # can slide, so the invariant is the full plate plus full equipment band.
+    center = replace(
+        target_report(),
+        full=False,
+        edges=frozenset({"bottom"}),
+        gripper_overlap_px=12000,
+        gripper_clearance_px=0.0,
+    )
+    left = replace(center, rectangularity=0.68)
+    right = replace(center, rectangularity=0.66)
+
+    assert planner.next_action(views(center, left, right)).kind is not ActionKind.DONE
+
+
+def test_target_survey_requires_roi_in_each_configured_ivm_camera():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    enter_ascend(planner)
+    ready = target_report(SurveyTargetMode.NIC_SFP_DESTINATION)
+    clipped_right = replace(
+        ready,
+        target_region_full=False,
+        target_region_edges=frozenset({"right"}),
+        target_region_visible_frac=0.82,
+    )
+
+    action = planner.next_action(views(ready, ready, clipped_right))
+
+    assert action.kind is not ActionKind.DONE
+    assert action.camera in {"center_camera", "right_camera"}
+
+
+def test_sfp_survey_requires_complete_opposite_logo_equipment_band():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    # Even a 98% aggregate band can contain the one missing outer module.
+    usable = target_report(
+        target_region_full=False,
+        target_region_visible_frac=0.98,
+        target_region_edges=frozenset({"top"}),
+        target_region_center_error=(0.22, -0.24),
+        target_region_gripper_clearance_px=24.0,
+    )
+
+    assert planner.next_action(views(usable, usable, usable)).kind is not ActionKind.DONE
+
+
+def test_target_survey_still_rejects_inadequate_side_component_coverage():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    enter_ascend(planner)
+    ready = target_report()
+    insufficient_side = replace(
+        ready,
+        target_region_full=False,
+        target_region_visible_frac=0.60,
+        target_region_edges=frozenset({"right"}),
+    )
+
+    action = planner.next_action(views(ready, ready, insufficient_side))
+
+    assert action.kind is not ActionKind.DONE
+    # Side coverage failure may use that camera's image plane or a shared
+    # center-camera optical backoff; neither can complete the survey early.
+    assert action.camera in {"center_camera", "right_camera"}
+
+
+def test_target_side_crop_is_repaired_with_shared_backoff():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    enter_ascend(planner)
+    ready = target_report(
+        SurveyTargetMode.NIC_SFP_DESTINATION,
+        area_frac=0.40,
+    )
+    cropped_side = replace(
+        ready,
+        target_region_visible_frac=0.60,
+        target_region_edges=frozenset({"right", "top"}),
+        target_region_center_error=(0.55, -0.45),
+    )
+
+    action = planner.next_action(views(ready, ready, cropped_side))
+
+    assert action.kind is ActionKind.BACKOFF
+    assert action.camera == "center_camera"
+    assert "whole board plus the protruding pick-module row" in action.reason
+
+
+def test_target_missing_in_side_board_view_adds_shared_clearance():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.SC_DESTINATION_PORT,
+    )
+    enter_ascend(planner)
+    ready = target_report(
+        SurveyTargetMode.SC_DESTINATION_PORT,
+        area_frac=0.38,
+    )
+    side_without_roi = replace(
+        ready,
+        target_region_seen=False,
+        target_region_visible_frac=0.0,
+        center_error=(-0.40, 0.10),
+    )
+
+    action = planner.next_action(views(ready, ready, side_without_roi))
+
+    assert action.kind is ActionKind.UP_CLEARANCE
+    assert action.camera == "center_camera"
+    assert "lack board evidence" in action.reason
+
+
+def test_nic_survey_repairs_horizontal_offset_with_j1_before_j2_4():
+    planner = AdaptiveViewpointPlanner(
+        expected_cameras=("center_camera", "left_camera", "right_camera"),
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    enter_ascend(planner)
+    # The organizer-style view need not center each differently shaped ROI on
+    # the same pixel, but it must remain inside the shared canonical window.
+    usable = target_report(
+        SurveyTargetMode.NIC_SFP_DESTINATION,
+        target_region_center_error=(0.30, -0.40),
+        target_region_visible_frac=0.90,
+        target_region_edges=frozenset({"top"}),
+        target_region_gripper_overlap_px=0,
+        target_region_gripper_clearance_px=0.0,
+    )
+
+    action = planner.next_action(views(usable, usable, usable))
+    assert action.kind is ActionKind.BASE_YAW
+    assert "J1" in action.reason
+
+
+def test_targeted_alignment_uses_j1_probe_when_plate_axis_is_ambiguous():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    centered = target_report(
+        center_error=(0.0, 0.0),
+        long_axis_ratio=1.0,
+        orientation_deg=0.0,
+        target_region_visible_frac=0.90,
+        target_region_edges=frozenset({"top"}),
+    )
+
+    assert planner.next_action(views(centered)).kind is ActionKind.OBSERVE
+    action = planner.next_action(views(centered))
+
+    assert action.kind is ActionKind.BASE_YAW
+    assert planner.phase == "j1_center"
+    assert "J1 probe" in action.reason
+
+
+def test_target_mask_and_centering_emit_one_coherent_correction():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.SC_DESTINATION_PORT,
+        max_occlusion_translates=2,
+    )
+    enter_ascend(planner)
+    blocked = target_report(
+        SurveyTargetMode.SC_DESTINATION_PORT,
+        target_region_center_error=(0.10, 0.28),
+        target_region_gripper_overlap_px=5000,
+        target_region_gripper_clearance_px=0.0,
+        target_region_gripper_escape_direction=(0.0, -1.0),
+    )
+
+    first = planner.next_action(views(blocked))
+    improving = replace(
+        blocked,
+        target_region_center_error=(0.04, 0.15),
+        target_region_gripper_overlap_px=2500,
+    )
+    second = planner.next_action(views(improving))
+
+    assert first.kind is second.kind is ActionKind.TRANSLATE
+    assert first.image_direction[1] > 0.0
+    assert second.image_direction[1] > 0.0
+    assert "coherent target-centering/mask-escape" in first.reason
+
+
+def test_target_roi_scale_drives_approach_not_whole_board_area():
+    planner = AdaptiveViewpointPlanner(
+        survey_target=SurveyTargetMode.SC_DESTINATION_PORT,
+    )
+    enter_ascend(planner)
+    too_distant = target_report(
+        SurveyTargetMode.SC_DESTINATION_PORT,
+        area_frac=0.252,
+        target_region_area_frac=0.010,
+    )
+
+    action = planner.next_action(views(too_distant))
+
+    assert action.kind is ActionKind.APPROACH
+    assert action.axial_direction < 0.0

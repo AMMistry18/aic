@@ -6,6 +6,7 @@ import pytest
 
 from aic_perception.board_visibility import (
     MaskReport,
+    SurveyTargetMode,
     adaptive_action,
     analyze_board,
     combine_cameras,
@@ -13,9 +14,11 @@ from aic_perception.board_visibility import (
     detect_purple_logo,
     ivm_survey_ready,
     ivm_survey_rejection_reasons,
+    normalize_survey_target,
     optical_axes_in_base,
     rotation_matrix_from_quaternion,
     search_progress,
+    survey_view_requirements,
     view_quality,
     world_delta,
 )
@@ -61,6 +64,118 @@ def test_centered_board_is_full_and_rectangular():
     assert report.context_ok and report.detail_ok and report.shape_ok
     assert not report.artificial_bottom_contact
     assert view_quality(report) > 0.7
+
+
+def test_component_survey_regions_follow_logo_anchored_board_axes():
+    image = logo_frame(
+        logo_rect=(185, 260, 215, 290),
+        rect=(170, 150, 470, 330),
+        size=(640, 480),
+    )
+
+    staged = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        survey_target=SurveyTargetMode.STAGED_SFP_MODULE,
+    )
+    nic = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        survey_target=SurveyTargetMode.NIC_SFP_DESTINATION,
+    )
+    sc = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        survey_target=SurveyTargetMode.SC_DESTINATION_PORT,
+    )
+
+    assert staged.target_region_seen
+    assert nic.target_region_seen
+    assert sc.target_region_seen
+    assert staged.target_region_centroid[1] < nic.target_region_centroid[1]
+    assert nic.target_region_centroid[0] > sc.target_region_centroid[0]
+    assert sc.survey_target == "sc_destination_port"
+
+
+def test_numeric_survey_target_three_selects_sc_destination_port():
+    assert normalize_survey_target(3) is SurveyTargetMode.SC_DESTINATION_PORT
+    with pytest.raises(ValueError, match="unknown survey target"):
+        normalize_survey_target(4)
+
+
+def test_component_survey_modes_use_target_specific_ivm_view_geometry():
+    sfp = survey_view_requirements(SurveyTargetMode.STAGED_SFP_MODULE)
+    nic = survey_view_requirements(SurveyTargetMode.NIC_SFP_DESTINATION)
+    sc = survey_view_requirements(SurveyTargetMode.SC_DESTINATION_PORT)
+
+    # Staged SFP geometry needs the most frontal view; destination ports retain
+    # controlled obliquity for depth.  None of these parameters encode module
+    # positions along the movable rails.
+    assert sfp.target_tilt_deg == 10.0
+    assert sfp.target_tilt_deg < nic.target_tilt_deg < sc.target_tilt_deg
+    assert sfp.tilt_tolerance_deg == 4.0
+    assert sfp.min_area_frac == pytest.approx(0.065)
+    assert sfp.max_area_frac == pytest.approx(0.35)
+    assert sfp.center_min_visible_frac == pytest.approx(0.96)
+    assert sfp.side_min_visible_frac == pytest.approx(0.92)
+    assert sfp.min_gripper_clearance_px == pytest.approx(8.0)
+    assert sfp.center_max_error_x == pytest.approx(0.18)
+    assert nic.center_max_error_x == pytest.approx(0.18)
+    assert nic.center_min_visible_frac == pytest.approx(0.88)
+    assert nic.side_min_visible_frac == pytest.approx(0.84)
+    assert nic.min_gripper_clearance_px == pytest.approx(8.0)
+    assert sfp.max_roll_error_deg == 2.0
+    assert nic.max_roll_error_deg == 2.0
+
+
+def test_target_region_gripper_metrics_ignore_unrelated_board_overlap():
+    image = logo_frame(
+        logo_rect=(185, 260, 215, 290),
+        rect=(170, 150, 470, 330),
+        size=(640, 480),
+    )
+    ignore = np.zeros(image.shape[:2], dtype=np.uint8)
+    ignore[300:480, 340:640] = 255
+
+    staged = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        ignore_mask=ignore,
+        survey_target="staged_sfp_module",
+    )
+    nic = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        ignore_mask=ignore,
+        survey_target="nic_sfp_destination",
+    )
+
+    assert staged.target_region_gripper_overlap_px == 0
+    assert nic.target_region_gripper_overlap_px > 0
+
+
+def test_sfp_completion_guard_covers_gripper_adapter_beyond_exact_mask():
+    image = logo_frame(
+        logo_rect=(185, 260, 215, 290),
+        rect=(170, 150, 470, 330),
+        size=(640, 480),
+    )
+    # This simulated rendered adapter is outside the exact SFP polygon and
+    # farther away than its ordinary 20 px context pad, but close enough to
+    # hide an outer module in an oblique side-camera view.
+    ignore = np.zeros(image.shape[:2], dtype=np.uint8)
+    ignore[100:225, 535:640] = 255
+
+    staged = analyze_board(
+        image,
+        ignore_bottom_frac=0.0,
+        ignore_mask=ignore,
+        survey_target="staged_sfp_module",
+    )
+
+    assert staged.target_region_seen
+    assert staged.target_region_gripper_overlap_px > 0
+    assert staged.target_region_gripper_clearance_px == 0.0
 
 
 def survey_report(**changes):
@@ -114,6 +229,19 @@ def test_ivm_survey_ready_rejects_clipped_or_ambiguous_center_view():
     assert "horizontal_off_center" in reasons
     assert "gripper_mask_contact" in reasons
     assert "long_axis_ambiguous" in reasons
+
+
+def test_component_survey_can_ignore_only_the_padded_full_plate_gate():
+    report = survey_report(full=False)
+
+    reasons = ivm_survey_rejection_reasons(
+        report,
+        require_full_plate=False,
+        clearance_scale=0.20,
+    )
+
+    assert "plate_not_full" not in reasons
+    assert reasons == ()
 
 
 @pytest.mark.parametrize(

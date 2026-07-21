@@ -16,6 +16,7 @@ RGB/BGR channel swap.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -30,6 +31,208 @@ PURPLE_VAL_MIN = 60
 PURPLE_MIN_BLOB_PX = 50
 PURPLE_MIN_TOTAL_PX = 100
 
+
+class SurveyTargetMode(str, Enum):
+    """Component group which should be framed for the next IVM request."""
+
+    UNSPECIFIED = "unspecified"
+    STAGED_SFP_MODULE = "staged_sfp_module"
+    NIC_SFP_DESTINATION = "nic_sfp_destination"
+    SC_DESTINATION_PORT = "sc_destination_port"
+
+
+_SURVEY_TARGET_BY_NUMBER = {
+    0: SurveyTargetMode.UNSPECIFIED,
+    1: SurveyTargetMode.STAGED_SFP_MODULE,
+    2: SurveyTargetMode.NIC_SFP_DESTINATION,
+    3: SurveyTargetMode.SC_DESTINATION_PORT,
+}
+
+
+def normalize_survey_target(value: object) -> SurveyTargetMode:
+    """Normalize protobuf enum numbers/names and Python values."""
+
+    if isinstance(value, SurveyTargetMode):
+        return value
+    if isinstance(value, (int, np.integer)):
+        try:
+            return _SURVEY_TARGET_BY_NUMBER[int(value)]
+        except KeyError as exc:
+            raise ValueError(f"unknown survey target enum value {value!r}") from exc
+    text = str(value or "").strip().lower()
+    text = text.removeprefix("survey_target_")
+    if not text:
+        text = SurveyTargetMode.UNSPECIFIED.value
+    try:
+        return SurveyTargetMode(text)
+    except ValueError as exc:
+        raise ValueError(f"unknown survey target {value!r}") from exc
+
+
+@dataclass(frozen=True)
+class _TargetProfile:
+    # Bounds are expressed in the board min-area rectangle: long axis points
+    # away from the purple logo and short axis points toward it. Values outside
+    # [-1, 1] intentionally cover hardware protruding beyond the dark plate.
+    long_bounds: tuple[float, float]
+    short_bounds: tuple[float, float]
+    desired_image_center: tuple[float, float] = (0.50, 0.40)
+
+
+@dataclass(frozen=True)
+class SurveyViewRequirements:
+    """IVM-view geometry and acceptance thresholds for one survey mode.
+
+    These are deliberately target-specific.  A staged SFP source needs a
+    nearly frontal view of the module top/retention geometry in *all* three
+    cameras; the NIC and SC destinations instead benefit from a controlled
+    oblique view that preserves useful side/depth cues.  The visible-fraction
+    tests describe the projected component region, not a padded empty-board
+    boundary, so they do not keep moving after the target is already usable.
+    """
+
+    target_tilt_deg: float
+    tilt_tolerance_deg: float
+    min_area_frac: float
+    max_area_frac: float
+    center_min_visible_frac: float
+    side_min_visible_frac: float
+    center_max_error_x: float
+    center_max_error_y: float
+    side_max_error_x: float
+    side_max_error_y: float
+    min_rectangularity: float
+    min_gripper_clearance_px: float
+    max_roll_error_deg: float
+    side_min_area_scale: float
+    side_max_area_scale: float
+
+
+# The default is retained for legacy whole-board surveys.  Explicit component
+# surveys use the values below rather than the former one-size-fits-all 32deg
+# tilt and "every ROI context pad must be empty" completion gate.
+_DEFAULT_SURVEY_VIEW_REQUIREMENTS = SurveyViewRequirements(
+    target_tilt_deg=32.0,
+    tilt_tolerance_deg=2.0,
+    min_area_frac=0.045,
+    max_area_frac=0.32,
+    center_min_visible_frac=0.97,
+    side_min_visible_frac=0.97,
+    center_max_error_x=0.18,
+    center_max_error_y=0.22,
+    side_max_error_x=0.35,
+    side_max_error_y=0.35,
+    min_rectangularity=0.62,
+    min_gripper_clearance_px=32.0,
+    max_roll_error_deg=2.0,
+    side_min_area_scale=0.75,
+    side_max_area_scale=1.20,
+)
+
+
+_SURVEY_VIEW_REQUIREMENTS = {
+    # IVM feedback: the staged SFP module's top/distinct retention geometry
+    # must be visible in every camera.  A 10deg pitch is intentionally much
+    # closer to frontal than the old 32deg view; the lateral cameras still
+    # provide triangulation without hiding the top behind the module body.
+    SurveyTargetMode.STAGED_SFP_MODULE: SurveyViewRequirements(
+        target_tilt_deg=10.0,
+        tilt_tolerance_deg=4.0,
+        min_area_frac=0.065,
+        # Restore the successful full-equipment-band scale from r34.  The
+        # larger r35-r37 maximum let a center view pass while side-camera
+        # parallax stacked the outer SFP module behind the gripper.
+        max_area_frac=0.35,
+        center_min_visible_frac=0.96,
+        side_min_visible_frac=0.92,
+        center_max_error_x=0.18,
+        center_max_error_y=0.75,
+        side_max_error_x=0.65,
+        side_max_error_y=0.90,
+        min_rectangularity=0.45,
+        min_gripper_clearance_px=8.0,
+        max_roll_error_deg=2.0,
+        side_min_area_scale=0.50,
+        side_max_area_scale=1.35,
+    ),
+    # NIC cards need top and side/depth evidence.  Keep a moderate oblique
+    # angle, rather than using the flat SFP-source view.
+    SurveyTargetMode.NIC_SFP_DESTINATION: SurveyViewRequirements(
+        target_tilt_deg=18.0,
+        tilt_tolerance_deg=4.0,
+        min_area_frac=0.060,
+        max_area_frac=0.42,
+        center_min_visible_frac=0.88,
+        side_min_visible_frac=0.84,
+        center_max_error_x=0.18,
+        center_max_error_y=0.75,
+        side_max_error_x=0.65,
+        side_max_error_y=0.90,
+        min_rectangularity=0.45,
+        min_gripper_clearance_px=8.0,
+        max_roll_error_deg=2.0,
+        side_min_area_scale=0.50,
+        side_max_area_scale=1.35,
+    ),
+    # SC ports likewise require a moderate oblique survey so the connector
+    # openings and surrounding depth remain distinguishable.
+    SurveyTargetMode.SC_DESTINATION_PORT: SurveyViewRequirements(
+        target_tilt_deg=26.0,
+        tilt_tolerance_deg=3.0,
+        min_area_frac=0.022,
+        max_area_frac=0.22,
+        center_min_visible_frac=0.82,
+        side_min_visible_frac=0.78,
+        center_max_error_x=0.75,
+        center_max_error_y=0.75,
+        side_max_error_x=0.90,
+        side_max_error_y=0.90,
+        min_rectangularity=0.45,
+        min_gripper_clearance_px=0.0,
+        max_roll_error_deg=20.0,
+        side_min_area_scale=0.50,
+        side_max_area_scale=1.35,
+    ),
+}
+
+# The embedded calibration traces the black camera housing but the rendered
+# gray finger/adapter can extend beyond it at close, oblique poses.  Keep this
+# extra guard out of segmentation (so board extraction is unchanged) and use
+# it only for staged-SFP completion/steering metrics.  Eight percent is about
+# 82 px on the 1024-high streams and covers the observed right-camera miss.
+_SFP_GRIPPER_GUARD_FRAC = 0.08
+
+
+def survey_view_requirements(value: object) -> SurveyViewRequirements:
+    """Return the deterministic IVM survey geometry for ``value``.
+
+    ``UNSPECIFIED`` is intentionally kept on the historical whole-board
+    configuration.  Explicit modes are the only modes that opt into the
+    component-specific camera geometry.
+    """
+
+    return _SURVEY_VIEW_REQUIREMENTS.get(
+        normalize_survey_target(value), _DEFAULT_SURVEY_VIEW_REQUIREMENTS
+    )
+
+
+_TARGET_PROFILES = {
+    # The staged SFP module occupies the cable-mount edge.  The SC plug reuses
+    # the saved TCP pose from this survey after the SFP cable is removed, so it
+    # deliberately has no independent search mode.
+    SurveyTargetMode.STAGED_SFP_MODULE: _TargetProfile(
+        (-1.08, 1.08), (-1.46, -0.42), desired_image_center=(0.50, 0.32)
+    ),
+    # The five NIC cards protrude from the logo-side edge toward the end of
+    # the board opposite the logo.
+    SurveyTargetMode.NIC_SFP_DESTINATION: _TargetProfile(
+        (-0.05, 1.42), (0.00, 1.42)
+    ),
+    # The blue SC connector block is immediately inboard of the logo.
+    SurveyTargetMode.SC_DESTINATION_PORT: _TargetProfile(
+        (-0.62, 0.18), (-0.48, 0.58)
+    ),
+}
 
 def detect_purple_logo(image: np.ndarray):
     """Detect the board's magenta insignia in a BGR/BGRA image.
@@ -124,6 +327,32 @@ class MaskReport:
     logo_center_error: tuple[float, float] = (0.0, 0.0)
     logo_area_frac: float = 0.0
     logo_bbox: tuple[int, int, int, int] | None = None
+    # Runtime-only physical gate supplied by the skill wrapper from fresh TF.
+    # Pure image tests and non-robot callers default to true; the live wrapper
+    # overwrites the center report before the planner can complete.
+    survey_tilt_ready: bool = True
+    # For a component-targeted survey these fields describe a board-relative
+    # region rather than the entire plate.  They remain inert in legacy
+    # UNSPECIFIED mode, preserving every existing caller and test fixture.
+    survey_target: str = SurveyTargetMode.UNSPECIFIED.value
+    target_region_seen: bool = False
+    target_region_full: bool = False
+    target_region_visible_frac: float = 0.0
+    target_region_area_frac: float = 0.0
+    target_region_bbox: tuple[int, int, int, int] | None = None
+    target_region_centroid: tuple[float, float] | None = None
+    target_region_center_error: tuple[float, float] = (0.0, 0.0)
+    target_region_edges: frozenset[str] = field(default_factory=frozenset)
+    target_region_clearance_px: tuple[float, float, float, float] = (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    target_region_context_pad_px: float = 0.0
+    target_region_gripper_overlap_px: int = 0
+    target_region_gripper_clearance_px: float = float("inf")
+    target_region_gripper_escape_direction: tuple[float, float] = (0.0, -1.0)
 
 
 @dataclass(frozen=True)
@@ -142,6 +371,175 @@ class SearchAction:
     reason: str = ""
 
 
+def _target_region_fields(
+    *,
+    target_mode: SurveyTargetMode,
+    image_shape: tuple[int, int],
+    min_rect,
+    logo_centroid: tuple[float, float] | None,
+    ignored: np.ndarray,
+) -> dict:
+    """Project a physical component zone into one camera image.
+
+    The purple logo fixes both otherwise-ambiguous signs of the board axes.
+    This makes the region stable through J6 rotations and oblique side-camera
+    views; an axis-aligned fraction of ``bbox`` would silently swap zones as
+    the board rotates.
+    """
+
+    import cv2
+
+    fields: dict = {"survey_target": target_mode.value}
+    if target_mode is SurveyTargetMode.UNSPECIFIED:
+        return fields
+    profile = _TARGET_PROFILES[target_mode]
+    if min_rect is None or logo_centroid is None:
+        return fields
+
+    height, width = image_shape
+    center = np.asarray(min_rect[0], dtype=float)
+    rect_width, rect_height = (float(value) for value in min_rect[1])
+    if min(rect_width, rect_height) <= 1e-6:
+        return fields
+
+    angle_deg = float(min_rect[2])
+    if rect_width >= rect_height:
+        half_long, half_short = 0.5 * rect_width, 0.5 * rect_height
+    else:
+        angle_deg += 90.0
+        half_long, half_short = 0.5 * rect_height, 0.5 * rect_width
+    angle = np.deg2rad(angle_deg)
+    long_axis = np.asarray((np.cos(angle), np.sin(angle)), dtype=float)
+    logo_offset = np.asarray(logo_centroid, dtype=float) - center
+    # Canonical +long points away from the logo.
+    if float(np.dot(logo_offset, long_axis)) > 0.0:
+        long_axis *= -1.0
+    short_axis = np.asarray((-long_axis[1], long_axis[0]), dtype=float)
+    # Canonical +short points toward the logo-side board edge.
+    if float(np.dot(logo_offset, short_axis)) < 0.0:
+        short_axis *= -1.0
+
+    long_lo, long_hi = profile.long_bounds
+    short_lo, short_hi = profile.short_bounds
+    points = np.asarray(
+        [
+            center
+            + long_axis * (long_value * half_long)
+            + short_axis * (short_value * half_short)
+            for long_value, short_value in (
+                (long_lo, short_lo),
+                (long_hi, short_lo),
+                (long_hi, short_hi),
+                (long_lo, short_hi),
+            )
+        ],
+        dtype=np.float32,
+    )
+    expected_area = abs(float(cv2.contourArea(points)))
+    if expected_area <= 1.0:
+        return fields
+
+    x_min = float(np.min(points[:, 0]))
+    x_max = float(np.max(points[:, 0]))
+    y_min = float(np.min(points[:, 1]))
+    y_max = float(np.max(points[:, 1]))
+    clearances = (
+        x_min,
+        float(width - 1) - x_max,
+        y_min,
+        float(height - 1) - y_max,
+    )
+    projected_span = max(x_max - x_min, y_max - y_min)
+    context_pad = max(20.0, min(48.0, 0.06 * projected_span))
+    edges = frozenset(
+        edge
+        for edge, clearance in zip(
+            ("left", "right", "top", "bottom"), clearances
+        )
+        if clearance < context_pad
+    )
+
+    region = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(region, np.rint(points).astype(np.int32), 1)
+    visible_area = int(np.count_nonzero(region))
+    visible_frac = float(np.clip(visible_area / expected_area, 0.0, 1.0))
+    region_center = np.mean(points, axis=0)
+    desired_x = profile.desired_image_center[0] * float(width - 1)
+    desired_y = profile.desired_image_center[1] * float(height - 1)
+    center_error = (
+        float((region_center[0] - desired_x) / max(1.0, 0.5 * (width - 1))),
+        float((region_center[1] - desired_y) / max(1.0, 0.5 * (height - 1))),
+    )
+
+    overlap_px = 0
+    gripper_clearance = float("inf")
+    escape_direction = (0.0, -1.0)
+    if np.any(ignored):
+        clearance_ignored = ignored
+        if target_mode is SurveyTargetMode.STAGED_SFP_MODULE:
+            guard_px = max(
+                1,
+                int(round(_SFP_GRIPPER_GUARD_FRAC * min(height, width))),
+            )
+            guard_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (2 * guard_px + 1, 2 * guard_px + 1),
+            )
+            clearance_ignored = cv2.dilate(
+                ignored.astype(np.uint8), guard_kernel, iterations=1
+            ).astype(bool)
+        pad_px = max(1, int(round(context_pad)))
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * pad_px + 1, 2 * pad_px + 1)
+        )
+        protected = cv2.dilate(region, kernel, iterations=1).astype(bool)
+        overlap_px = int(np.count_nonzero(protected & clearance_ignored))
+        free_space = (~clearance_ignored).astype(np.uint8)
+        distances = cv2.distanceTransform(free_space, cv2.DIST_L2, 5)[protected]
+        if distances.size:
+            gripper_clearance = (
+                0.0 if overlap_px else float(np.min(distances))
+            )
+        protected_y, protected_x = np.nonzero(protected)
+        ignored_y, ignored_x = np.nonzero(clearance_ignored)
+        if protected_x.size and ignored_x.size:
+            escape = np.asarray(
+                (
+                    float(protected_x.mean() - ignored_x.mean()),
+                    float(protected_y.mean() - ignored_y.mean()),
+                )
+            )
+            norm = float(np.linalg.norm(escape))
+            if norm > 1e-9:
+                escape /= norm
+                escape_direction = (float(escape[0]), float(escape[1]))
+
+    return {
+        **fields,
+        "target_region_seen": visible_area > 0,
+        "target_region_full": not edges and visible_frac >= 0.97,
+        "target_region_visible_frac": visible_frac,
+        "target_region_area_frac": visible_area / float(height * width),
+        "target_region_bbox": (
+            int(np.floor(x_min)),
+            int(np.floor(y_min)),
+            int(np.ceil(x_max)),
+            int(np.ceil(y_max)),
+        ),
+        "target_region_centroid": (
+            float(region_center[0]),
+            float(region_center[1]),
+        ),
+        "target_region_center_error": center_error,
+        "target_region_edges": edges,
+        "target_region_clearance_px": tuple(float(v) for v in clearances),
+        "target_region_context_pad_px": context_pad,
+        "target_region_gripper_overlap_px": overlap_px,
+        "target_region_gripper_clearance_px": gripper_clearance,
+        "target_region_gripper_escape_direction": escape_direction,
+    }
+
+
 def analyze_board(
     image: np.ndarray,
     margin_px: int = 15,
@@ -153,6 +551,7 @@ def analyze_board(
     min_detail_area_frac: float = 0.02,
     context_pad_frac: float = 0.10,
     ignore_mask: np.ndarray | None = None,
+    survey_target: object = SurveyTargetMode.UNSPECIFIED,
 ) -> MaskReport:
     """Return whether the whole dark task board is visible in ``image``.
 
@@ -186,6 +585,8 @@ def analyze_board(
         raise ValueError("min_rectangularity must be in [0, 1]")
     if not 0.0 <= context_pad_frac <= 1.0:
         raise ValueError("context_pad_frac must be in [0, 1]")
+    target_mode = normalize_survey_target(survey_target)
+    target_identity = {"survey_target": target_mode.value}
 
     if img.ndim == 2:
         gray = img.copy()
@@ -196,7 +597,7 @@ def analyze_board(
 
     height, width = gray.shape
     if height < 2 or width < 2:
-        return MaskReport(seen=False, full=False)
+        return MaskReport(seen=False, full=False, **target_identity)
 
     ignored = np.zeros((height, width), dtype=bool)
     if ignore_mask is not None:
@@ -212,6 +613,7 @@ def analyze_board(
     logo = detect_purple_logo(img)
     logo_fields: dict = {}
     logo_mask = None
+    logo_centroid = None
     if logo is not None:
         logo_mask, logo_centroid, logo_area_px, logo_bbox = logo
         half_w = max(1.0, 0.5 * float(width - 1))
@@ -241,7 +643,9 @@ def analyze_board(
         or background.size == 0
         or float(background.mean()) - float(foreground.mean()) < min_contrast
     ):
-        return MaskReport(seen=False, full=False, **logo_fields)
+        return MaskReport(
+            seen=False, full=False, **logo_fields, **target_identity
+        )
 
     # The insignia is physically part of the plate: force it into the board
     # foreground so it can never punch a hole or shift the centroid.
@@ -267,7 +671,9 @@ def analyze_board(
 
     count, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
     if count <= 1:
-        return MaskReport(seen=False, full=False, **logo_fields)
+        return MaskReport(
+            seen=False, full=False, **logo_fields, **target_identity
+        )
 
     # Anchor component selection to the insignia when it is visible: the
     # component overlapping the (dilated) purple region is the board by
@@ -291,7 +697,9 @@ def analyze_board(
         component_index = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
     area = int(stats[component_index, cv2.CC_STAT_AREA])
     if area < min_area_frac * height * width:
-        return MaskReport(seen=False, full=False, **logo_fields)
+        return MaskReport(
+            seen=False, full=False, **logo_fields, **target_identity
+        )
 
     x0 = int(stats[component_index, cv2.CC_STAT_LEFT])
     y0 = int(stats[component_index, cv2.CC_STAT_TOP])
@@ -391,12 +799,14 @@ def analyze_board(
     gripper_overlap_px = 0
     gripper_clearance_px = float("inf")
     gripper_escape_direction = (0.0, -1.0)
+    component_min_rect = None
     contours, _ = cv2.findContours(
         component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     if contours:
         contour = max(contours, key=cv2.contourArea)
-        rect_width, rect_height = cv2.minAreaRect(contour)[1]
+        component_min_rect = cv2.minAreaRect(contour)
+        rect_width, rect_height = component_min_rect[1]
         rect_area = float(rect_width * rect_height)
         if rect_area > 0.0:
             rectangularity = min(1.0, area / rect_area)
@@ -453,6 +863,7 @@ def analyze_board(
 
     orientation_deg = 0.0
     long_axis_ratio = 1.0
+    target_min_rect = component_min_rect
     orientation_contours = []
     if orientation_component is not None:
         orientation_contours, _ = cv2.findContours(
@@ -461,6 +872,7 @@ def analyze_board(
     if orientation_contours:
         contour = max(orientation_contours, key=cv2.contourArea)
         min_rect = cv2.minAreaRect(contour)
+        target_min_rect = min_rect
         rect_width, rect_height = min_rect[1]
         rect_area = float(rect_width * rect_height)
         if rect_area > 0.0:
@@ -566,6 +978,13 @@ def analyze_board(
         and detail_ok
         and shape_ok
     )
+    target_fields = _target_region_fields(
+        target_mode=target_mode,
+        image_shape=(height, width),
+        min_rect=target_min_rect,
+        logo_centroid=logo_centroid,
+        ignored=ignored,
+    )
     return MaskReport(
         seen=True,
         full=full,
@@ -593,6 +1012,7 @@ def analyze_board(
         orientation_deg=orientation_deg,
         long_axis_ratio=long_axis_ratio,
         **logo_fields,
+        **target_fields,
     )
 
 
@@ -607,6 +1027,7 @@ def view_quality(report: MaskReport) -> float:
 def ivm_survey_rejection_reasons(
     report: MaskReport,
     *,
+    require_full_plate: bool = True,
     max_area_frac: float = 0.36,
     min_rectangularity: float = 0.70,
     max_center_error_x: float = 0.15,
@@ -630,7 +1051,7 @@ def ivm_survey_rejection_reasons(
     """
 
     reasons: list[str] = []
-    if not report.full:
+    if require_full_plate and not report.full:
         reasons.append("plate_not_full")
     if not report.logo_seen:
         reasons.append("logo_not_seen")

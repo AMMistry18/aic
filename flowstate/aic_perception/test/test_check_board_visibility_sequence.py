@@ -12,6 +12,62 @@ from pathlib import Path
 
 
 SOURCE_PATH = Path(__file__).resolve().parents[1] / "check_board_visibility_skill.py"
+PROTO_PATH = Path(__file__).resolve().parents[1] / "check_board_visibility_skill.proto"
+
+
+def test_survey_target_enum_is_nested_and_backward_compatible():
+    proto = PROTO_PATH.read_text(encoding="utf-8")
+    params_start = proto.index("message CheckBoardVisibilitySkillParams {")
+    enum_start = proto.index("  enum SurveyTarget {")
+    params_end = proto.index("message CheckBoardVisibilitySkillResult {")
+
+    assert params_start < enum_start < params_end
+    assert "enum SurveyTarget" not in proto[:params_start]
+    expected_enum = """  enum SurveyTarget {
+    UNSPECIFIED = 0;
+    STAGED_SFP_MODULE = 1;
+    NIC_SFP_DESTINATION = 2;
+    SC_DESTINATION_PORT = 3;
+  }"""
+    assert expected_enum in proto[enum_start:params_end]
+    assert "  SurveyTarget survey_target = 31;" in proto[enum_start:params_end]
+
+
+def test_survey_target_is_resolved_logged_and_routed_to_perception_and_planner():
+    source, execute_inner = execute_inner_source()
+
+    planner_call = next(
+        item
+        for item in ast.walk(execute_inner)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Name)
+        and item.func.id == "AdaptiveViewpointPlanner"
+    )
+    analyze_calls = [
+        item
+        for item in ast.walk(execute_inner)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Name)
+        and item.func.id == "analyze_board"
+    ]
+
+    planner_target = next(
+        keyword.value
+        for keyword in planner_call.keywords
+        if keyword.arg == "survey_target"
+    )
+    assert ast.unparse(planner_target) == "survey_target_name"
+    assert len(analyze_calls) == 1
+    camera_target = next(
+        keyword.value
+        for keyword in analyze_calls[0].keywords
+        if keyword.arg == "survey_target"
+    )
+    assert ast.unparse(camera_target) == "survey_target_name"
+    assert "_resolve_survey_target" in source
+    assert '"active search parameters: survey_target=%s(%d)' in source
+    assert 'f"survey_target={survey_target_name}: {result.message}"' in source
+    assert '"all three cameras confirmed synchronized target context "' in source
 
 
 def skill_source() -> tuple[str, ast.ClassDef]:
@@ -77,35 +133,57 @@ def test_leveling_is_phase_gated_and_completion_is_planner_confirmed():
     assert "ivm_survey_ready" not in source
 
 
-def test_center_topdown_and_side_full_evidence_reach_planner():
+def test_center_survey_tilt_and_side_component_evidence_reach_planner():
     source, execute_inner = execute_inner_source()
 
-    full_keywords = [
+    tilt_keywords = [
         keyword.value
         for item in ast.walk(execute_inner)
         if isinstance(item, ast.Call)
         and isinstance(item.func, ast.Name)
         and item.func.id == "replace"
         for keyword in item.keywords
-        if keyword.arg == "full"
+        if keyword.arg == "survey_tilt_ready"
     ]
-    assert len(full_keywords) == 1
-    assert isinstance(full_keywords[0], ast.Call)
-    assert isinstance(full_keywords[0].func, ast.Name)
-    assert full_keywords[0].func.id == "bool"
-    assert len(full_keywords[0].args) == 1
-    assert isinstance(full_keywords[0].args[0], ast.BoolOp)
-    assert isinstance(full_keywords[0].args[0].op, ast.And)
-    full_gate = ast.unparse(full_keywords[0])
-    assert "name != 'center_camera'" in full_gate
-    assert "item.full" in full_gate
-    assert "center_top_down" in full_gate
+    assert len(tilt_keywords) == 1
+    tilt_gate = ast.unparse(tilt_keywords[0])
+    assert "name != 'center_camera'" in tilt_gate
+    assert "center_tilt_ready" in tilt_gate
 
     axes_lines = call_lines(execute_inner, "_camera_axes_in_base")
     planner_lines = call_lines(execute_inner, "next_action")
     assert min(axes_lines) < planner_lines[0]
     assert call_lines(execute_inner, "request_relevel")
-    assert "synchronized three-camera survey" in source
+    assert "synchronized_three_camera_survey" in source
+    assert "target_center_tilt_deg or 32.0" in source
+    assert "center_tilt_tolerance_deg or 2.0" in source
+    assert "survey_tilt_correction" in source
+    assert "params.ivm_min_center_board_area_frac or 0.32" in source
+    assert "params.ivm_max_center_board_area_frac or 0.50" in source
+    assert "auxiliary_context_scale=1.50" in source
+    assert "auxiliary_max_center_error_x=0.25" in source
+    assert "auxiliary_max_center_error_y=0.25" in source
+    assert "auxiliary_min_gripper_clearance_px=32.0" in source
+
+
+def test_explicit_targets_override_legacy_whole_board_tilt_with_ivm_geometry():
+    source, _ = execute_inner_source()
+
+    assert "target_mode = normalize_survey_target(survey_target_name)" in source
+    assert "survey_view_requirements(target_mode)" in source
+    assert "target_center_tilt_deg = target_requirements.target_tilt_deg" in source
+    assert "center_tilt_tolerance_deg = target_requirements.tilt_tolerance_deg" in source
+    assert 'target_geometry_source = "target-specific IVM profile"' in source
+
+
+def test_leveling_uses_only_one_small_singularity_clearance_lift():
+    source, _ = execute_inner_source()
+
+    assert "level_clearance_applied = False" in source
+    assert "if level_clearance_applied" in source
+    assert "else min(0.015, backoff_step_m)" in source
+    assert "level_clearance_applied = True" in source
+    assert "min(0.02, backoff_step_m)" not in source
 
 
 def test_component_coverage_is_true_only_on_done():
@@ -119,7 +197,7 @@ def test_component_coverage_is_true_only_on_done():
     )
 
 
-def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
+def test_leveling_measures_drift_without_restarting_completed_phases():
     source, _ = execute_inner_source()
 
     for name in (
@@ -129,7 +207,6 @@ def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
         "post_level_joint6",
         "level_joint1_drift",
         "level_joint6_drift",
-        "level_joint_drift_tolerance_rad",
         "level_anchor_joint1",
         "level_anchor_joint6",
         "min_level_progress_rad",
@@ -137,8 +214,9 @@ def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
         assert name in source
     assert "post_level_joint1 - level_anchor_joint1" in source
     assert "post_level_joint6 - level_anchor_joint6" in source
-    assert "returning to visual correction" in source
-    assert "planner.request_recenter()" in source
+    assert "returning to visual correction" not in source
+    assert "planner.request_recenter()" not in source
+    assert "final confirmed J6" in source
     assert source.index("level_joint1_drift =") < source.index(
         "planner.mark_level_complete()"
     )
