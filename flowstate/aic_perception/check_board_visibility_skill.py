@@ -2537,20 +2537,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
 
     @staticmethod
     def _stage2_landmarks(image, report, ignored_pixels):
-        """Extract a complete logo and a four-corner board observation.
+        """Extract a Stage-2 geometric seed from the handoff image.
 
-        Stage 2 deliberately refuses a centroid from a cropped or
-        gripper-covered magenta fragment.  The board quad is recovered from
-        the full dark component anchored by that complete logo; the downstream
-        PnP solver, rather than an image scale heuristic, then recovers the
-        board's arbitrary 6-DoF pose.
+        This deliberately does *not* reuse ``report.full`` as a handoff
+        condition.  Stage 1 may end with a cropped board, and SFP Stage 2
+        must still run from that final triplet.  The only image-side seed
+        requirements here are the measurements Stage 2 itself needs: a real,
+        unobstructed purple logo and a recoverable board outline.  Motion and
+        final all-camera visibility remain independently guarded below.
         """
         import cv2
 
         from aic_perception.board_visibility import detect_purple_logo
 
-        if not report.seen or not report.full:
-            return None, "source camera does not contain the complete board"
         logo = detect_purple_logo(image)
         if logo is None:
             return None, "complete purple logo was not detected"

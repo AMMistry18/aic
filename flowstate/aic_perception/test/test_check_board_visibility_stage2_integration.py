@@ -96,20 +96,27 @@ def test_stagnated_legacy_stage1_hands_its_final_triplet_to_stage2():
     assert "self._run_sfp_geometric_stage2(" in method_source
 
 
-def test_stage2_requires_complete_unobstructed_logo_and_full_board_quad():
+def test_stage2_does_not_reuse_stage1_full_board_as_a_handoff_gate():
     source, _ = _source_and_class()
     landmarks = _method("_stage2_landmarks")
     method_source = ast.get_source_segment(source, landmarks)
 
     for contract in (
-        "report.seen",
-        "report.full",
         "logo_margin < 8",
         "purple logo intersects the gripper uncertainty mask",
         "board outline touches the physical image boundary",
         "approxPolyDP",
     ):
         assert contract in method_source
+    report_attributes = {
+        node.attr
+        for node in ast.walk(landmarks)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "report"
+    }
+    assert "full" not in report_attributes
+    assert "seen" not in report_attributes
 
 
 def test_stage2_consumes_all_camera_info_and_full_camera_tcp_tf():
