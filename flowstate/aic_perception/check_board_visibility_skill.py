@@ -314,6 +314,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         level_anchor_joint6 = None
         level_vertical_polarity = 1.0
         pending_level_vertical_sample = None
+        # Stage 1 is only an acquisition phase.  It must not abort the SFP
+        # survey just because the legacy board-centroid heuristic is unhappy
+        # with a gripper-clipped initial image.  Give the measured logo/board
+        # acquisition policy a finite but useful budget, then let Stage 2 make
+        # the final fail-closed pose decision from calibration and all cameras.
+        max_logo_acquisition_moves = 10
         logo_acquisition_moves = 0
 
         def motion_cancelled() -> bool:
@@ -665,11 +671,33 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 # pose that frames the complete loose-SFP envelope in all
                 # three calibrated cameras.
                 if not self._stage2_has_complete_landmark(snapshot, reports):
-                    if logo_acquisition_moves >= 2:
-                        self._stage2_not_done(
-                            result,
-                            "complete purple logo was not acquired after two "
-                            "bounded image-feedback corrections",
+                    if logo_acquisition_moves >= max_logo_acquisition_moves:
+                        logging.info(
+                            "Stage 1 used its %d measured acquisition moves; "
+                            "handing the current landmark evidence to Stage 2 "
+                            "for a calibrated fail-closed decision",
+                            max_logo_acquisition_moves,
+                        )
+                        self._run_sfp_geometric_stage2(
+                            snapshot=snapshot,
+                            reports=reports,
+                            result=result,
+                            timeout_sec=timeout_sec,
+                            deadline=overall_deadline,
+                            started_at=started_at,
+                            max_speed_mps=max_speed_mps,
+                            max_angular_speed_rps=max_angular_speed_rps,
+                            publish_hz=publish_hz,
+                            settle_tolerance_m=settle_tolerance_m,
+                            settle_orientation_tolerance_rad=(
+                                settle_orientation_tolerance_rad
+                            ),
+                            move_timeout_sec=move_timeout_sec,
+                            baseline_force_xyz=baseline_force_xyz,
+                            max_force_n=max_force_n,
+                            force_delta_n=force_delta_n,
+                            cancelled=cancelled,
+                            motion_cancelled=stage2_motion_cancelled,
                         )
                         return
                     acquired = self._move_to_acquire_complete_logo(
@@ -721,6 +749,65 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
             if action.terminal:
+                if staged_sfp_target:
+                    # A clipped board centroid is not proof that the purple
+                    # logo is unusable.  Continue with measured logo/board
+                    # acquisition instead of exposing the legacy planner's
+                    # two-backoff STAGNATED result as a terminal failure.
+                    if logo_acquisition_moves < max_logo_acquisition_moves:
+                        acquired = self._move_to_acquire_complete_logo(
+                            snapshot=snapshot,
+                            reports=reports,
+                            result=result,
+                            timeout_sec=timeout_sec,
+                            step_m=step_m,
+                            max_speed_mps=max_speed_mps,
+                            max_angular_speed_rps=max_angular_speed_rps,
+                            publish_hz=publish_hz,
+                            settle_tolerance_m=settle_tolerance_m,
+                            settle_orientation_tolerance_rad=(
+                                settle_orientation_tolerance_rad
+                            ),
+                            move_timeout_sec=move_timeout_sec,
+                            baseline_force_xyz=baseline_force_xyz,
+                            max_force_n=max_force_n,
+                            force_delta_n=force_delta_n,
+                            cancelled=cancelled,
+                            motion_cancelled=stage2_motion_cancelled,
+                        )
+                        if not acquired:
+                            return
+                        logo_acquisition_moves += 1
+                        deadline = overall_deadline
+                        iteration += 1
+                        continue
+                    logging.info(
+                        "legacy Stage-1 planner stagnated after %d measured "
+                        "logo/board acquisition moves; handing off to Stage 2",
+                        logo_acquisition_moves,
+                    )
+                    self._run_sfp_geometric_stage2(
+                        snapshot=snapshot,
+                        reports=reports,
+                        result=result,
+                        timeout_sec=timeout_sec,
+                        deadline=overall_deadline,
+                        started_at=started_at,
+                        max_speed_mps=max_speed_mps,
+                        max_angular_speed_rps=max_angular_speed_rps,
+                        publish_hz=publish_hz,
+                        settle_tolerance_m=settle_tolerance_m,
+                        settle_orientation_tolerance_rad=(
+                            settle_orientation_tolerance_rad
+                        ),
+                        move_timeout_sec=move_timeout_sec,
+                        baseline_force_xyz=baseline_force_xyz,
+                        max_force_n=max_force_n,
+                        force_delta_n=force_delta_n,
+                        cancelled=cancelled,
+                        motion_cancelled=stage2_motion_cancelled,
+                    )
+                    return
                 result.success = False
                 result.message = action.reason
                 return
@@ -2363,7 +2450,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         cancelled,
         motion_cancelled,
     ) -> bool:
-        """Make one measured camera-plane correction toward the visible logo."""
+        """Make one measured board-fit or camera-plane logo correction.
+
+        When the plate still fills or clips the image, a board-normal retreat
+        is more informative than sliding the logo around the same cropped
+        view.  Once scale is usable, use the logo direction for a bounded
+        camera-plane correction.  Both choices are measured from the fresh
+        frame; neither is a blind sweep.
+        """
         import cv2
 
         from aic_perception.board_visibility import detect_purple_logo
@@ -2411,18 +2505,24 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 if float(np.linalg.norm(escape)) > 1e-6:
                     desired_image = escape
+        source_report = reports[camera_name]
+        prefer_backoff = bool(
+            source_report.area_frac >= 0.32
+            or "context_clipped" in source_report.failure_reasons
+        )
         desired_norm = float(np.linalg.norm(desired_image))
-        if desired_norm < 1e-4:
+        if desired_norm < 1e-4 and not prefer_backoff:
             self._stage2_not_done(
                 result,
                 f"{camera_name} logo is visible but its complete outline "
                 "cannot be recovered; refusing an unmeasured direction",
             )
             return False
-        desired_image /= desired_norm
+        if desired_norm >= 1e-4:
+            desired_image /= desired_norm
         try:
             position, orientation = self._gripper_pose(timeout_sec)
-            image_right, image_down, _ = self._camera_axes_in_base(
+            image_right, image_down, camera_back_away = self._camera_axes_in_base(
                 camera_name, timeout_sec
             )
         except Exception as error:
@@ -2430,14 +2530,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result, f"logo-acquisition camera/TCP TF unavailable: {error}"
             )
             return False
-        # An object moves opposite camera translation in the image.  Convert
-        # the measured desired logo displacement to one bounded camera-plane
-        # correction; there is no polarity guess or sweep.
-        correction_m = min(0.025, max(0.010, 0.5 * step_m))
-        delta = -correction_m * (
-            float(desired_image[0]) * np.asarray(image_right, dtype=float)
-            + float(desired_image[1]) * np.asarray(image_down, dtype=float)
-        )
+        if prefer_backoff:
+            # The camera back-away axis is derived from the current optical
+            # TF.  This is the same physical zoom-out direction as the
+            # legacy BACKOFF action, but it remains available after that
+            # planner's two-backoff centroid limit.
+            correction_m = min(0.045, max(0.020, 0.9 * step_m))
+            delta = correction_m * np.asarray(camera_back_away, dtype=float)
+            acquisition_mode = "board_fit_backoff"
+        else:
+            # An object moves opposite camera translation in the image.
+            correction_m = min(0.025, max(0.010, 0.5 * step_m))
+            delta = -correction_m * (
+                float(desired_image[0]) * np.asarray(image_right, dtype=float)
+                + float(desired_image[1]) * np.asarray(image_down, dtype=float)
+            )
+            acquisition_mode = "logo_plane_shift"
         target_position_array = np.asarray(position, dtype=float) + delta
         target_position = tuple(float(value) for value in target_position_array)
         fresh_force = snapshot.force_xyz
@@ -2468,8 +2576,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             float(delta[2]),
         )
         logging.info(
-            "bounded logo acquisition camera=%s desired_image=(%+.3f,%+.3f) "
-            "delta=(%+.4f,%+.4f,%+.4f)m",
+            "bounded Stage-1 acquisition mode=%s camera=%s "
+            "desired_image=(%+.3f,%+.3f) delta=(%+.4f,%+.4f,%+.4f)m",
+            acquisition_mode,
             camera_name,
             desired_image[0],
             desired_image[1],

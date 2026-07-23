@@ -84,13 +84,26 @@ def test_logo_acquisition_is_bounded_measured_and_never_a_blind_sweep():
     method = _method("_move_to_acquire_complete_logo")
     method_source = ast.get_source_segment(source, method)
 
-    assert "logo_acquisition_moves >= 2" in source
+    assert "max_logo_acquisition_moves = 10" in source
+    assert "logo_acquisition_moves < max_logo_acquisition_moves" in source
     assert "detect_purple_logo" in method_source
     assert "_camera_axes_in_base" in method_source
     assert "_gripper_pose" in method_source
     assert "would be blind" in method_source
     assert len(_calls(method, "move_smooth")) == 1
     assert not any(isinstance(item, ast.While) for item in ast.walk(method))
+
+
+def test_stagnated_legacy_stage1_hands_staged_sfp_to_stage2_after_acquisition():
+    source, _ = _source_and_class()
+    execute_inner = _method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
+
+    assert "if action.terminal:" in method_source
+    assert "if staged_sfp_target:" in method_source
+    assert "legacy Stage-1 planner stagnated" in method_source
+    assert "handing off to Stage 2" in method_source
+    assert "self._run_sfp_geometric_stage2(" in method_source
 
 
 def test_stage2_requires_complete_unobstructed_logo_and_full_board_quad():
