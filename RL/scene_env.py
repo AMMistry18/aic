@@ -242,6 +242,130 @@ class SceneEnvConfig:
     base_script_residual_limit_m: float = 0.01
     base_script_residual_limit_rad: float = 0.10
 
+    # --- Gate-0 contact/domain randomisation ------------------------------
+    # Disabled by default so historical/evaluation behavior stays byte-for-byte
+    # comparable.  Student-v3 training and the Gate-0 probe opt in explicitly.
+    domain_randomization: bool = False
+    random_policy_hz_range: tuple = (2.5, 20.0)
+    random_action_delay_steps: tuple = (0, 1)
+    random_friction_scale_range: tuple = (0.35, 2.5)
+    # MuJoCo REFSafe clamps below 2*timestep (=4 ms in this scene).
+    # Keep randomized contacts above MuJoCo's 2*dt REFSafe edge.
+    random_contact_timeconst_range_s: tuple = (0.010, 0.040)
+    random_contact_dampratio_range: tuple = (0.35, 2.0)
+    # Effective pair margin (split equally across plug and port geoms). Keep it
+    # below the compiled ridge clearance so a perfectly aligned plug can pass.
+    random_contact_pair_margin_range_m: tuple = (0.0, 0.0001)
+    random_collision_size_scale_range: tuple = (0.98, 1.04)
+    random_controller_scale_range: tuple = (0.75, 1.25)
+    random_wrench_limit_scale_range: tuple = (0.80, 1.20)
+    random_cable_force_bias_n: tuple = (-2.0, 2.0)
+    random_cable_torque_bias_nm: tuple = (-0.1, 0.1)
+    random_tracking_pos_bias_m: float = 0.0010
+    random_tracking_rot_bias_rad: float = 0.020
+    random_port_pos_bias_m: float = 0.0020
+    random_port_rot_bias_rad: float = 0.035
+    random_wrench_bias_n: float = 4.0
+    random_wrench_bias_nm: float = 0.25
+    random_wrench_noise_n: float = 1.5
+    random_wrench_noise_nm: float = 0.08
+    random_wrench_delay_steps: tuple = (0, 2)
+    # Geometry/fixed-body changes must be made before model compilation so
+    # MuJoCo rebuilds its collision broadphase. One seed defines one immutable
+    # variant; vector workers use distinct seeds to form the training ensemble.
+    compiled_variant_seed: Optional[int] = None
+    compiled_contact_ridge_enabled: bool = True
+    compiled_contact_ridge_depth_range_m: tuple = (0.0050, 0.0400)
+    compiled_contact_ridge_clearance_range_m: tuple = (0.00021, 0.00030)
+
+
+def _compile_scene_model(cfg: SceneEnvConfig):
+    """Compile a nominal scene or one safe, immutable collision variant."""
+    if cfg.compiled_variant_seed is None:
+        return mujoco.MjModel.from_xml_path(cfg.scene_path), {}
+
+    rng = np.random.default_rng(int(cfg.compiled_variant_seed))
+    spec = mujoco.MjSpec.from_file(cfg.scene_path)
+    size_lo, size_hi = sorted(map(float, cfg.random_collision_size_scale_range))
+    collision_size_scale = float(rng.uniform(size_lo, size_hi))
+    plug_bodies = {"lc_plug_link", "sfp_module_link", "sfp_tip_link"}
+    for geom in spec.geoms:
+        parent_name = getattr(getattr(geom, "parent", None), "name", "")
+        if int(geom.contype) != 0 and parent_name in plug_bodies:
+            geom.size = np.asarray(geom.size, dtype=np.float64) * collision_size_scale
+
+    pos_bias = rng.uniform(-cfg.random_port_pos_bias_m,
+                           cfg.random_port_pos_bias_m, 3)
+    rot_bias = rng.uniform(-cfg.random_port_rot_bias_rad,
+                           cfg.random_port_rot_bias_rad, 3)
+    nic = spec.body("nic_card_link")
+    if nic is None:
+        raise ValueError("compiled variant requires nic_card_link")
+    nic.pos = np.asarray(nic.pos, dtype=np.float64) + pos_bias
+    angle = float(np.linalg.norm(rot_bias))
+    dq = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    if angle > 1e-12:
+        mujoco.mju_axisAngle2Quat(dq, rot_bias / angle, angle)
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mulQuat(quat, dq, np.asarray(nic.quat, dtype=np.float64))
+    nic.quat = quat / np.linalg.norm(quat)
+    ridge_depth = ridge_clearance = None
+    if cfg.compiled_contact_ridge_enabled:
+        depth_lo, depth_hi = sorted(map(
+            float, cfg.compiled_contact_ridge_depth_range_m))
+        clear_lo, clear_hi = sorted(map(
+            float, cfg.compiled_contact_ridge_clearance_range_m))
+        ridge_depth = float(rng.uniform(depth_lo, depth_hi))
+        ridge_clearance = float(rng.uniform(clear_lo, clear_hi))
+        entrance = spec.body(cfg.insert_target_body)
+        if entrance is None:
+            raise ValueError(
+                f"compiled contact ridge requires {cfg.insert_target_body!r}")
+        tip_geoms = [
+            spec.geom("contact_collision_1"),
+            spec.geom("non_contact_collision"),
+        ]
+        if any(geom is None for geom in tip_geoms):
+            raise ValueError("compiled contact ridge requires SFP tip collision geoms")
+        plug_half_width = max(
+            abs(float(geom.pos[0])) + float(geom.size[0]) for geom in tip_geoms)
+        plug_half_height = max(
+            abs(float(geom.pos[1])) + float(geom.size[1]) for geom in tip_geoms)
+        ridge_half_width = 0.0005
+        ridge_inner_x = plug_half_width + ridge_clearance
+        for sign, suffix in ((-1.0, "neg"), (1.0, "pos")):
+            geom = entrance.add_geom(
+                name=f"aic_random_contact_ridge_{suffix}",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                # 3 mm axial band centered in the observed 6--7.5 mm region.
+                size=[ridge_half_width, 0.0065, 0.0015],
+                pos=[sign * (ridge_inner_x + ridge_half_width), 0.0, ridge_depth],
+            )
+            geom.contype = 1
+            geom.conaffinity = 1
+            geom.priority = 10
+            geom.friction = [2.0, 0.01, 0.001]
+        ridge_inner_y = plug_half_height + ridge_clearance
+        for sign, suffix in ((-1.0, "bottom"), (1.0, "top")):
+            geom = entrance.add_geom(
+                name=f"aic_random_contact_ridge_{suffix}",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[0.0085, ridge_half_width, 0.0015],
+                pos=[0.0, sign * (ridge_inner_y + ridge_half_width), ridge_depth],
+            )
+            geom.contype = 1
+            geom.conaffinity = 1
+            geom.priority = 10
+            geom.friction = [2.0, 0.01, 0.001]
+    return spec.compile(), {
+        "compiled_variant_seed": int(cfg.compiled_variant_seed),
+        "collision_size_scale": collision_size_scale,
+        "nic_pos_bias_m": pos_bias.tolist(),
+        "nic_rot_bias_rad": rot_bias.tolist(),
+        "contact_ridge_depth_m": ridge_depth,
+        "contact_ridge_clearance_m": ridge_clearance,
+    }
+
 
 class SceneInsertEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 20}
@@ -259,6 +383,11 @@ class SceneInsertEnv(gym.Env):
         self._action_dim = int(cfg.cart_action_dims) if self._cart_mode else 6
         self._cart_max_wrench = np.asarray(cfg.cart_max_wrench, dtype=np.float64)
         self._cart_tau_limit = np.asarray(cfg.cart_torque_limit, dtype=np.float64)
+        self._cart_kp_pos = float(cfg.cart_kp_pos)
+        self._cart_kd_pos = float(cfg.cart_kd_pos)
+        self._cart_kp_rot = float(cfg.cart_kp_rot)
+        self._cart_kd_rot = float(cfg.cart_kd_rot)
+        self._cart_nullspace_damping = float(cfg.cart_nullspace_damping)
         self._joint_stiffness = np.asarray(cfg.joint_stiffness, dtype=np.float64)
         self._joint_damping = np.asarray(cfg.joint_damping, dtype=np.float64)
         self._joint_tau_limit = np.asarray(cfg.joint_torque_limit, dtype=np.float64)
@@ -266,7 +395,7 @@ class SceneInsertEnv(gym.Env):
                 self._cart_max_wrench, self._cart_tau_limit,
                 self._joint_stiffness, self._joint_damping, self._joint_tau_limit)):
             raise ValueError("all arm impedance vectors must contain six values")
-        self.model = mujoco.MjModel.from_xml_path(cfg.scene_path)
+        self.model, self._compiled_variant_diag = _compile_scene_model(cfg)
         self.data = mujoco.MjData(self.model)
         if int(cfg.control_substeps) < 1:
             raise ValueError("control_substeps must be positive")
@@ -313,6 +442,30 @@ class SceneInsertEnv(gym.Env):
         self._ft_force_adr = self._sensor_adr("AtiForceTorqueSensor_force")
         self._ft_torque_adr = self._sensor_adr("AtiForceTorqueSensor_torque")
 
+        # Preserve the compiled nominal model. Episode randomisation always
+        # restores these arrays first, preventing drift across resets.
+        self._nominal_geom_friction = self.model.geom_friction.copy()
+        self._nominal_geom_solref = self.model.geom_solref.copy()
+        self._nominal_geom_solimp = self.model.geom_solimp.copy()
+        self._nominal_geom_margin = self.model.geom_margin.copy()
+        contact_tokens = ("sfp", "nic_card", "mount", "plug", "cable")
+        self._contact_geom_ids = np.asarray([
+            i for i in range(self.model.ngeom)
+            if any(t in (
+                (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, i) or "")
+                + " "
+                + (mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_BODY,
+                    int(self.model.geom_bodyid[i])) or "")
+            ).lower() for t in contact_tokens)
+        ], dtype=np.int32)
+        self._ridge_geom_ids = np.asarray([
+            i for i in range(self.model.ngeom)
+            if (mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
+            ).startswith("aic_random_contact_ridge_")
+        ], dtype=np.int32)
+
         self._home = np.asarray(cfg.home_qpos, dtype=np.float64)
         self._curriculum_level = float(cfg.curriculum_level)
         self._level_file: Optional[Path] = None
@@ -320,6 +473,17 @@ class SceneInsertEnv(gym.Env):
         self._last_action = np.zeros(self._action_dim, np.float32)
         self._arm_target = self._home.copy()
         self._prev_depth_norm = 0.0
+        self._episode_control_substeps = int(cfg.control_substeps)
+        self._action_delay_steps = 0
+        self._action_queue: list[np.ndarray] = []
+        self._episode_cable_wrench = np.zeros(6, dtype=np.float64)
+        self._tracking_pos_bias = np.zeros(3, dtype=np.float64)
+        self._tracking_rot_bias = np.zeros(3, dtype=np.float64)
+        self._wrench_bias = np.zeros(6, dtype=np.float64)
+        self._wrench_noise_sigma = np.zeros(6, dtype=np.float64)
+        self._wrench_delay_steps = 0
+        self._wrench_obs_queue: list[np.ndarray] = []
+        self._randomization_diag: dict[str, object] = {"enabled": False}
 
         # obs renderer (3 wrist cams) + reward renderer (center cam, native res)
         self._renderer, self._cams = None, []
@@ -404,6 +568,17 @@ class SceneInsertEnv(gym.Env):
         if self._ft_torque_adr is not None:
             ft[3:] = self.data.sensordata[self._ft_torque_adr:self._ft_torque_adr + 3]
         return ft
+
+    def _observed_ft(self):
+        """Policy-visible FT with episode bias/noise/delay; safety stays physical."""
+        ft = self._raw_ft() + self._wrench_bias
+        if np.any(self._wrench_noise_sigma):
+            ft = ft + self.np_random.normal(0.0, self._wrench_noise_sigma)
+        self._wrench_obs_queue.append(np.asarray(ft, dtype=np.float64))
+        keep = max(1, int(self._wrench_delay_steps) + 1)
+        if len(self._wrench_obs_queue) > keep:
+            self._wrench_obs_queue.pop(0)
+        return self._wrench_obs_queue[0].copy()
 
     def _site_quat(self):
         q = np.zeros(4)
@@ -537,6 +712,142 @@ class SceneInsertEnv(gym.Env):
         else:
             bid = int(self._target_bids[0])
         self._configure_port_frame(bid)
+
+    @staticmethod
+    def _ordered_pair(values, *, integer: bool = False):
+        lo, hi = values
+        if integer:
+            return int(min(lo, hi)), int(max(lo, hi))
+        return float(min(lo, hi)), float(max(lo, hi))
+
+    def _randomize_episode(self) -> None:
+        """Sample the contact/cadence mismatch used by Gate 0 and student v3."""
+        cfg, rng = self.cfg, self.np_random
+        self.model.geom_friction[:] = self._nominal_geom_friction
+        self.model.geom_solref[:] = self._nominal_geom_solref
+        self.model.geom_solimp[:] = self._nominal_geom_solimp
+        self.model.geom_margin[:] = self._nominal_geom_margin
+        self._joint_stiffness = np.asarray(cfg.joint_stiffness, dtype=np.float64)
+        self._joint_damping = np.asarray(cfg.joint_damping, dtype=np.float64)
+        self._cart_max_wrench = np.asarray(cfg.cart_max_wrench, dtype=np.float64)
+        self._cart_kp_pos = float(cfg.cart_kp_pos)
+        self._cart_kd_pos = float(cfg.cart_kd_pos)
+        self._cart_kp_rot = float(cfg.cart_kp_rot)
+        self._cart_kd_rot = float(cfg.cart_kd_rot)
+        self._cart_nullspace_damping = float(cfg.cart_nullspace_damping)
+        self._episode_control_substeps = int(cfg.control_substeps)
+        self._action_delay_steps = 0
+        self._episode_cable_wrench[:] = 0.0
+        self._tracking_pos_bias[:] = 0.0
+        self._tracking_rot_bias[:] = 0.0
+        self._wrench_bias[:] = 0.0
+        self._wrench_noise_sigma[:] = 0.0
+        self._wrench_delay_steps = 0
+        self._action_queue = []
+        self._wrench_obs_queue = []
+        self._randomization_diag = {"enabled": False}
+        if not cfg.domain_randomization:
+            self._policy_dt_s = self._physics_dt_s * self._episode_control_substeps
+            return
+
+        hz_lo, hz_hi = self._ordered_pair(cfg.random_policy_hz_range)
+        requested_hz = float(np.exp(rng.uniform(
+            np.log(max(hz_lo, 1e-3)), np.log(max(hz_hi, hz_lo + 1e-3)))))
+        self._episode_control_substeps = max(
+            1, int(round(1.0 / (requested_hz * self._physics_dt_s))))
+        self._policy_dt_s = self._physics_dt_s * self._episode_control_substeps
+        delay_lo, delay_hi = self._ordered_pair(
+            cfg.random_action_delay_steps, integer=True)
+        self._action_delay_steps = int(rng.integers(delay_lo, delay_hi + 1))
+
+        fr_lo, fr_hi = self._ordered_pair(cfg.random_friction_scale_range)
+        friction_scale = float(np.exp(rng.uniform(np.log(fr_lo), np.log(fr_hi))))
+        tc_lo, tc_hi = self._ordered_pair(cfg.random_contact_timeconst_range_s)
+        dr_lo, dr_hi = self._ordered_pair(cfg.random_contact_dampratio_range)
+        margin_lo, margin_hi = self._ordered_pair(
+            cfg.random_contact_pair_margin_range_m)
+        timeconst = float(np.exp(rng.uniform(np.log(tc_lo), np.log(tc_hi))))
+        dampratio = float(np.exp(rng.uniform(np.log(dr_lo), np.log(dr_hi))))
+        pair_contact_margin = float(rng.uniform(margin_lo, margin_hi))
+        gids = self._contact_geom_ids
+        if gids.size:
+            self.model.geom_friction[gids, :2] = np.maximum(
+                1e-5, self._nominal_geom_friction[gids, :2] * friction_scale)
+            # Positive solref is [timeconst, dampratio]. This spans compliant to
+            # stiff/underdamped contact while remaining in MuJoCo's stable form.
+            self.model.geom_solref[gids, 0] = timeconst
+            self.model.geom_solref[gids, 1] = dampratio
+            self.model.geom_margin[gids] = 0.5 * pair_contact_margin
+        if self._ridge_geom_ids.size:
+            # A tight aligned opening is still contact-free. Once a biased plug
+            # touches the detent, make its response stiff enough that it cannot
+            # numerically tunnel through the 3 mm band under the 10 N controller.
+            # The ridge needs enough tangential hold to produce a bounded jam
+            # rather than a lateral slip/ejection; the stable positive solref
+            # below keeps that hold from producing an impulse.
+            self.model.geom_friction[self._ridge_geom_ids, 0] = 5.0
+            # Stability fix (2026-07-12): the previous direct-format stiffness
+            # (-3.0e5, -3.0e3) was ~150x stiffer than the scene's stable weld
+            # (solref 0.002 1) at the 2 ms timestep; a laterally-biased plug
+            # hitting it produced a one-step QACC blow-up (9.8 kN, 50-342 mm
+            # ejection) that broke Student-v3 pilot training. Use a positive
+            # solref with the time constant safely above the REFSafe floor
+            # (2*dt = 4 ms) and critical damping: stiff enough to stop tunneling
+            # through the 3 mm band under the 10 N controller, but numerically
+            # stable. solimp left near-rigid.
+            self.model.geom_solref[self._ridge_geom_ids] = (0.006, 1.0)
+            self.model.geom_solimp[self._ridge_geom_ids] = (
+                0.99, 0.999, 0.0001, 0.5, 2.0)
+
+        ctrl_lo, ctrl_hi = self._ordered_pair(cfg.random_controller_scale_range)
+        controller_scale = float(rng.uniform(ctrl_lo, ctrl_hi))
+        wrench_lo, wrench_hi = self._ordered_pair(cfg.random_wrench_limit_scale_range)
+        wrench_limit_scale = float(rng.uniform(wrench_lo, wrench_hi))
+        self._joint_stiffness *= controller_scale
+        self._joint_damping *= np.sqrt(controller_scale)
+        self._cart_kp_pos *= controller_scale
+        self._cart_kd_pos *= np.sqrt(controller_scale)
+        self._cart_kp_rot *= controller_scale
+        self._cart_kd_rot *= np.sqrt(controller_scale)
+        self._cart_nullspace_damping *= np.sqrt(controller_scale)
+        self._cart_max_wrench *= wrench_limit_scale
+
+        f_lo, f_hi = self._ordered_pair(cfg.random_cable_force_bias_n)
+        t_lo, t_hi = self._ordered_pair(cfg.random_cable_torque_bias_nm)
+        self._episode_cable_wrench[:3] = rng.uniform(f_lo, f_hi, 3)
+        self._episode_cable_wrench[3:] = rng.uniform(t_lo, t_hi, 3)
+        self._tracking_pos_bias = rng.uniform(
+            -cfg.random_tracking_pos_bias_m, cfg.random_tracking_pos_bias_m, 3)
+        self._tracking_rot_bias = rng.uniform(
+            -cfg.random_tracking_rot_bias_rad, cfg.random_tracking_rot_bias_rad, 3)
+        self._wrench_bias[:3] = rng.uniform(
+            -cfg.random_wrench_bias_n, cfg.random_wrench_bias_n, 3)
+        self._wrench_bias[3:] = rng.uniform(
+            -cfg.random_wrench_bias_nm, cfg.random_wrench_bias_nm, 3)
+        self._wrench_noise_sigma[:3] = float(cfg.random_wrench_noise_n)
+        self._wrench_noise_sigma[3:] = float(cfg.random_wrench_noise_nm)
+        wd_lo, wd_hi = self._ordered_pair(cfg.random_wrench_delay_steps, integer=True)
+        self._wrench_delay_steps = int(rng.integers(wd_lo, wd_hi + 1))
+        self._randomization_diag = {
+            "enabled": True,
+            **self._compiled_variant_diag,
+            "policy_hz": 1.0 / self._policy_dt_s,
+            "control_substeps": self._episode_control_substeps,
+            "action_delay_steps": self._action_delay_steps,
+            "friction_scale": friction_scale,
+            "contact_timeconst_s": timeconst,
+            "contact_dampratio": dampratio,
+            "pair_contact_margin_m": pair_contact_margin,
+            "controller_scale": controller_scale,
+            "wrench_limit_scale": wrench_limit_scale,
+            "cable_wrench": self._episode_cable_wrench.tolist(),
+            "tracking_pos_bias_m": self._tracking_pos_bias.tolist(),
+            "tracking_rot_bias_rad": self._tracking_rot_bias.tolist(),
+            "wrench_delay_steps": self._wrench_delay_steps,
+        }
+
+    def _apply_episode_wrench(self) -> None:
+        self.data.xfrc_applied[self._plug_id] = self._episode_cable_wrench
 
     def _rigid_home(self, home):
         """Arm to `home`; rigidly move straight cable so welded plug starts at tool.relpose."""
@@ -798,6 +1109,7 @@ class SceneInsertEnv(gym.Env):
                 target_tip, self._insert_axis, q_seed)
             self._rigid_home(q_arm)
             for _ in range(n_settle):
+                self._apply_episode_wrench()
                 self.data.ctrl[:6] = self._base_torque(q_arm)
                 self.data.ctrl[6] = self.cfg.gripper_ctrl
                 mujoco.mj_step(self.model, self.data)
@@ -830,6 +1142,7 @@ class SceneInsertEnv(gym.Env):
             _, q_arm, diag = best
             self._rigid_home(q_arm)
             for _ in range(n_settle):
+                self._apply_episode_wrench()
                 self.data.ctrl[:6] = self._base_torque(q_arm)
                 self.data.ctrl[6] = self.cfg.gripper_ctrl
                 mujoco.mj_step(self.model, self.data)
@@ -922,8 +1235,9 @@ class SceneInsertEnv(gym.Env):
 
     def _cart_desired_pose(self):
         R = self._cart_frame_R
-        des_pos = self._cart_base_pos + R @ self._cart_resid_pos
-        rot_world = R @ self._cart_resid_rotvec
+        des_pos = (self._cart_base_pos + R @ self._cart_resid_pos
+                   + R @ self._tracking_pos_bias)
+        rot_world = R @ (self._cart_resid_rotvec + self._tracking_rot_bias)
         angle = float(np.linalg.norm(rot_world))
         dq = self._axis_angle(rot_world, angle)
         des_quat = self._qmul(dq, self._cart_base_quat)
@@ -942,8 +1256,8 @@ class SceneInsertEnv(gym.Env):
         pos_err = np.asarray(des_pos) - self.data.site_xpos[self._tcp_sid]
         q_diff = self._qmul(des_quat, self._qinv(self._site_quat()))
         rot_err = self._quat_to_rotvec(q_diff)   # world frame (matches Jr)
-        force = cfg.cart_kp_pos * pos_err - cfg.cart_kd_pos * v
-        torque = cfg.cart_kp_rot * rot_err - cfg.cart_kd_rot * w
+        force = self._cart_kp_pos * pos_err - self._cart_kd_pos * v
+        torque = self._cart_kp_rot * rot_err - self._cart_kd_rot * w
         wrench = np.concatenate([force, torque])
         wrench_sat = bool(np.any(np.abs(wrench) > self._cart_max_wrench))
         wrench = np.clip(wrench, -self._cart_max_wrench, self._cart_max_wrench)
@@ -954,7 +1268,7 @@ class SceneInsertEnv(gym.Env):
         # commanded TCP motion.
         nullspace = np.eye(6) - J.T @ np.linalg.pinv(J.T)
         tau = (J.T @ wrench
-               + nullspace @ (-cfg.cart_nullspace_damping * qd_arm)
+               + nullspace @ (-self._cart_nullspace_damping * qd_arm)
                + self.data.qfrc_bias[self._arm_vadr])
         tau_sat = bool(np.any(np.abs(tau) > self._cart_tau_limit))
         tau = np.clip(tau, -self._cart_tau_limit, self._cart_tau_limit)
@@ -991,7 +1305,8 @@ class SceneInsertEnv(gym.Env):
         des_pos, des_quat = self._cart_desired_pose()
         tcp_before = self.data.site_xpos[self._tcp_sid].copy()
         wrench_f_max = wrench_t_max = tau_max = 0.0
-        for _ in range(cfg.control_substeps):
+        for _ in range(self._episode_control_substeps):
+            self._apply_episode_wrench()
             tau, wrench, wrench_sat, tau_sat, _, _ = (
                 self._cart_impedance_torque(des_pos, des_quat))
             self.data.ctrl[:6] = tau
@@ -1057,6 +1372,7 @@ class SceneInsertEnv(gym.Env):
 
     def reset(self, *, seed: Optional[int] = None, options=None):
         super().reset(seed=seed)
+        self._randomize_episode()
         if self._level_file is not None and self._level_file.exists():
             try:
                 self._curriculum_level = float(self._level_file.read_text().strip())
@@ -1080,16 +1396,25 @@ class SceneInsertEnv(gym.Env):
         return self._obs(), {
             "curriculum_level": self._curriculum_level,
             "reset_diag": getattr(self, "_last_reset_diag", None),
+            "domain_randomization": dict(self._randomization_diag),
         }
 
     def step(self, action):
         action = np.clip(np.asarray(action, np.float64).reshape(self._action_dim), -1.0, 1.0)
+        self._action_queue.append(action.copy())
+        keep = max(1, self._action_delay_steps + 1)
+        if len(self._action_queue) > keep:
+            self._action_queue.pop(0)
+        applied_action = (np.zeros_like(action)
+                          if len(self._action_queue) <= self._action_delay_steps
+                          else self._action_queue[0])
         if self._cart_mode:
-            self._apply_cartesian_action(action)
+            self._apply_cartesian_action(applied_action)
         else:
             self._arm_target = self._clip_action_target(
-                self._arm_target + action * self.cfg.action_joint_scale)
-            for _ in range(self.cfg.control_substeps):
+                self._arm_target + applied_action * self.cfg.action_joint_scale)
+            for _ in range(self._episode_control_substeps):
+                self._apply_episode_wrench()
                 self.data.ctrl[:6] = self._base_torque(self._arm_target)
                 self.data.ctrl[6] = self.cfg.gripper_ctrl
                 mujoco.mj_step(self.model, self.data)
@@ -1110,6 +1435,8 @@ class SceneInsertEnv(gym.Env):
             "breakdown": breakdown,
             "image_l1_norm": breakdown.image_l1_norm,
             "f_z": float(self._f_axial),
+            "f_lateral": float(getattr(self, "_f_lateral", float("nan"))),
+            "contact_force_norm": float(getattr(self, "_f_norm", float("nan"))),
             "f_z_mean": float(np.mean(self._f_ax_buf)) if self._f_ax_buf else float("nan"),
             "f_z_max": float(np.max(np.abs(self._f_ax_buf))) if self._f_ax_buf else float("nan"),
             "depth_norm": float(self._prev_depth_norm),
@@ -1129,6 +1456,8 @@ class SceneInsertEnv(gym.Env):
             "physics_dt_s": self._physics_dt_s,
             "policy_dt_s": self._policy_dt_s,
             "policy_hz": 1.0 / self._policy_dt_s,
+            "domain_randomization": dict(self._randomization_diag),
+            "applied_action": applied_action.astype(np.float32),
             "curriculum_level": float(self._curriculum_level),
             "action_mode": self.cfg.action_mode,
             **score_info,
@@ -1412,6 +1741,8 @@ class SceneInsertEnv(gym.Env):
         f_axial = float(np.dot(fc, self._insert_axis))
         f_lat = float(np.linalg.norm(fc - f_axial * self._insert_axis))
         self._f_axial = f_axial
+        self._f_lateral = f_lat
+        self._f_norm = float(np.linalg.norm(fc))
         self._f_ax_buf.append(f_axial)
         tip = self.data.xpos[self._plug_tip_id]
         axial_err, lat_vec = self._tip_port_errors(tip)
@@ -1560,7 +1891,7 @@ class SceneInsertEnv(gym.Env):
             "arm_qpos": d.qpos[self._arm_qadr].astype(np.float32),
             "arm_qvel": d.qvel[self._arm_vadr].astype(np.float32),
             "tcp_pose": np.concatenate([tcp_pos, self._site_quat()]).astype(np.float32),
-            "ft": self._raw_ft().astype(np.float32),
+            "ft": self._observed_ft().astype(np.float32),
             "last_action": self._last_action.copy(),
         }
         if self._renderer is not None and self._cams:

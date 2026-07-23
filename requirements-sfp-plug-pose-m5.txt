@@ -1,0 +1,8 @@
+# Versions verified together on Apple M5 / macOS on 2026-07-18.
+torch==2.11.0
+torchvision==0.26.0
+ultralytics==8.4.48
+opencv-python==5.0.0.93
+numpy==2.5.1
+scipy==1.18.0
+PyYAML==6.0.3

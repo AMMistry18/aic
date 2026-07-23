@@ -1,0 +1,1036 @@
+"""Plug-relative deterministic SFP controller for the v50 Flowstate image.
+
+This module is intentionally separate from the deployed v49 ``RLInsert.py``.
+The v50 image installs it next to both runtime copies of ``RLInsert`` and applies
+a small, hash-gated dispatch patch.  Keeping the state machine here makes the
+new behavior testable without importing ROS.
+
+The controller has one non-negotiable perception contract: a fresh, validated
+plug pose is required before motion and after every lift recovery.  The old
+fixed cable-angle bias is never used as a fallback.  Once a fresh plug pose has
+been observed, the measured TCP-to-plug transform is used kinematically while
+the cameras become occluded during seating.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+import time
+from typing import Optional
+
+import numpy as np
+
+
+INSERT_DEPTH_M = 0.0458
+LOCAL_SFP_PORT_KPS = np.array(
+    [
+        [0.00685, 0.0043, 0.0],
+        [-0.00685, 0.0043, 0.0],
+        [-0.00685, -0.0043, 0.0],
+        [0.00685, -0.0043, 0.0],
+    ],
+    dtype=np.float64,
+)
+
+SEATED = "seated"
+STALLED = "stalled"
+HARD_FAILURE = "hard_failure"
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+@dataclass(frozen=True)
+class V50Config:
+    """Safety and timing limits, expressed in wall time where applicable."""
+
+    command_dt_sim_s: float = 0.05
+    align_timeout_wall_s: float = 5.0
+    align_lateral_tol_m: float = 0.0010
+    align_rotation_tol_rad: float = np.deg2rad(1.5)
+    align_max_lateral_step_m: float = 0.0015
+    align_max_rotation_step_rad: float = np.deg2rad(1.5)
+    stall_timeout_wall_s: float = 2.5
+    stall_progress_m: float = 0.0008
+    free_speed_m_s: float = 0.015
+    contact_speed_m_s: float = 0.006
+    contact_force_n: float = 3.0
+    target_axial_force_n: float = 8.0
+    seat_force_cap_n: float = 10.0
+    force_abort_n: float = 18.0
+    force_abort_wall_s: float = 0.25
+    axial_stiffness_n_m: float = 500.0
+    max_axial_lead_m: float = 0.020
+    lateral_safety_m: float = 0.006
+    rotation_safety_rad: float = np.deg2rad(15.0)
+    seat_candidate_depth_m: float = 0.0445
+    insertion_event_timeout_wall_s: float = 6.0
+    max_visual_rescues_per_pose: int = 1
+    max_lift_recoveries: int = 1
+    lift_distance_m: float = 0.006
+    lift_timeout_wall_s: float = 2.0
+    recovery_percept_samples: int = 3
+    recovery_percept_min_agree: int = 2
+    recovery_percept_agree_m: float = 0.004
+    recovery_percept_timeout_wall_s: float = 5.0
+    plug_max_age_s: float = 0.35
+
+    @classmethod
+    def from_env(cls) -> "V50Config":
+        return cls(
+            command_dt_sim_s=_env_float("RL_INSERT_V50_COMMAND_DT_S", 0.05),
+            align_timeout_wall_s=_env_float("RL_INSERT_V50_ALIGN_TIMEOUT_S", 5.0),
+            stall_timeout_wall_s=_env_float("RL_INSERT_V50_STALL_TIMEOUT_S", 2.5),
+            stall_progress_m=_env_float("RL_INSERT_V50_STALL_PROGRESS_M", 0.0008),
+            free_speed_m_s=_env_float("RL_INSERT_V50_FREE_SPEED_M_S", 0.015),
+            contact_speed_m_s=_env_float("RL_INSERT_V50_CONTACT_SPEED_M_S", 0.006),
+            contact_force_n=_env_float("RL_INSERT_V50_CONTACT_FORCE_N", 3.0),
+            target_axial_force_n=_env_float("RL_INSERT_V50_TARGET_FORCE_N", 8.0),
+            seat_force_cap_n=_env_float("RL_INSERT_V50_SEAT_FORCE_CAP_N", 10.0),
+            force_abort_n=_env_float("RL_INSERT_FORCE_ABORT_N", 18.0),
+            force_abort_wall_s=_env_float("RL_INSERT_V50_FORCE_ABORT_DWELL_S", 0.25),
+            axial_stiffness_n_m=_env_float("RL_INSERT_V50_AXIAL_STIFFNESS_N_M", 500.0),
+            max_axial_lead_m=_env_float("RL_INSERT_V50_MAX_AXIAL_LEAD_M", 0.020),
+            insertion_event_timeout_wall_s=_env_float(
+                "RL_INSERT_V50_EVENT_TIMEOUT_S", 6.0
+            ),
+            max_visual_rescues_per_pose=_env_int(
+                "RL_INSERT_V50_MAX_VISUAL_RESCUES", 1
+            ),
+            max_lift_recoveries=_env_int("RL_INSERT_V50_MAX_LIFT_RECOVERIES", 1),
+            lift_distance_m=_env_float("RL_INSERT_V50_LIFT_DISTANCE_M", 0.006),
+            recovery_percept_samples=_env_int(
+                "RL_INSERT_V50_RECOVERY_PERCEPT_SAMPLES", 3
+            ),
+            recovery_percept_min_agree=_env_int(
+                "RL_INSERT_V50_RECOVERY_PERCEPT_MIN_AGREE", 2
+            ),
+            plug_max_age_s=_env_float("RL_INSERT_V50_PLUG_MAX_AGE_S", 0.35),
+        ).validated()
+
+    def validated(self) -> "V50Config":
+        if not 0.005 <= self.lift_distance_m <= 0.008:
+            raise ValueError("v50 lift recovery must stay within 5-8 mm")
+        if not 0.0 < self.target_axial_force_n < self.seat_force_cap_n:
+            raise ValueError("v50 target force must be below the seat force cap")
+        if not self.seat_force_cap_n < self.force_abort_n <= 18.0:
+            raise ValueError("v50 force cap must be below the <=18 N hard abort")
+        if self.max_visual_rescues_per_pose < 1:
+            raise ValueError("v50 requires visual contrast as the first wedge rescue")
+        if not 0 <= self.max_lift_recoveries <= 2:
+            raise ValueError("v50 lift recovery count must be bounded to 0-2")
+        if self.recovery_percept_min_agree > self.recovery_percept_samples:
+            raise ValueError("v50 recovery consensus cannot require too many samples")
+        if self.axial_stiffness_n_m <= 0.0:
+            raise ValueError("v50 axial stiffness must be positive")
+        return self
+
+    @property
+    def force_lead_m(self) -> float:
+        return min(
+            self.max_axial_lead_m,
+            self.target_axial_force_n / self.axial_stiffness_n_m,
+        )
+
+
+def quaternion_to_matrix(quaternion_wxyz) -> np.ndarray:
+    q = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if not np.isfinite(norm) or norm <= 1e-12:
+        raise ValueError("invalid quaternion")
+    w, x, y, z = q / norm
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def matrix_to_quaternion(rotation) -> np.ndarray:
+    R = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    trace = float(np.trace(R))
+    if trace > 0.0:
+        s = np.sqrt(trace + 1.0) * 2.0
+        q = np.array(
+            [0.25 * s, (R[2, 1] - R[1, 2]) / s,
+             (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s]
+        )
+    else:
+        i = int(np.argmax(np.diag(R)))
+        if i == 0:
+            s = np.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) * 2.0
+            q = np.array([(R[2, 1] - R[1, 2]) / s, 0.25 * s,
+                          (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s])
+        elif i == 1:
+            s = np.sqrt(max(0.0, 1.0 + R[1, 1] - R[0, 0] - R[2, 2])) * 2.0
+            q = np.array([(R[0, 2] - R[2, 0]) / s,
+                          (R[0, 1] + R[1, 0]) / s, 0.25 * s,
+                          (R[1, 2] + R[2, 1]) / s])
+        else:
+            s = np.sqrt(max(0.0, 1.0 + R[2, 2] - R[0, 0] - R[1, 1])) * 2.0
+            q = np.array([(R[1, 0] - R[0, 1]) / s,
+                          (R[0, 2] + R[2, 0]) / s,
+                          (R[1, 2] + R[2, 1]) / s, 0.25 * s])
+    q /= max(float(np.linalg.norm(q)), 1e-12)
+    if q[0] < 0.0:
+        q = -q
+    return q
+
+
+def axis_angle(rotation) -> np.ndarray:
+    R = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    angle = float(np.arccos(np.clip((np.trace(R) - 1.0) * 0.5, -1.0, 1.0)))
+    if angle <= 1e-9:
+        return np.zeros(3, dtype=np.float64)
+    axis = np.array(
+        [R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]],
+        dtype=np.float64,
+    )
+    denom = 2.0 * np.sin(angle)
+    if abs(denom) <= 1e-9:
+        values, vectors = np.linalg.eigh((R + np.eye(3)) * 0.5)
+        axis = vectors[:, int(np.argmax(values))]
+    else:
+        axis /= denom
+    axis /= max(float(np.linalg.norm(axis)), 1e-12)
+    return axis * angle
+
+
+def rotation_from_axis_angle(vector) -> np.ndarray:
+    v = np.asarray(vector, dtype=np.float64).reshape(3)
+    angle = float(np.linalg.norm(v))
+    if angle <= 1e-12:
+        return np.eye(3)
+    axis = v / angle
+    K = np.array(
+        [[0.0, -axis[2], axis[1]],
+         [axis[2], 0.0, -axis[0]],
+         [-axis[1], axis[0], 0.0]],
+        dtype=np.float64,
+    )
+    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+
+
+def solve_tip_in_tcp(tcp_pos, tcp_quat, tip_pos, tip_rotation):
+    """Return the measured rigid plug-tip transform in the current TCP frame."""
+
+    tcp_pos = np.asarray(tcp_pos, dtype=np.float64).reshape(3)
+    tip_pos = np.asarray(tip_pos, dtype=np.float64).reshape(3)
+    R_tcp = quaternion_to_matrix(tcp_quat)
+    R_tip = np.asarray(tip_rotation, dtype=np.float64).reshape(3, 3)
+    return R_tcp.T @ (tip_pos - tcp_pos), R_tcp.T @ R_tip
+
+
+def tip_from_tcp_transform(tcp_pos, tcp_quat, tip_in_tcp_pos, tip_in_tcp_rotation):
+    R_tcp = quaternion_to_matrix(tcp_quat)
+    tip_pos = (
+        np.asarray(tcp_pos, dtype=np.float64).reshape(3)
+        + R_tcp @ np.asarray(tip_in_tcp_pos, dtype=np.float64).reshape(3)
+    )
+    tip_rotation = R_tcp @ np.asarray(tip_in_tcp_rotation, dtype=np.float64).reshape(3, 3)
+    return tip_pos, tip_rotation
+
+
+def tcp_for_tip_transform(tip_pos, tip_rotation, tip_in_tcp_pos, tip_in_tcp_rotation):
+    R_tip = np.asarray(tip_rotation, dtype=np.float64).reshape(3, 3)
+    R_rel = np.asarray(tip_in_tcp_rotation, dtype=np.float64).reshape(3, 3)
+    R_tcp = R_tip @ R_rel.T
+    tcp_pos = (
+        np.asarray(tip_pos, dtype=np.float64).reshape(3)
+        - R_tcp @ np.asarray(tip_in_tcp_pos, dtype=np.float64).reshape(3)
+    )
+    return tcp_pos, matrix_to_quaternion(R_tcp)
+
+
+def v50_tip_from_tcp(policy, tcp_pos, tcp_quat):
+    """Use the per-run visual grasp transform once it has been established.
+
+    The legacy transform remains available only before v50 control starts so the
+    old port detector can rank multiple port candidates.  ``run_v50_script``
+    refuses to move unless ``_v50_grasp_transform`` has been populated from a
+    fresh visual plug observation.
+    """
+
+    transform = getattr(policy, "_v50_grasp_transform", None)
+    if transform is None:
+        from .rl_insert_contract import sfp_tip_pose_from_tcp
+
+        return sfp_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    return tip_from_tcp_transform(tcp_pos, tcp_quat, *transform)
+
+
+def v50_tcp_pose_for_tip(policy, tip_pos, tip_rotation):
+    transform = getattr(policy, "_v50_grasp_transform", None)
+    if transform is None:
+        from .rl_insert_contract import tcp_pose_for_sfp_tip
+
+        return tcp_pose_for_sfp_tip(tip_pos, tip_rotation)
+    return tcp_for_tip_transform(tip_pos, tip_rotation, *transform)
+
+
+def next_persistent_depth(
+    current_depth: float,
+    commanded_depth: float,
+    elapsed_wall_s: float,
+    force_n: float,
+    config: V50Config,
+) -> float:
+    """Advance an absolute seat setpoint while retaining bounded axial lead."""
+
+    current_depth = float(current_depth)
+    commanded_depth = max(float(commanded_depth), current_depth)
+    if np.isfinite(force_n) and force_n >= config.seat_force_cap_n:
+        candidate = commanded_depth
+    else:
+        speed = (
+            config.contact_speed_m_s
+            if np.isfinite(force_n) and force_n >= config.contact_force_n
+            else config.free_speed_m_s
+        )
+        candidate = commanded_depth + speed * max(0.0, float(elapsed_wall_s))
+    # This is a persistent absolute setpoint.  It grows while the plug is stuck,
+    # unlike v49's ``current_tip + one_step`` command.  The lead cap bounds the
+    # nominal impedance demand to approximately target_axial_force_n.
+    return min(INSERT_DEPTH_M, candidate, current_depth + config.force_lead_m)
+
+
+@dataclass
+class WallProgressWatch:
+    progress_m: float
+    timeout_s: float
+    best_depth: float
+    progress_time: float
+
+    @classmethod
+    def start(cls, depth: float, now: float, config: V50Config):
+        return cls(config.stall_progress_m, config.stall_timeout_wall_s, depth, now)
+
+    def stalled(self, depth: float, now: float) -> bool:
+        if float(depth) >= self.best_depth + self.progress_m:
+            self.best_depth = float(depth)
+            self.progress_time = float(now)
+        return float(now) - self.progress_time >= self.timeout_s
+
+
+def configure_v50(policy) -> None:
+    """Load the dedicated plug estimator and initialize per-action state."""
+
+    if getattr(policy, "_v50_configured", False):
+        return
+    from .sfp_plug_pose import SfpPlugPoseEstimator
+
+    weights = Path(
+        os.environ.get("AIC_SFP_PLUG_POSE_WEIGHTS", "/models/sfp_plug_pose_best.pt")
+    )
+    if not weights.is_file():
+        raise FileNotFoundError(
+            f"v50 plug-pose weights missing at {weights}; no fixed-bias fallback is allowed"
+        )
+    policy._v50_config = V50Config.from_env()
+    policy._v50_plug_estimator = SfpPlugPoseEstimator(
+        str(weights),
+        imgsz=_env_int("RL_INSERT_V50_PLUG_IMGSZ", 960),
+        conf_threshold=_env_float("RL_INSERT_V50_PLUG_CONF", 0.25),
+    )
+    policy._v50_grasp_transform = None
+    policy._v50_pending_world_plug = None
+    _warm_v50_perception(policy)
+    policy._v50_configured = True
+    policy.get_logger().info(
+        f"[v50] plug-relative controller ready; weights={weights} "
+        f"force_target={policy._v50_config.target_axial_force_n:.1f}N "
+        f"force_abort={policy._v50_config.force_abort_n:.1f}N"
+    )
+
+
+def _warm_v50_perception(policy) -> None:
+    """Pay both YOLO first-inference costs during lifecycle configuration."""
+
+    from .sfp_plug_pose import PlugPoseView
+
+    image = np.zeros((640, 640, 3), dtype=np.uint8)
+    # A no-detection result is expected for black pixels; an exception is not.
+    policy._pc.detect_nic(image, conf_thresh=0.99)
+    policy._v50_plug_estimator.detect_views(
+        [
+            PlugPoseView(
+                camera_name="v50_warmup",
+                image_bgr=image,
+                K=np.array(
+                    [[500.0, 0.0, 320.0], [0.0, 500.0, 320.0], [0.0, 0.0, 1.0]],
+                    dtype=np.float64,
+                ),
+                T_world_from_camera=np.eye(4),
+                stamp_s=0.0,
+                frame_id="v50-warmup",
+            )
+        ]
+    )
+    policy.get_logger().info(
+        "[v50] port and plug YOLO first-inference warmup completed during configure"
+    )
+
+
+def _message_stamp(message):
+    header = getattr(message, "header", None)
+    return getattr(header, "stamp", None)
+
+
+def _observation_stamp_s(observation) -> Optional[float]:
+    from .sfp_plug_pose import stamp_to_seconds
+
+    values = []
+    for name in ("left_image", "center_image", "right_image"):
+        try:
+            value = stamp_to_seconds(_message_stamp(getattr(observation, name, None)))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(float(value))
+    return max(values) if values else None
+
+
+def _normalize_event(value: object) -> str:
+    return str(value or "").strip().strip("/")
+
+
+def _plug_views_from_observation(policy, observation):
+    from .sfp_plug_pose import PlugPoseView, stamp_to_seconds
+
+    messages = {
+        "left_camera": getattr(observation, "left_image", None),
+        "center_camera": getattr(observation, "center_image", None),
+        "right_camera": getattr(observation, "right_image", None),
+    }
+    result = []
+    for camera, (image_bgr, K, T_cam_from_base) in policy._build_views(
+        observation
+    ).items():
+        try:
+            stamp_s = stamp_to_seconds(_message_stamp(messages[camera]))
+        except (TypeError, ValueError):
+            continue
+        result.append(
+            PlugPoseView(
+                camera_name=camera,
+                image_bgr=image_bgr,
+                K=K,
+                T_world_from_camera=policy._pc.invert_transform(T_cam_from_base),
+                stamp_s=float(stamp_s),
+                frame_id=f"{camera}:{float(stamp_s):.9f}",
+            )
+        )
+    return result
+
+
+def prime_v50_plug_pose(policy, get_observation, move_robot) -> bool:
+    """Observe the plug before port selection and calibrate its TCP transform.
+
+    Port consensus ranks multiple detected cages by distance to the plug.  v50
+    therefore primes the direct plug estimate first, so even candidate selection
+    uses measured plug geometry rather than the legacy grasp assumption.  The
+    robot remains stationary while the subsequent port consensus is collected,
+    making this same fresh world plug pose valid for initial relative alignment.
+    """
+
+    policy._v50_grasp_transform = None
+    policy._v50_pending_world_plug = None
+    deadline = time.monotonic() + 2.0
+    observation = None
+    while time.monotonic() < deadline:
+        policy._enforce_action_deadline(move_robot)
+        candidate = get_observation()
+        if candidate is not None and _observation_stamp_s(candidate) is not None:
+            observation = candidate
+            break
+        time.sleep(0.02)
+    if observation is None:
+        policy.get_logger().error("[v50] no timestamped observation for plug priming")
+        return False
+    views = _plug_views_from_observation(policy, observation)
+    if len(views) < 2:
+        policy.get_logger().error("[v50] fewer than two views for plug priming")
+        return False
+    from .sfp_plug_pose import stamp_to_seconds
+
+    now_s = stamp_to_seconds(policy._parent_node.get_clock().now())
+    estimate = policy._v50_plug_estimator.estimate_multiview(
+        views,
+        now_s=now_s,
+        max_age_s=policy._v50_config.plug_max_age_s,
+    )
+    if estimate is None:
+        policy.get_logger().error(
+            "[v50] direct plug priming failed; no fixed-grasp control fallback"
+        )
+        return False
+    tcp_pos, tcp_quat = policy._tcp()
+    policy._v50_grasp_transform = solve_tip_in_tcp(
+        tcp_pos,
+        tcp_quat,
+        estimate.position_world,
+        estimate.rotation_world_from_plug,
+    )
+    policy._v50_pending_world_plug = estimate
+    policy.get_logger().info(
+        f"[v50] direct plug primed before port selection: confidence="
+        f"{estimate.confidence:.3f} views={estimate.view_count} "
+        f"reproj={estimate.reprojection_error_px:.2f}px "
+        f"frames={list(estimate.source_frame_ids)}"
+    )
+    return True
+
+
+class PlugRelativeV50Controller:
+    """Bounded visual -> persistent-seat -> lift/re-perceive state machine."""
+
+    STIFFNESS = [350.0, 350.0, 500.0, 60.0, 60.0, 60.0]
+    DAMPING = [90.0, 90.0, 100.0, 25.0, 25.0, 25.0]
+    HOLD_STIFFNESS = [100.0, 100.0, 100.0, 50.0, 50.0, 50.0]
+    HOLD_DAMPING = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+
+    def __init__(
+        self,
+        policy,
+        task,
+        get_observation,
+        move_robot,
+        send_feedback,
+        *,
+        port_pos,
+        port_quat,
+        Rp,
+    ):
+        self.policy = policy
+        self.task = task
+        self.get_observation = get_observation
+        self.move_robot = move_robot
+        self.send_feedback = send_feedback
+        self.config = getattr(policy, "_v50_config", V50Config.from_env())
+        self.port_pos = np.asarray(port_pos, dtype=np.float64).reshape(3)
+        self.port_quat = np.asarray(port_quat, dtype=np.float64).reshape(4)
+        self.Rp = np.asarray(Rp, dtype=np.float64).reshape(3, 3)
+        self.log = policy.get_logger()
+        parent = policy._parent_node
+        self.event_generation = int(getattr(parent, "_insertion_event_generation", 0))
+        self.expected_event = _normalize_event(
+            f"{getattr(task, 'target_module_name', '')}/{getattr(task, 'port_name', '')}"
+        )
+        self.last_observation_stamp = None
+        self.last_accepted_plug_stamp = None
+
+    def _event(self):
+        parent = self.policy._parent_node
+        generation = int(getattr(parent, "_insertion_event_generation", 0))
+        value = _normalize_event(getattr(parent, "_insertion_event_value", ""))
+        if generation <= self.event_generation:
+            return None
+        return value
+
+    def _event_status(self):
+        value = self._event()
+        if value is None:
+            return None
+        if value == self.expected_event:
+            return SEATED
+        self.log.error(
+            f"[v50] insertion event was for wrong port '{value}', expected "
+            f"'{self.expected_event}'"
+        )
+        return HARD_FAILURE
+
+    def _force_magnitude(self, observation) -> float:
+        if observation is None:
+            return float("nan")
+        wrench = self.policy._wrench_vector(observation) - self.policy._wrench_baseline
+        return float(np.linalg.norm(wrench[:3]))
+
+    def _hold_tip(self, tip_pos, tip_rotation) -> None:
+        self.policy.set_pose_target(
+            self.move_robot,
+            self.policy._tcp_target_for_tip(tip_pos, tip_rotation),
+            stiffness=self.HOLD_STIFFNESS,
+            damping=self.HOLD_DAMPING,
+        )
+
+    def _wait_new_observation(self, *, after_stamp, timeout_wall_s):
+        deadline = time.monotonic() + timeout_wall_s
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            observation = self.get_observation()
+            if observation is not None:
+                stamp = _observation_stamp_s(observation)
+                if stamp is not None and (after_stamp is None or stamp > after_stamp + 1e-9):
+                    self.last_observation_stamp = stamp
+                    return observation
+            time.sleep(0.02)
+        return None
+
+    def _plug_views(self, observation):
+        return _plug_views_from_observation(self.policy, observation)
+
+    def _activate_plug_pose(self, observation) -> bool:
+        views = self._plug_views(observation)
+        if len(views) < 2:
+            self.log.error("[v50] fewer than two fresh plug camera views; fail closed")
+            return False
+        from .sfp_plug_pose import stamp_to_seconds
+
+        # Image age must be measured in the same ROS/simulation clock domain as
+        # the image headers, never against time.monotonic().
+        now_s = stamp_to_seconds(self.policy._parent_node.get_clock().now())
+        estimate = self.policy._v50_plug_estimator.estimate_relative_to_port(
+            views,
+            self.port_pos,
+            self.Rp,
+            now_s=now_s,
+            max_age_s=self.config.plug_max_age_s,
+            min_stamp_s=self.last_accepted_plug_stamp,
+        )
+        if estimate is None:
+            self.log.error(
+                "[v50] fresh plug pose unavailable; refusing fixed-bias fallback"
+            )
+            return False
+        tip_pos = self.port_pos + self.Rp @ np.asarray(
+            estimate.translation_port, dtype=np.float64
+        ).reshape(3)
+        tip_rotation = self.Rp @ np.asarray(
+            estimate.rotation_port_from_plug, dtype=np.float64
+        ).reshape(3, 3)
+        tcp_pos, tcp_quat = self.policy._tcp()
+        self.policy._v50_grasp_transform = solve_tip_in_tcp(
+            tcp_pos, tcp_quat, tip_pos, tip_rotation
+        )
+        self.last_accepted_plug_stamp = float(estimate.stamp_s)
+        self.log.info(
+            "[v50] fresh plug pose accepted: "
+            f"delta_port_mm={np.round(estimate.translation_port * 1000.0, 2).tolist()} "
+            f"confidence={estimate.confidence:.3f} views={estimate.view_count} "
+            f"reproj={estimate.reprojection_error_px:.2f}px "
+            f"frames={list(estimate.source_frame_ids)}"
+        )
+        return True
+
+    def _activate_initial_plug_pose(self) -> bool:
+        estimate = getattr(self.policy, "_v50_pending_world_plug", None)
+        if estimate is None or getattr(self.policy, "_v50_grasp_transform", None) is None:
+            self.log.error("[v50] no fresh primed plug pose for initial control")
+            return False
+        relative = self.Rp.T @ (
+            np.asarray(estimate.position_world, dtype=np.float64) - self.port_pos
+        )
+        self.last_accepted_plug_stamp = float(estimate.stamp_s)
+        self.policy._v50_pending_world_plug = None
+        self.log.info(
+            f"[v50] initial plug-to-port delta_mm="
+            f"{np.round(relative * 1000.0, 2).tolist()} from direct plug pose"
+        )
+        return True
+
+    def _tip_pose(self):
+        tcp_pos, tcp_quat = self.policy._tcp()
+        return self.policy._tip_from_tcp(tcp_pos, tcp_quat)
+
+    def _errors(self):
+        tip_pos, tip_rotation = self._tip_pose()
+        delta = self.Rp.T @ (tip_pos - self.port_pos)
+        rotation_error = axis_angle(self.Rp.T @ tip_rotation)
+        return (
+            float(delta[2]),
+            delta[:2],
+            rotation_error,
+            tip_pos,
+            tip_rotation,
+        )
+
+    def _align(self) -> bool:
+        start = time.monotonic()
+        depth, _, _, _, _ = self._errors()
+        align_depth = depth
+        while time.monotonic() - start < self.config.align_timeout_wall_s:
+            self.policy._enforce_action_deadline(self.move_robot)
+            depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
+            lateral = float(np.linalg.norm(lateral_xy))
+            rotation = float(np.linalg.norm(rotation_error))
+            if (
+                lateral <= self.config.align_lateral_tol_m
+                and rotation <= self.config.align_rotation_tol_rad
+            ):
+                self.log.info(
+                    f"[v50] plug-relative alignment valid: lateral={lateral*1000:.2f}mm "
+                    f"rotation={np.degrees(rotation):.2f}deg depth={depth*1000:.1f}mm"
+                )
+                return True
+            lateral_step = -lateral_xy
+            lateral_norm = float(np.linalg.norm(lateral_step))
+            if lateral_norm > self.config.align_max_lateral_step_m:
+                lateral_step *= self.config.align_max_lateral_step_m / lateral_norm
+            target_tip = (
+                tip_pos
+                + self.Rp[:, 0] * lateral_step[0]
+                + self.Rp[:, 1] * lateral_step[1]
+                + self.Rp[:, 2] * float(np.clip(align_depth - depth, -0.002, 0.002))
+            )
+            if rotation > self.config.align_max_rotation_step_rad:
+                remaining = 1.0 - self.config.align_max_rotation_step_rad / rotation
+                target_rotation = self.Rp @ rotation_from_axis_angle(
+                    remaining * rotation_error
+                )
+            else:
+                target_rotation = self.Rp
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(target_tip, target_rotation),
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+        self.log.error("[v50] plug-relative alignment exceeded wall-time budget")
+        return False
+
+    def _wait_for_insertion_event(self, fixed_tip) -> str:
+        deadline = time.monotonic() + self.config.insertion_event_timeout_wall_s
+        hard_force_since = None
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            event_status = self._event_status()
+            if event_status is not None:
+                return event_status
+            observation = self.get_observation()
+            force = self._force_magnitude(observation)
+            tip_pos, _ = self._tip_pose()
+            if np.isfinite(force) and force > self.config.force_abort_n:
+                self._hold_tip(tip_pos, self.Rp)
+                hard_force_since = hard_force_since or time.monotonic()
+                if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
+                    self.log.error(
+                        f"[v50] >{self.config.force_abort_n:.1f}N during event dwell"
+                    )
+                    return HARD_FAILURE
+            else:
+                hard_force_since = None
+                self.policy.set_pose_target(
+                    self.move_robot,
+                    self.policy._tcp_target_for_tip(fixed_tip, self.Rp),
+                    stiffness=self.STIFFNESS,
+                    damping=self.DAMPING,
+                )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+        self.log.warn("[v50] seated geometry produced no matching insertion event")
+        return STALLED
+
+    def _seat(self) -> str:
+        depth, _, _, _, _ = self._errors()
+        command_depth = depth
+        now = time.monotonic()
+        last_command_time = now
+        progress = WallProgressWatch.start(depth, now, self.config)
+        hard_force_since = None
+
+        while True:
+            self.policy._enforce_action_deadline(self.move_robot)
+            event_status = self._event_status()
+            if event_status is not None:
+                return event_status
+            observation = self.get_observation()
+            depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
+            lateral = float(np.linalg.norm(lateral_xy))
+            rotation = float(np.linalg.norm(rotation_error))
+            force = self._force_magnitude(observation)
+            now = time.monotonic()
+
+            if np.isfinite(force) and force > self.config.force_abort_n:
+                self._hold_tip(tip_pos, self.Rp)
+                hard_force_since = hard_force_since or now
+                if now - hard_force_since >= self.config.force_abort_wall_s:
+                    self.log.error(
+                        f"[v50] sustained force {force:.1f}N exceeds "
+                        f"{self.config.force_abort_n:.1f}N; held and aborted"
+                    )
+                    return HARD_FAILURE
+                self.policy.sleep_for(self.config.command_dt_sim_s)
+                continue
+            hard_force_since = None
+
+            if lateral > self.config.lateral_safety_m or rotation > self.config.rotation_safety_rad:
+                self.log.warn(
+                    f"[v50] wedge geometry: lateral={lateral*1000:.1f}mm "
+                    f"rotation={np.degrees(rotation):.1f}deg"
+                )
+                return STALLED
+
+            if depth >= self.config.seat_candidate_depth_m:
+                fixed_tip = self.port_pos + self.Rp[:, 2] * INSERT_DEPTH_M
+                return self._wait_for_insertion_event(fixed_tip)
+
+            if progress.stalled(depth, now):
+                self.log.warn(
+                    f"[v50] wall-time stall: depth={depth*1000:.1f}mm "
+                    f"best={progress.best_depth*1000:.1f}mm force={force:.2f}N"
+                )
+                return STALLED
+
+            command_depth = next_persistent_depth(
+                depth,
+                command_depth,
+                now - last_command_time,
+                force,
+                self.config,
+            )
+            last_command_time = now
+            target_tip = self.port_pos + self.Rp[:, 2] * command_depth
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(target_tip, self.Rp),
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+
+    def _visual_rescue(self) -> bool:
+        if not self.policy._visual_gap_wedge_enabled():
+            self.log.error("[v50] visual contrast recovery is disabled")
+            return False
+        self.send_feedback("wedge detected -- visual contrast recovery")
+        try:
+            hole = self.policy._run_visual_gap_wedge_recovery(
+                self.get_observation,
+                self.move_robot,
+                raw_port_pos=self.port_pos,
+                Rp=self.Rp,
+                R_seat=self.Rp,
+                local_port_kps=LOCAL_SFP_PORT_KPS,
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+                step_dt=self.config.command_dt_sim_s,
+            )
+        except Exception as exc:
+            self.log.error(f"[v50] visual contrast recovery failed: {exc}")
+            return False
+        if hole is None:
+            self.log.warn("[v50] visual contrast recovery had no safe consensus")
+            return False
+        offset = self.Rp.T @ (np.asarray(hole, dtype=np.float64) - self.port_pos)
+        self.port_pos = (
+            self.port_pos + self.Rp[:, 0] * offset[0] + self.Rp[:, 1] * offset[1]
+        )
+        self.log.info(
+            f"[v50] visual opening accepted: lateral_delta_mm="
+            f"{np.round(offset[:2] * 1000.0, 2).tolist()}"
+        )
+        return True
+
+    def _lift(self) -> bool:
+        tip_start, _ = self._tip_pose()
+        target_tip = tip_start - self.Rp[:, 2] * self.config.lift_distance_m
+        start_depth = float((self.Rp.T @ (tip_start - self.port_pos))[2])
+        deadline = time.monotonic() + self.config.lift_timeout_wall_s
+        self.send_feedback(
+            f"lifting {self.config.lift_distance_m*1000.0:.0f}mm for fresh perception"
+        )
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(target_tip, self.Rp),
+                stiffness=self.HOLD_STIFFNESS,
+                damping=self.HOLD_DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+            tip_pos, _ = self._tip_pose()
+            depth = float((self.Rp.T @ (tip_pos - self.port_pos))[2])
+            if start_depth - depth >= self.config.lift_distance_m - 0.001:
+                # Mark the newest image visible *after* the lift completed.  The
+                # recovery consensus below accepts only strictly newer frames, so
+                # it cannot accidentally reuse a pre-lift or in-motion image.
+                completion_observation = self.get_observation()
+                completion_stamp = (
+                    _observation_stamp_s(completion_observation)
+                    if completion_observation is not None
+                    else None
+                )
+                if completion_stamp is None:
+                    self.log.error(
+                        "[v50] lift completed but no timestamped camera frame was available"
+                    )
+                    return False
+                self.last_observation_stamp = completion_stamp
+                return True
+        self.log.error("[v50] bounded lift did not reach its 5-8mm recovery target")
+        return False
+
+    def _fresh_port_after_lift(self):
+        samples = []
+        newest_observation = None
+        after_stamp = self.last_observation_stamp
+        deadline = time.monotonic() + self.config.recovery_percept_timeout_wall_s
+        while (
+            len(samples) < self.config.recovery_percept_samples
+            and time.monotonic() < deadline
+        ):
+            observation = self._wait_new_observation(
+                after_stamp=after_stamp,
+                timeout_wall_s=min(1.0, max(0.05, deadline - time.monotonic())),
+            )
+            if observation is None:
+                continue
+            after_stamp = self.last_observation_stamp
+            newest_observation = observation
+            result = self.policy.perceive_port_pose(self.task, observation)
+            if result is None:
+                continue
+            position, quaternion, reprojection = result
+            if np.isfinite(reprojection):
+                samples.append(
+                    (
+                        np.asarray(position, dtype=np.float64),
+                        np.asarray(quaternion, dtype=np.float64),
+                        float(reprojection),
+                    )
+                )
+        if len(samples) < self.config.recovery_percept_min_agree:
+            self.log.error("[v50] fresh recovery port perception lacked consensus")
+            return None
+        positions = np.array([sample[0] for sample in samples])
+        median = np.median(positions, axis=0)
+        kept = [
+            sample
+            for sample in samples
+            if float(np.linalg.norm(sample[0] - median))
+            <= self.config.recovery_percept_agree_m
+        ]
+        if len(kept) < self.config.recovery_percept_min_agree:
+            self.log.error("[v50] fresh recovery port poses disagreed")
+            return None
+        port_pos = np.median(np.array([sample[0] for sample in kept]), axis=0)
+        best = min(kept, key=lambda sample: float(np.linalg.norm(sample[0] - port_pos)))
+        return port_pos, best[1], newest_observation
+
+    def _lift_and_refresh(self) -> bool:
+        if not self._lift():
+            return False
+        refreshed = self._fresh_port_after_lift()
+        if refreshed is None:
+            return False
+        self.port_pos, self.port_quat, _ = refreshed
+        self.Rp = quaternion_to_matrix(self.port_quat)
+        # Port inference consumes time.  Obtain one additional image set newer
+        # than every port-consensus frame before running plug pose, rather than
+        # allowing the estimator's age gate to reject or reuse an old frame.
+        observation = self._wait_new_observation(
+            after_stamp=self.last_observation_stamp,
+            timeout_wall_s=1.5,
+        )
+        if observation is None:
+            self.log.error("[v50] no post-consensus fresh frame for plug recovery")
+            return False
+        # Clear the old transform before accepting a new one.  A failed estimator
+        # can therefore never silently keep controlling from the stale grasp.
+        self.policy._v50_grasp_transform = None
+        if not self._activate_plug_pose(observation):
+            self._hold_legacy_safe_pose()
+            return False
+        return True
+
+    def _hold_legacy_safe_pose(self):
+        """Hold the TCP itself when no visually calibrated plug transform exists."""
+
+        tcp_pos, tcp_quat = self.policy._tcp()
+        from .rl_insert_contract import sfp_tip_pose_from_tcp
+
+        tip_pos, tip_rotation = sfp_tip_pose_from_tcp(tcp_pos, tcp_quat)
+        self._hold_tip(tip_pos, tip_rotation)
+
+    def run(self) -> bool:
+        self.send_feedback("v50 fresh plug-to-port perception")
+        if not self._activate_initial_plug_pose():
+            self._hold_legacy_safe_pose()
+            return False
+
+        for recovery_index in range(self.config.max_lift_recoveries + 1):
+            if not self._align():
+                return False
+            visual_uses = 0
+            while True:
+                self.send_feedback("v50 persistent force-regulated seating")
+                outcome = self._seat()
+                if outcome == SEATED:
+                    self.log.info(
+                        f"[v50] matching insertion event confirmed for {self.expected_event}"
+                    )
+                    self.send_feedback("correct-port insertion event confirmed")
+                    return True
+                if outcome == HARD_FAILURE:
+                    return False
+                if visual_uses < self.config.max_visual_rescues_per_pose:
+                    visual_uses += 1
+                    if self._visual_rescue() and self._align():
+                        continue
+                break
+
+            if recovery_index >= self.config.max_lift_recoveries:
+                self.log.error("[v50] visual and bounded lift recovery budget exhausted")
+                return False
+            self.log.warn(
+                f"[v50] seating still stalled after visual rescue; starting bounded "
+                f"lift/re-perception {recovery_index + 1}/{self.config.max_lift_recoveries}"
+            )
+            if not self._lift_and_refresh():
+                return False
+            # The next loop gives the freshly perceived recovery pose its own
+            # visual-first wedge rescue before another persistent seat attempt.
+        return False
+
+
+def run_v50_script(
+    policy,
+    task,
+    get_observation,
+    move_robot,
+    send_feedback,
+    *,
+    port_pos,
+    port_quat,
+    Rp,
+) -> bool:
+    return PlugRelativeV50Controller(
+        policy,
+        task,
+        get_observation,
+        move_robot,
+        send_feedback,
+        port_pos=port_pos,
+        port_quat=port_quat,
+        Rp=Rp,
+    ).run()
+
+
+__all__ = [
+    "HARD_FAILURE",
+    "INSERT_DEPTH_M",
+    "PlugRelativeV50Controller",
+    "SEATED",
+    "STALLED",
+    "V50Config",
+    "WallProgressWatch",
+    "configure_v50",
+    "next_persistent_depth",
+    "prime_v50_plug_pose",
+    "run_v50_script",
+    "solve_tip_in_tcp",
+    "tcp_for_tip_transform",
+    "tip_from_tcp_transform",
+    "v50_tcp_pose_for_tip",
+    "v50_tip_from_tcp",
+]

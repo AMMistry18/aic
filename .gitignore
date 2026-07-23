@@ -3,6 +3,15 @@ __pycache__/
 *.egg-info/
 build/
 files.txt
+*.DS_Store
+
+# Local experiment and evaluation outputs
+wandb/
+runs/
+outputs/
+results/
+testing/visual_validation/
+*.wandb
 
 # pixi environments
 .pixi/*

@@ -150,7 +150,12 @@ class PerceptionCore:
             }
         """
         model = self._load_sc_yolo()
-        result = model(bgr, verbose=False, conf=conf_thresh)[0]
+        # The SC pose model was trained at imgsz=960 (train_sc.py). Without an
+        # explicit imgsz, ultralytics letterboxes to its 640 default, silently
+        # downscaling the 1152x1024 camera frames ~1.8x AND running the model
+        # off its training scale. Match the training resolution here.
+        imgsz = int(os.environ.get("AIC_SC_POSE_IMGSZ", "960"))
+        result = model(bgr, verbose=False, conf=conf_thresh, imgsz=imgsz)[0]
         out = []
         if result.boxes is None or len(result.boxes) == 0:
             return out

@@ -162,6 +162,9 @@ Manages trial execution, validates participant models, and collects scoring data
 * **[Scene Description](./docs/scene_description.md):** Technical details of the simulation environment.
 * **[Task Board Description](./docs/task_board_description.md):** Physical layout and specifications of the task board.
 * **[Troubleshooting](./docs/troubleshooting.md):** Common issues and debugging strategies.
+* **[Current Repository Handoff](./docs/HANDOFF.md):** Authoritative insertion and board-search baselines on `main`.
+* **[Insertion Handoff](./docs/INSERTION_HANDOFF.md):** Script-only SFP V50 implementation, build, and validation contract.
+* **[Board Search Handoff](./docs/BOARD_SEARCH_HANDOFF.md):** Board-search snapshot pinned to commit `b269872`.
 
 ### Reference Materials
 

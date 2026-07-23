@@ -1,8 +1,0 @@
-{"time":"2026-07-03T20:53:52.720526409-05:00","level":"INFO","msg":"stream: starting","core version":"0.24.2"}
-{"time":"2026-07-03T20:53:52.92127984-05:00","level":"INFO","msg":"stream: created new stream","id":"h24infqj"}
-{"time":"2026-07-03T20:53:52.921388516-05:00","level":"INFO","msg":"handler: started","stream_id":"h24infqj"}
-{"time":"2026-07-03T20:53:52.92151846-05:00","level":"INFO","msg":"stream: started","id":"h24infqj"}
-{"time":"2026-07-03T20:53:52.921551042-05:00","level":"INFO","msg":"writer: started","stream_id":"h24infqj"}
-{"time":"2026-07-03T20:53:52.921551929-05:00","level":"INFO","msg":"sender: started","stream_id":"h24infqj"}
-{"time":"2026-07-03T21:07:53.425394293-05:00","level":"ERROR","msg":"api: HTTP error","status":404,"method":"POST","url":"https://api.wandb.ai/files/tar2/intrinsic/h24infqj/file_stream"}
-{"time":"2026-07-03T21:07:53.425438073-05:00","level":"ERROR+4","msg":"filestream: fatal error: filestream: failed to upload: 404 Not Found url=https://api.wandb.ai/files/tar2/intrinsic/h24infqj/file_stream: {\"error\":\"run intrinsic/h24infqj not found while streaming file\"}"}

@@ -1,0 +1,61 @@
+[workspace]
+name = "aic"
+authors = ["Teo Koon Peng <koonpeng@intrinsic.ai>"]
+channels = ["robostack-kilted", "conda-forge"]
+platforms = ["linux-64", "osx-arm64"]
+version = "0.1.0"
+conda-pypi-map = { "robostack-kilted" = "robostack_mapping.json" }
+preview = ["pixi-build"]
+
+[environments]
+skill-build = { features = ["skill-runtime", "build-dependencies"], solve-group = "default" }
+skill-runtime = { features = ["skill-runtime"], solve-group = "default" }
+
+[feature.skill-runtime.target.linux-64.dependencies]
+evdev = ">=1.9.2,<2"
+lttng-ust = "*"
+
+[feature.skill-runtime.dependencies]
+numpy = "<2.3.0"
+ros-kilted-control-msgs = "*"
+ros-kilted-geometry-msgs = "*"
+ros-kilted-sensor-msgs = "*"
+ros-kilted-std-msgs = "*"
+ros-kilted-std-srvs = "*"
+ros-kilted-tf2-eigen = "*"
+ros-kilted-tf2-ros-py = "*"
+ros-kilted-rclpy = "*"
+ros-kilted-rmw-zenoh-cpp = "*"
+ros-kilted-ros-core = "*"
+re2 = "*"
+flatbuffers = "*"
+eigen = "==3.4.0"
+zeromq = "*"
+libgrpc = "<1.80.0"
+prometheus-cpp = "*"
+gz-msgs = "==12.0.1"
+gz-transport = "==15.0.2"
+gz-cmake = ">=5.0.0,<6.0"
+gz-math = ">=9.0.0,<10.0"
+gz-utils = ">=4.0.0,<5.0"
+ros-kilted-actuator-msgs = ">=0.0.1,<0.1"
+ros-kilted-gps-msgs = ">=2.1.0,<2.2"
+ros-kilted-vision-msgs = ">=4.2.0,<4.3"
+ros-kilted-ros-gz-interfaces = ">=2.1.0,<2.2"
+ros-kilted-yaml-cpp-vendor = "*"
+ros-kilted-orocos-kdl-vendor = "*"
+nlohmann_json = "*"
+
+[feature.build-dependencies.dependencies]
+colcon-common-extensions = ">=0.3.0,<0.4"
+ros-kilted-ament-cmake-vendor-package = ">=2.7.0, <2.8"
+pybind11 = "*"
+cppzmq = "*"
+grpcio-tools = "<1.80.0"
+
+[feature.skill-runtime.tasks]
+colcon-build = "LIBRARY_PATH=\"$CONDA_PREFIX/lib\" colcon build --base-paths flowstate ../sdk-ros --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+[feature.skill-runtime.activation]
+scripts = ["pixi_env_setup.sh"]
+

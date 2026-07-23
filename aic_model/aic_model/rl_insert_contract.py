@@ -17,11 +17,24 @@ HOME_QPOS = np.array(
 )
 DEPLOY_POS_SCALE = np.array([0.0015, 0.0015, 0.0035], dtype=np.float64)
 DEPLOY_ROT_SCALE = np.array([0.08, 0.08, 0.12], dtype=np.float64)
+# The seat actor emits deploy-convention actions, but its training wrapper then
+# converts those actions through SceneInsertEnv's 1 mm / 1 degree Cartesian
+# interface.  The conversion clips per axis before the simulator integrates the
+# residual.  In particular, a saturated seat yaw command is 1.0 degree in
+# training, not the 1.375 degrees produced by applying DEPLOY_ROT_SCALE directly.
+SEAT_SIM_POS_SCALE_M = 1.0e-3
+SEAT_SIM_ROT_SCALE_RAD = float(np.radians(1.0))
+SEAT_RESIDUAL_POS_LIMIT_M = 0.20
+SEAT_RESIDUAL_ROT_LIMIT_RAD = 0.35
 SFP_TIP_IN_TCP_POS = np.array(
     [-0.0017771781, -0.0188744563, 0.0547221980], dtype=np.float64
 )
+# 2026-07-13: v17 applied a +1.16 deg nudge (q_tcp^-1*q_port) which made the tilt
+# WORSE. Per user, apply the SAME 1.16 deg magnitude in the OPPOSITE direction.
+# Original: [0.9852867415, 0.1688620346, -0.0042579615, -0.0260292145].
+# v17 (wrong way): [0.9863980666, 0.1620801968, 0.0030413, -0.0271958552].
 SFP_TIP_IN_TCP_QUAT = np.array(
-    [0.9852867415, 0.1688620346, -0.0042579615, -0.0260292145],
+    [0.9840750466, 0.1756266707, -0.0115567892, -0.0248599222],
     dtype=np.float64,
 )
 
@@ -121,6 +134,97 @@ def deploy_action_delta(action, port_quat) -> tuple[np.ndarray, np.ndarray]:
     return (
         frame @ (action[:3] * DEPLOY_POS_SCALE),
         frame @ (action[3:] * DEPLOY_ROT_SCALE),
+    )
+
+
+def seat_training_action_delta_port(action) -> tuple[np.ndarray, np.ndarray]:
+    """Return the exact per-step physical delta used by seat-policy training.
+
+    ``SeatEnv`` has already applied its scalar 0.20 gain when this function is
+    called.  This mirrors ``deploy_to_sim_action`` followed by
+    ``SceneInsertEnv._apply_cartesian_action`` without depending on MuJoCo.
+    Both returned vectors are expressed in the fixed port frame.
+    """
+    action = np.asarray(action, dtype=np.float64).reshape(ACTION_DIM)
+    sim_pos_action = np.clip(
+        action[:3] * DEPLOY_POS_SCALE / SEAT_SIM_POS_SCALE_M, -1.0, 1.0
+    )
+    sim_rot_action = np.clip(
+        action[3:] * DEPLOY_ROT_SCALE / SEAT_SIM_ROT_SCALE_RAD, -1.0, 1.0
+    )
+    return (
+        sim_pos_action * SEAT_SIM_POS_SCALE_M,
+        sim_rot_action * SEAT_SIM_ROT_SCALE_RAD,
+    )
+
+
+def accumulate_seat_residual(
+    residual_pos_port,
+    residual_rot_port,
+    action,
+    *,
+    pos_limit_m=SEAT_RESIDUAL_POS_LIMIT_M,
+    rot_limit_rad=SEAT_RESIDUAL_ROT_LIMIT_RAD,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Accumulate and componentwise-clamp one seat action like training."""
+    residual_pos_port = np.asarray(
+        residual_pos_port, dtype=np.float64
+    ).reshape(3)
+    residual_rot_port = np.asarray(
+        residual_rot_port, dtype=np.float64
+    ).reshape(3)
+    dpos_port, drot_port = seat_training_action_delta_port(action)
+    raw_pos = residual_pos_port + dpos_port
+    raw_rot = residual_rot_port + drot_port
+    new_pos = np.clip(raw_pos, -float(pos_limit_m), float(pos_limit_m))
+    new_rot = np.clip(raw_rot, -float(rot_limit_rad), float(rot_limit_rad))
+    clipped = bool(
+        np.any(new_pos != raw_pos) or np.any(new_rot != raw_rot)
+    )
+    return new_pos, new_rot, clipped
+
+
+def seat_residual_target_pose(
+    base_pos,
+    base_quat,
+    port_quat,
+    residual_pos_port,
+    residual_rot_port,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build the absolute TCP target for an accumulated seat residual.
+
+    The base pose is the measured handoff TCP pose.  Translation and rotation
+    residuals remain in the fixed port frame for the full actor rollout, just
+    as they do in ``SceneInsertEnv``.  Rotation is applied to the left of the
+    handoff orientation and returned as a rotation matrix.
+    """
+    base_pos = np.asarray(base_pos, dtype=np.float64).reshape(3)
+    base_rotation = quat_to_matrix(base_quat)
+    frame = port_frame(port_quat)
+    residual_pos_port = np.asarray(
+        residual_pos_port, dtype=np.float64
+    ).reshape(3)
+    residual_rot_world = frame @ np.asarray(
+        residual_rot_port, dtype=np.float64
+    ).reshape(3)
+    angle = float(np.linalg.norm(residual_rot_world))
+    if angle < 1e-12:
+        delta_rotation = np.eye(3, dtype=np.float64)
+    else:
+        axis = residual_rot_world / angle
+        x, y, z = axis
+        skew = np.array(
+            [[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]],
+            dtype=np.float64,
+        )
+        delta_rotation = (
+            np.eye(3)
+            + np.sin(angle) * skew
+            + (1.0 - np.cos(angle)) * (skew @ skew)
+        )
+    return (
+        base_pos + frame @ residual_pos_port,
+        delta_rotation @ base_rotation,
     )
 
 

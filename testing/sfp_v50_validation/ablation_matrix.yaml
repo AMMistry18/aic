@@ -1,0 +1,121 @@
+schema_version: 1
+matrix_id: sfp_v50_staged_ablation_v1
+task_scope: sfp_only
+clock: time.monotonic_ns
+notes:
+  - The fixed TCP bias is disabled in every v50 stage; relative plug-to-port pose is authoritative.
+  - Wedge handling enters visual contrast rescue before persistent axial seating.
+  - A failed seating attempt lifts and obtains genuinely fresh plug and port observations.
+  - A wedge during recovery re-enters visual contrast rescue before seating resumes.
+stages:
+  - id: v49_reference
+    order: 0
+    trials: 10
+    frozen: false
+    features:
+      relative_plug_port_pose: false
+      fixed_bias: true
+      visual_contrast_rescue: unreachable
+      persistent_axial_seating: false
+      lift_fresh_reperception: false
+      recovery_visual_reentry: false
+    promotion:
+      min_trials: 10
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0
+  - id: relative_pose_only
+    order: 1
+    trials: 30
+    frozen: false
+    features:
+      relative_plug_port_pose: true
+      fixed_bias: false
+      visual_contrast_rescue: false
+      persistent_axial_seating: false
+      lift_fresh_reperception: false
+      recovery_visual_reentry: false
+    promotion:
+      min_trials: 30
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0
+
+  - id: visual_first
+    order: 2
+    trials: 30
+    frozen: false
+    features:
+      relative_plug_port_pose: true
+      fixed_bias: false
+      visual_contrast_rescue: true
+      persistent_axial_seating: false
+      lift_fresh_reperception: false
+      recovery_visual_reentry: false
+    promotion:
+      min_trials: 30
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0
+
+  - id: visual_then_persistent_seating
+    order: 3
+    trials: 50
+    frozen: false
+    features:
+      relative_plug_port_pose: true
+      fixed_bias: false
+      visual_contrast_rescue: true
+      persistent_axial_seating: true
+      lift_fresh_reperception: false
+      recovery_visual_reentry: false
+    promotion:
+      min_trials: 50
+      min_correct_event_rate: 0.95
+      max_p95_correct_event_s: 45.0
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0
+
+  - id: recovery_with_visual_reentry
+    order: 4
+    trials: 100
+    frozen: false
+    features:
+      relative_plug_port_pose: true
+      fixed_bias: false
+      visual_contrast_rescue: true
+      persistent_axial_seating: true
+      lift_fresh_reperception: true
+      recovery_visual_reentry: true
+    promotion:
+      min_trials: 100
+      min_correct_event_rate: 0.99
+      max_p95_correct_event_s: 45.0
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0
+
+  - id: frozen_v50_full
+    order: 5
+    trials: 300
+    frozen: true
+    features:
+      relative_plug_port_pose: true
+      fixed_bias: false
+      visual_contrast_rescue: true
+      persistent_axial_seating: true
+      lift_fresh_reperception: true
+      recovery_visual_reentry: true
+    required_artifacts:
+      - controller_source
+      - plug_pose_model
+      - port_pose_model
+      - runtime_recipe
+    promotion:
+      min_trials: 300
+      min_correct_event_rate: 1.0
+      max_p95_correct_event_s: 45.0
+      max_wrong_port_events: 0
+      max_offlimit_trials: 0
+      max_force_penalty_trials: 0

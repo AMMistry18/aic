@@ -1,0 +1,22 @@
+schema_version: 1
+name: sfp_qualification_6dof_v1
+source: docs/qualification_phase.md grasp-pose deviation guidance
+units:
+  translation: m
+  rotation: rad
+fields: [x, y, z, roll, pitch, yaw]
+sampling:
+  kind: truncated_multivariate_normal
+  # Official nominal SFP grasp pose. All six relative-pose dimensions vary.
+  mean: [0.0, 0.015385, 0.04245, 0.4432, -0.4838, 1.3303]
+  # 0.75 mm and 0.015 rad one-sigma variation, truncated at the documented
+  # approximate 2 mm / 0.04 rad qualification envelope.
+  covariance:
+    - [0.0000005625, 0.0, 0.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0000005625, 0.0, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0000005625, 0.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 0.000225, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 0.0, 0.000225, 0.0]
+    - [0.0, 0.0, 0.0, 0.0, 0.0, 0.000225]
+  lower: [-0.002, 0.013385, 0.04045, 0.4032, -0.5238, 1.2903]
+  upper: [0.002, 0.017385, 0.04445, 0.4832, -0.4438, 1.3703]

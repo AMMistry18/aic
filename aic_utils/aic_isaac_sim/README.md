@@ -73,7 +73,7 @@ Then validate cloning and GPU state paths:
   --num_envs 64 --steps 200 --headless
 ```
 
-Do not start a long run until the parity gates in `HANDOFF.md` pass.
+Do not start a long run until the parity gates in `STATUS.md` pass.
 
 ## Train SAC
 

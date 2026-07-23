@@ -83,6 +83,7 @@ pynput = ">=1.7.6,<2"
 pyspacemouse = ">=2.0.0, <3"
 ultralytics = ">=8.4.37, <9"
 stable-baselines3 = ">=2.6"
+tensorboard = ">=2.9"
 wandb = ">=0.20"
 
 

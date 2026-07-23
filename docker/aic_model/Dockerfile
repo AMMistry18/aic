@@ -9,6 +9,7 @@ COPY aic_example_policies /ws_aic/src/aic/aic_example_policies
 COPY aic_model /ws_aic/src/aic/aic_model
 COPY aic_interfaces /ws_aic/src/aic/aic_interfaces
 COPY aic_utils /ws_aic/src/aic/aic_utils
+COPY student_teacher_policy/lerobot_robot_aic /ws_aic/src/aic/student_teacher_policy/lerobot_robot_aic
 COPY pixi.toml pixi.lock /ws_aic/src/aic/
 COPY pixi_env_setup.sh /ws_aic/src/aic/
 

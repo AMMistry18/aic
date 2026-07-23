@@ -1,43 +1,49 @@
 #
-# RLInsert -- aic_model Policy wrapping the Contract-A last-inch insertion RL
-# network (TorchScript, 69-dim observation -> 6-dim tanh cartesian residual).
+# RLInsert -- self-contained aic_model Policy for last-inch SFP insertion.
 #
-# Deployment assumptions (per team decision):
-#   * The process hands off at the START OF THE LAST-INCH ENVELOPE (~72 mm
-#     retract span, tip ~26 mm outside the port mouth) -- no approach phase.
-#   * NO ground-truth TF for objects. Object poses come from:
-#       - port pose:  PERCEPTION, as geometry_msgs/PoseStamped in base_link on
-#         a topic (default /aic_perception/port_pose, env RL_INSERT_PORT_TOPIC)
-#         or a static env override RL_INSERT_PORT_POSE="x,y,z,qw,qx,qy,qz".
-#       - plug tip pose: computed from the robot's own gripper/tcp TF composed
-#         with the fixed grasp transform published in the task description
-#         ("Reference Grasp Poses": gripper/tcp relative to the plug link).
+# This is a single-file policy: it does its OWN perception (YOLO-pose on the
+# three cameras via PerceptionCore + multiview triangulation -> SFP port pose)
+# and then runs the last-inch RL/guided insertion network (TorchScript, 69-dim
+# observation -> 6-dim tanh cartesian residual).  It deliberately does NOT
+# inherit from PerceptionInsert; everything needed lives here.
+#
+# Motion contract (per team decision):
+#   * Perceive the target SFP port pose in base_link from the cameras.
+#   * From WHEREVER the upstream macro handed the plug off, descend straight
+#     down the perceived port insertion axis into the port.  No retract, no
+#     "up then back down", no separate approach file.
+#   * Object poses come only from perception + the robot's own TCP TF composed
+#     with the fixed measured SFP-tip<-TCP transform (rl_insert_contract).
 #
 # Module path for aic_model:  -p policy:=aic_model.RLInsert
 #
-# --------------------------------------------------------------------------
-# Items tagged VERIFY must be diffed against RL/teacher/student_env_a.py
-# before trusting a scored run -- the known Gazebo "lateral jam" bug lives in
-# exactly these conventions.
-# --------------------------------------------------------------------------
+# The only imports outside this file are:
+#   * PerceptionCore  -- the raw YOLO wrapper (weights load: best.pt / best_sc_pose.pt)
+#   * rl_insert_contract -- the 69-dim obs + action math SHARED WITH TRAINING
+#     (must stay identical to the MuJoCo side; do not fork it here).
+#
+import itertools
 import os
 import time
 import traceback
+from pathlib import Path
 
+import cv2
 import numpy as np
 
-from aic_example_policies.ros.PerceptionInsert import PerceptionInsert
+from aic_example_policies.ros.perception_core import PerceptionCore
+from aic_model.policy import Policy
 from aic_task_interfaces.msg import Task
-from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
+from geometry_msgs.msg import Point, Pose, Quaternion
+from rclpy.duration import Duration
 from rclpy.time import Time
 from tf2_ros import TransformException
 
 from .rl_insert_contract import (
-    DEPLOY_POS_SCALE as POS_SCALE,
-    DEPLOY_ROT_SCALE as ROT_SCALE,
     HOME_QPOS as AIC_HOME_QPOS,
+    SFP_TIP_IN_TCP_POS,
+    SFP_TIP_IN_TCP_QUAT,
     build_observation69,
-    deploy_action_delta,
     guided_tip_target,
     port_frame,
     sfp_tip_pose_from_tcp,
@@ -45,38 +51,57 @@ from .rl_insert_contract import (
 )
 
 # ----------------------------- configuration -------------------------------
-MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_contractA_v1.ts")
-PORT_POSE_TOPIC = os.environ.get("RL_INSERT_PORT_TOPIC", "/aic_perception/port_pose")
-STATIC_PORT_POSE = os.environ.get("RL_INSERT_PORT_POSE", "")  # "x,y,z,qw,qx,qy,qz"
-PORT_SOURCE = os.environ.get("RL_INSERT_PORT_SOURCE", "perception").strip().lower()
-PORT_POSE_STALE_SEC = 5.0   # perception older than this at start => refuse
-MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
+MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_flowstate_v1.ts")
 
-# Controlled no-training validation knobs.  The normal submission path can
-# disable prepositioning once an upstream macro owns the handoff.
-PREPOSITION_HANDOFF = os.environ.get("RL_INSERT_PREPOSITION", "0").strip().lower() in (
-    "1", "true", "yes", "on"
+# Perception weights.  best.pt = SFP YOLO-pose keypoints (the one loaded "in the
+# form"); best_sc_pose.pt = SC pose (kept wired for later, not used for SFP).
+# Default to the weights dir that ships next to PerceptionCore -- the base image
+# already bakes best.pt / best_sc_pose.pt there, so this resolves correctly both
+# in the repo and inside the installed site-packages layout.
+import aic_example_policies.ros.perception_core as _pc_mod
+_WEIGHTS_DIR = Path(
+    os.environ.get(
+        "AIC_PERCEPTION_WEIGHTS_DIR",
+        str(Path(_pc_mod.__file__).resolve().parent / "weights"),
+    )
 )
-HANDOFF_GAP_M = float(os.environ.get("RL_INSERT_HANDOFF_GAP_M", "0.026"))
-HANDOFF_LATERAL_SIGMA_M = float(
-    os.environ.get("RL_INSERT_HANDOFF_LATERAL_SIGMA_M", "0.002")
-)
-HANDOFF_AXIAL_SIGMA_M = float(os.environ.get("RL_INSERT_HANDOFF_AXIAL_SIGMA_M", "0.003"))
-HANDOFF_ROT_SIGMA_RAD = float(os.environ.get("RL_INSERT_HANDOFF_ROT_SIGMA_RAD", "0.025"))
-HANDOFF_SEED = int(os.environ.get("RL_INSERT_HANDOFF_SEED", "0"))
+NIC_WEIGHTS = os.environ.get("AIC_NIC_WEIGHTS", str(_WEIGHTS_DIR / "best.pt"))
+SC_WEIGHTS = os.environ.get("AIC_SC_POSE_WEIGHTS", str(_WEIGHTS_DIR / "best_sc_pose.pt"))
+
+CAMERA_NAMES = ["left_camera", "center_camera", "right_camera"]
+MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
+# Perception robustness (2026-07-12): a single-frame perceive occasionally locks
+# onto the WRONG NIC/port (~40 mm off) with clean reproj, and wanders ~1 mm
+# frame-to-frame. Sample several frames and require a MEDIAN cluster to agree
+# before trusting the pose; separately reject any candidate implausibly far from
+# the plug tip (the macro hands off ~9 mm out, so a 40 mm pick is a wrong port).
+PERCEPT_SAMPLES = int(os.environ.get("RL_INSERT_PERCEPT_SAMPLES", "7"))
+PERCEPT_MIN_AGREE = int(os.environ.get("RL_INSERT_PERCEPT_MIN_AGREE", "3"))
+PERCEPT_AGREE_TOL_M = float(os.environ.get("RL_INSERT_PERCEPT_AGREE_TOL_M", "0.004"))
+PERCEPT_SAMPLE_DT = float(os.environ.get("RL_INSERT_PERCEPT_SAMPLE_DT", "0.15"))
+MAX_HANDOFF_SELECT_M = float(os.environ.get("RL_INSERT_MAX_HANDOFF_SELECT_M", "0.020"))
 
 # raw: original Contract-A behavior; zero: isolate pose/action contract;
 # baseline: subtract the six-axis wrench observed before the handoff.
-WRENCH_MODE = os.environ.get("RL_INSERT_WRENCH_MODE", "raw").strip().lower()
-CONTROL_MODE = os.environ.get("RL_INSERT_CONTROL_MODE", "guided").strip().lower()
+WRENCH_MODE = os.environ.get("RL_INSERT_WRENCH_MODE", "baseline").strip().lower()
+# Temporary script-only deployment. Restoring learned control requires an
+# intentional source/image change rather than a runtime environment override.
+CONTROL_MODE = "script"
+# Restore the bounded visual board-framing pass from b269872.  It is opt-in for
+# normal insertion tasks; the reserved task ID runs only the board search.
+BOARD_SEARCH = os.environ.get("RL_INSERT_BOARD_SEARCH", "0") == "1"
+BOARD_SEARCH_ONLY_TASK_ID = os.environ.get(
+    "RL_INSERT_BOARD_SEARCH_ONLY_TASK_ID", "board_search_only"
+).strip()
 
 STEP_DT = float(os.environ.get("RL_INSERT_STEP_DT", "0.10"))
-PREPOSITION_HOLD_SCALE = float(
-    os.environ.get("RL_INSERT_PREPOSITION_HOLD_SCALE", "1.0")
-)
 MAX_RL_STEPS = int(os.environ.get("RL_INSERT_STEPS", "400"))
 INSERT_DEPTH = 0.045    # m, mouth -> seated
-HANDOFF_MAX_DIST = 0.12  # m; farther than this from the mouth => macro failed
+# From the handoff, the tip may legitimately start a bit outside the mouth.
+# This only guards against a totally wrong perception / handoff (macro failed).
+HANDOFF_MAX_DIST = float(os.environ.get("RL_INSERT_HANDOFF_MAX_DIST", "0.12"))  # m
+
+# Deploy action adapter (kept from the contract; identity by default).
 ACTION_SIGN = np.array([
     float(v) for v in os.environ.get("RL_INSERT_ACTION_SIGN", "1,1,1,1,1,1").split(",")
 ], dtype=np.float64)
@@ -87,20 +112,146 @@ ACTION_GAIN = np.array([
 ], dtype=np.float64)
 if ACTION_GAIN.shape != (6,) or not np.all(np.isfinite(ACTION_GAIN)):
     raise ValueError("RL_INSERT_ACTION_GAIN must contain six finite comma-separated values")
-SAFETY_MAX_LATERAL_M = float(os.environ.get("RL_INSERT_SAFETY_MAX_LATERAL_M", "0.012"))
+
+SAFETY_MAX_LATERAL_M = float(os.environ.get("RL_INSERT_SAFETY_MAX_LATERAL_M", "0.006"))
 SAFETY_MAX_RETREAT_M = float(os.environ.get("RL_INSERT_SAFETY_MAX_RETREAT_M", "0.015"))
-SAFETY_MAX_ROTATION_RAD = float(
-    os.environ.get("RL_INSERT_SAFETY_MAX_ROTATION_RAD", "0.20")
-)
+SAFETY_MAX_ROTATION_RAD = float(os.environ.get("RL_INSERT_SAFETY_MAX_ROTATION_RAD", "0.26"))
+# Force-reactive advance freeze (rl mode): once the plug touches the chamfer,
+# pushing deeper while off-square levers the tip sideways and cocks it (the
+# lateral+rotation+force-all-rising jam seen at seat).  Above this contact-force
+# threshold, suppress the INWARD component of the commanded position delta so the
+# impedance controller can re-square before advancing; lateral/rotation
+# correction and retreat still pass through.  Set threshold high to disable.
+ADVANCE_FREEZE_FORCE_N = float(os.environ.get("RL_INSERT_ADVANCE_FREEZE_FORCE_N", "1.5"))
+# Grace window: the macro hands off with real lateral/rotation offset (~6 mm /
+# ~8.6 deg) that the policy is meant to correct.  Enforcing the steady-state
+# lateral/rotation limits on the raw handoff pose aborts on step 0 before the
+# policy can act.  During the grace window we only abort if the error grows
+# meaningfully WORSE than the handoff (true runaway drift), not for the
+# pre-existing offset; after it, the hard limits apply.  The retreat and force
+# guards stay live from step 0 regardless.
+SAFETY_GRACE_STEPS = int(os.environ.get("RL_INSERT_SAFETY_GRACE_STEPS", "40"))
+SAFETY_GRACE_LATERAL_SLACK_M = float(
+    os.environ.get("RL_INSERT_SAFETY_GRACE_LATERAL_SLACK_M", "0.004"))
+SAFETY_GRACE_ROTATION_SLACK_RAD = float(
+    os.environ.get("RL_INSERT_SAFETY_GRACE_ROTATION_SLACK_RAD", "0.087"))
+
 GUIDED_OUTSIDE_STEP_M = float(os.environ.get("RL_INSERT_GUIDED_OUTSIDE_STEP_M", "0.0015"))
 GUIDED_INSIDE_STEP_M = float(os.environ.get("RL_INSERT_GUIDED_INSIDE_STEP_M", "0.00075"))
+
+# --------------------- scripted align-then-descend mode ---------------------
+# CONTROL_MODE="script": a pure-geometry two-phase controller with NO RL.
+#   Phase 1 (align): hold the current standoff depth and cancel the perceived
+#     lateral + rotation error until it is within tolerance (or a step budget).
+#   Phase 2 (descend): step straight down the perceived port axis in small
+#     increments that get PROGRESSIVELY SLOWER the deeper we go, so if the
+#     alignment was slightly off we contact the mouth gently instead of ramming.
+#   Force-reactive: above SCRIPT_CONTACT_FORCE_N, pause the descent (hold depth)
+#     to let the impedance controller settle; sustained high force aborts.
+# This is the align-first "script does alignment + gentle descent" test bed.
+SCRIPT_ALIGN_LATERAL_TOL_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_LATERAL_TOL_M", "0.0010"))
+SCRIPT_ALIGN_ROTATION_TOL_RAD = float(
+    os.environ.get("RL_INSERT_SCRIPT_ALIGN_ROTATION_TOL_RAD", "0.026"))  # ~1.5 deg
+SCRIPT_ALIGN_MAX_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_ALIGN_MAX_STEPS", "80"))
+SCRIPT_ALIGN_LATERAL_GAIN = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_LATERAL_GAIN", "0.6"))
+SCRIPT_ALIGN_ROTATION_GAIN = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_ROTATION_GAIN", "0.6"))
+SCRIPT_ALIGN_MAX_LATERAL_STEP_M = float(
+    os.environ.get("RL_INSERT_SCRIPT_ALIGN_MAX_LATERAL_STEP_M", "0.0015"))
+SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD = float(
+    os.environ.get("RL_INSERT_SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD", "0.026"))
+# Progressive descent: step size shrinks linearly from FAR to NEAR as depth goes
+# from the mouth (0) to seated (INSERT_DEPTH). Far steps move quickly through
+# free space; near steps creep so a missed alignment taps rather than rams.
+SCRIPT_DESCEND_STEP_FAR_M = float(os.environ.get("RL_INSERT_SCRIPT_DESCEND_STEP_FAR_M", "0.0020"))
+SCRIPT_DESCEND_STEP_NEAR_M = float(os.environ.get("RL_INSERT_SCRIPT_DESCEND_STEP_NEAR_M", "0.0004"))
+# Standoff the tip holds during phase-1 alignment (m along the port axis; the
+# mouth is depth=0, negative is above/outside). Aligns just above the mouth.
+SCRIPT_ALIGN_STANDOFF_M = float(os.environ.get("RL_INSERT_SCRIPT_ALIGN_STANDOFF_M", "-0.004"))
+# Post-align pre-engage bias: after Phase-1 alignment converges (perception read +
+# lateral/rotation cancelled), apply ONE fixed offset before Phase-2 descent, to
+# pre-seat the plug against the (near-constant) wedge location so the seat starts
+# from a better spot. Both are in the PERCEIVED PORT frame:
+#   BIAS_X_M  = shift along port X (lateral, along the pin row; signed)
+#   BIAS_Y_M  = shift along port Y (signed)
+#   BIAS_RX_RAD = tilt about port X (signed; negative tips one way, positive the other)
+# Set to 0 to disable (no bias, exactly the previous behavior). Tune per rebuild
+# via RL_INSERT_SCRIPT_BIAS_{X_M,Y_M,RX_RAD} (no runtime override in Flowstate).
+SCRIPT_BIAS_X_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_X_M", "-0.0008"))     # -0.8 mm (-X, was -1.0)
+SCRIPT_BIAS_Y_M = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_Y_M", "0.007"))       # +7.0 mm (+Y)
+SCRIPT_BIAS_RX_RAD = float(os.environ.get("RL_INSERT_SCRIPT_BIAS_RX_RAD", "-0.122173"))  # -7.0 deg
+# Contact-force handling during descent (uses the tared wrench, like rl mode).
+# Above CONTACT_FORCE we are touching the mouth: switch from fast free-space
+# descent to a SLOW force-limited seat push (keep advancing gently, do NOT freeze)
+# until force reaches the SEAT_FORCE cap, at which point we hold that one step.
+# This is the scripted force-reactive seat: square plug pressing gently home.
+SCRIPT_CONTACT_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_CONTACT_FORCE_N", "5.0"))
+SCRIPT_SEAT_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_SEAT_FORCE_N", "12.0"))
+SCRIPT_SEAT_STEP_M = float(os.environ.get("RL_INSERT_SCRIPT_SEAT_STEP_M", "0.0003"))
+# Wedge is a GEOMETRIC bind: depth stalled AND lateral blown out. Steady small
+# lateral at a stall is normal contact (keep seating), NOT a wedge. Only abort as
+# a wedge if lateral exceeds this while stalled.
+SCRIPT_WEDGE_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_WEDGE_LATERAL_M", "0.0015"))
+# Re-align if lateral/rotation drifts back out of tolerance mid-descent.
+SCRIPT_REALIGN_LATERAL_M = float(os.environ.get("RL_INSERT_SCRIPT_REALIGN_LATERAL_M", "0.0020"))
+# Wedge/stall detection: if we command inward motion but depth does not progress
+# for this many steps while force stays BELOW the hard-jam abort (i.e. it is a
+# geometric bind, not an axial crush), declare wedged and abort instead of
+# grinding to the step budget. A wedge with a repeatable stall depth across runs
+# indicates a FIXED grasp mis-calibration; a varying stall depth indicates the
+# grasp angle varies run-to-run (the kinematic tip cannot be trusted either way).
+SCRIPT_STALL_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_STALL_STEPS", "40"))
+SCRIPT_STALL_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_STALL_PROGRESS_M", "0.0008"))
+# Hand-off gate: once the plug is pre-engaged (tilted + biased into the mouth), the
+# "lateral distance from the perceived mouth" reading is high by construction (the
+# tip is deep and cocked, not wandering), so it is NOT a valid wedge signal. Instead
+# keep descending through a depth-stall until FORCE builds -- a real jam -- then hold
+# for the RL hand-off. This lets the script pre-engage the plug as deep as it can
+# GENTLY before handing off, rather than quitting early on a false lateral reading.
+SCRIPT_HANDOFF_FORCE_N = float(os.environ.get("RL_INSERT_SCRIPT_HANDOFF_FORCE_N", "10.0"))
+
+# --- Stall-nudge recovery (try a small lateral shift BEFORE giving up) --------
+# Observed failure: the plug stalls right at the mouth without entering the port,
+# and all it needs is a little more motion in +Y (port frame) to drop in. On a
+# depth-stall, before handing off, step +Y a little and keep pushing down; if depth
+# breaks free, it worked and normal descent resumes from the better offset. +Y ONLY
+# by design (see SCRIPT_NUDGE_DIRS) -- -Y / +/-X would only shove the plug off the
+# offset the pre-engage bias already dialed in. Each step is small and the total
+# excursion is capped so the plug can never walk off the board. Set
+# Retained as legacy configuration metadata, but the script-only controller no
+# longer calls lateral nudge recovery after centering.
+SCRIPT_NUDGE_ENABLE = os.environ.get(
+    "RL_INSERT_SCRIPT_NUDGE_ENABLE", "0").strip().lower() in ("1", "true", "yes")
+# Size of each individual nudge step (port-frame meters).
+SCRIPT_NUDGE_STEP_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_STEP_M", "0.0004"))  # 0.4 mm
+# Max cumulative lateral excursion the nudge search may add (safety cap vs runaway).
+SCRIPT_NUDGE_MAX_TOTAL_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_MAX_TOTAL_M", "0.0020"))  # 2 mm
+# How many settle+observe steps to hold after a nudge before judging if it helped.
+SCRIPT_NUDGE_SETTLE_STEPS = int(os.environ.get("RL_INSERT_SCRIPT_NUDGE_SETTLE_STEPS", "8"))
+# Depth gain (past the stall depth) that counts as "the nudge broke it free".
+SCRIPT_NUDGE_PROGRESS_M = float(os.environ.get("RL_INSERT_SCRIPT_NUDGE_PROGRESS_M", "0.0010"))  # 1 mm
+# Direction(s) to nudge, in the PORT frame (dx_alongPinRow, dy). +Y ONLY -- the
+# stall is a consistent "needs a little more +Y" catch, and -Y / +/-X would only
+# shove the plug off the offset the pre-engage bias already dialed in. Keep this a
+# single direction; the retry just keeps stepping +Y (bounded by the excursion cap).
+SCRIPT_NUDGE_DIRS = [("+Y", 0.0, 1.0)]
+
+# One-shot grasp calibration dump: when set, at handoff log the TCP pose and any
+# available ground-truth plug/tip TF frames (all in base_link), so the true
+# tip-relative-to-TCP transform can be solved offline and SFP_TIP_IN_TCP_QUAT
+# recalibrated to the actual grasp (not the wedge-inferred guess). Logs only;
+# does not change control.
+CALIB_DUMP = os.environ.get("RL_INSERT_CALIB_DUMP", "0").strip().lower() in ("1", "true", "yes")
+# Candidate TF frame names the sim MIGHT publish for the true plug/tip pose. We
+# probe each; whichever resolves gives ground truth. Extend via env (comma-sep).
+CALIB_PLUG_FRAMES = [
+    f.strip() for f in os.environ.get(
+        "RL_INSERT_CALIB_PLUG_FRAMES",
+        "sfp_tip,sfp_plug,plug,cable_0,sfp,gripper/sfp_tip,gripper/plug,tool/tip",
+    ).split(",") if f.strip()
+]
 GUIDED_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_MAX_LEAD_M", "0.004"))
-GUIDED_CONTACT_DEPTH_M = float(
-    os.environ.get("RL_INSERT_GUIDED_CONTACT_DEPTH_M", "-0.008")
-)
-GUIDED_CONTACT_MAX_LEAD_M = float(
-    os.environ.get("RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M", "0.020")
-)
+GUIDED_CONTACT_DEPTH_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_DEPTH_M", "-0.008"))
+GUIDED_CONTACT_MAX_LEAD_M = float(os.environ.get("RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M", "0.020"))
 
 # Impedance mirroring training (CartesianImpedanceAction, kp~100):
 STIFFNESS = [100.0, 100.0, 100.0, 50.0, 50.0, 50.0]
@@ -108,26 +259,6 @@ DAMPING = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
 GUIDED_STIFFNESS = [500.0, 500.0, 500.0, 60.0, 60.0, 60.0]
 GUIDED_DAMPING = [100.0, 100.0, 100.0, 25.0, 25.0, 25.0]
 
-# Grasp transforms from the Phase-1 task description ("Reference Grasp Poses"):
-# pose of gripper/tcp EXPRESSED IN the plug link frame. Quaternions given as
-# xyzw in the docs; stored here as wxyz.
-GRASP_TCP_IN_PLUG = {
-    # plug_type: (translation xyz [m], quaternion wxyz)
-    "sfp": (np.array([0.000, 0.027, -0.000]),
-            np.array([-0.822, -0.568, 0.023, -0.015])),
-    "sc":  (np.array([-0.000, -0.005, 0.001]),
-            np.array([0.170, 0.685, -0.158, 0.691])),
-}
-
-# Pose of the MuJoCo SFP tip body expressed in gripper/tcp.  This is the
-# transform consumed by student_env_a.py: q_tip/x_tip come from sfp_tip_link,
-# while q_gripper/x_gripper come from gripper_tcp.  It is obtained by composing
-# the exported tool<->plug weld with lc_plug->sfp_module->sfp_tip and removing
-# the gripper_tcp site offset.  Do not replace it with a task "grasp pose": that
-# pose names a different plug frame and previously produced a ~29 mm / ~89 deg
-# observation error at an otherwise aligned handoff.
-# Home joint configuration used for obs[0:6] = joint_pos - home.
-# Override via env: RL_INSERT_HOME_QPOS="q1,q2,q3,q4,q5,q6".
 HOME_QPOS_ENV = os.environ.get("RL_INSERT_HOME_QPOS", "")
 
 # VERIFY: MuJoCo joint order used in training.
@@ -140,33 +271,24 @@ JOINT_ORDER = [
     "wrist_3_joint",
 ]
 
-# VERIFY: quaternion component order fed to the net. MuJoCo = wxyz.
-QUAT_ORDER_WXYZ = True
-
-# VERIFY: which columns of the port rotation matrix are (lat_x, lat_y, insert_axis).
-# Training: scene._cart_frame_R = [_lat_x, _lat_y, _insert_axis].
-PORT_LAT_X_COL, PORT_LAT_Y_COL, PORT_INSERT_COL = 0, 1, 2
-PORT_INSERT_SIGN = +1.0  # +1 if the port frame axis points INTO the port
-
-# VERIFY (the unresolved handoff question): X reference for delta_port.
-# Training used the port MOUTH (scene._port_pos).
-DELTA_REF_IS_MOUTH = True
-
-# VERIFY: wrench frame/scale. obs[51:57] = wrench * 0.1, training sensor frame.
-WRENCH_SCALE = 0.1
-
-# Success/abort thresholds for the reconstructed loop tail (see note above
-# _run): seat tolerance on depth, lateral gate at seat, and a sustained-force
-# abort protecting the Tier-2 wrench budget (scoring threshold is 20 N).
-SEAT_DEPTH_TOL = 0.002   # m
+# Success/abort thresholds for the insertion loop tail.
+SEAT_DEPTH_TOL = 0.002    # m
 SEAT_LATERAL_MAX = 0.005  # m
 FORCE_ABORT_N = float(os.environ.get("RL_INSERT_FORCE_ABORT_N", "18.0"))
-FORCE_ABORT_STEPS = 8    # consecutive steps above FORCE_ABORT_N => abort
+FORCE_ABORT_STEPS = 8     # consecutive steps above FORCE_ABORT_N => abort
+
+# SFP corner keypoints in the port entrance frame; matches YOLO-pose kp order.
+LOCAL_SFP_PORT_KPS = np.array([
+    [0.00685, 0.0043, 0.0],    # KP0: top-left
+    [-0.00685, 0.0043, 0.0],   # KP1: top-right
+    [-0.00685, -0.0043, 0.0],  # KP2: bottom-right
+    [0.00685, -0.0043, 0.0],   # KP3: bottom-left
+], dtype=np.float64)
 # ---------------------------------------------------------------------------
 
 
+# --------------------------- small math helpers ----------------------------
 def _q_to_R(qw, qx, qy, qz):
-    """Rotation matrix from quaternion (w, x, y, z)."""
     n = np.sqrt(qw * qw + qx * qx + qy * qy + qz * qz) + 1e-12
     w, x, y, z = qw / n, qx / n, qy / n, qz / n
     return np.array([
@@ -177,7 +299,6 @@ def _q_to_R(qw, qx, qy, qz):
 
 
 def _R_to_axis_angle(R):
-    """3-vector axis*angle from rotation matrix."""
     tr = np.clip((np.trace(R) - 1.0) / 2.0, -1.0, 1.0)
     angle = np.arccos(tr)
     if angle < 1e-8:
@@ -188,16 +309,17 @@ def _R_to_axis_angle(R):
 
 
 def _axis_angle_to_R(v):
-    angle = np.linalg.norm(v)
+    """Rodrigues: axis-angle vector (rad) -> rotation matrix. Inverse of
+    _R_to_axis_angle."""
+    angle = float(np.linalg.norm(v))
     if angle < 1e-10:
         return np.eye(3)
-    k = v / angle
+    k = np.asarray(v, dtype=np.float64) / angle
     K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-    return np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
 
 
-def _R_to_q(R):
-    """Quaternion (w, x, y, z) from rotation matrix."""
+def _rotmat_to_quat_wxyz(R):
     w = np.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2.0
     if w > 1e-6:
         x = (R[2, 1] - R[1, 2]) / (4 * w)
@@ -205,7 +327,6 @@ def _R_to_q(R):
         z = (R[1, 0] - R[0, 1]) / (4 * w)
         q = np.array([w, x, y, z])
     else:
-        # 180-degree rotation: pick the dominant diagonal
         i = int(np.argmax(np.diag(R)))
         j, k = (i + 1) % 3, (i + 2) % 3
         s = np.sqrt(max(0.0, 1.0 + R[i, i] - R[j, j] - R[k, k])) * 2.0
@@ -217,57 +338,69 @@ def _R_to_q(R):
     return q / (np.linalg.norm(q) + 1e-12)
 
 
-class RLInsert(PerceptionInsert):
-    def _load_final_insert_policy(self):
-        """PerceptionInsert hook: RLInsert owns the only final-insert network."""
-        self._final_insert_policy = None
-        self._final_insert_policy_kind = None
+def _normalize(v, eps=1e-9):
+    n = np.linalg.norm(v)
+    return None if n < eps else v / n
+
+
+def _ros_image_to_cv2(img_msg):
+    arr = np.frombuffer(img_msg.data, dtype=np.uint8)
+    if img_msg.encoding == "mono8":
+        return cv2.cvtColor(arr.reshape(img_msg.height, img_msg.width), cv2.COLOR_GRAY2BGR)
+    arr = arr.reshape(img_msg.height, img_msg.width, 3)
+    return arr.copy() if img_msg.encoding == "bgr8" else cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+
+def _tf_to_4x4(tf_msg):
+    if hasattr(tf_msg, "transform"):
+        tf_msg = tf_msg.transform
+    t, q = tf_msg.translation, tf_msg.rotation
+    x, y, z, w = q.x, q.y, q.z, q.w
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = [t.x, t.y, t.z]
+    return T
+
+
+class RLInsert(Policy):
+    """Single-file SFP last-inch insertion policy (perception + RL)."""
 
     def __init__(self, parent_node):
         super().__init__(parent_node)
         log = self.get_logger()
         if WRENCH_MODE not in ("raw", "zero", "baseline"):
             raise ValueError("RL_INSERT_WRENCH_MODE must be raw, zero, or baseline")
-        if CONTROL_MODE not in ("rl", "guided"):
-            raise ValueError("RL_INSERT_CONTROL_MODE must be rl or guided")
-        if PORT_SOURCE not in ("perception", "external"):
-            raise ValueError("RL_INSERT_PORT_SOURCE must be perception or external")
+        if CONTROL_MODE not in ("rl", "guided", "script"):
+            raise ValueError("RL_INSERT_CONTROL_MODE must be rl, guided, or script")
+
+        self._task = None
         self._wrench_baseline = np.zeros(6, dtype=np.float64)
-        self._handoff_rng = np.random.default_rng(HANDOFF_SEED)
+        self._last_port_quat_wxyz = None
+        self._last_port_reproj_px = None
 
-        # Load torch + model HERE so failures reject goals visibly instead of
-        # dying silently inside the insert_cable thread.
-        import torch
-        log.info(f"[rl] torch {torch.__version__}")
-        if not os.path.exists(MODEL_PATH):
+        # ---- perception weights (best.pt / best_sc_pose.pt) ----
+        sc_weights = SC_WEIGHTS if os.path.exists(SC_WEIGHTS) else None
+        if not os.path.exists(NIC_WEIGHTS):
             raise FileNotFoundError(
-                f"[rl] model not found at {MODEL_PATH}; COPY it into the image "
-                "and/or set RL_INSERT_MODEL")
-        self._torch = torch
-        self._model = torch.jit.load(MODEL_PATH, map_location="cpu")
-        self._model.eval()
-        probe = self._forward(np.zeros(69, dtype=np.float32))
-        log.info(f"[rl] model loaded from {MODEL_PATH}; probe={np.round(probe, 4)}")
-
-        # Port pose in base_link.  A static override is bench-only; otherwise
-        # use the bundled YOLO/multiview estimator unless an external publisher
-        # was explicitly requested.
-        self._port_pose = None       # (pos(3), quat wxyz(4))
-        self._port_pose_t = 0.0      # monotonic receive time
-        if STATIC_PORT_POSE:
-            v = np.array([float(x) for x in STATIC_PORT_POSE.split(",")])
-            assert v.size == 7, "RL_INSERT_PORT_POSE must be x,y,z,qw,qx,qy,qz"
-            self._port_pose = (v[:3], v[3:] / np.linalg.norm(v[3:]))
-            self._port_pose_t = float("inf")
-            log.warn(f"[rl] using STATIC port pose {v} (bench mode)")
-        elif PORT_SOURCE == "external":
-            self._port_sub = parent_node.create_subscription(
-                PoseStamped, PORT_POSE_TOPIC, self._port_pose_cb, 10)
-            log.info(f"[rl] subscribed to perception port pose on {PORT_POSE_TOPIC}")
+                f"[rl] SFP YOLO weights not found at {NIC_WEIGHTS}; set AIC_NIC_WEIGHTS")
+        log.info(f"[rl] loading SFP YOLO-pose weights: {NIC_WEIGHTS}")
+        if sc_weights is None:
+            log.warn(f"[rl] SC pose weights absent at {SC_WEIGHTS} (SFP unaffected)")
         else:
-            log.info("[rl] using bundled SFP YOLO + multiview port perception")
+            log.info(f"[rl] SC pose weights available: {sc_weights}")
+        self._pc = PerceptionCore(nic_weights=NIC_WEIGHTS, sc_weights=sc_weights)
 
-        self._home_qpos = None
+        # Script-only mode does not import torch, require an actor artifact, or
+        # execute learned control.
+        self._torch = None
+        self._model = None
+        log.info("[script] SCRIPT-ONLY: RL actor loading and inference are disabled")
+
         if HOME_QPOS_ENV:
             self._home_qpos = np.array([float(v) for v in HOME_QPOS_ENV.split(",")])
             assert self._home_qpos.shape == (6,)
@@ -276,51 +409,110 @@ class RLInsert(PerceptionInsert):
             self._home_qpos = AIC_HOME_QPOS.copy()
             log.info(f"[rl] using training home qpos: {self._home_qpos}")
 
-    # ------------------------------------------------------------- callbacks
-    def _port_pose_cb(self, msg: PoseStamped):
-        if msg.header.frame_id not in ("", "base_link"):
-            self.get_logger().warn(
-                f"[rl] port pose frame_id={msg.header.frame_id!r}; expected base_link",
-                throttle_duration_sec=5.0)
-        p, o = msg.pose.position, msg.pose.orientation
-        self._port_pose = (np.array([p.x, p.y, p.z]),
-                           np.array([o.w, o.x, o.y, o.z]))
-        self._port_pose_t = time.monotonic()
-
     # ------------------------------------------------------------------ util
     def _forward(self, obs69):
         with self._torch.no_grad():
             out = self._model(self._torch.from_numpy(obs69.astype(np.float32)))
         return np.clip(out.detach().cpu().numpy().reshape(-1), -1.0, 1.0)
 
+    def _lookup_transform(self, target_frame, source_frame, timeout_sec=0.2):
+        return self._parent_node._tf_buffer.lookup_transform(
+            target_frame, source_frame, Time(), Duration(seconds=timeout_sec))
+
+    def _wait_for_transform(self, target_frame, source_frame, timeout_sec=8.0):
+        deadline = time.monotonic() + timeout_sec
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                return self._lookup_transform(target_frame, source_frame, timeout_sec=0.2)
+            except TransformException as e:
+                last_error = e
+                self.sleep_for(0.1)
+        if last_error is not None:
+            raise last_error
+        raise TransformException(f"Timed out waiting for {target_frame} <- {source_frame}")
+
+    def _wait_for_stable_clock(self, timeout_sec=8.0, samples=4):
+        deadline = time.monotonic() + timeout_sec
+        last_ns = None
+        stable = 0
+        while time.monotonic() < deadline:
+            now_ns = self._parent_node.get_clock().now().nanoseconds
+            if now_ns <= 0:
+                stable = 0
+            elif last_ns is None or now_ns >= last_ns:
+                stable += 1
+                if stable >= samples:
+                    return True
+            else:
+                stable = 0
+            last_ns = now_ns
+            time.sleep(0.1)
+        self.get_logger().warn("[rl] timed out waiting for stable sim time; continuing")
+        return False
+
     def _tcp(self):
-        t = self._parent_node._tf_buffer.lookup_transform(
-            "base_link", "gripper/tcp", Time())
+        t = self._lookup_transform("base_link", "gripper/tcp")
         tr, ro = t.transform.translation, t.transform.rotation
-        return (np.array([tr.x, tr.y, tr.z]),
-                np.array([ro.w, ro.x, ro.y, ro.z]))  # wxyz
+        return (np.array([tr.x, tr.y, tr.z]), np.array([ro.w, ro.x, ro.y, ro.z]))  # wxyz
 
-    def _tip_from_tcp(self, tcp_pos, tcp_quat, plug_type):
-        """Plug tip pose from the robot's own TCP + fixed grasp transform.
+    def _tip_from_tcp(self, tcp_pos, tcp_quat):
+        """SFP plug tip pose from TCP + the measured SFP-tip<-TCP transform."""
+        return sfp_tip_pose_from_tcp(tcp_pos, tcp_quat)
 
-        Task description gives T_plug<-tcp (pose of gripper/tcp expressed in
-        the plug link frame). Then:
-            T_base<-plug = T_base<-tcp * inverse(T_plug<-tcp)
+    def _dump_grasp_calibration(self):
+        """One-shot: log everything needed to recalibrate SFP_TIP_IN_TCP_QUAT.
+
+        Dumps (a) the TCP pose in base_link, (b) the tip pose the CURRENT
+        (possibly wrong) transform produces, and (c) any ground-truth plug/tip TF
+        frame that resolves -- all in base_link. From (a) + a true tip pose the
+        exact tip-relative-to-TCP transform is R_tcp^T @ R_tip_true (right axis),
+        which we then paste into rl_insert_contract. Logs only; no motion change.
         """
-        R_tcp = _q_to_R(*tcp_quat)
-        if plug_type == "sfp":
-            return sfp_tip_pose_from_tcp(tcp_pos, tcp_quat)
-
-        # Legacy SC path.  The bundled Contract-A artifact is SFP-only, but
-        # retain the old conversion until SC gets its own measured contract.
-        t_pt, q_pt = GRASP_TCP_IN_PLUG[plug_type]
-        R_pt = _q_to_R(*q_pt)
-        R_tip = R_tcp @ R_pt.T
-        tip_pos = tcp_pos - R_tip @ t_pt
-        return tip_pos, R_tip
+        log = self.get_logger()
+        try:
+            tcp_pos, tcp_quat = self._tcp()
+        except Exception as ex:
+            log.error(f"[calib] cannot read TCP: {ex}")
+            return
+        tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
+        q_tip_assumed = _rotmat_to_quat_wxyz(R_tip)
+        log.info("[calib] === GRASP CALIBRATION DUMP (base_link) ===")
+        log.info(f"[calib] TCP pos={np.round(tcp_pos,6).tolist()} "
+                 f"quat_wxyz={np.round(tcp_quat,6).tolist()}")
+        log.info(f"[calib] ASSUMED tip (current transform) pos={np.round(tip_pos,6).tolist()} "
+                 f"quat_wxyz={np.round(q_tip_assumed,6).tolist()}")
+        log.info(f"[calib] current SFP_TIP_IN_TCP_QUAT={SFP_TIP_IN_TCP_QUAT.tolist()} "
+                 f"POS={SFP_TIP_IN_TCP_POS.tolist()}")
+        found_any = False
+        for frame in CALIB_PLUG_FRAMES:
+            try:
+                tf = self._lookup_transform("base_link", frame, timeout_sec=0.3)
+            except Exception:
+                continue
+            tr, ro = tf.transform.translation, tf.transform.rotation
+            gt_pos = np.array([tr.x, tr.y, tr.z])
+            gt_quat = np.array([ro.w, ro.x, ro.y, ro.z])  # wxyz
+            # True tip-in-TCP transform: T_tcp^-1 @ T_true. Compute the rotation
+            # part R_tcp^T @ R_true and the position part R_tcp^T @ (p_true-p_tcp).
+            R_tcp = _q_to_R(*tcp_quat)
+            R_true = _q_to_R(*gt_quat)
+            R_rel = R_tcp.T @ R_true
+            q_rel = _rotmat_to_quat_wxyz(R_rel)
+            p_rel = R_tcp.T @ (gt_pos - tcp_pos)
+            found_any = True
+            log.info(f"[calib] GROUND-TRUTH frame '{frame}' RESOLVED: "
+                     f"pos={np.round(gt_pos,6).tolist()} quat_wxyz={np.round(gt_quat,6).tolist()}")
+            log.info(f"[calib]   >>> SOLVED SFP_TIP_IN_TCP_QUAT={np.round(q_rel,10).tolist()}")
+            log.info(f"[calib]   >>> SOLVED SFP_TIP_IN_TCP_POS ={np.round(p_rel,10).tolist()}  "
+                     f"(paste BOTH into rl_insert_contract.py if this frame is the true tip)")
+        if not found_any:
+            log.warn(f"[calib] no ground-truth plug/tip frame resolved from "
+                     f"{CALIB_PLUG_FRAMES}. Set RL_INSERT_CALIB_PLUG_FRAMES to the "
+                     f"correct frame name, or provide TCP + true-tip poses another way.")
+        log.info("[calib] === END DUMP ===")
 
     def _tcp_target_for_tip(self, tip_pos, R_tip):
-        """Return a base-frame TCP Pose for a requested SFP tip pose."""
         tcp_pos, q_tcp = tcp_pose_for_sfp_tip(tip_pos, R_tip)
         return Pose(
             position=Point(x=float(tcp_pos[0]), y=float(tcp_pos[1]), z=float(tcp_pos[2])),
@@ -329,46 +521,323 @@ class RLInsert(PerceptionInsert):
                 y=float(q_tcp[2]), z=float(q_tcp[3])),
         )
 
-    def _preposition_handoff(self, move_robot, send_feedback, port_pos, port_quat):
-        """Move the attached SFP to a randomized last-inch handoff pose."""
-        Rp = port_frame(port_quat)
-        lateral = np.clip(
-            self._handoff_rng.normal(0.0, HANDOFF_LATERAL_SIGMA_M, size=2),
-            -0.004, 0.004,
-        )
-        gap = float(np.clip(
-            HANDOFF_GAP_M + self._handoff_rng.normal(0.0, HANDOFF_AXIAL_SIGMA_M),
-            0.018, 0.040,
-        ))
-        rotvec_port = np.clip(
-            self._handoff_rng.normal(0.0, HANDOFF_ROT_SIGMA_RAD, size=3),
-            -0.06, 0.06,
-        )
-        R_tip = Rp @ _axis_angle_to_R(rotvec_port)
+    # --------------------------------------------------------- perception ---
+    def _get_cam_data(self, obs, cam_name):
+        img_map = {"left_camera": obs.left_image, "center_camera": obs.center_image,
+                   "right_camera": obs.right_image}
+        info_map = {"left_camera": obs.left_camera_info, "center_camera": obs.center_camera_info,
+                    "right_camera": obs.right_camera_info}
+        img_msg, info_msg = img_map.get(cam_name), info_map.get(cam_name)
+        if img_msg is None or info_msg is None:
+            return None
+        K = np.array(info_msg.k).reshape(3, 3)
+        if K[0, 0] == 0:
+            return None
+        try:
+            bgr = _ros_image_to_cv2(img_msg)
+        except Exception:
+            return None
+        return bgr, K
 
+    def _lookup_cam_from_base(self, cam_name):
+        try:
+            tf = self._lookup_transform(f"{cam_name}/optical", "base_link")
+        except TransformException as e:
+            self.get_logger().warn(f"{cam_name}: TF lookup failed: {e}")
+            return None
+        return _tf_to_4x4(tf)
+
+    def _build_views(self, obs):
+        views = {}
+        for cam in CAMERA_NAMES:
+            d = self._get_cam_data(obs, cam)
+            if d is None:
+                continue
+            bgr, K = d
+            T = self._lookup_cam_from_base(cam)
+            if T is None:
+                continue
+            views[cam] = (bgr, K, T)
+        return views
+
+    def _reproject_error_px(self, X, K, T_cam_from_base, uv):
+        P = self._pc.build_projection_matrix(K, T_cam_from_base)
+        x = P @ np.array([X[0], X[1], X[2], 1.0], dtype=np.float64)
+        if x[2] <= 1e-6:
+            return None
+        uv_hat = np.array([x[0] / x[2], x[1] / x[2]], dtype=np.float64)
+        return float(np.linalg.norm(uv_hat - np.array(uv, dtype=np.float64)))
+
+    def _estimate_sfp_port_orientation(self, kp_3d):
+        """Entrance-frame quat/yaw from the four triangulated SFP corners.
+
+        In-plane +X = midpoint(KP0,KP3) - midpoint(KP1,KP2), projected to the
+        board plane; insertion axis is world -Z (downward).
+        """
+        if kp_3d.shape != (4, 3):
+            return None, None
+        x_axis = ((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)
+        x_axis[2] = 0.0
+        x_axis = _normalize(x_axis)
+        if x_axis is None:
+            return None, None
+        z_axis = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        y_axis = _normalize(np.cross(z_axis, x_axis))
+        if y_axis is None:
+            return None, None
+        x_axis = _normalize(np.cross(y_axis, z_axis))
+        R_tip = np.column_stack([x_axis, y_axis, z_axis])
+        yaw = float(np.arctan2(R_tip[1, 0], R_tip[0, 0]))
+        return _rotmat_to_quat_wxyz(R_tip), yaw
+
+    def _make_sfp_multiview_candidates(self, per_cam):
+        cams = [c for c, cand in per_cam.items() if cand]
+        if len(cams) < 2:
+            return []
+        for c in cams:
+            per_cam[c] = per_cam[c][:5]
+
+        candidates = []
+        for picks in itertools.product(*[per_cam[c] for c in cams]):
+            kp_3d = []
+            try:
+                for i in range(4):
+                    pts_2d = [tuple(p["kps"][i]) for p in picks]
+                    Ps = [p["P"] for p in picks]
+                    kp_3d.append(self._pc.triangulate(pts_2d, Ps))
+            except Exception:
+                continue
+            kp_3d = np.array(kp_3d, dtype=np.float64)
+            X = kp_3d.mean(axis=0)
+            if X[2] < -0.05 or X[2] > 0.25:
+                continue
+
+            q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+            if q_wxyz is None:
+                continue
+
+            width = np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5))
+            height = np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5))
+            if not (0.006 <= width <= 0.030 and 0.004 <= height <= 0.025):
+                continue
+
+            errors = []
+            for p in picks:
+                for i in range(4):
+                    err = self._reproject_error_px(kp_3d[i], p["K"], p["T"], p["kps"][i])
+                    if err is not None:
+                        errors.append(err)
+            if not errors:
+                continue
+            reproj = float(np.mean(errors))
+            shape_penalty = abs(width - 0.0137) * 250.0 + abs(height - 0.0086) * 250.0
+            score = reproj + shape_penalty - 0.02 * float(np.mean([p.get("conf", 0.0) for p in picks]))
+            candidates.append({
+                "X": X, "kp_3d": kp_3d, "q_wxyz": q_wxyz, "yaw": yaw,
+                "score": float(score), "reproj_px": reproj,
+                "width": float(width), "height": float(height), "port_slot": None,
+            })
+
+        candidates.sort(key=lambda c: c["score"])
+        return candidates
+
+    def _estimate_sfp_port_pose_single_view(self, kps_2d, K, T_cam_from_base, cam_name):
+        """Fallback pose from one camera via PnP on the known SFP rectangle."""
+        img_pts = np.asarray(kps_2d, dtype=np.float64).reshape(-1, 2)
+        if img_pts.shape != (4, 2) or not np.all(np.isfinite(img_pts)):
+            return None
+        dist = np.zeros((5, 1), dtype=np.float64)
+        flags = cv2.SOLVEPNP_IPPE if hasattr(cv2, "SOLVEPNP_IPPE") else cv2.SOLVEPNP_ITERATIVE
+        ok, rvec, tvec = cv2.solvePnP(LOCAL_SFP_PORT_KPS, img_pts, K.astype(np.float64), dist, flags=flags)
+        if not ok and flags != cv2.SOLVEPNP_ITERATIVE:
+            ok, rvec, tvec = cv2.solvePnP(
+                LOCAL_SFP_PORT_KPS, img_pts, K.astype(np.float64), dist, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            return None
+        reproj, _ = cv2.projectPoints(LOCAL_SFP_PORT_KPS, rvec, tvec, K.astype(np.float64), dist)
+        reproj_error = float(np.mean(np.linalg.norm(reproj.reshape(-1, 2) - img_pts, axis=1)))
+        if reproj_error > MAX_PORT_REPROJ_PX:
+            return None
+        R_cam_port, _ = cv2.Rodrigues(rvec)
+        port_cam = tvec.reshape(3)
+        if port_cam[2] <= 0.0:
+            return None
+        T_base_from_cam = self._pc.invert_transform(T_cam_from_base)
+        X = (T_base_from_cam @ np.array([port_cam[0], port_cam[1], port_cam[2], 1.0]))[:3]
+        R_base_port = T_base_from_cam[:3, :3] @ R_cam_port
+        kp_3d = (R_base_port @ LOCAL_SFP_PORT_KPS.T).T + X
+        q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+        return X, kp_3d, q_wxyz, yaw, reproj_error
+
+    def _extract_trailing_index(self, name, prefix):
+        if not name or not name.startswith(prefix):
+            return None
+        try:
+            return int(name[len(prefix):].split("_")[0])
+        except (TypeError, ValueError):
+            return None
+
+    def _select_sfp_candidate(self, candidates, target_idx, label):
+        """Pick the target port: nearest candidate to the current plug tip.
+
+        The task board translates/yaws between trials and not every slot is
+        populated, so we choose the perceived port physically closest to our own
+        tip rather than trusting a fixed slot index.
+        """
+        if not candidates:
+            return None
+        try:
+            tcp_pos, tcp_quat = self._tcp()
+            tip_pos, _ = self._tip_from_tcp(tcp_pos, tcp_quat)
+        except Exception:
+            return candidates[0]
+        # Distance gate: the macro hands off ~9 mm from the target mouth, so a
+        # candidate far beyond that is a different (wrong) NIC/port picked up by
+        # nearest-tip. Drop those before selecting so we don't commit to a
+        # cleanly-detected-but-wrong port.
+        in_range = [c for c in candidates
+                    if float(np.linalg.norm(c["X"] - tip_pos)) <= MAX_HANDOFF_SELECT_M]
+        if not in_range:
+            nearest = min(candidates,
+                          key=lambda c: float(np.linalg.norm(c["X"] - tip_pos)))
+            self.get_logger().warn(
+                f"{label}: all candidates beyond {MAX_HANDOFF_SELECT_M*1000:.0f}mm "
+                f"handoff gate (nearest {np.linalg.norm(nearest['X']-tip_pos)*1000:.1f}mm) "
+                "-- rejecting as wrong port")
+            return None
+        chosen = min(in_range, key=lambda c: float(np.linalg.norm(c["X"] - tip_pos)))
         self.get_logger().info(
-            "[rl] randomized handoff target | "
-            f"gap_mm={gap*1000:.1f} lateral_mm={(lateral*1000).round(2).tolist()} "
-            f"rot_deg={np.degrees(rotvec_port).round(2).tolist()}"
-        )
-        send_feedback("perception-guided RL handoff")
-        # Stage along the retract axis so the final approach is straight and the
-        # cable/controller have time to settle before the policy takes over.
-        for stage_gap, hold_s in ((0.12, 3.0), (0.065, 2.5), (gap, 2.5)):
-            tip_target = (
-                np.asarray(port_pos, dtype=np.float64)
-                + Rp[:, 0] * lateral[0]
-                + Rp[:, 1] * lateral[1]
-                - Rp[:, 2] * stage_gap
-            )
-            self.set_pose_target(
-                move_robot,
-                self._tcp_target_for_tip(tip_target, R_tip),
-                stiffness=STIFFNESS,
-                damping=DAMPING,
-            )
-            self.sleep_for(hold_s * PREPOSITION_HOLD_SCALE)
+            f"{label}: nearest-tip selected X={np.round(chosen['X'], 5).tolist()} "
+            f"dist={np.linalg.norm(chosen['X'] - tip_pos) * 1000:.1f}mm "
+            f"reproj={chosen['reproj_px']:.1f}px (requested_slot={target_idx})")
+        return chosen
 
+    def perceive_port_pose_consensus(self, task, get_observation):
+        """Robust port pose: sample several frames and return the median of a
+        cluster that agrees, rejecting single-frame wrong-port / noisy picks.
+
+        Returns (port_pos(3), port_quat_wxyz(4), reproj_px) or None.
+        """
+        log = self.get_logger()
+        samples = []  # list of (X, q_wxyz, reproj)
+        for _ in range(PERCEPT_SAMPLES):
+            obs = get_observation()
+            if obs is not None:
+                res = self.perceive_port_pose(task, obs)
+                if res is not None:
+                    X, q, reproj = res
+                    if np.isfinite(reproj) and reproj <= MAX_PORT_REPROJ_PX:
+                        samples.append((np.asarray(X, float),
+                                        np.asarray(q, float), float(reproj)))
+            self.sleep_for(PERCEPT_SAMPLE_DT)
+
+        if len(samples) < PERCEPT_MIN_AGREE:
+            log.error(f"[rl] perception consensus failed: only {len(samples)}/"
+                      f"{PERCEPT_SAMPLES} frames passed reproj (need "
+                      f"{PERCEPT_MIN_AGREE})")
+            return None
+
+        # Cluster around the median position (robust to a wrong-port outlier).
+        positions = np.array([s[0] for s in samples])
+        med = np.median(positions, axis=0)
+        keep = [s for s in samples
+                if float(np.linalg.norm(s[0] - med)) <= PERCEPT_AGREE_TOL_M]
+        if len(keep) < PERCEPT_MIN_AGREE:
+            spread = float(np.max(np.linalg.norm(positions - med, axis=1))) * 1000
+            log.error(f"[rl] perception consensus failed: {len(keep)}/"
+                      f"{len(samples)} frames agree within "
+                      f"{PERCEPT_AGREE_TOL_M*1000:.1f}mm (spread={spread:.1f}mm) "
+                      "-- unstable / conflicting port detections")
+            return None
+
+        kept_pos = np.array([s[0] for s in keep])
+        port_pos = np.median(kept_pos, axis=0)
+        kept_reproj = float(np.median([s[2] for s in keep]))
+        # Quaternion from the kept sample closest to the median position (avoids
+        # naive quaternion averaging / sign issues).
+        best = min(keep, key=lambda s: float(np.linalg.norm(s[0] - port_pos)))
+        port_quat = best[1]
+        log.info(f"[rl] perception consensus: {len(keep)}/{len(samples)} agree, "
+                 f"port={np.round(port_pos, 5).tolist()} reproj={kept_reproj:.2f}px")
+        self._last_port_quat_wxyz = port_quat
+        self._last_port_reproj_px = kept_reproj
+        return port_pos, port_quat, kept_reproj
+
+    def perceive_port_pose(self, task, obs):
+        """Return (port_pos(3), port_quat_wxyz(4), reproj_px) or None (SFP)."""
+        self._last_port_quat_wxyz = None
+        self._last_port_reproj_px = None
+        views = self._build_views(obs)
+        if len(views) < 2:
+            # Single-view PnP fallback so one usable camera still yields a pose.
+            if len(views) == 1:
+                cam, (bgr, K, T) = next(iter(views.items()))
+                nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
+                best = None
+                for det in nics[:5]:
+                    for slot in (0, 1):
+                        kps = np.asarray(det["kps"])[slice(4 * slot, 4 * (slot + 1))]
+                        if kps.shape != (4, 2):
+                            continue
+                        res = self._estimate_sfp_port_pose_single_view(kps, K, T, cam)
+                        if res is None:
+                            continue
+                        X, _, q_wxyz, _, reproj = res
+                        if q_wxyz is None:
+                            continue
+                        if best is None or reproj < best[2]:
+                            best = (X, q_wxyz, reproj)
+                if best is None:
+                    self.get_logger().error("[rl] single-view SFP PnP produced no pose")
+                    return None
+                X, q_wxyz, reproj = best
+                self._last_port_quat_wxyz = q_wxyz
+                self._last_port_reproj_px = float(reproj)
+                return np.asarray(X, dtype=np.float64), np.asarray(q_wxyz, dtype=np.float64), float(reproj)
+            self.get_logger().error(f"[rl] only {len(views)} cam views usable")
+            return None
+
+        # Multiview: collect per-camera SFP keypoint detections for both slots.
+        per_slot_cam = {0: {}, 1: {}}
+        for cam, (bgr, K, T) in views.items():
+            nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
+            if not nics:
+                self.get_logger().warn(f"{cam}: no NIC")
+                continue
+            for slot in (0, 1):
+                kp_slice = slice(4 * slot, 4 * (slot + 1))
+                dets = []
+                for det in nics[:5]:
+                    kps = np.asarray(det["kps"])[kp_slice]
+                    if kps.shape != (4, 2):
+                        continue
+                    dets.append({
+                        "kps": kps, "conf": det["conf"], "K": K, "T": T,
+                        "P": self._pc.build_projection_matrix(K, T),
+                    })
+                if dets:
+                    per_slot_cam[slot][cam] = dets
+
+        candidates = []
+        for slot, slot_cams in per_slot_cam.items():
+            for cand in self._make_sfp_multiview_candidates(slot_cams):
+                cand["port_slot"] = slot
+                candidates.append(cand)
+        candidates.sort(key=lambda c: c["score"])
+        if not candidates:
+            self.get_logger().warn("[rl] SFP multiview matching found no port candidates")
+            return None
+
+        target_idx = self._extract_trailing_index(task.target_module_name, "nic_card_mount_")
+        chosen = self._select_sfp_candidate(candidates, target_idx, "SFP target")
+        if chosen is None or chosen["q_wxyz"] is None:
+            return None
+        self._last_port_quat_wxyz = np.asarray(chosen["q_wxyz"], dtype=np.float64)
+        self._last_port_reproj_px = float(chosen["reproj_px"])
+        return (np.asarray(chosen["X"], dtype=np.float64),
+                self._last_port_quat_wxyz, float(chosen["reproj_px"]))
+
+    # ------------------------------------------------------- obs construction
     def _joint_vec(self, joint_state, attr):
         vals = dict(zip(joint_state.name, getattr(joint_state, attr)))
         try:
@@ -380,22 +849,11 @@ class RLInsert(PerceptionInsert):
     @staticmethod
     def _wrench_vector(obs_msg):
         w = obs_msg.wrist_wrench.wrench
-        return np.array(
-            [
-                w.force.x,
-                w.force.y,
-                w.force.z,
-                w.torque.x,
-                w.torque.y,
-                w.torque.z,
-            ],
-            dtype=np.float64,
-        )
+        return np.array([w.force.x, w.force.y, w.force.z,
+                         w.torque.x, w.torque.y, w.torque.z], dtype=np.float64)
 
-    # ------------------------------------------------------- obs construction
     def _build_obs(self, obs_msg, tcp_pos, tcp_quat, tip_pos, R_tip,
                    port_pos, port_quat, prev_tcp, dt, last_action):
-        """69-dim observation, mirroring RL/teacher/student_env_a.py layout."""
         jp = self._joint_vec(obs_msg.joint_states, "position")
         jv = self._joint_vec(obs_msg.joint_states, "velocity")
         v_lin = np.zeros(3, dtype=np.float64)
@@ -405,27 +863,14 @@ class RLInsert(PerceptionInsert):
             R_prev = _q_to_R(*prev_tcp[1])
             R_cur = _q_to_R(*tcp_quat)
             v_ang = _R_to_axis_angle(R_cur @ R_prev.T) / dt
-
-        w = obs_msg.wrist_wrench.wrench
-        wrench = np.array([
-            w.force.x, w.force.y, w.force.z,
-            w.torque.x, w.torque.y, w.torque.z,
-        ], dtype=np.float64)
         return build_observation69(
-            joint_pos=jp,
-            joint_vel=jv,
-            tcp_pos=tcp_pos,
-            tcp_quat=tcp_quat,
-            tcp_linear_velocity_world=v_lin,
-            tcp_angular_velocity_world=v_ang,
-            port_pos=port_pos,
-            port_quat=port_quat,
-            tip_pos=tip_pos,
-            tip_rotation=R_tip,
-            wrench=wrench,
-            last_action=last_action,
-            home_qpos=self._home_qpos,
-            wrench_mode=WRENCH_MODE,
+            joint_pos=jp, joint_vel=jv,
+            tcp_pos=tcp_pos, tcp_quat=tcp_quat,
+            tcp_linear_velocity_world=v_lin, tcp_angular_velocity_world=v_ang,
+            port_pos=port_pos, port_quat=port_quat,
+            tip_pos=tip_pos, tip_rotation=R_tip,
+            wrench=self._wrench_vector(obs_msg), last_action=last_action,
+            home_qpos=self._home_qpos, wrench_mode=WRENCH_MODE,
             wrench_baseline=self._wrench_baseline,
         )
 
@@ -445,19 +890,15 @@ class RLInsert(PerceptionInsert):
         plug_type = (task.plug_type or "sfp").lower()
         log.info(f"[rl] task: cable={task.cable_name} plug={task.plug_name} "
                  f"({plug_type}) port={task.port_name} module={task.target_module_name}")
-        if plug_type not in GRASP_TCP_IN_PLUG:
-            log.error(f"[rl] no grasp transform for plug_type={plug_type!r}")
-            return False
-
         if plug_type != "sfp":
-            log.error("[rl] Contract-A student is SFP-only")
+            log.error("[rl] this single-file policy is SFP-only")
             return False
 
         self._wait_for_stable_clock()
         self._wait_for_transform("base_link", "gripper/tcp", timeout_sec=8.0)
         self.sleep_for(1.0)
 
-        # --- inputs ready? (observations + perception port pose)
+        # --- wait for a first observation (cameras + robot state)
         obs = None
         t0 = time.monotonic()
         while obs is None and time.monotonic() - t0 < 10.0:
@@ -468,102 +909,82 @@ class RLInsert(PerceptionInsert):
             log.error("[rl] no Observation in 10 s -- zenoh wiring broken")
             return False
 
+        # The Flowstate insert-cable skill exposes Task.id. Reserving one ID
+        # provides a board-framing-only step without another ROS policy node.
+        if task.id == BOARD_SEARCH_ONLY_TASK_ID:
+            from .board_search import BoardSearch
+            ok = BoardSearch(self).run(get_observation, move_robot)
+            log.info(f"[board_search] board-only task complete: {ok}")
+            return ok
 
+        if BOARD_SEARCH:
+            from .board_search import BoardSearch
+            ok = BoardSearch(self).run(get_observation, move_robot)
+            log.info(f"[board_search] whole board in view: {ok}")
+
+        # --- perceive the SFP port pose (multi-frame consensus so one bad frame
+        #     or a wrong-port pick does not commit us to the wrong cage)
+        perceived = self.perceive_port_pose_consensus(task, get_observation)
+        if perceived is None:
+            log.error("[rl] perception failed to produce an SFP port pose")
+            return False
+        port_pos, port_quat, reproj_px = perceived
+        port_quat = np.asarray(port_quat, dtype=np.float64)
+        port_quat /= max(float(np.linalg.norm(port_quat)), 1e-12)
+        if not np.isfinite(reproj_px) or reproj_px > MAX_PORT_REPROJ_PX:
+            log.error(f"[rl] rejecting SFP pose: reproj={reproj_px}px limit={MAX_PORT_REPROJ_PX}px")
+            return False
+        log.info(f"[rl] perceived port p={np.round(port_pos, 5).tolist()} "
+                 f"q_wxyz={np.round(port_quat, 5).tolist()} reproj={reproj_px:.2f}px")
+
+        # --- wrench baseline captured HERE, at the current handoff pose. We do
+        #     NOT move up/away first, so this is a valid contact-force baseline.
         self._wrench_baseline = self._wrench_vector(obs)
-        log.info(
-            f"[rl] pre-handoff wrench mode={WRENCH_MODE} baseline="
-            f"{np.round(self._wrench_baseline, 4).tolist()}"
-        )
-        log.info(
-            f"[rl] deploy action adapter: sign={ACTION_SIGN.tolist()} "
-            f"gain={ACTION_GAIN.tolist()}"
-        )
+        log.info(f"[rl] handoff wrench baseline mode={WRENCH_MODE} "
+                 f"baseline={np.round(self._wrench_baseline, 4).tolist()} control={CONTROL_MODE}")
 
-        if not STATIC_PORT_POSE and PORT_SOURCE == "perception":
-            perceived = self.perceive_port_position(task, obs)
-            if perceived is None or self._last_port_quat_wxyz is None:
-                log.error("[rl] bundled perception failed to produce an SFP port pose")
-                return False
-            reproj_px = getattr(self, "_last_port_reproj_px", None)
-            if (reproj_px is None or not np.isfinite(reproj_px)
-                    or reproj_px > MAX_PORT_REPROJ_PX):
-                log.error(
-                    "[rl] rejecting SFP perception pose: "
-                    f"reprojection={reproj_px!r}px limit={MAX_PORT_REPROJ_PX:.1f}px"
-                )
-                return False
-            port_pos = np.asarray(perceived[0], dtype=np.float64)
-            port_quat = np.asarray(self._last_port_quat_wxyz, dtype=np.float64)
-            port_quat /= max(float(np.linalg.norm(port_quat)), 1e-12)
-            self._port_pose = (port_pos, port_quat)
-            self._port_pose_t = time.monotonic()
-            log.info(
-                f"[rl] perceived port pose p={np.round(port_pos, 5).tolist()} "
-                f"q_wxyz={np.round(port_quat, 5).tolist()} "
-                f"reproj={reproj_px:.2f}px"
-            )
+        # One-shot grasp-calibration dump (set RL_INSERT_CALIB_DUMP=1). Logs the
+        # TCP + any ground-truth tip frame so SFP_TIP_IN_TCP_QUAT can be re-solved.
+        if CALIB_DUMP:
+            self._dump_grasp_calibration()
 
-        if PORT_SOURCE == "external" and not STATIC_PORT_POSE:
-            t0 = time.monotonic()
-            while self._port_pose is None and time.monotonic() - t0 < 15.0:
-                self.sleep_for(0.2)
-        if self._port_pose is None:
-            log.error(f"[rl] no perception port pose on {PORT_POSE_TOPIC} in 15 s")
-            return False
-        if (time.monotonic() - self._port_pose_t) > PORT_POSE_STALE_SEC:
-            log.warn("[rl] perception port pose is stale; proceeding with last value")
-        port_pos, port_quat = self._port_pose
-        log.info(f"[rl] port pose: p={np.round(port_pos, 4)} q={np.round(port_quat, 4)}")
-
-        if PREPOSITION_HANDOFF:
-            self._preposition_handoff(
-                move_robot, send_feedback, port_pos, port_quat)
-
-        # MuJoCo captures its baseline after reset at the handoff. Deployment
-        # must do the same: prepositioning changes cable gravity and tension,
-        # so the earlier sample is not a valid contact-force baseline.
-        handoff_obs = get_observation()
-        if handoff_obs is None:
-            log.error("[rl] no Observation available for handoff wrench baseline")
-            return False
-        self._wrench_baseline = self._wrench_vector(handoff_obs)
-        log.info(
-            f"[rl] handoff wrench baseline={np.round(self._wrench_baseline, 4).tolist()} "
-            f"control_mode={CONTROL_MODE}"
-        )
-
-        # --- handoff sanity: are we inside the training envelope (~72 mm)?
-        tcp_pos, tcp_quat = self._tcp()
-        tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat, plug_type)
-        dist = float(np.linalg.norm(tip_pos - port_pos))
+        # --- handoff sanity: are we within the last-inch envelope of the mouth?
         Rp = port_frame(port_quat)
+        tcp_pos, tcp_quat = self._tcp()
+        tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
+        dist = float(np.linalg.norm(tip_pos - port_pos))
         handoff_delta = Rp.T @ (tip_pos - port_pos)
         handoff_rot = _R_to_axis_angle(Rp.T @ R_tip)
-        log.info(
-            f"[rl] handoff check: |tip-mouth|={dist*1000:.1f}mm "
-            f"delta_port_mm={(handoff_delta*1000).round(2).tolist()} "
-            f"rot_err_deg={np.degrees(handoff_rot).round(2).tolist()}"
-        )
+        log.info(f"[rl] handoff check: |tip-mouth|={dist*1000:.1f}mm "
+                 f"delta_port_mm={(handoff_delta*1000).round(2).tolist()} "
+                 f"rot_err_deg={np.degrees(handoff_rot).round(2).tolist()}")
         if dist > HANDOFF_MAX_DIST:
-            log.error(f"[rl] tip is {dist*1000:.0f} mm from the port mouth -- "
-                      "outside the last-inch envelope. The upstream process must "
-                      "hand off within ~72 mm. Aborting so the failure is visible.")
+            log.error(f"[rl] tip is {dist*1000:.0f} mm from the mouth -- outside the "
+                      "last-inch envelope; the upstream macro must hand off closer. Aborting.")
             return False
 
-        # ------------------------------ RL loop ------------------------------
-        send_feedback("rl last-inch")
+        # Scripted (no-RL) align-then-progressive-descent test path.
+        if CONTROL_MODE == "script":
+            return self._run_script(
+                get_observation, move_robot, send_feedback,
+                port_pos=port_pos, port_quat=port_quat, Rp=Rp)
+
+        # ------------------------------ insertion loop -----------------------
+        # Straight descent from the CURRENT pose down the perceived port axis.
+        # No preposition / retract / re-approach.
+        send_feedback("rl last-inch (straight descent)")
         insert_axis = Rp[:, 2]
         last_action = np.zeros(6, dtype=np.float32)
         prev_tcp = None
         prev_t = None
         cmd_pos, cmd_R = tcp_pos.copy(), _q_to_R(*tcp_quat)
-
-        # NOTE: everything below the set_pose_target call is RECONSTRUCTED --
-        # the emailed original was truncated after "depth". Diff against the
-        # author's copy before a scored run.
         force_hot_steps = 0
         depth = float("nan")
         handoff_depth = float(handoff_delta[2])
+        # Baselines for the grace-window safety gate: the lateral/rotation error
+        # present at handoff, which the policy is expected to reduce.
+        handoff_lateral = float(np.linalg.norm(handoff_delta[:2]))
+        handoff_rotation = float(np.linalg.norm(handoff_rot))
         planned_depth = handoff_depth
 
         for step in range(MAX_RL_STEPS):
@@ -577,11 +998,7 @@ class RLInsert(PerceptionInsert):
                 log.warn(f"[rl] tcp TF miss: {ex}")
                 self.sleep_for(STEP_DT)
                 continue
-            tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat, plug_type)
-
-            # refresh perception if it keeps publishing (rigid board: optional)
-            if self._port_pose is not None:
-                port_pos, port_quat = self._port_pose
+            tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
 
             now = time.monotonic()
             dt = (now - prev_t) if prev_t else STEP_DT
@@ -590,13 +1007,8 @@ class RLInsert(PerceptionInsert):
             raw_act = self._forward(o)
             act = np.clip(raw_act * ACTION_SIGN * ACTION_GAIN, -1.0, 1.0)
             if step == 0 or step % 50 == 0:
-                # Full obs dump: diff this against a MuJoCo rollout at the same
-                # pose to root-cause any train/deploy convention mismatch.
                 log.info("[rl] obs69=" + np.array2string(
                     o, precision=5, max_line_width=1000, separator=","))
-            # This field is the network's previous output.  ACTION_SIGN adapts
-            # the deploy actuator convention and is deliberately not folded
-            # back into the learned observation.
             last_action = raw_act
             prev_tcp = (tcp_pos, tcp_quat)
             prev_t = now
@@ -609,51 +1021,49 @@ class RLInsert(PerceptionInsert):
             wrench_delta = self._wrench_vector(obs) - self._wrench_baseline
             f_mag = float(np.linalg.norm(wrench_delta[:3]))
             guided_max_lead = float("nan")
+            target_depth = float("nan")
 
             if CONTROL_MODE == "guided":
                 guided_max_lead = (
-                    GUIDED_CONTACT_MAX_LEAD_M
-                    if depth >= GUIDED_CONTACT_DEPTH_M
-                    else GUIDED_MAX_LEAD_M
-                )
+                    GUIDED_CONTACT_MAX_LEAD_M if depth >= GUIDED_CONTACT_DEPTH_M
+                    else GUIDED_MAX_LEAD_M)
                 target_tip, target_R, planned_depth, target_depth = guided_tip_target(
-                    port_pos=port_pos,
-                    port_quat=port_quat,
-                    current_depth=depth,
-                    planned_depth=planned_depth,
+                    port_pos=port_pos, port_quat=port_quat,
+                    current_depth=depth, planned_depth=planned_depth,
                     insert_depth=INSERT_DEPTH,
-                    outside_step=GUIDED_OUTSIDE_STEP_M,
-                    inside_step=GUIDED_INSIDE_STEP_M,
-                    max_lead=guided_max_lead,
-                )
+                    outside_step=GUIDED_OUTSIDE_STEP_M, inside_step=GUIDED_INSIDE_STEP_M,
+                    max_lead=guided_max_lead)
                 target_pose = self._tcp_target_for_tip(target_tip, target_R)
-                cmd_pos = np.array([
-                    target_pose.position.x,
-                    target_pose.position.y,
-                    target_pose.position.z,
-                ])
-                cmd_R = _q_to_R(
-                    target_pose.orientation.w,
-                    target_pose.orientation.x,
-                    target_pose.orientation.y,
-                    target_pose.orientation.z,
-                )
                 command_delta_port = Rp.T @ (target_tip - tip_pos)
-                self.set_pose_target(
-                    move_robot,
-                    target_pose,
-                    stiffness=GUIDED_STIFFNESS,
-                    damping=GUIDED_DAMPING,
-                )
+                self.set_pose_target(move_robot, target_pose,
+                                     stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
             else:
-                # Learned port-frame deltas are applied to the commanded pose.
+                from .rl_insert_contract import deploy_action_delta
                 dp, drot_world = deploy_action_delta(act, port_quat)
-                dR = _axis_angle_to_R(drot_world)
+                # Force-reactive advance freeze: if we're in contact (force above
+                # threshold) and the policy commands further inward motion, drop
+                # only the inward component so it stops driving into a jam and
+                # lets the controller re-square.  Lateral correction and any
+                # retreat (negative inward) pass through unchanged.
+                if f_mag > ADVANCE_FREEZE_FORCE_N:
+                    inward = float(dp @ insert_axis)
+                    if inward > 0.0:
+                        dp = dp - inward * insert_axis
+                        if step % 10 == 0:
+                            log.info(f"[rl] advance freeze: force={f_mag:.2f}N > "
+                                     f"{ADVANCE_FREEZE_FORCE_N:.1f}N, held inward "
+                                     f"{inward*1000:.2f}mm")
+                angle = float(np.linalg.norm(drot_world))
+                if angle < 1e-10:
+                    dR = np.eye(3)
+                else:
+                    k = drot_world / angle
+                    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+                    dR = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
                 cmd_pos = cmd_pos + dp
                 cmd_R = dR @ cmd_R
-                q = _R_to_q(cmd_R)
+                q = _rotmat_to_quat_wxyz(cmd_R)
                 command_delta_port = Rp.T @ dp
-                target_depth = float("nan")
                 self.set_pose_target(
                     move_robot,
                     Pose(position=Point(x=cmd_pos[0], y=cmd_pos[1], z=cmd_pos[2]),
@@ -661,44 +1071,50 @@ class RLInsert(PerceptionInsert):
                     stiffness=STIFFNESS, damping=DAMPING)
 
             if step % 10 == 0:
-                log.info(
-                    f"[rl] step {step}: depth={depth*1000:.1f}/"
-                    f"{INSERT_DEPTH*1000:.0f}mm lateral={lateral*1000:.1f}mm "
-                    f"rot_err_deg={np.degrees(rotation_error_norm):.1f} "
-                    f"force_delta_N={f_mag:.2f} "
-                    f"control={CONTROL_MODE} target_depth_mm={target_depth*1000:.1f} "
-                    f"max_lead_mm={guided_max_lead*1000:.1f} "
-                    f"raw_act={np.round(raw_act, 3).tolist()} "
-                    f"command_delta_port_mm={(command_delta_port*1000).round(3).tolist()}"
-                )
+                log.info(f"[rl] step {step}: depth={depth*1000:.1f}/{INSERT_DEPTH*1000:.0f}mm "
+                         f"lateral={lateral*1000:.1f}mm rot_err_deg={np.degrees(rotation_error_norm):.1f} "
+                         f"force_delta_N={f_mag:.2f} control={CONTROL_MODE} "
+                         f"target_depth_mm={target_depth*1000:.1f} "
+                         f"raw_act={np.round(raw_act, 3).tolist()} "
+                         f"cmd_delta_port_mm={(command_delta_port*1000).round(3).tolist()}")
 
-            if (lateral > SAFETY_MAX_LATERAL_M
-                    or depth < handoff_depth - SAFETY_MAX_RETREAT_M
-                    or rotation_error_norm > SAFETY_MAX_ROTATION_RAD):
-                log.error(
-                    "[rl] contract safety abort | "
-                    f"depth_mm={depth*1000:.1f} initial_mm={handoff_depth*1000:.1f} "
-                    f"lateral_mm={lateral*1000:.1f} "
-                    f"rot_err_deg={np.degrees(rotation_error_norm):.1f}"
-                )
+            # Retreat guard is always live: pulling away from the board is never
+            # acceptable, even during the grace window.
+            retreated = depth < handoff_depth - SAFETY_MAX_RETREAT_M
+            if step < SAFETY_GRACE_STEPS:
+                # Give the policy room to correct the handoff offset: only abort
+                # if lateral/rotation grows meaningfully worse than at handoff.
+                lateral_limit = max(SAFETY_MAX_LATERAL_M,
+                                    handoff_lateral + SAFETY_GRACE_LATERAL_SLACK_M)
+                rotation_limit = max(SAFETY_MAX_ROTATION_RAD,
+                                     handoff_rotation + SAFETY_GRACE_ROTATION_SLACK_RAD)
+            else:
+                lateral_limit = SAFETY_MAX_LATERAL_M
+                rotation_limit = SAFETY_MAX_ROTATION_RAD
+            if (lateral > lateral_limit
+                    or retreated
+                    or rotation_error_norm > rotation_limit):
+                log.error(f"[rl] contract safety abort | step={step} "
+                          f"depth_mm={depth*1000:.1f} "
+                          f"initial_mm={handoff_depth*1000:.1f} lateral_mm={lateral*1000:.1f} "
+                          f"(limit={lateral_limit*1000:.1f}) "
+                          f"rot_err_deg={np.degrees(rotation_error_norm):.1f} "
+                          f"(limit={np.degrees(rotation_limit):.1f})")
                 send_feedback("rl contract safety abort")
                 return False
 
             if depth >= INSERT_DEPTH - SEAT_DEPTH_TOL and lateral < SEAT_LATERAL_MAX:
-                log.info(f"[rl] seated: depth={depth*1000:.1f} mm "
-                         f"lateral={lateral*1000:.1f} mm after {step + 1} steps")
+                log.info(f"[rl] seated: depth={depth*1000:.1f}mm lateral={lateral*1000:.1f}mm "
+                         f"after {step + 1} steps")
                 send_feedback("rl insert seated")
                 return True
 
-            # Tier-2 wrench budget guard: sustained force => back off and abort
-            # rather than grind (the scored threshold is 20 N).
             force_hot_steps = force_hot_steps + 1 if f_mag > FORCE_ABORT_N else 0
             if force_hot_steps >= FORCE_ABORT_STEPS:
-                log.error(f"[rl] sustained wrist force {f_mag:.1f} N over "
-                          f"{FORCE_ABORT_STEPS} steps at depth={depth*1000:.1f} mm "
-                          "-- jammed; retreating along the insert axis and aborting.")
+                log.error(f"[rl] sustained wrist force {f_mag:.1f} N over {FORCE_ABORT_STEPS} "
+                          f"steps at depth={depth*1000:.1f}mm -- jammed; retreating and aborting.")
                 retreat = cmd_pos - insert_axis * 0.010
-                q = _R_to_q(cmd_R)
+                q = _rotmat_to_quat_wxyz(cmd_R)
                 self.set_pose_target(
                     move_robot,
                     Pose(position=Point(x=retreat[0], y=retreat[1], z=retreat[2]),
@@ -713,4 +1129,306 @@ class RLInsert(PerceptionInsert):
         log.error(f"[rl] step budget ({MAX_RL_STEPS}) exhausted; "
                   f"last depth={depth*1000:.1f}/{INSERT_DEPTH*1000:.0f} mm")
         send_feedback("rl insert timed out")
+        return False
+
+    # --------------------------------------------------- scripted controller ---
+    def _script_errors(self, Rp, port_pos, R_target=None):
+        """Current (depth, lateral, rotation-error-vec) of the plug tip.
+
+        Position errors (depth, lateral) are in the port frame Rp about the
+        (possibly bias-shifted) port_pos. The rotation error is vs R_target -- the
+        desired tip orientation, which is the BIASED/tilted frame R_seat when a bias
+        is set (defaults to Rp = untilted port frame). depth: +inward, 0 at mouth."""
+        tcp_pos, tcp_quat = self._tcp()
+        tip_pos, R_tip = self._tip_from_tcp(tcp_pos, tcp_quat)
+        d = Rp.T @ (tip_pos - port_pos)
+        R_ref = Rp if R_target is None else R_target
+        rot_err = _R_to_axis_angle(R_ref.T @ R_tip)
+        return (float(d[2]), d[:2].copy(), rot_err, tip_pos, R_tip)
+
+    def _nudge_to_unstick(self, get_observation, move_robot, *, Rp, port_pos,
+                          R_seat, insert_axis, stall_depth):
+        """On a mouth stall, step +Y a little to try to drop the plug in.
+
+        The plug often stalls at the mouth needing only a little more motion in +Y
+        (port frame). Step +Y one small increment at a time (each capped cumulatively
+        so it cannot walk off the board), keeping a gentle inward push, and check if
+        depth advanced past the stall depth. Return True the moment it breaks free
+        (leaving the plug at the better offset so normal descent resumes); False if we
+        reach the excursion cap without freeing it (caller then falls back to the
+        hold-and-handoff). +Y only by design -- see SCRIPT_NUDGE_DIRS.
+        """
+        log = self.get_logger()
+        applied_dx = 0.0            # cumulative port-frame excursion (safety cap)
+        applied_dy = 0.0
+        # Keep stepping in the configured direction(s) -- +Y only -- one small step at
+        # a time, up to the cumulative excursion cap. Each step gets a few settle+push
+        # sub-steps to see if depth breaks free before adding the next step.
+        while True:
+            name, ux, uy = SCRIPT_NUDGE_DIRS[0]
+            step_dx = ux * SCRIPT_NUDGE_STEP_M
+            step_dy = uy * SCRIPT_NUDGE_STEP_M
+            # Would the NEXT step push us past the cumulative excursion cap? Stop.
+            if (abs(applied_dx + step_dx) > SCRIPT_NUDGE_MAX_TOTAL_M or
+                    abs(applied_dy + step_dy) > SCRIPT_NUDGE_MAX_TOTAL_M):
+                break
+            applied_dx += step_dx
+            applied_dy += step_dy
+            lat_world = Rp[:, 0] * step_dx + Rp[:, 1] * step_dy
+            log.info(f"[script] NUDGE {name}: step={SCRIPT_NUDGE_STEP_M*1000:.2f}mm "
+                     f"(cumulative dX={applied_dx*1000:.2f} dY={applied_dy*1000:.2f}mm) "
+                     f"from stall depth {stall_depth*1000:.1f}mm")
+            # Settle+push: apply the lateral step AND a gentle inward push each step,
+            # so the freed plug actually descends rather than just sliding sideways.
+            broke_free = False
+            for _ in range(SCRIPT_NUDGE_SETTLE_STEPS):
+                obs = get_observation()
+                depth, _, _, tip_pos, _ = self._script_errors(
+                    Rp, port_pos, R_target=R_seat)
+                target_tip = tip_pos + insert_axis * SCRIPT_SEAT_STEP_M + lat_world
+                # Compliant gains so the plug can give and find the pocket.
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(target_tip, R_seat),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                # Only apply the full lateral step on the first sub-step; after that
+                # hold the offset and keep pushing inward (lat_world -> 0) so we do
+                # not integrate the nudge every step into a runaway.
+                lat_world = np.zeros(3)
+                self.sleep_for(STEP_DT)
+                if depth > stall_depth + SCRIPT_NUDGE_PROGRESS_M:
+                    broke_free = True
+                    break
+            if broke_free:
+                depth, _, _, _, _ = self._script_errors(Rp, port_pos, R_target=R_seat)
+                log.info(f"[script] NUDGE {name} UNSTUCK: depth advanced to "
+                         f"{depth*1000:.1f}mm -- resuming descent.")
+                return True
+            # This step did not help; loop adds another +Y increment until the
+            # cumulative-cap check stops us.
+        log.info(f"[script] +Y nudge reached the {SCRIPT_NUDGE_MAX_TOTAL_M*1000:.1f}mm "
+                 f"excursion cap without freeing the stall.")
+        return False
+
+    def _run_script(self, get_observation, move_robot, send_feedback, *,
+                    port_pos, port_quat, Rp):
+        """Pure-geometry align-then-progressive-descent. No RL, no network.
+
+        Phase 1: hold a standoff depth and cancel perceived lateral + rotation
+        error to tolerance.  Phase 2: creep straight down the perceived port
+        axis, step size shrinking with depth so a slightly-missed alignment taps
+        the mouth gently rather than ramming.  Force pauses the descent; sustained
+        high force retreats and aborts.  Uses the tared wrench from _run().
+        """
+        log = self.get_logger()
+        insert_axis = Rp[:, 2]                       # unit port axis in base_link
+        R_port = Rp                                  # target tip orientation == port frame
+        send_feedback("script align+descend (no RL)")
+
+        # PRE-ENGAGE BIAS as an ABSOLUTE target shift. Instead of nudging the plug
+        # by a relative increment (which never fully applied -- a one-shot move got
+        # cut off by the descent, so bigger Y values still undershot), we shift the
+        # TARGET the whole pipeline servos to: biased_port = port + X/Y in the port
+        # frame. Align then drives the tip fully to that biased point (same mechanism
+        # that already converges to <1mm), descent goes straight down through it, and
+        # every error reading is measured vs the biased target. The tilt is applied
+        # as the target orientation (R_seat) below. Bias values now mean exactly what
+        # they say: a +2.5mm Y bias => the plug ends up 2.5mm off the true port in Y.
+        port_pos = np.asarray(port_pos, dtype=float) + (
+            Rp[:, 0] * SCRIPT_BIAS_X_M + Rp[:, 1] * SCRIPT_BIAS_Y_M)
+        R_seat = R_port @ _axis_angle_to_R(
+            np.array([SCRIPT_BIAS_RX_RAD, 0.0, 0.0], dtype=float))
+        log.info(f"[script] pre-engage bias (absolute target shift): "
+                 f"dX={SCRIPT_BIAS_X_M*1000:.2f}mm dY={SCRIPT_BIAS_Y_M*1000:.2f}mm "
+                 f"rX={np.degrees(SCRIPT_BIAS_RX_RAD):.2f}deg")
+
+        # Align at WHERE we were handed off (do not force a descent to a fixed
+        # standoff first). This lets a deliberately-higher handoff -- e.g. +5mm so
+        # the cameras see the port clearer -- simply align higher, then descend
+        # progressively. Never align DEEPER than SCRIPT_ALIGN_STANDOFF_M (if handed
+        # off already close/below, hold there). The 120mm HANDOFF_MAX_DIST guard
+        # (checked in _run before we get here) already permits a higher start.
+        handoff_depth0, _, _, _, _ = self._script_errors(Rp, port_pos)
+        align_standoff = min(handoff_depth0, SCRIPT_ALIGN_STANDOFF_M)
+        log.info(f"[script] align standoff = {align_standoff*1000:.1f}mm "
+                 f"(handoff depth {handoff_depth0*1000:.1f}mm)")
+
+        # ---- Phase 1: align at standoff -------------------------------------
+        aligned = False
+        for astep in range(SCRIPT_ALIGN_MAX_STEPS):
+            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(
+                Rp, port_pos, R_target=R_seat)
+            lateral = float(np.linalg.norm(lat_vec))
+            rot_norm = float(np.linalg.norm(rot_err))
+            if lateral <= SCRIPT_ALIGN_LATERAL_TOL_M and rot_norm <= SCRIPT_ALIGN_ROTATION_TOL_RAD:
+                aligned = True
+                log.info(f"[script] aligned after {astep} steps: "
+                         f"lateral={lateral*1000:.2f}mm rot_err_deg={np.degrees(rot_norm):.2f}")
+                break
+            # Command: cancel lateral (bounded), pull depth toward the standoff,
+            # and square orientation to the port frame. All in base_link.
+            lat_cmd = -SCRIPT_ALIGN_LATERAL_GAIN * lat_vec
+            lat_step = float(np.linalg.norm(lat_cmd))
+            if lat_step > SCRIPT_ALIGN_MAX_LATERAL_STEP_M:
+                lat_cmd *= SCRIPT_ALIGN_MAX_LATERAL_STEP_M / lat_step
+            # lat_vec is expressed in the port XY plane -> lift to base_link
+            lat_world = Rp[:, 0] * lat_cmd[0] + Rp[:, 1] * lat_cmd[1]
+            depth_err = align_standoff - depth                   # toward standoff
+            depth_world = insert_axis * float(np.clip(depth_err, -0.002, 0.002))
+            target_tip = tip_pos + lat_world + depth_world
+            # Orientation goes toward the BIASED target frame (R_seat = port frame
+            # tilted by the pre-engage bias), rate-limited. rot_err is measured vs
+            # R_seat (see _script_errors, which uses the shifted target). So the tilt
+            # is reached during alignment, not as a separate cut-off move afterward.
+            if rot_norm > SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD:
+                move_frac = SCRIPT_ALIGN_MAX_ROTATION_STEP_RAD / rot_norm
+                target_R = R_seat @ _axis_angle_to_R((1.0 - move_frac) * rot_err)
+            else:
+                target_R = R_seat
+            self.set_pose_target(
+                move_robot, self._tcp_target_for_tip(target_tip, target_R),
+                stiffness=GUIDED_STIFFNESS, damping=GUIDED_DAMPING)
+            if astep % 10 == 0:
+                log.info(f"[script] align step {astep}: lateral={lateral*1000:.2f}mm "
+                         f"rot_err_deg={np.degrees(rot_norm):.2f} depth_mm={depth*1000:.1f}")
+            self.sleep_for(STEP_DT)
+
+        if not aligned:
+            log.error(f"[script] failed to align within {SCRIPT_ALIGN_MAX_STEPS} steps; "
+                      f"aborting before descent (last lateral={lateral*1000:.2f}mm "
+                      f"rot_err_deg={np.degrees(rot_norm):.2f}).")
+            send_feedback("script align failed -- aborted before descent")
+            return False
+
+        # The pre-engage bias is already baked into port_pos (position) and R_seat
+        # (orientation) at the top, so alignment above already drove the plug to the
+        # biased target. No separate one-shot move -- descend straight from here.
+
+        # ---- Phase 2: progressive slow descent ------------------------------
+        force_hot_steps = 0
+        # Wedge/stall tracking: deepest depth reached, and how long we have been
+        # commanding inward without beating it. Also record the lateral swing at
+        # stall (the wedge signature) for the fixed-vs-variable-grasp diagnosis.
+        deepest = -np.inf
+        stall_steps = 0
+        stall_depth = float("nan")
+        stall_lat_min = np.inf
+        stall_lat_max = -np.inf
+        for dstep in range(MAX_RL_STEPS):
+            obs = get_observation()
+            depth, lat_vec, rot_err, tip_pos, R_tip = self._script_errors(
+                Rp, port_pos, R_target=R_seat)
+            lateral = float(np.linalg.norm(lat_vec))
+            rot_norm = float(np.linalg.norm(rot_err))
+            f_mag = float("nan")
+            if obs is not None:
+                wrench_delta = self._wrench_vector(obs) - self._wrench_baseline
+                f_mag = float(np.linalg.norm(wrench_delta[:3]))
+
+            # Seated?
+            if depth >= INSERT_DEPTH - SEAT_DEPTH_TOL and lateral < SEAT_LATERAL_MAX:
+                log.info(f"[script] seated: depth={depth*1000:.1f}mm lateral={lateral*1000:.1f}mm "
+                         f"after {dstep} descent steps")
+                send_feedback("script insert seated")
+                return True
+
+            # Sustained high force -> jam: HOLD (do not retreat, per instruction).
+            if np.isfinite(f_mag) and f_mag > FORCE_ABORT_N:
+                force_hot_steps += 1
+            else:
+                force_hot_steps = 0
+            if force_hot_steps >= FORCE_ABORT_STEPS:
+                log.error(f"[script] sustained force {f_mag:.1f}N over {FORCE_ABORT_STEPS} steps "
+                          f"at depth={depth*1000:.1f}mm -- HOLDING position (no retreat), stopping.")
+                self.set_pose_target(
+                    move_robot, self._tcp_target_for_tip(tip_pos, R_seat),
+                    stiffness=STIFFNESS, damping=DAMPING)
+                send_feedback("script high force -- holding (no retreat)")
+                return False
+
+            # Track depth stall for wedge detection. A WEDGE is a GEOMETRIC bind:
+            # depth stalled AND lateral blown out (the plug levering sideways
+            # because it entered cocked). Steady SMALL lateral at a stall is just
+            # normal contact at the mouth -- keep seating, do NOT call it a wedge.
+            if depth > deepest + SCRIPT_STALL_PROGRESS_M:
+                deepest = depth
+                stall_steps = 0
+                stall_depth = float("nan")
+                stall_lat_min, stall_lat_max = np.inf, -np.inf
+            else:
+                stall_steps += 1
+                if np.isnan(stall_depth):
+                    stall_depth = depth
+                stall_lat_min = min(stall_lat_min, lateral)
+                stall_lat_max = max(stall_lat_max, lateral)
+            # Detect a stall for diagnostics. In script-only mode this never hands
+            # off to an actor or starts a lateral search: the straight compliant
+            # seating command below remains in control.
+            force_jam = np.isfinite(f_mag) and f_mag >= SCRIPT_HANDOFF_FORCE_N
+            depth_stalled = stall_steps >= SCRIPT_STALL_STEPS
+            if depth_stalled or force_jam:
+                trigger = "force-jam" if force_jam else "depth-stall"
+                if dstep % 10 == 0:
+                    log.info(
+                        f"[script] SCRIPT-ONLY {trigger} at depth={depth*1000:.1f}mm "
+                        f"lateral={lateral*1000:.2f}mm force={f_mag:.2f}N -- "
+                        "continuing straight force-limited seating; no RL or search")
+                deepest = depth
+                stall_steps = 0
+                stall_depth = float("nan")
+                stall_lat_min, stall_lat_max = np.inf, -np.inf
+
+            # Step sizing:
+            #  - free space (low force): progressive fast descent, shrinking with depth.
+            #  - in contact (force > CONTACT): SLOW force-limited seat push -- keep
+            #    advancing gently (this is the scripted force-reactive seat), and
+            #    only hold for one step once we hit the SEAT_FORCE cap.
+            if np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N:
+                if f_mag >= SCRIPT_SEAT_FORCE_N:
+                    step_m = 0.0            # at the seat-force cap: hold this step
+                else:
+                    step_m = SCRIPT_SEAT_STEP_M   # gentle push toward seated
+                if dstep % 10 == 0:
+                    log.info(f"[script] seating: force={f_mag:.2f}N depth={depth*1000:.1f}mm "
+                             f"step_mm={step_m*1000:.2f} lateral={lateral*1000:.2f}mm")
+            else:
+                frac = float(np.clip(depth / max(INSERT_DEPTH, 1e-6), 0.0, 1.0))
+                step_m = (SCRIPT_DESCEND_STEP_FAR_M
+                          + frac * (SCRIPT_DESCEND_STEP_NEAR_M - SCRIPT_DESCEND_STEP_FAR_M))
+
+            # Keep lateral squared to the BIASED target during descent; re-tighten if
+            # it drifts out. Because the bias is baked into port_pos, "lateral" is the
+            # error vs the biased point, so re-aligning pulls the plug TOWARD the
+            # biased target (it no longer fights the bias). This bounds any drift.
+            lat_world = np.zeros(3)
+            if lateral > SCRIPT_REALIGN_LATERAL_M:
+                lat_cmd = -SCRIPT_ALIGN_LATERAL_GAIN * lat_vec
+                lat_step = float(np.linalg.norm(lat_cmd))
+                if lat_step > SCRIPT_ALIGN_MAX_LATERAL_STEP_M:
+                    lat_cmd *= SCRIPT_ALIGN_MAX_LATERAL_STEP_M / lat_step
+                lat_world = Rp[:, 0] * lat_cmd[0] + Rp[:, 1] * lat_cmd[1]
+
+            # In contact use the softer (compliant) stiffness so the plug can give
+            # against the mouth as it seats; use the stiff gains in free space.
+            in_contact = np.isfinite(f_mag) and f_mag > SCRIPT_CONTACT_FORCE_N
+            stiff = STIFFNESS if in_contact else GUIDED_STIFFNESS
+            damp = DAMPING if in_contact else GUIDED_DAMPING
+            # Descent commands inward motion toward the BIASED target. The bias is
+            # already baked into port_pos (all errors here are measured vs the biased
+            # target) and R_seat, so no bias is re-added -- avoids the earlier runaway
+            # where re-adding an offset each step walked the plug off the board.
+            target_tip = tip_pos + insert_axis * step_m + lat_world
+            self.set_pose_target(
+                move_robot, self._tcp_target_for_tip(target_tip, R_seat),
+                stiffness=stiff, damping=damp)
+
+            if dstep % 10 == 0:
+                log.info(f"[script] descend step {dstep}: depth={depth*1000:.1f}/"
+                         f"{INSERT_DEPTH*1000:.0f}mm step_mm={step_m*1000:.2f} "
+                         f"lateral={lateral*1000:.2f}mm rot_err_deg={np.degrees(rot_norm):.2f} "
+                         f"force_N={f_mag:.2f}")
+            self.sleep_for(STEP_DT)
+
+        log.error(f"[script] descent step budget ({MAX_RL_STEPS}) exhausted; "
+                  f"last depth={depth*1000:.1f}/{INSERT_DEPTH*1000:.0f}mm")
+        send_feedback("script insert timed out")
         return False
