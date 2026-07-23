@@ -164,7 +164,7 @@ Manages trial execution, validates participant models, and collects scoring data
 * **[Troubleshooting](./docs/troubleshooting.md):** Common issues and debugging strategies.
 * **[Current Repository Handoff](./docs/HANDOFF.md):** Authoritative insertion and board-search baselines on `main`.
 * **[Insertion Handoff](./docs/INSERTION_HANDOFF.md):** Script-only SFP V50 implementation, build, and validation contract.
-* **[Board Search Handoff](./docs/BOARD_SEARCH_HANDOFF.md):** Board-search snapshot pinned to commit `b269872`.
+* **[Board Search Handoff](./docs/BOARD_SEARCH_HANDOFF.md):** Geometric staged-SFP implementation pinned to commit `b65a7a0`.
 
 ### Reference Materials
 

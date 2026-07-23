@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import threading
 import time
 from typing import Any
@@ -13,17 +13,51 @@ from .config import CAMERA_NAMES, PerceptionConfig
 
 
 @dataclass(frozen=True)
+class CameraCalibration:
+    """Validated pinhole calibration for one approved wrist camera."""
+
+    width: int
+    height: int
+    k: tuple[float, ...]
+    distortion: tuple[float, ...]
+    distortion_model: str
+    frame_id: str
+    stamp_ns: int
+
+    @property
+    def camera_matrix(self) -> np.ndarray:
+        """Return the 3x3 intrinsic matrix as a new array."""
+        return np.asarray(self.k, dtype=float).reshape(3, 3)
+
+
+@dataclass(frozen=True)
 class CameraSnapshot:
     """A fresh set of approved wrist-camera frames and the latest force."""
 
     frames: dict[str, dict[str, Any]]
     force_xyz: tuple[float, float, float] | None
+    calibrations: dict[str, CameraCalibration] = field(default_factory=dict)
 
     @property
     def force_norm(self) -> float | None:
         if self.force_xyz is None:
             return None
         return float(np.linalg.norm(np.asarray(self.force_xyz, dtype=float)))
+
+    @property
+    def frame_stamp_skew_ns(self) -> int | None:
+        """Return newest-minus-oldest frame stamp, or ``None`` below two frames."""
+        stamps = [int(frame["stamp_ns"]) for frame in self.frames.values()]
+        if len(stamps) < 2:
+            return None
+        return max(stamps) - min(stamps)
+
+    def frames_within_skew(self, max_skew_ns: int) -> bool:
+        """Whether all returned frame stamps are within an inclusive bound."""
+        if max_skew_ns < 0:
+            raise ValueError("max_skew_ns must be non-negative")
+        skew = self.frame_stamp_skew_ns
+        return skew is not None and skew <= max_skew_ns
 
 
 def ros_image_to_bgr(message: Any) -> np.ndarray:
@@ -70,20 +104,90 @@ def ros_image_to_bgr(message: Any) -> np.ndarray:
 
 
 def stamp_to_nanoseconds(stamp: Any) -> int:
-    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+    sec = int(stamp.sec)
+    nanosec = int(stamp.nanosec)
+    if sec < 0 or not 0 <= nanosec < 1_000_000_000:
+        raise ValueError("invalid ROS timestamp")
+    return sec * 1_000_000_000 + nanosec
+
+
+def approved_camera_message_frames(optical_frame_id: str) -> frozenset[str]:
+    """Return the only image/CameraInfo frames accepted for one wrist camera.
+
+    The simulator's Basler macro deliberately publishes the image from
+    ``<camera>/sensor_link`` while CameraInfo carries optical intrinsics and
+    TF exposes the co-located, fixed ``<camera>/optical`` child.  Those are the
+    only two names we admit.  In particular this is *not* a prefix match: a
+    CameraInfo message can never redirect the geometric pipeline to an object
+    or arbitrary robot frame.
+    """
+    suffix = "/optical"
+    if not optical_frame_id.endswith(suffix):
+        raise ValueError("configured camera frame must be an optical frame")
+    stem = optical_frame_id[: -len(suffix)]
+    return frozenset((optical_frame_id, f"{stem}/sensor_link"))
+
+
+def frames_are_approved_camera_pair(
+    image_frame_id: str,
+    calibration_frame_id: str,
+    optical_frame_id: str,
+) -> bool:
+    """Whether image and calibration independently belong to one camera."""
+    approved = approved_camera_message_frames(optical_frame_id)
+    return image_frame_id in approved and calibration_frame_id in approved
+
+
+def camera_info_to_calibration(
+    message: Any, expected_frame_id: str
+) -> CameraCalibration:
+    """Validate CameraInfo from the exact sensor/optical frame pair."""
+    width = int(message.width)
+    height = int(message.height)
+    if width <= 0 or height <= 0:
+        raise ValueError("camera-info dimensions must be positive")
+
+    k = tuple(float(value) for value in message.k)
+    if len(k) != 9 or not np.all(np.isfinite(np.asarray(k, dtype=float))):
+        raise ValueError("camera-info K must contain nine finite values")
+    if k[0] <= 0.0 or k[4] <= 0.0 or k[8] <= 0.0:
+        raise ValueError(
+            "camera-info focal lengths and homogeneous scale must be positive"
+        )
+
+    distortion = tuple(float(value) for value in message.d)
+    if not np.all(np.isfinite(np.asarray(distortion, dtype=float))):
+        raise ValueError("camera-info distortion must be finite")
+    distortion_model = str(message.distortion_model)
+    if not distortion_model:
+        raise ValueError("camera-info distortion model must not be empty")
+
+    frame_id = str(message.header.frame_id)
+    if frame_id not in approved_camera_message_frames(expected_frame_id):
+        raise ValueError("camera-info frame is outside the camera TF allowlist")
+    return CameraCalibration(
+        width=width,
+        height=height,
+        k=k,
+        distortion=distortion,
+        distortion_model=distortion_model,
+        frame_id=frame_id,
+        stamp_ns=stamp_to_nanoseconds(message.header.stamp),
+    )
 
 
 class CameraRig:
-    """Subscribe only to the three approved images and wrist wrench topic."""
+    """Subscribe only to approved wrist images, calibration, and wrench data."""
 
     def __init__(self, node: Any, config: PerceptionConfig):
         from geometry_msgs.msg import WrenchStamped
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-        from sensor_msgs.msg import Image
+        from sensor_msgs.msg import CameraInfo, Image
 
         self._condition = threading.Condition()
         self._sequences = {camera: 0 for camera in CAMERA_NAMES}
         self._latest_frames: dict[str, dict[str, Any]] = {}
+        self._latest_calibrations: dict[str, CameraCalibration] = {}
         self._force_xyz: tuple[float, float, float] | None = None
         self._force_received_at: float | None = None
         qos = QoSProfile(
@@ -91,15 +195,27 @@ class CameraRig:
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
         )
-        self._subscriptions = [
-            node.create_subscription(
-                Image,
-                config.image_topics[camera],
-                lambda message, name=camera: self._on_image(name, message),
-                qos,
+        self._camera_frames = dict(config.camera_frames)
+        self._subscriptions = []
+        for camera in config.cameras:
+            self._subscriptions.append(
+                node.create_subscription(
+                    Image,
+                    config.image_topics[camera],
+                    lambda message, name=camera: self._on_image(name, message),
+                    qos,
+                )
             )
-            for camera in config.cameras
-        ]
+            self._subscriptions.append(
+                node.create_subscription(
+                    CameraInfo,
+                    config.camera_info_topics[camera],
+                    lambda message, name=camera: self._on_camera_info(
+                        name, message
+                    ),
+                    qos,
+                )
+            )
         self._subscriptions.append(
             node.create_subscription(
                 WrenchStamped, config.wrench_topic, self._on_wrench, qos
@@ -118,6 +234,17 @@ class CameraRig:
         with self._condition:
             self._latest_frames[camera] = frame
             self._sequences[camera] += 1
+            self._condition.notify_all()
+
+    def _on_camera_info(self, camera: str, message: Any) -> None:
+        try:
+            calibration = camera_info_to_calibration(
+                message, self._camera_frames[camera]
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return
+        with self._condition:
+            self._latest_calibrations[camera] = calibration
             self._condition.notify_all()
 
     def _on_wrench(self, message: Any) -> None:
@@ -229,13 +356,18 @@ class CameraRig:
                         for camera in fresh
                         if camera in self._latest_frames
                     }
+                    calibrations = self._calibrations_for_frames(frames)
                     force_xyz = self._force_xyz
                     if (
                         self._force_received_at is None
                         or time.monotonic() - self._force_received_at > 0.5
                     ):
                         force_xyz = None
-                    return CameraSnapshot(frames=frames, force_xyz=force_xyz)
+                    return CameraSnapshot(
+                        frames=frames,
+                        force_xyz=force_xyz,
+                        calibrations=calibrations,
+                    )
                 wait_until = deadline
                 if collection_deadline is not None:
                     wait_until = min(wait_until, collection_deadline)
@@ -247,6 +379,7 @@ class CameraRig:
                             for camera in fresh
                             if camera in self._latest_frames
                         }
+                        calibrations = self._calibrations_for_frames(frames)
                         force_xyz = self._force_xyz
                         if (
                             self._force_received_at is None
@@ -254,7 +387,31 @@ class CameraRig:
                         ):
                             force_xyz = None
                         return CameraSnapshot(
-                            frames=frames, force_xyz=force_xyz
+                            frames=frames,
+                            force_xyz=force_xyz,
+                            calibrations=calibrations,
                         )
                     return None
                 self._condition.wait(timeout=remaining)
+
+    def _calibrations_for_frames(
+        self, frames: dict[str, dict[str, Any]]
+    ) -> dict[str, CameraCalibration]:
+        """Select only calibrations usable with the frames in a snapshot."""
+        calibrations: dict[str, CameraCalibration] = {}
+        for camera, frame in frames.items():
+            calibration = self._latest_calibrations.get(camera)
+            if calibration is None:
+                continue
+            height, width = frame["image"].shape[:2]
+            if (
+                calibration.width == width
+                and calibration.height == height
+                and frames_are_approved_camera_pair(
+                    str(frame.get("frame_id", "")),
+                    calibration.frame_id,
+                    self._camera_frames[camera],
+                )
+            ):
+                calibrations[camera] = calibration
+        return calibrations

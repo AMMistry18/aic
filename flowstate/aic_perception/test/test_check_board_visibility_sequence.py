@@ -112,11 +112,22 @@ def test_component_coverage_is_true_only_on_done():
     source, _ = execute_inner_source()
 
     assert "component_coverage_ready = bool" not in source
-    assert source.count("result.component_coverage_ready = True") == 1
+    # Legacy NIC/SC completion and geometric staged-SFP completion each own
+    # one terminal assignment.
+    assert source.count("result.component_coverage_ready = True") == 2
+    assert source.count("result.done = True") == 2
     assert "if action.kind == ActionKind.DONE:" in source
-    assert source.index("if action.kind == ActionKind.DONE:") < source.index(
-        "result.component_coverage_ready = True"
-    )
+    done_positions = [
+        index
+        for index in range(len(source))
+        if source.startswith("result.done = True", index)
+    ]
+    coverage_positions = [
+        index
+        for index in range(len(source))
+        if source.startswith("result.component_coverage_ready = True", index)
+    ]
+    assert all(done < coverage for done, coverage in zip(done_positions, coverage_positions))
 
 
 def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
@@ -194,7 +205,7 @@ def test_faster_defaults_and_precise_j6_are_declared_by_wrapper():
     assert "params.max_speed_mps or 0.05" in source
     assert "params.max_angular_speed_rps or 0.30" in source
     assert "params.move_timeout_seconds or 6.0" in source
-    assert "params.search_timeout_seconds or 90.0" in source
+    assert "params.search_timeout_seconds or 60.0" in source
     assert "j6_tolerance=%.1fdeg" in source
 
 

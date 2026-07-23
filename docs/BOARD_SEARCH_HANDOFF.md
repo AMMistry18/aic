@@ -1,40 +1,61 @@
 # Board-search handoff
 
-Updated: 2026-07-22
+Updated: 2026-07-23
 
-## Pinned baseline
+## Pinned implementation
 
-The board-search implementation on `main` is pinned byte-for-byte to:
+The geometric staged-SFP implementation is pinned to:
 
 ```text
-b269872eb6f0a4a49edc6334c6985e4b00238a5b
-Record three-camera v4 deployment
+525eb40
+Do not gate SFP Stage 2 on Stage 1 board fullness
 ```
 
-The pin covers the model helper and test, Flowstate package, calibrated masks,
-skill resources and build scripts, deployment manifest, and `inctl` helper.
-Later board-search, simplified-search, and gripper-gate commits are intentionally
-excluded.
+This is the SFP-only follow-up to `b269872`. NIC and SC preserve the legacy
+Stage-1 completion behavior.
 
 ## Behavior contract
 
-The V4 terminal contract uses synchronized evidence from all three wrist
-cameras:
+Stage 1 is the original rough board-acquisition planner. For staged SFP
+modules, both its normal `DONE` and terminal/no-progress results hand their
+final synchronized triplet directly to Stage 2. Stage-1 board fullness is not
+a Stage-2 handoff requirement. Stage 2 then:
 
-- the center camera owns board identity, J1/J6 alignment, top-down geometry,
-  26–36% image area, and the strict two-degree orientation gate;
-- left and right cameras provide mandatory supporting context and gripper
-  separation, but cannot complete the search independently;
-- all three views must have zero protected-envelope mask overlap;
-- two consecutive fresh synchronized snapshots must satisfy the terminal
-  contract; and
-- a failing side view drives a small translation in that camera's image axes,
-  after which center geometry is rechecked.
+- consumes exact CameraInfo intrinsics and image-timestamped TCP/camera TF;
+- derives its geometric seed from the observed board outline and asymmetric
+  purple material landmark, without requiring the Stage-1 report to call the
+  board full;
+- searches board-relative standoff, two board-plane offsets, oblique look
+  direction, and roll using the production three-camera URDF geometry;
+- requires the complete conservative staged-SFP envelope and all six legal
+  module-seat detail probes inside every camera;
+- requires zero overlap and at least 32 pixels of clearance from each
+  conservative gripper mask;
+- allows at most 45 degrees of orientation change, and performs any meaningful
+  wrist reorientation only after retreating beyond a conservative 0.40 m rig
+  sweep radius; and
+- requires two fresh triplets with at most 50 ms timestamp skew, complete
+  per-camera PnP, pairwise/plan pose consistency, and all-camera projection
+  verification before `done=true`.
 
-Motion remains bounded by deadline, force, displacement, and cumulative-travel
-limits. Expected sensor or search failure returns `success=false`; cancellation
-uses the process cancellation path. The Flowstate process must always switch
-back to the default controller after the skill, on both success and failure.
+Expected calibration, geometry, reach, timeout, or verification failure returns
+`success=true, done=false` so the Flowstate process can decide whether to retry.
+Cancellation still uses the process cancellation path. The complete invocation
+is capped at 60 seconds and every motion remains force-guarded.
+
+## Latest deployment
+
+Installed into Flowstate solution
+`9b9e6784-583b-4d03-905e-98735b9aaa40_BRANCH` as:
+
+```text
+ai.tar2.check_board_visibility_skill_v4.0.0.1+03b1f0186844246ba00990c94fd7cf44067e55ce051bf47dbf1a7722e1d1aa02
+```
+
+The immediately preceding run proved that the Stage-2 call occurs, but it
+still returns before motion if its own geometric seed rejects a clipped board
+outline or logo/gripper overlap. That remaining Stage-2 seed behavior is the
+next issue to address; it is distinct from the removed Stage-1 fullness gate.
 
 ## Authoritative source
 
@@ -46,15 +67,10 @@ back to the default controller after the skill, on both success and failure.
 - `deploy/flowstate/aic_model_v38.manifest.textproto`
 - `scripts/flowstate/inctl.sh`
 
-To verify that the pinned files have not drifted:
+To verify that the implementation files have not drifted:
 
 ```bash
-git diff --exit-code b269872 -- \
-  aic_model/aic_model/board_search.py \
-  aic_model/test/test_board_search.py \
-  flowstate \
-  deploy/flowstate \
-  scripts/flowstate/inctl.sh
+git diff --exit-code 525eb40 -- flowstate/aic_perception
 ```
 
 ## Build and install
@@ -99,6 +115,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="aic_model:${PYTHONPATH}" \
   flowstate/aic_perception/test
 ```
 
-Commit `b269872` recorded 144 passing Flowstate tests. Any intentional board
-change must update this handoff and the pinned commit statement in the same
-change.
+Commit `525eb40` passes 216 Flowstate perception tests. Any intentional
+board-search change must update this handoff and its pinned implementation.

@@ -3,8 +3,8 @@
 ## Check Board Visibility
 
 `ai.tar2.check_board_visibility_skill_v4` uses only documented participant data:
-three wrist-camera image topics, measured `/joint_states`, controller state,
-wrist wrench, and
+three wrist-camera image and CameraInfo topics, measured `/joint_states`,
+controller state, wrist wrench, and
 robot-mounted TF. Its TF access is code-restricted to these pairs:
 
 ```text
@@ -15,7 +15,8 @@ base_link <- gripper/tcp
 ```
 
 It does not request task-board, port, module, cable, Gazebo, entity-state, or
-scoring transforms. One invocation performs the camera/motion loop itself. If
+scoring transforms. TF is resolved at each image timestamp. One invocation
+performs the camera/motion loop itself. If
 no camera sees the board, it sends a bounded joint-1 horizontal acquisition
 sweep as a small base-Z Cartesian TCP arc through
 `/aic_controller/pose_commands`. This target rotates TCP position and
@@ -31,15 +32,15 @@ base-frame `+Z` Cartesian clearance steps through
 `/aic_controller/pose_commands`, passing the measured TCP orientation through
 unchanged.
 
-The search is feedback-driven, not random and not a fixed sequence. If neither
+Stage 1 is feedback-driven, not random and not a fixed sequence. If neither
 yaw direction improves three-camera coverage, it restores the best measured
 yaw, takes one upward escape step, and immediately repeats horizontal
 optimization at the new height. It does not stack upward moves before that yaw
-retry. The visible-board policy never pitches the camera, combines rotation
-with translation, or approaches an uncertain board. There is no fixed
-move-count terminal.
+retry. Stage 1 never pitches the camera or approaches an uncertain board.
+There is no fixed move-count terminal.
 
-`done` first requires every configured wrist camera to see at least 12% board
+For NIC/SC routes, legacy `done` first requires every configured wrist camera
+to see at least 12% board
 pixels by default. After that horizontal gate latches, the board silhouette plus
 a dynamic 5%-of-projected-board context envelope must remain inside one usable
 camera frame for two fresh snapshots. It also requires enough board pixels for
@@ -49,12 +50,21 @@ bridge into that band is removed before this contact test. This is a geometric
 coverage guarantee for the plate and protruding component zones; IVM downstream
 remains responsible for semantic NIC/SC pose detection.
 
+For `STAGED_SFP_MODULE`, Stage 1 hands off only with a complete unobstructed
+purple landmark. A calibrated CAD/PnP Stage 2 then searches one deterministic
+board-relative survey pose. The complete conservative staged-SFP envelope and
+individual legal-seat detail probes must be fully inside all three images,
+clear of every conservative gripper mask by at least 32 pixels, in two fresh
+triplets with at most 50 ms skew. Every camera must produce a board pose that
+agrees with the plan and the other cameras before `done=true`.
+
 The internal motion safeguards are:
 
 - quintic minimum-jerk Cartesian setpoints at 20 Hz;
-- at most 0.04 m/s and 0.20 rad/s, with coarse-to-fine 0.05-0.15 rad
+- at most 0.05 m/s and 0.30 rad/s, with direct-joint moves capped at 0.20 rad/s
+  and coarse-to-fine 0.05-0.15 rad
   visible-board yaw actions;
-- a 90 second overall deadline, 0.50 m start-relative TCP envelope, 0.80 m
+- a 60 second overall deadline, 0.50 m start-relative TCP envelope, 0.80 m
   cumulative translation, 1.60 rad start-relative J1 yaw, and 2.20 rad
   cumulative angular travel by default;
 - a finite four-leg joint-1 scan when no camera detects the board, plus
@@ -70,9 +80,13 @@ The internal motion safeguards are:
   than a trial-step limit.
 
 `aic_controller` provides command clamping, smoothing, impedance control, and a
-tracking-error safety reset. It is not the Flowstate world-model motion planner,
-so the survey pose and the full configured search envelope must be free space. The
-skill cannot guarantee collision-free motion from arbitrary starting poses.
+tracking-error safety reset. It is not the Flowstate world-model motion planner
+and this repository exposes no supported IK/collision-query service. Stage 2
+therefore limits orientation change to 45 degrees, retreats with orientation
+held, rotates only beyond a conservative 0.40 m camera-rig sweep radius, then
+translates with final orientation fixed. It still fails closed outside its
+guarded reachable range and cannot guarantee arbitrary-start collision-free
+motion.
 
 Inputs are the skill parameters in `CheckBoardVisibilitySkillParams`; no world
 objects or task poses are passed in. The ROS bridge must expose the three image

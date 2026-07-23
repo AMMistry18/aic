@@ -16,9 +16,9 @@ The repository intentionally combines two explicit baselines:
 - **Insertion:** the latest local SFP V50 plug-relative controller and pose
   model. Learned insertion is disabled. `RLInsert.py` forces script mode and
   does not load an RL actor.
-- **Board search:** the source snapshot from commit
-  `b269872eb6f0a4a49edc6334c6985e4b00238a5b` (`Record three-camera v4
-  deployment`). Later board-search experiments are not part of this baseline.
+- **Board search:** geometric staged-SFP Stage 2 from commit `b65a7a0`
+  (`Add geometric SFP survey stage`). It preserves legacy NIC/SC completion
+  while requiring calibrated, synchronized all-camera SFP visibility.
 
 Do not infer the active implementation from an old feature branch, deployment
 note, W&B run, or versioned handoff. Start from `main` and these three files.
@@ -54,4 +54,4 @@ git status --short --branch
 
 Before pushing insertion or board-search changes, run the focused commands in
 the corresponding handoff. If the board-search implementation changes, update
-its pin and explain the departure from `b269872` in the same commit.
+its pin and validation contract in the same change.

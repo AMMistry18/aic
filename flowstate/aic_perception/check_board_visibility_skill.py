@@ -187,7 +187,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # then consumed the old 90-second budget on 8-second settling cycles.
         # Workspace, travel, force, and per-move limits remain independently
         # bounded, so extend only the overall observation/motion budget.
-        search_timeout_sec = float(params.search_timeout_seconds or 90.0)
+        # Stage 2 is designed around two settled post-motion triplets.  Keep
+        # the complete skill bounded to the requested 60-second headroom;
+        # accepting an old 90-second default made a Flowstate timeout look
+        # like an inexplicable controller hang.
+        search_timeout_sec = float(params.search_timeout_seconds or 60.0)
         max_displacement_m = float(params.max_displacement_m or 0.50)
         angular_step_rad = float(params.angular_step_rad or 0.10)
         max_angular_displacement_rad = float(
@@ -205,6 +209,13 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         settle_orientation_tolerance_rad = float(
             params.settle_orientation_tolerance_rad or 0.05
         )
+        # `survey_target` was present in the deployed v4 descriptor before it
+        # was accidentally dropped from this source branch.  Use numeric enum
+        # values here so an older generated Python stub remains safe while the
+        # rebuilt descriptor is rolling out: 0/1 are loose staged SFP, and
+        # 2/3 deliberately retain the legacy NIC/SC completion contract.
+        survey_target = int(getattr(params, "survey_target", 0))
+        staged_sfp_target = self._uses_staged_sfp_stage2(survey_target)
         self._validate_parameters(
             min_contrast=min_contrast,
             margin_px=margin_px,
@@ -278,6 +289,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             planner.roll_align_threshold_deg,
         )
         started_at = time.monotonic()
+        # Keep Stage 1's original deadline and planner behavior unchanged.
+        # Stage 2 is invoked only after this planner reaches its own terminal
+        # condition; it does not impose an acquisition budget or reserve.
         deadline = started_at + search_timeout_sec
         baseline_force_xyz = None
         initial_pose = None
@@ -294,7 +308,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         level_anchor_joint6 = None
         level_vertical_polarity = 1.0
         pending_level_vertical_sample = None
-
         def motion_cancelled() -> bool:
             return bool(cancelled() or time.monotonic() >= deadline)
 
@@ -617,19 +630,82 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             result.last_action = action.kind.value
 
             if action.kind == ActionKind.DONE:
-                result.done = True
-                result.success = True
-                result.component_coverage_ready = True
-                result.steer_camera = "center_camera"
-                result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
-                result.message = (
-                    "all three cameras confirmed synchronized board context "
-                    "and gripper clearance while the center retained its "
-                    "aligned top-down IVM view in two fresh frames after "
-                    f"{result.moves_executed} adaptive moves"
+                if not staged_sfp_target:
+                    # This shared skill is also called before the NIC and SC
+                    # branches.  Do not send those target modes through the
+                    # loose-SFP CAD/PnP survey gate; it would change their
+                    # downstream semantics and break the active process.
+                    result.done = True
+                    result.success = True
+                    result.component_coverage_ready = True
+                    result.steer_camera = "center_camera"
+                    result.elapsed_seconds = max(
+                        0.0, time.monotonic() - started_at
+                    )
+                    result.message = (
+                        "legacy synchronized board-visibility survey verified "
+                        f"for target mode {survey_target} after "
+                        f"{result.moves_executed} adaptive moves"
+                    )
+                    return
+                # For SFP, leave the original Stage-1 planner untouched and
+                # run the geometric survey only after it has independently
+                # completed its usual three-camera terminal condition.
+                self._run_sfp_geometric_stage2(
+                    snapshot=snapshot,
+                    reports=reports,
+                    result=result,
+                    timeout_sec=timeout_sec,
+                    deadline=deadline,
+                    started_at=started_at,
+                    max_speed_mps=max_speed_mps,
+                    max_angular_speed_rps=max_angular_speed_rps,
+                    publish_hz=publish_hz,
+                    settle_tolerance_m=settle_tolerance_m,
+                    settle_orientation_tolerance_rad=(
+                        settle_orientation_tolerance_rad
+                    ),
+                    move_timeout_sec=move_timeout_sec,
+                    baseline_force_xyz=baseline_force_xyz,
+                    max_force_n=max_force_n,
+                    force_delta_n=force_delta_n,
+                    cancelled=cancelled,
+                    motion_cancelled=motion_cancelled,
                 )
                 return
             if action.terminal:
+                if staged_sfp_target:
+                    # Preserve the legacy planner's terminal decision and all
+                    # of its preceding motion exactly as-is.  Its SFP result
+                    # is the handoff point for Stage 2, not a request for an
+                    # additional Stage-1 acquisition loop.
+                    logging.info(
+                        "legacy Stage-1 planner ended (%s); handing its final "
+                        "triplet directly to Stage 2",
+                        action.reason,
+                    )
+                    self._run_sfp_geometric_stage2(
+                        snapshot=snapshot,
+                        reports=reports,
+                        result=result,
+                        timeout_sec=timeout_sec,
+                        deadline=deadline,
+                        started_at=started_at,
+                        max_speed_mps=max_speed_mps,
+                        max_angular_speed_rps=max_angular_speed_rps,
+                        publish_hz=publish_hz,
+                        settle_tolerance_m=settle_tolerance_m,
+                        settle_orientation_tolerance_rad=(
+                            settle_orientation_tolerance_rad
+                        ),
+                        move_timeout_sec=move_timeout_sec,
+                        baseline_force_xyz=baseline_force_xyz,
+                        max_force_n=max_force_n,
+                        force_delta_n=force_delta_n,
+                        cancelled=cancelled,
+                        motion_cancelled=motion_cancelled,
+                    )
+                    return
                 result.success = False
                 result.message = action.reason
                 return
@@ -2232,6 +2308,1391 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
             iteration += 1
 
+    def _stage2_has_complete_landmark(self, snapshot, reports) -> bool:
+        """Whether any calibrated camera has a complete Stage-2 landmark."""
+        for camera_name in ("center_camera", "left_camera", "right_camera"):
+            if (
+                camera_name not in snapshot.frames
+                or camera_name not in snapshot.calibrations
+                or camera_name not in reports
+            ):
+                continue
+            image = snapshot.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(
+                camera_name, image.shape
+            )
+            observation, _ = self._stage2_landmarks(
+                image, reports[camera_name], ignored
+            )
+            if observation is not None:
+                return True
+        return False
+
+    def _move_to_acquire_complete_logo(
+        self,
+        *,
+        snapshot,
+        reports,
+        result,
+        timeout_sec: float,
+        step_m: float,
+        max_speed_mps: float,
+        max_angular_speed_rps: float,
+        publish_hz: float,
+        settle_tolerance_m: float,
+        settle_orientation_tolerance_rad: float,
+        move_timeout_sec: float,
+        baseline_force_xyz,
+        max_force_n: float,
+        force_delta_n: float,
+        cancelled,
+        motion_cancelled,
+    ) -> bool:
+        """Make one measured board-fit or camera-plane logo correction.
+
+        When the plate still fills or clips the image, a board-normal retreat
+        is more informative than sliding the logo around the same cropped
+        view.  Once scale is usable, use the logo direction for a bounded
+        camera-plane correction.  Both choices are measured from the fresh
+        frame; neither is a blind sweep.
+        """
+        import cv2
+
+        from aic_perception.board_visibility import detect_purple_logo
+
+        selected = None
+        for camera_name in ("center_camera", "left_camera", "right_camera"):
+            if camera_name not in snapshot.frames or camera_name not in reports:
+                continue
+            detected = detect_purple_logo(
+                snapshot.frames[camera_name]["image"]
+            )
+            if detected is not None:
+                selected = (camera_name, detected)
+                break
+        if selected is None:
+            self._stage2_not_done(
+                result,
+                "purple pixels are unavailable, so a logo-acquisition move "
+                "would be blind",
+            )
+            return False
+
+        camera_name, (logo_mask, logo_centroid, _, _) = selected
+        image = snapshot.frames[camera_name]["image"]
+        height, width = image.shape[:2]
+        ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
+        uncertainty = cv2.dilate(
+            ignored.astype(np.uint8), np.ones((9, 9), np.uint8)
+        ).astype(bool)
+        center = np.array((0.5 * (width - 1), 0.5 * (height - 1)), dtype=float)
+        desired_image = center - np.asarray(logo_centroid, dtype=float)
+        desired_image /= np.array(
+            (max(1.0, 0.5 * width), max(1.0, 0.5 * height)), dtype=float
+        )
+        if np.any(logo_mask.astype(bool) & uncertainty):
+            logo_y, logo_x = np.nonzero(logo_mask)
+            mask_y, mask_x = np.nonzero(uncertainty)
+            if logo_x.size and mask_x.size:
+                escape = np.array(
+                    (
+                        float(logo_x.mean() - mask_x.mean()) / max(1.0, width),
+                        float(logo_y.mean() - mask_y.mean()) / max(1.0, height),
+                    ),
+                    dtype=float,
+                )
+                if float(np.linalg.norm(escape)) > 1e-6:
+                    desired_image = escape
+        source_report = reports[camera_name]
+        prefer_backoff = bool(
+            source_report.area_frac >= 0.32
+            or "context_clipped" in source_report.failure_reasons
+        )
+        desired_norm = float(np.linalg.norm(desired_image))
+        if desired_norm < 1e-4 and not prefer_backoff:
+            self._stage2_not_done(
+                result,
+                f"{camera_name} logo is visible but its complete outline "
+                "cannot be recovered; refusing an unmeasured direction",
+            )
+            return False
+        if desired_norm >= 1e-4:
+            desired_image /= desired_norm
+        try:
+            position, orientation = self._gripper_pose(timeout_sec)
+            image_right, image_down, camera_back_away = self._camera_axes_in_base(
+                camera_name, timeout_sec
+            )
+        except Exception as error:
+            self._stage2_not_done(
+                result, f"logo-acquisition camera/TCP TF unavailable: {error}"
+            )
+            return False
+        if prefer_backoff:
+            # The camera back-away axis is derived from the current optical
+            # TF.  This is the same physical zoom-out direction as the
+            # legacy BACKOFF action, but it remains available after that
+            # planner's two-backoff centroid limit.
+            correction_m = min(0.045, max(0.020, 0.9 * step_m))
+            delta = correction_m * np.asarray(camera_back_away, dtype=float)
+            acquisition_mode = "board_fit_backoff"
+        else:
+            # An object moves opposite camera translation in the image.
+            correction_m = min(0.025, max(0.010, 0.5 * step_m))
+            delta = -correction_m * (
+                float(desired_image[0]) * np.asarray(image_right, dtype=float)
+                + float(desired_image[1]) * np.asarray(image_down, dtype=float)
+            )
+            acquisition_mode = "logo_plane_shift"
+        target_position_array = np.asarray(position, dtype=float) + delta
+        target_position = tuple(float(value) for value in target_position_array)
+        fresh_force = snapshot.force_xyz
+        if fresh_force is None:
+            fresh_force = self.camera_rig.wait_for_force_xyz(
+                timeout_sec=timeout_sec, max_age_sec=0.5
+            )
+        if fresh_force is None:
+            self._stage2_not_done(
+                result,
+                "no fresh wrist-force sample for bounded logo acquisition",
+            )
+            return False
+        if baseline_force_xyz is None:
+            baseline_force_xyz = fresh_force
+        if cancelled():
+            raise skill_interface.SkillCancelledError(
+                "board search cancelled before logo acquisition"
+            )
+
+        result.last_action = "acquire_complete_purple_logo"
+        result.target_valid = True
+        result.target_frame = self.config.base_frame
+        result.target.x, result.target.y, result.target.z = target_position
+        result.dx, result.dy, result.dz = (
+            float(delta[0]),
+            float(delta[1]),
+            float(delta[2]),
+        )
+        logging.info(
+            "bounded Stage-1 acquisition mode=%s camera=%s "
+            "desired_image=(%+.3f,%+.3f) delta=(%+.4f,%+.4f,%+.4f)m",
+            acquisition_mode,
+            camera_name,
+            desired_image[0],
+            desired_image[1],
+            delta[0],
+            delta[1],
+            delta[2],
+        )
+        outcome = self.robot_motion.move_smooth(
+            target_position,
+            target_orientation=orientation,
+            max_speed_mps=max_speed_mps,
+            max_angular_speed_radps=max_angular_speed_rps,
+            publish_hz=publish_hz,
+            settle_tolerance_m=settle_tolerance_m,
+            settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
+            timeout_sec=move_timeout_sec,
+            baseline_force_xyz=baseline_force_xyz,
+            max_force_n=max_force_n,
+            force_delta_n=force_delta_n,
+            cancelled=motion_cancelled,
+        )
+        if outcome.cancelled:
+            if cancelled():
+                raise skill_interface.SkillCancelledError(outcome.message)
+            self._stage2_not_done(
+                result, "search deadline reached during logo acquisition"
+            )
+            return False
+        if not outcome.success:
+            result.force_abort = outcome.force_abort
+            self._stage2_not_done(
+                result, f"bounded logo-acquisition move failed: {outcome.message}"
+            )
+            return False
+        result.moves_executed += 1
+        result.travel_m += float(outcome.distance_m)
+        result.angular_travel_rad += float(outcome.angular_distance_rad)
+        result.moved = result.moved or (
+            outcome.distance_m > 0.0 or outcome.angular_distance_rad > 0.0
+        )
+        return True
+
+    @staticmethod
+    def _uses_staged_sfp_stage2(survey_target: int) -> bool:
+        """Whether this invocation owns the loose staged-SFP survey gate."""
+        # UNSPECIFIED is retained as the historical pre-enum SFP default.
+        return int(survey_target) in (0, 1)
+
+    @staticmethod
+    def _stage2_not_done(result, reason: str) -> None:
+        """Return a geometric-stage rejection without aborting the flowchart."""
+        result.success = True
+        result.done = False
+        result.component_coverage_ready = False
+        result.target_valid = False
+        result.last_action = "sfp_geometric_stage2_rejected"
+        result.message = f"SFP geometric Stage 2 not ready: {reason}"
+
+    @staticmethod
+    def _stage2_landmarks(image, report, ignored_pixels):
+        """Extract a Stage-2 geometric seed from the handoff image.
+
+        This deliberately does *not* reuse ``report.full`` as a handoff
+        condition.  Stage 1 may end with a cropped board, and SFP Stage 2
+        must still run from that final triplet.  The only image-side seed
+        requirements here are the measurements Stage 2 itself needs: a real,
+        unobstructed purple logo and a recoverable board outline.  Motion and
+        final all-camera visibility remain independently guarded below.
+        """
+        import cv2
+
+        from aic_perception.board_visibility import detect_purple_logo
+
+        logo = detect_purple_logo(image)
+        if logo is None:
+            return None, "complete purple logo was not detected"
+        logo_mask, logo_centroid, logo_area, logo_bbox = logo
+        height, width = image.shape[:2]
+        x0, y0, x1, y1 = logo_bbox
+        logo_margin = min(x0, y0, width - 1 - x1, height - 1 - y1)
+        if logo_margin < 8:
+            return None, "purple logo touches the physical image boundary"
+        ignored = np.asarray(ignored_pixels, dtype=bool)
+        if ignored.shape != (height, width):
+            return None, "gripper mask dimensions do not match the image"
+        uncertainty = cv2.dilate(
+            ignored.astype(np.uint8), np.ones((9, 9), np.uint8)
+        ).astype(bool)
+        if np.any(logo_mask.astype(bool) & uncertainty):
+            return None, "purple logo intersects the gripper uncertainty mask"
+        logo_width = x1 - x0 + 1
+        logo_height = y1 - y0 + 1
+        logo_box_area = float(logo_width * logo_height)
+        logo_fill = float(logo_area) / max(1.0, logo_box_area)
+        logo_aspect = float(logo_width) / max(1.0, float(logo_height))
+        if (
+            min(logo_width, logo_height) < 12
+            or not 0.05 <= logo_fill <= 0.85
+            or not 0.35 <= logo_aspect <= 2.8
+        ):
+            return None, "purple logo shape is clipped or too small for pose"
+
+        source = np.asarray(image)
+        if source.ndim == 3 and source.shape[2] == 4:
+            gray = cv2.cvtColor(source, cv2.COLOR_BGRA2GRAY)
+        elif source.ndim == 3:
+            gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = source
+        _, dark = cv2.threshold(
+            gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        )
+        dark[ignored] = 0
+        dark[logo_mask.astype(bool)] = 255
+        # Remove thin cable/card protrusions while preserving the plate core.
+        kernel_size = max(5, int(round(0.012 * min(height, width))) | 1)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (kernel_size, kernel_size)
+        )
+        plate = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
+        plate = cv2.morphologyEx(plate, cv2.MORPH_OPEN, kernel)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(plate, 8)
+        if count <= 1:
+            return None, "dark board component could not be recovered"
+        logo_x = int(round(logo_centroid[0]))
+        logo_y = int(round(logo_centroid[1]))
+        label = int(labels[logo_y, logo_x])
+        if label == 0:
+            # The logo can sit on a bright inlay. Choose the plate component
+            # with the greatest overlap with the Stage-1 board bounding box.
+            if report.bbox is None:
+                return None, "logo is not connected to a board component"
+            bx0, by0, bx1, by1 = report.bbox
+            overlap_scores = []
+            for index in range(1, count):
+                sx, sy, sw, sh, _ = stats[index]
+                overlap = max(0, min(sx + sw, bx1 + 1) - max(sx, bx0))
+                overlap *= max(0, min(sy + sh, by1 + 1) - max(sy, by0))
+                overlap_scores.append((overlap, index))
+            label = max(overlap_scores)[1]
+        component = (labels == label).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return None, "board outline contour is unavailable"
+        contour = max(contours, key=cv2.contourArea)
+        hull = cv2.convexHull(contour)
+        perimeter = cv2.arcLength(hull, True)
+        quad = None
+        for epsilon_frac in (0.01, 0.02, 0.03, 0.04, 0.06, 0.08):
+            approximation = cv2.approxPolyDP(
+                hull, epsilon_frac * perimeter, True
+            )
+            if len(approximation) == 4 and cv2.isContourConvex(approximation):
+                quad = approximation.reshape(4, 2).astype(float)
+                break
+        if quad is None:
+            quad = cv2.boxPoints(cv2.minAreaRect(hull)).astype(float)
+        if abs(float(cv2.contourArea(quad.astype(np.float32)))) < 0.08 * (
+            height * width
+        ):
+            return None, "board outline is too small for stable planar PnP"
+        quad_margin = min(
+            float(quad[:, 0].min()),
+            float(quad[:, 1].min()),
+            float(width - 1 - quad[:, 0].max()),
+            float(height - 1 - quad[:, 1].max()),
+        )
+        if quad_margin < 3.0:
+            return None, "board outline touches the physical image boundary"
+        return (quad, np.asarray(logo_centroid, dtype=float)), "ok"
+
+    def _base_transform_at(
+        self, child_frame: str, stamp_ns: int, timeout_sec: float
+    ):
+        """Return ``base_link_T_child`` at an image timestamp, never latest.
+
+        Camera projection is only meaningful when the base-to-camera and
+        base-to-TCP transforms describe the same captured image.  Static TFs
+        are allowed to report timestamp zero.  Dynamic transforms must either
+        be returned at the requested time or within 50 ms of it.
+        """
+        from aic_perception.board_stage2 import Transform
+        from rclpy.duration import Duration
+        from rclpy.time import Time
+
+        permitted = set(self.config.camera_frames.values())
+        permitted.add(self.config.gripper_frame)
+        if child_frame not in permitted:
+            raise ValueError(f"TF frame {child_frame!r} is outside the allowlist")
+        if not isinstance(stamp_ns, (int, np.integer)) or int(stamp_ns) <= 0:
+            raise ValueError("image timestamp is invalid for TF lookup")
+        requested = Time(nanoseconds=int(stamp_ns))
+        stamped = self.tf_buffer.lookup_transform(
+            self.config.base_frame,
+            child_frame,
+            requested,
+            timeout=Duration(seconds=min(timeout_sec, 3.0)),
+        )
+        header_stamp = stamped.header.stamp
+        returned_ns = int(header_stamp.sec) * 1_000_000_000 + int(
+            header_stamp.nanosec
+        )
+        # Static transforms conventionally have a zero header stamp.  For a
+        # dynamic edge, do not silently accept a stale transform.
+        if returned_ns and abs(returned_ns - int(stamp_ns)) > 50_000_000:
+            raise ValueError(
+                f"TF for {child_frame} is {abs(returned_ns - int(stamp_ns)) / 1e6:.1f}ms "
+                "away from the image timestamp"
+            )
+        translation = stamped.transform.translation
+        rotation = stamped.transform.rotation
+        values = np.asarray(
+            (
+                translation.x,
+                translation.y,
+                translation.z,
+                rotation.x,
+                rotation.y,
+                rotation.z,
+                rotation.w,
+            ),
+            dtype=float,
+        )
+        if not np.all(np.isfinite(values)):
+            raise ValueError(f"TF for {child_frame} contains non-finite values")
+        if float(np.linalg.norm(values[3:])) < 0.5:
+            raise ValueError(f"TF quaternion for {child_frame} is uninitialized")
+        return Transform.from_quaternion(
+            float(rotation.x),
+            float(rotation.y),
+            float(rotation.z),
+            float(rotation.w),
+            (float(translation.x), float(translation.y), float(translation.z)),
+        )
+
+    def _run_sfp_geometric_stage2(
+        self,
+        *,
+        snapshot,
+        reports,
+        result,
+        timeout_sec: float,
+        deadline: float,
+        started_at: float,
+        max_speed_mps: float,
+        max_angular_speed_rps: float,
+        publish_hz: float,
+        settle_tolerance_m: float,
+        settle_orientation_tolerance_rad: float,
+        move_timeout_sec: float,
+        baseline_force_xyz,
+        max_force_n: float,
+        force_delta_n: float,
+        cancelled,
+        motion_cancelled,
+    ) -> None:
+        """Estimate, execute, and verify one board-relative loose-SFP pose."""
+        from aic_perception.board_stage2 import (
+            CameraModel,
+            GripperExclusion,
+            board_pose_set_is_consistent,
+            estimate_board_pose,
+            quaternion_from_matrix,
+            sampled_cartesian_path_is_safe,
+            search_survey_pose,
+            verify_survey_view,
+        )
+
+        expected = tuple(sorted(self.config.camera_frames))
+        if snapshot.force_xyz is None:
+            force_wait_sec = min(
+                timeout_sec, max(0.0, deadline - time.monotonic())
+            )
+            fresh_force = self.camera_rig.wait_for_force_xyz(
+                timeout_sec=force_wait_sec,
+                max_age_sec=0.5,
+            )
+            if fresh_force is None:
+                self._stage2_not_done(
+                    result,
+                    "no fresh wrist-force sample after waiting; refusing the "
+                    "geometric SFP survey move",
+                )
+                return
+            if baseline_force_xyz is None:
+                baseline_force_xyz = fresh_force
+        missing_frames = sorted(set(expected) - set(snapshot.frames))
+        missing_calibration = sorted(set(expected) - set(snapshot.calibrations))
+        if missing_frames:
+            self._stage2_not_done(
+                result, f"fresh Stage-1 images missing {missing_frames}"
+            )
+            return
+        if missing_calibration:
+            self._stage2_not_done(
+                result, f"approved CameraInfo missing {missing_calibration}"
+            )
+            return
+
+        camera_models = {}
+        for camera_name in expected:
+            calibration = snapshot.calibrations[camera_name]
+            frame = snapshot.frames[camera_name]
+            from aic_perception.camera_rig import (
+                frames_are_approved_camera_pair,
+            )
+
+            if not frames_are_approved_camera_pair(
+                str(frame.get("frame_id", "")),
+                calibration.frame_id,
+                self.config.camera_frames[camera_name],
+            ):
+                self._stage2_not_done(
+                    result,
+                    f"{camera_name} image/CameraInfo frame is outside the "
+                    "sensor-link/optical allowlist",
+                )
+                return
+            if (
+                calibration.height,
+                calibration.width,
+            ) != frame["image"].shape[:2]:
+                self._stage2_not_done(
+                    result, f"{camera_name} CameraInfo/image dimensions differ"
+                )
+                return
+            try:
+                camera_models[camera_name] = CameraModel(
+                    name=camera_name,
+                    K=calibration.camera_matrix,
+                    width=calibration.width,
+                    height=calibration.height,
+                    distortion=np.asarray(
+                        calibration.distortion, dtype=float
+                    ),
+                    distortion_model=calibration.distortion_model,
+                )
+            except ValueError as error:
+                self._stage2_not_done(
+                    result, f"{camera_name} calibration rejected: {error}"
+                )
+                return
+
+        # Prefer the center, but a complete logo in either calibrated side
+        # camera is sufficient. This is a *seed* for Stage 2, not a Stage-1
+        # handoff criterion: a somewhat noisy outline may still be adequate
+        # to plan a bounded move whose path, IK, force, and final all-camera
+        # visibility verification remain independently fail-closed.
+        observations = {}
+        for camera_name in ("center_camera", "left_camera", "right_camera"):
+            if camera_name not in snapshot.frames:
+                continue
+            image = snapshot.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(
+                camera_name, image.shape
+            )
+            observations[camera_name] = self._stage2_landmarks(
+                image, reports[camera_name], ignored
+            )
+        complete_cameras = [
+            camera_name
+            for camera_name in (
+                "center_camera",
+                "left_camera",
+                "right_camera",
+            )
+            if camera_name in observations
+            and observations[camera_name][0] is not None
+        ]
+        if not complete_cameras:
+            reasons = "; ".join(
+                f"{name}: {reason}"
+                for name, (_, reason) in observations.items()
+            )
+            self._stage2_not_done(
+                result,
+                "no calibrated camera contains a complete unobstructed purple "
+                f"logo and board outline ({reasons})",
+            )
+            return
+
+        try:
+            # All transforms are evaluated at the actual corresponding image
+            # time.  Images can legally name sensor_link; their calibrated
+            # intrinsics are nevertheless optical, so only the fixed optical
+            # child is projected through and no message-provided TF frame is
+            # ever queried.
+            base_T_tcp_by_camera = {
+                name: self._base_transform_at(
+                    self.config.gripper_frame,
+                    int(snapshot.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+            base_T_cam = {
+                name: self._base_transform_at(
+                    self.config.camera_frames[name],
+                    int(snapshot.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+        except Exception as error:
+            self._stage2_not_done(
+                result,
+                "timestamp-bound permitted camera/TCP TF unavailable: "
+                f"{error}",
+            )
+            return
+        tcp_T_cam = {
+            name: base_T_tcp_by_camera[name].inverse().compose(transform)
+            for name, transform in base_T_cam.items()
+        }
+
+        pose_estimates = []
+        pose_failures = {}
+        for camera_name in complete_cameras:
+            (board_quad, logo_centroid), _ = observations[camera_name]
+            estimate, pose_reason = estimate_board_pose(
+                board_quad,
+                logo_centroid,
+                camera_models[camera_name],
+                base_T_cam[camera_name],
+                # The default 6 px threshold is appropriate for accepting a
+                # final measured board pose.  It was incorrectly used as a
+                # pre-motion handoff gate, causing Stage 2 to return without
+                # trying a safe survey pose in otherwise usable scenes.  Use
+                # this estimate only as a bounded motion seed; completion
+                # still uses fresh, strict all-camera verification below.
+                max_reprojection_error_px=20.0,
+                max_logo_error_px=120.0,
+            )
+            if estimate is None:
+                pose_failures[camera_name] = pose_reason
+            else:
+                pose_estimates.append(estimate)
+        if not pose_estimates:
+            self._stage2_not_done(
+                result,
+                "board pose confidence rejected in every complete-logo camera: "
+                + "; ".join(
+                    f"{name}={reason}"
+                    for name, reason in pose_failures.items()
+                ),
+            )
+            return
+        # Use all accepted cameras as a consistency check. A rejected center
+        # hypothesis does not hide a valid side-camera estimate, but two
+        # mutually contradictory accepted estimates may not be guessed
+        # between. Select the largest consistent cluster and prefer center
+        # within it.
+        clusters = []
+        for candidate_estimate in pose_estimates:
+            cluster = []
+            for other in pose_estimates:
+                translation_error = float(
+                    np.linalg.norm(
+                        candidate_estimate.base_T_board.translation
+                        - other.base_T_board.translation
+                    )
+                )
+                rotation_delta = (
+                    candidate_estimate.base_T_board.rotation.T
+                    @ other.base_T_board.rotation
+                )
+                angle_error = math.acos(
+                    float(
+                        np.clip(
+                            0.5 * (np.trace(rotation_delta) - 1.0),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
+                if translation_error <= 0.05 and angle_error <= math.radians(8):
+                    cluster.append(other)
+            clusters.append(cluster)
+        consistent = max(
+            clusters,
+            key=lambda cluster: (
+                len(cluster),
+                any(item.camera_name == "center_camera" for item in cluster),
+            ),
+        )
+        if len(pose_estimates) > 1 and len(consistent) < 2:
+            self._stage2_not_done(
+                result,
+                "accepted camera pose estimates disagree by more than "
+                "5 cm / 8 degrees",
+            )
+            return
+        board_pose = next(
+            (
+                item
+                for item in consistent
+                if item.camera_name == "center_camera"
+            ),
+            min(
+                consistent,
+                key=lambda item: (
+                    item.reprojection_error_px,
+                    item.logo_error_px,
+                ),
+            ),
+        )
+        source_camera = board_pose.camera_name
+        base_T_tcp = base_T_tcp_by_camera[source_camera]
+
+        grippers = {}
+        for camera_name in expected:
+            shape = snapshot.frames[camera_name]["image"].shape
+            gripper_mask = self.gripper_masks.ignored_pixels(
+                camera_name, shape
+            )
+            grippers[camera_name] = GripperExclusion(
+                mask=gripper_mask, margin_px=32.0
+            )
+        candidate, search_reason = search_survey_pose(
+            board_pose,
+            tcp_T_cam,
+            camera_models,
+            grippers,
+            reference_camera="center_camera",
+            current_base_T_tcp=base_T_tcp,
+            # Search under exactly the execution workspace guard.  Previously
+            # the geometry module optimised candidates inside a 1.8 m sphere,
+            # then this integration rejected its preferred choice at 1.2 m
+            # without considering the other all-camera-feasible candidates.
+            max_reach_m=1.20,
+            min_height_m=0.02,
+        )
+        if candidate is None:
+            self._stage2_not_done(
+                result, f"no safe all-camera SFP survey pose: {search_reason}"
+            )
+            return
+        target = candidate.base_T_tcp
+        displacement = target.translation - base_T_tcp.translation
+        distance_m = float(np.linalg.norm(displacement))
+        if distance_m > 0.65:
+            self._stage2_not_done(
+                result,
+                f"computed survey pose is {distance_m:.3f}m away; refusing "
+                "an unsafe one-shot Cartesian move",
+            )
+            return
+        target_rotation_delta = base_T_tcp.rotation.T @ target.rotation
+        orientation_distance = math.acos(
+            float(
+                np.clip(
+                    0.5 * (np.trace(target_rotation_delta) - 1.0),
+                    -1.0,
+                    1.0,
+                )
+            )
+        )
+        if (
+            not math.isfinite(orientation_distance)
+            or orientation_distance > math.radians(45.0) + 1e-6
+        ):
+            self._stage2_not_done(
+                result,
+                "computed survey orientation is "
+                f"{orientation_distance:.2f}rad from the acquired pose; "
+                "refusing an unsafe one-shot rotation",
+            )
+            return
+        if (
+            float(target.translation[2]) < 0.02
+            or float(np.linalg.norm(target.translation)) > 1.20
+        ):
+            self._stage2_not_done(
+                result, "computed survey TCP lies outside the workspace guard"
+            )
+            return
+        board_normal = np.asarray(
+            board_pose.base_T_board.rotation[:, 2], dtype=float
+        )
+        board_origin = np.asarray(
+            board_pose.base_T_board.translation, dtype=float
+        )
+        current_clearance = float(
+            np.dot(base_T_tcp.translation - board_origin, board_normal)
+        )
+        target_clearance = float(
+            np.dot(target.translation - board_origin, board_normal)
+        )
+        lateral_delta = displacement - np.dot(
+            displacement, board_normal
+        ) * board_normal
+
+        def path_is_safe(
+            start: np.ndarray,
+            end: np.ndarray,
+            *,
+            minimum_clearance: float,
+            allow_outward_retreat: bool = False,
+        ) -> bool:
+            return sampled_cartesian_path_is_safe(
+                start,
+                end,
+                board_origin=board_origin,
+                board_normal=board_normal,
+                minimum_clearance=minimum_clearance,
+                allow_outward_retreat=allow_outward_retreat,
+            )
+
+        if target_clearance < 0.12:
+            self._stage2_not_done(
+                result,
+                "computed SFP survey pose is too close to the board plane",
+            )
+            return
+        needs_orientation_waypoint = (
+            orientation_distance > settle_orientation_tolerance_rad
+        )
+        rotation_clearance_m = 0.40
+        needs_retreat = current_clearance < 0.12
+        # A lateral leg near the board is never sent directly, even when the
+        # endpoints are individually legal.  First establish a 16-cm normal
+        # standoff, then transit laterally.  This is the one and only retreat
+        # Stage 2 may insert.
+        needs_retreat = needs_retreat or (
+            float(np.linalg.norm(lateral_delta)) > 0.08
+            and min(current_clearance, target_clearance) < 0.16
+        )
+        # The repository exposes no supported IK/collision-query service.
+        # Never sweep the ~35 cm wrist-camera rig beside the board.  If a
+        # meaningful orientation change is required, retreat with the acquired
+        # orientation held, rotate in place beyond the rig's conservative
+        # bounding radius, then translate with the final orientation fixed.
+        needs_retreat = needs_retreat or (
+            needs_orientation_waypoint
+            and current_clearance < rotation_clearance_m
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 1.0:
+            self._stage2_not_done(
+                result, "search deadline left no time for the geometric move"
+            )
+            return
+        if cancelled():
+            raise skill_interface.SkillCancelledError(
+                "board search cancelled before geometric SFP motion"
+            )
+
+        if needs_retreat:
+            required_retreat_clearance = (
+                rotation_clearance_m
+                if needs_orientation_waypoint
+                else 0.16
+            )
+            retreat_distance = max(
+                0.0, required_retreat_clearance - current_clearance
+            )
+            retreat_position_array = (
+                base_T_tcp.translation + retreat_distance * board_normal
+            )
+            retreat_position = tuple(
+                float(value) for value in retreat_position_array
+            )
+            if not path_is_safe(
+                base_T_tcp.translation,
+                retreat_position_array,
+                minimum_clearance=0.12,
+                allow_outward_retreat=True,
+            ) or not path_is_safe(
+                retreat_position_array,
+                target.translation,
+                minimum_clearance=0.12,
+            ):
+                self._stage2_not_done(
+                    result,
+                    "retreat/direct geometric SFP path violates sampled "
+                    "workspace or board-normal clearance",
+                )
+                return
+            logging.info(
+                "SFP Stage 2 inserting board-normal retreat %.3fm before "
+                "%.3fm lateral transit (clearance %.3fm)",
+                retreat_distance,
+                float(np.linalg.norm(lateral_delta)),
+                current_clearance,
+            )
+            retreat = self.robot_motion.move_smooth(
+                retreat_position,
+                target_orientation=quaternion_from_matrix(base_T_tcp.rotation),
+                max_speed_mps=max_speed_mps,
+                max_angular_speed_radps=max_angular_speed_rps,
+                publish_hz=publish_hz,
+                settle_tolerance_m=settle_tolerance_m,
+                settle_angular_tolerance_rad=(
+                    settle_orientation_tolerance_rad
+                ),
+                # Stage 2 owns the remaining invocation budget.  Do not
+                # reject a valid long Cartesian profile merely because the
+                # legacy per-move timeout was shorter than that budget.
+                timeout_sec=remaining,
+                baseline_force_xyz=baseline_force_xyz,
+                max_force_n=max_force_n,
+                force_delta_n=force_delta_n,
+                cancelled=motion_cancelled,
+            )
+            if retreat.cancelled:
+                if cancelled():
+                    raise skill_interface.SkillCancelledError(retreat.message)
+                self._stage2_not_done(
+                    result,
+                    "search deadline reached during board-normal retreat",
+                )
+                return
+            if not retreat.success or not retreat.target_reached:
+                result.force_abort = retreat.force_abort
+                self._stage2_not_done(
+                    result,
+                    "board-normal retreat did not reach its safe waypoint: "
+                    f"{retreat.message}",
+                )
+                return
+            result.moves_executed += 1
+            result.travel_m += float(retreat.distance_m)
+            result.angular_travel_rad += float(retreat.angular_distance_rad)
+            result.moved = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 1.0:
+                self._stage2_not_done(
+                    result,
+                    "search deadline expired after the board-normal retreat",
+                )
+                return
+        elif not path_is_safe(
+            base_T_tcp.translation,
+            target.translation,
+            minimum_clearance=0.12,
+        ):
+            self._stage2_not_done(
+                result,
+                "direct geometric SFP path fails sampled clearance guard",
+            )
+            return
+
+        target_position = tuple(float(value) for value in target.translation)
+        target_orientation = quaternion_from_matrix(target.rotation)
+        orientation_position_array = (
+            retreat_position_array
+            if needs_retreat
+            else base_T_tcp.translation
+        )
+        if needs_orientation_waypoint:
+            orientation_clearance = float(
+                np.dot(
+                    orientation_position_array - board_origin,
+                    board_normal,
+                )
+            )
+            if orientation_clearance < rotation_clearance_m:
+                self._stage2_not_done(
+                    result,
+                    "no conservative board clearance for the planned wrist "
+                    "orientation waypoint",
+                )
+                return
+            orientation_position = tuple(
+                float(value) for value in orientation_position_array
+            )
+            orientation_outcome = self.robot_motion.move_smooth(
+                orientation_position,
+                target_orientation=target_orientation,
+                max_speed_mps=max_speed_mps,
+                max_angular_speed_radps=max_angular_speed_rps,
+                publish_hz=publish_hz,
+                settle_tolerance_m=settle_tolerance_m,
+                settle_angular_tolerance_rad=(
+                    settle_orientation_tolerance_rad
+                ),
+                timeout_sec=remaining,
+                baseline_force_xyz=baseline_force_xyz,
+                max_force_n=max_force_n,
+                force_delta_n=force_delta_n,
+                cancelled=motion_cancelled,
+            )
+            if orientation_outcome.cancelled:
+                if cancelled():
+                    raise skill_interface.SkillCancelledError(
+                        orientation_outcome.message
+                    )
+                self._stage2_not_done(
+                    result,
+                    "search deadline reached during the safe orientation "
+                    "waypoint",
+                )
+                return
+            if (
+                not orientation_outcome.success
+                or not orientation_outcome.target_reached
+            ):
+                result.force_abort = orientation_outcome.force_abort
+                self._stage2_not_done(
+                    result,
+                    "safe orientation waypoint did not complete: "
+                    f"{orientation_outcome.message}",
+                )
+                return
+            result.moves_executed += 1
+            result.travel_m += float(orientation_outcome.distance_m)
+            result.angular_travel_rad += float(
+                orientation_outcome.angular_distance_rad
+            )
+            result.moved = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 1.0:
+                self._stage2_not_done(
+                    result,
+                    "search deadline expired after the safe orientation "
+                    "waypoint",
+                )
+                return
+        result.last_action = "sfp_geometric_stage2_move"
+        result.target_valid = True
+        result.target_frame = self.config.base_frame
+        result.target.x, result.target.y, result.target.z = target_position
+        result.dx, result.dy, result.dz = (
+            float(displacement[0]),
+            float(displacement[1]),
+            float(displacement[2]),
+        )
+        logging.info(
+            "SFP Stage 2 source=%s reprojection=%.2fpx target=(%.4f,%.4f,"
+            "%.4f)m standoff=%.3fm yaw=%+.3frad min_clearance=%.1fpx",
+            source_camera,
+            board_pose.reprojection_error_px,
+            target_position[0],
+            target_position[1],
+            target_position[2],
+            candidate.standoff_m,
+            candidate.yaw_rad,
+            candidate.min_clearance_px,
+        )
+        outcome = self.robot_motion.move_smooth(
+            target_position,
+            target_orientation=target_orientation,
+            max_speed_mps=max_speed_mps,
+            max_angular_speed_radps=max_angular_speed_rps,
+            publish_hz=publish_hz,
+            settle_tolerance_m=settle_tolerance_m,
+            settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
+            timeout_sec=remaining,
+            baseline_force_xyz=baseline_force_xyz,
+            max_force_n=max_force_n,
+            force_delta_n=force_delta_n,
+            cancelled=motion_cancelled,
+        )
+        if outcome.cancelled:
+            if cancelled():
+                raise skill_interface.SkillCancelledError(outcome.message)
+            self._stage2_not_done(
+                result, "search deadline reached during geometric SFP motion"
+            )
+            return
+        if not outcome.success:
+            result.force_abort = outcome.force_abort
+            self._stage2_not_done(
+                result, f"geometric SFP motion did not complete: {outcome.message}"
+            )
+            return
+        result.moves_executed += 1
+        result.travel_m += float(outcome.distance_m)
+        result.angular_travel_rad += float(outcome.angular_distance_rad)
+        result.moved = result.moved or (
+            outcome.distance_m > 0.0 or outcome.angular_distance_rad > 0.0
+        )
+        if not outcome.target_reached:
+            self._stage2_not_done(
+                result,
+                "controller stopped safely before the computed SFP survey pose",
+            )
+            return
+
+        verification_timeout = min(
+            timeout_sec, max(0.0, deadline - time.monotonic())
+        )
+        if verification_timeout <= 0.0:
+            self._stage2_not_done(
+                result, "search deadline expired before fresh verification"
+            )
+            return
+        fresh = self.camera_rig.grab(
+            timeout_sec=verification_timeout,
+            min_cameras=len(expected),
+            collection_grace_sec=0.0,
+        )
+        if fresh is None or set(fresh.frames) != set(expected):
+            self._stage2_not_done(
+                result, "fresh three-camera verification triplet unavailable"
+            )
+            return
+        if not fresh.frames_within_skew(50_000_000):
+            self._stage2_not_done(
+                result,
+                "fresh three-camera verification exceeds 50 ms timestamp skew",
+            )
+            return
+        from aic_perception.board_visibility import analyze_board
+
+        image_rejections = {}
+        fresh_reports = {}
+        for camera_name in expected:
+            image = fresh.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(
+                camera_name, image.shape
+            )
+            fresh_report = analyze_board(
+                image,
+                margin_px=3,
+                min_area_frac=0.001,
+                ignore_bottom_frac=0.0,
+                min_contrast=20.0,
+                min_rectangularity=0.20,
+                min_detail_area_frac=0.005,
+                context_pad_frac=0.0,
+                ignore_mask=ignored,
+            )
+            fresh_reports[camera_name] = fresh_report
+            reasons = []
+            if not fresh_report.seen:
+                reasons.append("board_context_not_detected")
+            if fresh_report.artificial_bottom_contact:
+                reasons.append("board_contacts_gripper_mask")
+            if fresh_report.gripper_overlap_px > 0:
+                reasons.append(
+                    f"board_gripper_overlap={fresh_report.gripper_overlap_px}px"
+                )
+            if reasons:
+                image_rejections[camera_name] = reasons
+        if image_rejections:
+            details = "; ".join(
+                f"{name}={','.join(reasons)}"
+                for name, reasons in image_rejections.items()
+            )
+            self._stage2_not_done(
+                result,
+                "fresh camera pixels rejected the predicted SFP survey view: "
+                f"{details}",
+            )
+            return
+        try:
+            # Do not project a fresh image using the pose at verification
+            # wall-clock time.  Each board PnP and each camera projection is
+            # tied to that camera's frame timestamp.
+            fresh_base_T_tcp = {
+                name: self._base_transform_at(
+                    self.config.gripper_frame,
+                    int(fresh.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+            fresh_base_T_cam = {
+                name: self._base_transform_at(
+                    self.config.camera_frames[name],
+                    int(fresh.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+        except Exception as error:
+            self._stage2_not_done(
+                result,
+                "timestamp-bound post-move camera/TCP TF unavailable: "
+                f"{error}",
+            )
+            return
+        fresh_estimates = {}
+        fresh_pose_failures = {}
+        for camera_name in (
+            "center_camera",
+            "left_camera",
+            "right_camera",
+        ):
+            image = fresh.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(
+                camera_name, image.shape
+            )
+            observation, reason = self._stage2_landmarks(
+                image, fresh_reports[camera_name], ignored
+            )
+            if observation is None:
+                fresh_pose_failures[camera_name] = reason
+                continue
+            fresh_quad, fresh_logo = observation
+            estimate, reason = estimate_board_pose(
+                fresh_quad,
+                fresh_logo,
+                camera_models[camera_name],
+                fresh_base_T_cam[camera_name],
+            )
+            if estimate is None:
+                fresh_pose_failures[camera_name] = reason
+            else:
+                fresh_estimates[camera_name] = estimate
+        fresh_consistent, fresh_consistency_reason = (
+            board_pose_set_is_consistent(
+                fresh_estimates,
+                board_pose,
+                expected,
+            )
+        )
+        if not fresh_consistent:
+            self._stage2_not_done(
+                result,
+                "fresh triplet board poses are incomplete or inconsistent: "
+                f"{fresh_consistency_reason}; "
+                + "; ".join(
+                    f"{name}={reason}"
+                    for name, reason in fresh_pose_failures.items()
+                )
+            )
+            return
+        # Verify each projection against the TCP and optical TF captured at
+        # *that* camera's image time.  `verify_survey_view` intentionally
+        # accepts a mapping, so one-camera calls avoid smearing the rig pose
+        # across a 50-ms synchronized triplet.
+        verification_by_camera = {}
+        for estimate in fresh_estimates.values():
+            name = estimate.camera_name
+            verification_by_camera[name] = verify_survey_view(
+                estimate,
+                fresh_base_T_tcp[name],
+                {name: tcp_T_cam[name]},
+                {name: camera_models[name]},
+                {name: grippers[name]},
+                {name: int(fresh.frames[name]["stamp_ns"])},
+                max_skew_ns=50_000_000,
+            )
+        missing_verified = set(expected) - set(verification_by_camera)
+        verification_failed = {
+            name: check
+            for name, check in verification_by_camera.items()
+            if not check.passed
+        }
+        if missing_verified or verification_failed:
+            details = "; ".join(
+                f"{name}="
+                f"{','.join(coverage.reasons) or coverage.reason}"
+                for name, coverage in verification_by_camera.items()
+            )
+            self._stage2_not_done(
+                result,
+                f"fresh all-camera SFP verification failed: "
+                f"missing={sorted(missing_verified)} ({details})",
+            )
+            return
+
+        confirmation_timeout = min(
+            timeout_sec, max(0.0, deadline - time.monotonic())
+        )
+        if confirmation_timeout <= 0.0:
+            self._stage2_not_done(
+                result, "deadline expired before the settled confirmation triplet"
+            )
+            return
+        confirmation = self.camera_rig.grab(
+            timeout_sec=confirmation_timeout,
+            min_cameras=len(expected),
+            collection_grace_sec=0.0,
+        )
+        if (
+            confirmation is None
+            or set(confirmation.frames) != set(expected)
+            or not confirmation.frames_within_skew(50_000_000)
+        ):
+            self._stage2_not_done(
+                result, "second settled three-camera triplet is unavailable"
+            )
+            return
+        confirmation_rejections = {}
+        confirmation_reports = {}
+        for camera_name in expected:
+            image = confirmation.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(
+                camera_name, image.shape
+            )
+            confirmation_report = analyze_board(
+                image,
+                margin_px=3,
+                min_area_frac=0.001,
+                ignore_bottom_frac=0.0,
+                min_contrast=20.0,
+                min_rectangularity=0.20,
+                min_detail_area_frac=0.005,
+                context_pad_frac=0.0,
+                ignore_mask=ignored,
+            )
+            confirmation_reports[camera_name] = confirmation_report
+            reasons = []
+            if not confirmation_report.seen:
+                reasons.append("board_context_not_detected")
+            if confirmation_report.artificial_bottom_contact:
+                reasons.append("board_contacts_gripper_mask")
+            if confirmation_report.gripper_overlap_px > 0:
+                reasons.append(
+                    "board_gripper_overlap="
+                    f"{confirmation_report.gripper_overlap_px}px"
+                )
+            if reasons:
+                confirmation_rejections[camera_name] = reasons
+        try:
+            confirmation_base_T_tcp = {
+                name: self._base_transform_at(
+                    self.config.gripper_frame,
+                    int(confirmation.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+            confirmation_base_T_cam = {
+                name: self._base_transform_at(
+                    self.config.camera_frames[name],
+                    int(confirmation.frames[name]["stamp_ns"]),
+                    timeout_sec,
+                )
+                for name in expected
+            }
+        except Exception as error:
+            self._stage2_not_done(
+                result,
+                "timestamp-bound confirmation camera/TCP TF unavailable: "
+                f"{error}",
+            )
+            return
+        confirmation_estimates = {}
+        for camera_name in expected:
+            image = confirmation.frames[camera_name]["image"]
+            ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
+            observation, reason = self._stage2_landmarks(
+                image, confirmation_reports[camera_name], ignored
+            )
+            if observation is None:
+                confirmation_rejections.setdefault(camera_name, []).append(reason)
+                continue
+            estimate, reason = estimate_board_pose(
+                observation[0],
+                observation[1],
+                camera_models[camera_name],
+                confirmation_base_T_cam[camera_name],
+            )
+            if estimate is None:
+                confirmation_rejections.setdefault(camera_name, []).append(
+                    f"PnP={reason}"
+                )
+                continue
+            confirmation_estimates[camera_name] = estimate
+
+        confirmation_consistent, confirmation_consistency_reason = (
+            board_pose_set_is_consistent(
+                confirmation_estimates,
+                board_pose,
+                expected,
+            )
+        )
+        if not confirmation_consistent:
+            self._stage2_not_done(
+                result,
+                "confirmation board poses are incomplete or inconsistent: "
+                f"{confirmation_consistency_reason}",
+            )
+            return
+
+        confirmation_projection = {}
+        for name, estimate in confirmation_estimates.items():
+            confirmation_projection[name] = verify_survey_view(
+                estimate,
+                confirmation_base_T_tcp[name],
+                {name: tcp_T_cam[name]},
+                {name: camera_models[name]},
+                {name: grippers[name]},
+                {name: int(confirmation.frames[name]["stamp_ns"])},
+                max_skew_ns=50_000_000,
+            )
+        missing_confirmation = set(expected) - set(confirmation_projection)
+        failed_confirmation = {
+            name: projection
+            for name, projection in confirmation_projection.items()
+            if not projection.passed
+        }
+        if confirmation_rejections or missing_confirmation or failed_confirmation:
+            details = "; ".join(
+                f"{name}={','.join(reasons)}"
+                for name, reasons in confirmation_rejections.items()
+            )
+            self._stage2_not_done(
+                result,
+                "second settled triplet failed image/projection verification"
+                + (
+                    f": missing={sorted(missing_confirmation)}; {details}"
+                    if details or missing_confirmation
+                    else ""
+                ),
+            )
+            return
+
+        result.done = True
+        result.success = True
+        result.component_coverage_ready = True
+        result.steer_camera = source_camera
+        result.last_action = "sfp_geometric_stage2_verified"
+        result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
+        result.message = (
+            "geometric Stage 2 verified the complete loose-SFP envelope "
+            "inside all three fresh calibrated camera views with conservative "
+            f"gripper clearance after {result.moves_executed} total moves"
+        )
+
     @staticmethod
     def _validate_parameters(**values) -> None:
         if not 0 <= values["min_contrast"] <= 255:
@@ -2262,8 +3723,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             raise ValueError("max_travel_m must be in [0.01, 1.0]")
         if not 1.0 <= values["force_delta_n"] <= 15.0:
             raise ValueError("force_delta_n must be in [1, 15]")
-        if not 10.0 <= values["search_timeout_sec"] <= 300.0:
-            raise ValueError("search_timeout_seconds must be in [10, 300]")
+        if not 10.0 <= values["search_timeout_sec"] <= 60.0:
+            raise ValueError("search_timeout_seconds must be in [10, 60]")
         if not 0.02 <= values["max_displacement_m"] <= 0.5:
             raise ValueError("max_displacement_m must be in [0.02, 0.5]")
         if not 0.005 <= values["angular_step_rad"] <= 0.2:
