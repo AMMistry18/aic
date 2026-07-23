@@ -319,7 +319,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # with a gripper-clipped initial image.  Give the measured logo/board
         # acquisition policy a finite but useful budget, then let Stage 2 make
         # the final fail-closed pose decision from calibration and all cameras.
-        max_logo_acquisition_moves = 10
+        # This is a budget of *all* Stage-1 robot moves, not just the
+        # logo-specific fallback moves.  In particular, the legacy planner's
+        # initial backoffs must not silently consume extra attempts.
+        max_logo_acquisition_moves = 5
         logo_acquisition_moves = 0
 
         def motion_cancelled() -> bool:
@@ -580,6 +583,42 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
 
+            # Keep a real time reserve for the geometric stage.  Do this
+            # before asking the legacy planner for another action, so a
+            # non-terminal legacy backoff cannot become an uncounted sixth
+            # Stage-1 move.  Stage 2 makes its own fail-closed landmark check.
+            if (
+                staged_sfp_target
+                and result.moves_executed >= max_logo_acquisition_moves
+            ):
+                logging.info(
+                    "Stage 1 used its %d total robot-move budget; handing "
+                    "the current landmark evidence to Stage 2",
+                    max_logo_acquisition_moves,
+                )
+                self._run_sfp_geometric_stage2(
+                    snapshot=snapshot,
+                    reports=reports,
+                    result=result,
+                    timeout_sec=timeout_sec,
+                    deadline=overall_deadline,
+                    started_at=started_at,
+                    max_speed_mps=max_speed_mps,
+                    max_angular_speed_rps=max_angular_speed_rps,
+                    publish_hz=publish_hz,
+                    settle_tolerance_m=settle_tolerance_m,
+                    settle_orientation_tolerance_rad=(
+                        settle_orientation_tolerance_rad
+                    ),
+                    move_timeout_sec=move_timeout_sec,
+                    baseline_force_xyz=baseline_force_xyz,
+                    max_force_n=max_force_n,
+                    force_delta_n=force_delta_n,
+                    cancelled=cancelled,
+                    motion_cancelled=stage2_motion_cancelled,
+                )
+                return
+
             # Completion needs a fresh physical top-down check, not a sticky
             # acknowledgement from an earlier leveling iteration.  If later
             # clearance IK tilts the camera, return to LEVEL immediately.
@@ -723,7 +762,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     if not acquired:
                         return
                     logo_acquisition_moves += 1
-                    deadline = overall_deadline
                     iteration += 1
                     continue
                 self._run_sfp_geometric_stage2(
@@ -778,7 +816,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         if not acquired:
                             return
                         logo_acquisition_moves += 1
-                        deadline = overall_deadline
                         iteration += 1
                         continue
                     logging.info(

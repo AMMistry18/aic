@@ -84,8 +84,9 @@ def test_logo_acquisition_is_bounded_measured_and_never_a_blind_sweep():
     method = _method("_move_to_acquire_complete_logo")
     method_source = ast.get_source_segment(source, method)
 
-    assert "max_logo_acquisition_moves = 10" in source
+    assert "max_logo_acquisition_moves = 5" in source
     assert "logo_acquisition_moves < max_logo_acquisition_moves" in source
+    assert "result.moves_executed >= max_logo_acquisition_moves" in source
     assert "detect_purple_logo" in method_source
     assert "_camera_axes_in_base" in method_source
     assert "_gripper_pose" in method_source
