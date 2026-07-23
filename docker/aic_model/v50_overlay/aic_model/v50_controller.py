@@ -464,14 +464,39 @@ def prime_v50_plug_pose(policy, get_observation, move_robot) -> bool:
     from .sfp_plug_pose import stamp_to_seconds
 
     now_s = stamp_to_seconds(policy._parent_node.get_clock().now())
+    try:
+        detections = policy._v50_plug_estimator.detect_views(views)
+    except Exception as exc:
+        policy.get_logger().error(
+            f"[v50] PLUG_POSE_REJECT reason=detector_error:{type(exc).__name__}:{exc}"
+        )
+        return False
+    by_camera = {d.camera_name: d for d in detections}
+    for view in views:
+        detection = by_camera.get(view.camera_name)
+        if detection is None:
+            policy.get_logger().info(
+                f"[v50] PLUG_POSE_INPUT camera={view.camera_name} stamp={view.stamp_s:.3f} "
+                "detection=none"
+            )
+            continue
+        kp_conf = np.asarray(detection.keypoint_confidences, dtype=np.float64)
+        kp_xy = np.asarray(detection.keypoints_px, dtype=np.float64)
+        usable = int(np.count_nonzero(kp_conf >= policy._v50_plug_estimator.min_keypoint_confidence))
+        policy.get_logger().info(
+            f"[v50] PLUG_POSE_INPUT camera={view.camera_name} stamp={view.stamp_s:.3f} "
+            f"box_conf={detection.box_confidence:.3f} usable_kp={usable}/{len(kp_conf)} "
+            f"kp_conf={np.round(kp_conf, 3).tolist()} kp_xy={np.round(kp_xy, 1).tolist()}"
+        )
     estimate = policy._v50_plug_estimator.estimate_multiview(
-        views,
-        now_s=now_s,
-        max_age_s=policy._v50_config.plug_max_age_s,
+        views, now_s=now_s, max_age_s=policy._v50_config.plug_max_age_s,
+        detections=detections,
     )
     if estimate is None:
         policy.get_logger().error(
-            "[v50] direct plug priming failed; no fixed-grasp control fallback"
+            "[v50] PLUG_POSE_REJECT reason="
+            f"{policy._v50_plug_estimator.last_failure_reason or 'unknown'} "
+            "no_fixed_grasp_fallback=true"
         )
         return False
     tcp_pos, tcp_quat = policy._tcp()
