@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from aic_perception.config import (
+    CAMERA_INFO_TOPICS,
     CAMERA_IMAGE_TOPICS,
     CAMERA_OPTICAL_FRAMES,
     CHANGE_TARGET_MODE_SERVICE,
@@ -17,6 +18,11 @@ def test_configuration_has_closed_robot_camera_tf_allowlist():
     assert config.base_frame == "base_link"
     assert config.gripper_frame == "gripper/tcp"
     assert config.image_topics == CAMERA_IMAGE_TOPICS
+    assert config.camera_info_topics == CAMERA_INFO_TOPICS == {
+        "left_camera": "/left_camera/camera_info",
+        "center_camera": "/center_camera/camera_info",
+        "right_camera": "/right_camera/camera_info",
+    }
     assert config.camera_frames == CAMERA_OPTICAL_FRAMES
     assert config.pose_command_topic == POSE_COMMAND_TOPIC
     assert config.controller_state_topic == CONTROLLER_STATE_TOPIC
@@ -34,6 +40,10 @@ def test_privileged_or_environment_frame_override_is_rejected():
         PerceptionConfig(gripper_frame="task_board")
     with pytest.raises(ValueError):
         PerceptionConfig(image_topics={"center_camera": "/gazebo/board_image"})
+    with pytest.raises(ValueError):
+        PerceptionConfig(
+            camera_info_topics={"center_camera": "/gazebo/camera_info"}
+        )
     with pytest.raises(ValueError):
         PerceptionConfig(wrench_topic="/scoring/wrench")
     with pytest.raises(ValueError):

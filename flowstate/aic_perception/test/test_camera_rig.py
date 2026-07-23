@@ -8,11 +8,15 @@ import numpy as np
 import pytest
 
 from aic_perception.camera_rig import (
+    CameraSnapshot,
     CameraRig,
+    approved_camera_message_frames,
+    camera_info_to_calibration,
+    frames_are_approved_camera_pair,
     ros_image_to_bgr,
     stamp_to_nanoseconds,
 )
-from aic_perception.config import CAMERA_NAMES
+from aic_perception.config import CAMERA_NAMES, CAMERA_OPTICAL_FRAMES
 
 
 def image_message(array, encoding="bgr8", padding=0, stamp_ns=123):
@@ -42,11 +46,36 @@ def image_message(array, encoding="bgr8", padding=0, stamp_ns=123):
     )
 
 
+def camera_info_message(
+    *,
+    width=5,
+    height=4,
+    camera="center_camera",
+    stamp_ns=120,
+):
+    return SimpleNamespace(
+        width=width,
+        height=height,
+        k=[500.0, 0.0, width / 2.0, 0.0, 501.0, height / 2.0, 0.0, 0.0, 1.0],
+        d=[0.1, -0.2, 0.0, 0.0, 0.01],
+        distortion_model="plumb_bob",
+        header=SimpleNamespace(
+            frame_id=CAMERA_OPTICAL_FRAMES[camera],
+            stamp=SimpleNamespace(
+                sec=stamp_ns // 1_000_000_000,
+                nanosec=stamp_ns % 1_000_000_000,
+            ),
+        ),
+    )
+
+
 def make_rig():
     rig = CameraRig.__new__(CameraRig)
     rig._condition = threading.Condition()
     rig._sequences = {camera: 0 for camera in CAMERA_NAMES}
     rig._latest_frames = {}
+    rig._latest_calibrations = {}
+    rig._camera_frames = dict(CAMERA_OPTICAL_FRAMES)
     rig._force_xyz = None
     rig._force_received_at = None
     return rig
@@ -81,6 +110,69 @@ def test_unsupported_encoding_is_rejected():
 def test_stamp_conversion():
     stamp = SimpleNamespace(sec=12, nanosec=345)
     assert stamp_to_nanoseconds(stamp) == 12_000_000_345
+    with pytest.raises(ValueError):
+        stamp_to_nanoseconds(SimpleNamespace(sec=0, nanosec=1_000_000_000))
+
+
+def test_camera_info_conversion_validates_and_preserves_intrinsics():
+    calibration = camera_info_to_calibration(
+        camera_info_message(), CAMERA_OPTICAL_FRAMES["center_camera"]
+    )
+    assert calibration.width == 5
+    assert calibration.height == 4
+    assert calibration.frame_id == "center_camera/optical"
+    assert calibration.distortion_model == "plumb_bob"
+    np.testing.assert_allclose(
+        calibration.camera_matrix,
+        [[500.0, 0.0, 2.5], [0.0, 501.0, 2.0], [0.0, 0.0, 1.0]],
+    )
+
+
+def test_camera_info_rejects_wrong_frame_and_invalid_intrinsics():
+    message = camera_info_message()
+    message.header.frame_id = "task_board"
+    with pytest.raises(ValueError):
+        camera_info_to_calibration(
+            message, CAMERA_OPTICAL_FRAMES["center_camera"]
+        )
+
+
+def test_basler_sensor_link_is_an_explicitly_accepted_optical_pair_only():
+    optical = CAMERA_OPTICAL_FRAMES["center_camera"]
+    assert approved_camera_message_frames(optical) == {
+        "center_camera/optical",
+        "center_camera/sensor_link",
+    }
+    message = camera_info_message()
+    message.header.frame_id = "center_camera/sensor_link"
+    calibration = camera_info_to_calibration(message, optical)
+    assert calibration.frame_id == "center_camera/sensor_link"
+
+    # This must stay an exact two-frame allowlist, not a camera-name prefix.
+    for forbidden in ("center_camera/link", "left_camera/sensor_link", "task_board"):
+        message.header.frame_id = forbidden
+        with pytest.raises(ValueError):
+            camera_info_to_calibration(message, optical)
+
+    message = camera_info_message()
+    message.k[0] = float("nan")
+    with pytest.raises(ValueError):
+        camera_info_to_calibration(
+            message, CAMERA_OPTICAL_FRAMES["center_camera"]
+        )
+
+
+def test_image_and_camera_info_may_use_either_member_of_exact_pair():
+    optical = CAMERA_OPTICAL_FRAMES["center_camera"]
+    assert frames_are_approved_camera_pair(
+        "center_camera/sensor_link", "center_camera/optical", optical
+    )
+    assert frames_are_approved_camera_pair(
+        "center_camera/optical", "center_camera/sensor_link", optical
+    )
+    assert not frames_are_approved_camera_pair(
+        "right_camera/sensor_link", "center_camera/optical", optical
+    )
 
 
 def test_grab_returns_only_frames_newer_than_call_start_and_latest_force():
@@ -107,6 +199,100 @@ def test_grab_returns_only_frames_newer_than_call_start_and_latest_force():
     assert snapshot.force_norm == 5.0
     assert rig.latest_force_xyz() == (3.0, 4.0, 0.0)
     assert rig.latest_force_norm() == 5.0
+
+
+def test_grab_exposes_only_dimension_matched_available_calibration():
+    rig = make_rig()
+    rig._on_camera_info("center_camera", camera_info_message())
+    rig._on_camera_info(
+        "right_camera",
+        camera_info_message(width=99, height=99, camera="right_camera"),
+    )
+
+    def publish():
+        time.sleep(0.01)
+        frame = np.zeros((4, 5, 3), dtype=np.uint8)
+        center = image_message(frame, stamp_ns=125)
+        center.header.frame_id = CAMERA_OPTICAL_FRAMES["center_camera"]
+        right = image_message(frame, stamp_ns=130)
+        right.header.frame_id = CAMERA_OPTICAL_FRAMES["right_camera"]
+        rig._on_image("center_camera", center)
+        rig._on_image("right_camera", right)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    snapshot = rig.grab(timeout_sec=0.5, min_cameras=2)
+    publisher.join()
+    assert snapshot is not None
+    assert set(snapshot.calibrations) == {"center_camera"}
+    assert snapshot.calibrations["center_camera"].stamp_ns == 120
+
+
+@pytest.mark.parametrize(
+    ("image_suffix", "info_suffix"),
+    (("sensor_link", "optical"), ("optical", "sensor_link")),
+)
+def test_grab_accepts_exact_sensor_optical_frame_pair(
+    image_suffix, info_suffix
+):
+    rig = make_rig()
+    info = camera_info_message()
+    info.header.frame_id = f"center_camera/{info_suffix}"
+    rig._on_camera_info("center_camera", info)
+
+    def publish():
+        time.sleep(0.01)
+        frame = image_message(np.zeros((4, 5, 3), dtype=np.uint8))
+        frame.header.frame_id = f"center_camera/{image_suffix}"
+        rig._on_image("center_camera", frame)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    snapshot = rig.grab(timeout_sec=0.5)
+    publisher.join()
+    assert snapshot is not None
+    assert set(snapshot.calibrations) == {"center_camera"}
+
+
+def test_grab_rejects_image_frame_outside_exact_camera_pair():
+    rig = make_rig()
+    rig._on_camera_info("center_camera", camera_info_message())
+
+    def publish():
+        time.sleep(0.01)
+        frame = image_message(np.zeros((4, 5, 3), dtype=np.uint8))
+        frame.header.frame_id = "right_camera/sensor_link"
+        rig._on_image("center_camera", frame)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    snapshot = rig.grab(timeout_sec=0.5)
+    publisher.join()
+    assert snapshot is not None
+    assert not snapshot.calibrations
+
+
+def test_snapshot_reports_and_bounds_frame_timestamp_skew():
+    snapshot = CameraSnapshot(
+        frames={
+            "left_camera": {"stamp_ns": 100},
+            "center_camera": {"stamp_ns": 125},
+            "right_camera": {"stamp_ns": 140},
+        },
+        force_xyz=None,
+    )
+    assert snapshot.frame_stamp_skew_ns == 40
+    assert snapshot.frames_within_skew(40)
+    assert not snapshot.frames_within_skew(39)
+    with pytest.raises(ValueError):
+        snapshot.frames_within_skew(-1)
+
+    one_frame = CameraSnapshot(
+        frames={"center_camera": {"stamp_ns": 100}},
+        force_xyz=None,
+    )
+    assert one_frame.frame_stamp_skew_ns is None
+    assert not one_frame.frames_within_skew(1_000)
 
 
 def test_grab_can_wait_for_multiple_fresh_cameras():

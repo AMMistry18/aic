@@ -15,6 +15,11 @@ CAMERA_IMAGE_TOPICS = {
     "center_camera": "/center_camera/image",
     "right_camera": "/right_camera/image",
 }
+CAMERA_INFO_TOPICS = {
+    "left_camera": "/left_camera/camera_info",
+    "center_camera": "/center_camera/camera_info",
+    "right_camera": "/right_camera/camera_info",
+}
 CAMERA_OPTICAL_FRAMES = {
     "left_camera": "left_camera/optical",
     "center_camera": "center_camera/optical",
@@ -43,6 +48,9 @@ class PerceptionConfig:
     image_topics: dict[str, str] = field(
         default_factory=lambda: dict(CAMERA_IMAGE_TOPICS)
     )
+    camera_info_topics: dict[str, str] = field(
+        default_factory=lambda: dict(CAMERA_INFO_TOPICS)
+    )
     camera_frames: dict[str, str] = field(
         default_factory=lambda: dict(CAMERA_OPTICAL_FRAMES)
     )
@@ -68,5 +76,7 @@ class PerceptionConfig:
             raise ValueError("camera set must match the three documented wrist cameras")
         if self.image_topics != CAMERA_IMAGE_TOPICS:
             raise ValueError("camera topic allowlist may not be overridden")
+        if self.camera_info_topics != CAMERA_INFO_TOPICS:
+            raise ValueError("camera-info topic allowlist may not be overridden")
         if self.camera_frames != CAMERA_OPTICAL_FRAMES:
             raise ValueError("camera TF allowlist may not be overridden")
