@@ -289,16 +289,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             planner.roll_align_threshold_deg,
         )
         started_at = time.monotonic()
-        # Reserve a bounded portion of the configured total for the geometric
-        # stage. Stage 1 may not consume the entire invocation and then ask
-        # Stage 2 to move against an already-expired deadline.
-        stage2_reserve_sec = min(
-            20.0,
-            max(4.0, 0.25 * search_timeout_sec),
-            0.40 * search_timeout_sec,
-        )
-        overall_deadline = started_at + search_timeout_sec
-        deadline = overall_deadline - stage2_reserve_sec
+        # Keep Stage 1's original deadline and planner behavior unchanged.
+        # Stage 2 is invoked only after this planner reaches its own terminal
+        # condition; it does not impose an acquisition budget or reserve.
+        deadline = started_at + search_timeout_sec
         baseline_force_xyz = None
         initial_pose = None
         initial_joint1 = None
@@ -314,22 +308,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         level_anchor_joint6 = None
         level_vertical_polarity = 1.0
         pending_level_vertical_sample = None
-        # Stage 1 is only an acquisition phase.  It must not abort the SFP
-        # survey just because the legacy board-centroid heuristic is unhappy
-        # with a gripper-clipped initial image.  Give the measured logo/board
-        # acquisition policy a finite but useful budget, then let Stage 2 make
-        # the final fail-closed pose decision from calibration and all cameras.
-        # This is a budget of *all* Stage-1 robot moves, not just the
-        # logo-specific fallback moves.  In particular, the legacy planner's
-        # initial backoffs must not silently consume extra attempts.
-        max_logo_acquisition_moves = 5
-        logo_acquisition_moves = 0
-
         def motion_cancelled() -> bool:
             return bool(cancelled() or time.monotonic() >= deadline)
-
-        def stage2_motion_cancelled() -> bool:
-            return bool(cancelled() or time.monotonic() >= overall_deadline)
 
         def require_motion_force(current_snapshot):
             """Return a snapshot with fresh force, but only when motion needs it.
@@ -583,42 +563,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 return
 
-            # Keep a real time reserve for the geometric stage.  Do this
-            # before asking the legacy planner for another action, so a
-            # non-terminal legacy backoff cannot become an uncounted sixth
-            # Stage-1 move.  Stage 2 makes its own fail-closed landmark check.
-            if (
-                staged_sfp_target
-                and result.moves_executed >= max_logo_acquisition_moves
-            ):
-                logging.info(
-                    "Stage 1 used its %d total robot-move budget; handing "
-                    "the current landmark evidence to Stage 2",
-                    max_logo_acquisition_moves,
-                )
-                self._run_sfp_geometric_stage2(
-                    snapshot=snapshot,
-                    reports=reports,
-                    result=result,
-                    timeout_sec=timeout_sec,
-                    deadline=overall_deadline,
-                    started_at=started_at,
-                    max_speed_mps=max_speed_mps,
-                    max_angular_speed_rps=max_angular_speed_rps,
-                    publish_hz=publish_hz,
-                    settle_tolerance_m=settle_tolerance_m,
-                    settle_orientation_tolerance_rad=(
-                        settle_orientation_tolerance_rad
-                    ),
-                    move_timeout_sec=move_timeout_sec,
-                    baseline_force_xyz=baseline_force_xyz,
-                    max_force_n=max_force_n,
-                    force_delta_n=force_delta_n,
-                    cancelled=cancelled,
-                    motion_cancelled=stage2_motion_cancelled,
-                )
-                return
-
             # Completion needs a fresh physical top-down check, not a sticky
             # acknowledgement from an earlier leveling iteration.  If later
             # clearance IK tilts the camera, return to LEVEL immediately.
@@ -704,72 +648,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         f"{result.moves_executed} adaptive moves"
                     )
                     return
-                # Stage 1 has only acquired a coarse board view.  Do not expose
-                # that as terminal success: Stage 2 estimates the board's full
-                # 6-DoF pose and chooses one deterministic board-relative TCP
-                # pose that frames the complete loose-SFP envelope in all
-                # three calibrated cameras.
-                if not self._stage2_has_complete_landmark(snapshot, reports):
-                    if logo_acquisition_moves >= max_logo_acquisition_moves:
-                        logging.info(
-                            "Stage 1 used its %d measured acquisition moves; "
-                            "handing the current landmark evidence to Stage 2 "
-                            "for a calibrated fail-closed decision",
-                            max_logo_acquisition_moves,
-                        )
-                        self._run_sfp_geometric_stage2(
-                            snapshot=snapshot,
-                            reports=reports,
-                            result=result,
-                            timeout_sec=timeout_sec,
-                            deadline=overall_deadline,
-                            started_at=started_at,
-                            max_speed_mps=max_speed_mps,
-                            max_angular_speed_rps=max_angular_speed_rps,
-                            publish_hz=publish_hz,
-                            settle_tolerance_m=settle_tolerance_m,
-                            settle_orientation_tolerance_rad=(
-                                settle_orientation_tolerance_rad
-                            ),
-                            move_timeout_sec=move_timeout_sec,
-                            baseline_force_xyz=baseline_force_xyz,
-                            max_force_n=max_force_n,
-                            force_delta_n=force_delta_n,
-                            cancelled=cancelled,
-                            motion_cancelled=stage2_motion_cancelled,
-                        )
-                        return
-                    acquired = self._move_to_acquire_complete_logo(
-                        snapshot=snapshot,
-                        reports=reports,
-                        result=result,
-                        timeout_sec=timeout_sec,
-                        step_m=step_m,
-                        max_speed_mps=max_speed_mps,
-                        max_angular_speed_rps=max_angular_speed_rps,
-                        publish_hz=publish_hz,
-                        settle_tolerance_m=settle_tolerance_m,
-                        settle_orientation_tolerance_rad=(
-                            settle_orientation_tolerance_rad
-                        ),
-                        move_timeout_sec=move_timeout_sec,
-                        baseline_force_xyz=baseline_force_xyz,
-                        max_force_n=max_force_n,
-                        force_delta_n=force_delta_n,
-                        cancelled=cancelled,
-                        motion_cancelled=stage2_motion_cancelled,
-                    )
-                    if not acquired:
-                        return
-                    logo_acquisition_moves += 1
-                    iteration += 1
-                    continue
+                # For SFP, leave the original Stage-1 planner untouched and
+                # run the geometric survey only after it has independently
+                # completed its usual three-camera terminal condition.
                 self._run_sfp_geometric_stage2(
                     snapshot=snapshot,
                     reports=reports,
                     result=result,
                     timeout_sec=timeout_sec,
-                    deadline=overall_deadline,
+                    deadline=deadline,
                     started_at=started_at,
                     max_speed_mps=max_speed_mps,
                     max_angular_speed_rps=max_angular_speed_rps,
@@ -783,52 +670,26 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     max_force_n=max_force_n,
                     force_delta_n=force_delta_n,
                     cancelled=cancelled,
-                    motion_cancelled=stage2_motion_cancelled,
+                    motion_cancelled=motion_cancelled,
                 )
                 return
             if action.terminal:
                 if staged_sfp_target:
-                    # A clipped board centroid is not proof that the purple
-                    # logo is unusable.  Continue with measured logo/board
-                    # acquisition instead of exposing the legacy planner's
-                    # two-backoff STAGNATED result as a terminal failure.
-                    if logo_acquisition_moves < max_logo_acquisition_moves:
-                        acquired = self._move_to_acquire_complete_logo(
-                            snapshot=snapshot,
-                            reports=reports,
-                            result=result,
-                            timeout_sec=timeout_sec,
-                            step_m=step_m,
-                            max_speed_mps=max_speed_mps,
-                            max_angular_speed_rps=max_angular_speed_rps,
-                            publish_hz=publish_hz,
-                            settle_tolerance_m=settle_tolerance_m,
-                            settle_orientation_tolerance_rad=(
-                                settle_orientation_tolerance_rad
-                            ),
-                            move_timeout_sec=move_timeout_sec,
-                            baseline_force_xyz=baseline_force_xyz,
-                            max_force_n=max_force_n,
-                            force_delta_n=force_delta_n,
-                            cancelled=cancelled,
-                            motion_cancelled=stage2_motion_cancelled,
-                        )
-                        if not acquired:
-                            return
-                        logo_acquisition_moves += 1
-                        iteration += 1
-                        continue
+                    # Preserve the legacy planner's terminal decision and all
+                    # of its preceding motion exactly as-is.  Its SFP result
+                    # is the handoff point for Stage 2, not a request for an
+                    # additional Stage-1 acquisition loop.
                     logging.info(
-                        "legacy Stage-1 planner stagnated after %d measured "
-                        "logo/board acquisition moves; handing off to Stage 2",
-                        logo_acquisition_moves,
+                        "legacy Stage-1 planner ended (%s); handing its final "
+                        "triplet directly to Stage 2",
+                        action.reason,
                     )
                     self._run_sfp_geometric_stage2(
                         snapshot=snapshot,
                         reports=reports,
                         result=result,
                         timeout_sec=timeout_sec,
-                        deadline=overall_deadline,
+                        deadline=deadline,
                         started_at=started_at,
                         max_speed_mps=max_speed_mps,
                         max_angular_speed_rps=max_angular_speed_rps,
@@ -842,7 +703,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         max_force_n=max_force_n,
                         force_delta_n=force_delta_n,
                         cancelled=cancelled,
-                        motion_cancelled=stage2_motion_cancelled,
+                        motion_cancelled=motion_cancelled,
                     )
                     return
                 result.success = False

@@ -58,52 +58,41 @@ def test_stage1_done_hands_off_in_place_instead_of_returning_success():
     terminal_start = source.index("if action.terminal:", done_start)
     done_branch = source[done_start:terminal_start]
 
-    assert "_stage2_has_complete_landmark" in done_branch
-    assert "_move_to_acquire_complete_logo" in done_branch
     assert "_run_sfp_geometric_stage2" in done_branch
     # The shared deployed skill keeps the legacy terminal contract for the
     # NIC/SC enum values, while SFP (0/1) continues into Stage 2.
     assert "if not staged_sfp_target" in done_branch
     assert "result.done = True" in done_branch
-    assert "continue" in done_branch
+    assert "deadline=deadline" in done_branch
 
 
-def test_stage2_has_a_reserved_budget_inside_the_configured_total():
+def test_stage1_keeps_its_original_configured_deadline():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "stage2_reserve_sec" in method_source
-    assert "overall_deadline = started_at + search_timeout_sec" in method_source
-    assert "deadline = overall_deadline - stage2_reserve_sec" in method_source
-    assert "deadline=overall_deadline" in method_source
+    assert "deadline = started_at + search_timeout_sec" in method_source
+    assert "stage2_reserve_sec" not in method_source
 
 
-def test_logo_acquisition_is_bounded_measured_and_never_a_blind_sweep():
+def test_stage1_does_not_inject_logo_acquisition_moves():
     source, _ = _source_and_class()
-    method = _method("_move_to_acquire_complete_logo")
-    method_source = ast.get_source_segment(source, method)
+    execute_inner = _method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "max_logo_acquisition_moves = 5" in source
-    assert "logo_acquisition_moves < max_logo_acquisition_moves" in source
-    assert "result.moves_executed >= max_logo_acquisition_moves" in source
-    assert "detect_purple_logo" in method_source
-    assert "_camera_axes_in_base" in method_source
-    assert "_gripper_pose" in method_source
-    assert "would be blind" in method_source
-    assert len(_calls(method, "move_smooth")) == 1
-    assert not any(isinstance(item, ast.While) for item in ast.walk(method))
+    assert "max_logo_acquisition_moves" not in method_source
+    assert "_move_to_acquire_complete_logo(" not in method_source
 
 
-def test_stagnated_legacy_stage1_hands_staged_sfp_to_stage2_after_acquisition():
+def test_stagnated_legacy_stage1_hands_its_final_triplet_to_stage2():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
     assert "if action.terminal:" in method_source
     assert "if staged_sfp_target:" in method_source
-    assert "legacy Stage-1 planner stagnated" in method_source
-    assert "handing off to Stage 2" in method_source
+    assert "legacy Stage-1 planner ended" in method_source
+    assert "directly to Stage 2" in method_source
     assert "self._run_sfp_geometric_stage2(" in method_source
 
 
