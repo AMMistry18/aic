@@ -2,39 +2,45 @@
 
 Updated: 2026-07-22
 
-## Pinned baseline
+## Pinned implementation
 
-The board-search implementation on `main` is pinned byte-for-byte to:
+The geometric staged-SFP implementation is pinned to:
 
 ```text
-b269872eb6f0a4a49edc6334c6985e4b00238a5b
-Record three-camera v4 deployment
+b65a7a0
+Add geometric SFP survey stage
 ```
 
-The pin covers the model helper and test, Flowstate package, calibrated masks,
-skill resources and build scripts, deployment manifest, and `inctl` helper.
-Later board-search, simplified-search, and gripper-gate commits are intentionally
-excluded.
+This intentionally replaces the weaker `b269872` terminal contract for the
+`STAGED_SFP_MODULE` route. NIC and SC survey targets keep the legacy Stage-1
+completion behavior.
 
 ## Behavior contract
 
-The V4 terminal contract uses synchronized evidence from all three wrist
-cameras:
+Stage 1 performs rough board acquisition and hands off only after the complete
+purple CAD landmark is visible and unobstructed in at least one calibrated
+camera. For staged SFP modules, Stage 2 then:
 
-- the center camera owns board identity, J1/J6 alignment, top-down geometry,
-  26–36% image area, and the strict two-degree orientation gate;
-- left and right cameras provide mandatory supporting context and gripper
-  separation, but cannot complete the search independently;
-- all three views must have zero protected-envelope mask overlap;
-- two consecutive fresh synchronized snapshots must satisfy the terminal
-  contract; and
-- a failing side view drives a small translation in that camera's image axes,
-  after which center geometry is rechecked.
+- consumes exact CameraInfo intrinsics and image-timestamped TCP/camera TF;
+- estimates `base_T_board` from the board quadrilateral and asymmetric purple
+  material landmark;
+- searches board-relative standoff, two board-plane offsets, oblique look
+  direction, and roll using the production three-camera URDF geometry;
+- requires the complete conservative staged-SFP envelope and all six legal
+  module-seat detail probes inside every camera;
+- requires zero overlap and at least 32 pixels of clearance from each
+  conservative gripper mask;
+- allows at most 45 degrees of orientation change, and performs any meaningful
+  wrist reorientation only after retreating beyond a conservative 0.40 m rig
+  sweep radius; and
+- requires two fresh triplets with at most 50 ms timestamp skew, complete
+  per-camera PnP, pairwise/plan pose consistency, and all-camera projection
+  verification before `done=true`.
 
-Motion remains bounded by deadline, force, displacement, and cumulative-travel
-limits. Expected sensor or search failure returns `success=false`; cancellation
-uses the process cancellation path. The Flowstate process must always switch
-back to the default controller after the skill, on both success and failure.
+Expected calibration, geometry, reach, timeout, or verification failure returns
+`success=true, done=false` so the Flowstate process can decide whether to retry.
+Cancellation still uses the process cancellation path. The complete invocation
+is capped at 60 seconds and every motion remains force-guarded.
 
 ## Authoritative source
 
@@ -46,15 +52,10 @@ back to the default controller after the skill, on both success and failure.
 - `deploy/flowstate/aic_model_v38.manifest.textproto`
 - `scripts/flowstate/inctl.sh`
 
-To verify that the pinned files have not drifted:
+To verify that the implementation files have not drifted:
 
 ```bash
-git diff --exit-code b269872 -- \
-  aic_model/aic_model/board_search.py \
-  aic_model/test/test_board_search.py \
-  flowstate \
-  deploy/flowstate \
-  scripts/flowstate/inctl.sh
+git diff --exit-code b65a7a0 -- flowstate/aic_perception
 ```
 
 ## Build and install
@@ -99,6 +100,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH="aic_model:${PYTHONPATH}" \
   flowstate/aic_perception/test
 ```
 
-Commit `b269872` recorded 144 passing Flowstate tests. Any intentional board
-change must update this handoff and the pinned commit statement in the same
-change.
+Commit `b65a7a0` passes 212 Flowstate perception tests. Any intentional
+board-search change must update this handoff and its pinned implementation.
