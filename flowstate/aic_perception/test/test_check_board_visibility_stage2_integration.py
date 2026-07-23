@@ -172,6 +172,19 @@ def test_stage2_orders_pose_search_motion_fresh_triplet_and_verification():
     assert verification[0] < fresh_grab[1] < verification[-1]
 
 
+def test_stage2_uses_a_relaxed_pose_seed_before_strict_final_verification():
+    source, _ = _source_and_class()
+    method = _method("_run_sfp_geometric_stage2")
+    method_source = ast.get_source_segment(source, method)
+
+    # Stage 2 must not reject a usable handoff merely because the initial
+    # outline is noisier than the final-pose threshold.  Its physical motion
+    # and terminal verification remain separately guarded below.
+    assert "max_reprojection_error_px=20.0" in method_source
+    assert "max_logo_error_px=120.0" in method_source
+    assert "verify_survey_view" in method_source
+
+
 def test_fresh_pixels_and_timestamp_skew_gate_terminal_done():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")

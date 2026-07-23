@@ -2963,7 +2963,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 return
 
         # Prefer the center, but a complete logo in either calibrated side
-        # camera is sufficient. No pose is inferred from an incomplete logo.
+        # camera is sufficient. This is a *seed* for Stage 2, not a Stage-1
+        # handoff criterion: a somewhat noisy outline may still be adequate
+        # to plan a bounded move whose path, IK, force, and final all-camera
+        # visibility verification remain independently fail-closed.
         observations = {}
         for camera_name in ("center_camera", "left_camera", "right_camera"):
             if camera_name not in snapshot.frames:
@@ -3040,6 +3043,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 logo_centroid,
                 camera_models[camera_name],
                 base_T_cam[camera_name],
+                # The default 6 px threshold is appropriate for accepting a
+                # final measured board pose.  It was incorrectly used as a
+                # pre-motion handoff gate, causing Stage 2 to return without
+                # trying a safe survey pose in otherwise usable scenes.  Use
+                # this estimate only as a bounded motion seed; completion
+                # still uses fresh, strict all-camera verification below.
+                max_reprojection_error_px=20.0,
+                max_logo_error_px=120.0,
             )
             if estimate is None:
                 pose_failures[camera_name] = pose_reason
