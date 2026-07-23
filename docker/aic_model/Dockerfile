@@ -1,53 +1,76 @@
-FROM docker.io/library/ros:kilted-ros-core AS build
+FROM docker.io/library/ros:kilted-ros-core
 
-# Install pixi
-RUN apt update && apt install -y git && curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=0.67.2 bash
+# Build from the exact upstream Phase 1 revision used by the validated image,
+# independent of whichever branch contains this Dockerfile.
+ARG AIC_PHASE1_COMMIT=1c1e018eaecadf1829e18603bb531af30e02fce2
+RUN apt update && \
+    apt install -y git ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    git init /ws_aic/src/aic && \
+    cd /ws_aic/src/aic && \
+    git remote add origin https://github.com/intrinsic-dev/aic.git && \
+    git fetch --depth 1 origin "$AIC_PHASE1_COMMIT" && \
+    git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "$AIC_PHASE1_COMMIT"
+
+RUN curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=0.67.2 bash
 ENV PATH="/root/.pixi/bin:$PATH"
 
-# Add base dependencies
-COPY aic_example_policies /ws_aic/src/aic/aic_example_policies
-COPY aic_model /ws_aic/src/aic/aic_model
-COPY aic_interfaces /ws_aic/src/aic/aic_interfaces
-COPY aic_utils /ws_aic/src/aic/aic_utils
-COPY student_teacher_policy/lerobot_robot_aic /ws_aic/src/aic/student_teacher_policy/lerobot_robot_aic
-COPY pixi.toml pixi.lock /ws_aic/src/aic/
-COPY pixi_env_setup.sh /ws_aic/src/aic/
-
-# Add other dependencies
-
 SHELL ["/bin/bash", "-c"]
-RUN --mount=type=cache,target=/root/.cache/rattler/cache --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
-    cd /ws_aic/src/aic && pixi install --locked
-RUN cd /ws_aic/src/aic && pixi run python -m ensurepip --upgrade && \
-    pixi run python -m pip install ultralytics
-RUN cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/PerceptionInsert.py \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/ && \
-    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/perception_core.py \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/ && \
-    mkdir -p /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights && \
-    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best.pt \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/ && \
-    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sc_pose.pt \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/ && \
-    cp /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/final_insert_sc_model73.ts \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_example_policies/ros/weights/
+RUN --mount=type=cache,target=/root/.cache/rattler/cache \
+    --mount=type=cache,target=/ws_aic/src/aic/.pixi/build \
+    cd /ws_aic/src/aic && pixi install --frozen
 
-# RLInsert policy + its TorchScript net (kept after the pixi layer so model
-# swaps don't rebuild the env)
-RUN cp /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/ && \
-    cp /ws_aic/src/aic/aic_model/aic_model/rl_insert_contract.py \
-       /ws_aic/src/aic/.pixi/envs/default/lib/python3.12/site-packages/aic_model/
-COPY models/final_insert_sfp_flowstate_v1.ts /models/final_insert_sfp_flowstate_v1.ts
-COPY models/final_insert_sfp_flowstate_v1.ts.contract.json /models/final_insert_sfp_flowstate_v1.ts.contract.json
-ENV RL_INSERT_MODEL=/models/final_insert_sfp_flowstate_v1.ts
-ENV RL_INSERT_WRENCH_MODE=baseline
-ENV RL_INSERT_CONTROL_MODE=guided
-ENV RL_INSERT_GUIDED_CONTACT_DEPTH_M=-0.008
-ENV RL_INSERT_GUIDED_CONTACT_MAX_LEAD_M=0.020
-ENV RL_INSERT_SAFETY_MAX_LATERAL_M=0.006
-ENV RL_INSERT_SAFETY_MAX_ROTATION_RAD=0.20
+# Use the resolved environment directly. Running `pixi run` here can trigger a
+# fresh manifest solve instead of using the already frozen environment.
+RUN cd /ws_aic/src/aic && \
+    .pixi/envs/default/bin/python -m ensurepip --upgrade && \
+    .pixi/envs/default/bin/python -m pip install --no-cache-dir "ultralytics==8.4.48"
+
+# Apply the exact V50 source and model weights after dependency layers so
+# policy-only changes remain quick Docker rebuilds.
+COPY docker/aic_model/v50_overlay /tmp/v50_overlay
+RUN cd /ws_aic/src/aic && \
+    SITE_PACKAGES="$(.pixi/envs/default/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
+    cp /tmp/v50_overlay/aic_model/*.py /ws_aic/src/aic/aic_model/aic_model/ && \
+    cp /tmp/v50_overlay/aic_model/*.py "$SITE_PACKAGES/aic_model/" && \
+    cp /tmp/v50_overlay/aic_example_policies/ros/perception_core.py \
+       /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/ && \
+    cp /tmp/v50_overlay/aic_example_policies/ros/perception_core.py \
+       "$SITE_PACKAGES/aic_example_policies/ros/" && \
+    mkdir -p \
+       /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights \
+       "$SITE_PACKAGES/aic_example_policies/ros/weights" \
+       "$SITE_PACKAGES/aic_perception" && \
+    cp /tmp/v50_overlay/aic_example_policies/ros/weights/*.pt \
+       /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/ && \
+    cp /tmp/v50_overlay/aic_example_policies/ros/weights/*.pt \
+       "$SITE_PACKAGES/aic_example_policies/ros/weights/" && \
+    cp /tmp/v50_overlay/aic_perception/*.py "$SITE_PACKAGES/aic_perception/" && \
+    .pixi/envs/default/bin/python -m py_compile \
+       /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+       /ws_aic/src/aic/aic_model/aic_model/v50_controller.py \
+       /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
+       /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
+    .pixi/envs/default/bin/python -c \
+       "import cv2, ultralytics; from aic_model.RLInsert import RLInsert; from aic_model.v50_controller import run_v50_script; from aic_perception.gripper_masks import GripperMaskBank; GripperMaskBank(); print('SFP V50 imports OK')"
+
+ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
+ENV RL_INSERT_ACTION_TIME_BUDGET_S=45
+ENV RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=1
+ENV RL_INSERT_VISUAL_GAP_DEBUG=1
+ENV RL_INSERT_V50_TARGET_FORCE_N=8.0
+ENV RL_INSERT_V50_SEAT_FORCE_CAP_N=10.0
 ENV RL_INSERT_FORCE_ABORT_N=18.0
+ENV RL_INSERT_V50_LIFT_DISTANCE_M=0.006
+ENV RL_INSERT_V50_MAX_VISUAL_RESCUES=1
+ENV RL_INSERT_V50_MAX_LIFT_RECOVERIES=1
+ENV RL_INSERT_CONTROL_MODE=script
+ENV RL_INSERT_SCRIPT_BIAS_X_M=0
+ENV RL_INSERT_SCRIPT_BIAS_Y_M=0
+ENV RL_INSERT_SCRIPT_BIAS_RX_RAD=0
+ENV RL_INSERT_MODEL=""
+ENV RL_INSERT_SEAT_MODEL=""
 
 WORKDIR /ws_aic/src/aic
 COPY --chmod=755 <<"EOF" /entrypoint.sh
@@ -65,7 +88,6 @@ should_enable_acl() {
   [[ "$AIC_ENABLE_ACL" == "true" || "$AIC_ENABLE_ACL" == "1" ]]
 }
 
-# prepare the credentials file
 if should_enable_acl; then
   if [[ ! (-n "$AIC_MODEL_PASSWD" ) ]]; then
     echo "AIC_MODEL_PASSWD must be provided"
@@ -74,7 +96,6 @@ if should_enable_acl; then
   echo "model:$AIC_MODEL_PASSWD" >> /credentials.txt
 fi
 
-# start the model
 ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/'"$AIC_ROUTER_ADDR"'"]'
 ZENOH_CONFIG_OVERRIDE+=';transport/shared_memory/enabled=false'
 if should_enable_acl; then
