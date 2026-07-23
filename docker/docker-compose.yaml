@@ -16,6 +16,10 @@ services:
       # AIC_ENABLE_ACL: true
   model:
     image: my-solution:v8
+    # Flowstate runs the policy on Linux/x86_64.  Pin this explicitly so an
+    # Apple-Silicon development host builds the deployable image via emulation
+    # instead of attempting the unsupported linux-aarch64 Pixi environment.
+    platform: linux/amd64
     build:
       dockerfile: docker/aic_model/Dockerfile
       context: ..
@@ -28,6 +32,10 @@ services:
       AIC_ROUTER_ADDR: eval:7447
       AIC_MODEL_PASSWD: CHANGE_IN_PROD
       AIC_SC_POSE_OUTPUT_DIR: /aic_perception_data/pose_sc_gt_raw
+      # The policy must choose from all perceived ports and accept any initial
+      # handoff distance.  It still keeps force and motion aborts active.
+      RL_INSERT_MAX_HANDOFF_SELECT_M: inf
+      RL_INSERT_HANDOFF_MAX_DIST: inf
       # AIC_ENABLE_ACL: true
     volumes:
       - /home/ubuntu/aic_perception_data:/aic_perception_data
