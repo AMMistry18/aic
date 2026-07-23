@@ -193,6 +193,15 @@ def test_stage2_searches_inside_the_execution_workspace_guard():
     assert "min_height_m=0.02" in method_source
 
 
+def test_stage2_motion_uses_remaining_deadline_not_legacy_per_move_caps():
+    method = _method("_run_sfp_geometric_stage2")
+    method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
+
+    assert method_source.count("timeout_sec=remaining") == 3
+    assert "max(move_timeout_sec, 8.0)" not in method_source
+    assert "max(move_timeout_sec, 12.0)" not in method_source
+
+
 def test_fresh_pixels_and_timestamp_skew_gate_terminal_done():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")

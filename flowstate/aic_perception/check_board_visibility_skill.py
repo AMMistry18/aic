@@ -3314,7 +3314,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 settle_angular_tolerance_rad=(
                     settle_orientation_tolerance_rad
                 ),
-                timeout_sec=min(remaining, max(move_timeout_sec, 8.0)),
+                # Stage 2 owns the remaining invocation budget.  Do not
+                # reject a valid long Cartesian profile merely because the
+                # legacy per-move timeout was shorter than that budget.
+                timeout_sec=remaining,
                 baseline_force_xyz=baseline_force_xyz,
                 max_force_n=max_force_n,
                 force_delta_n=force_delta_n,
@@ -3392,7 +3395,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 settle_angular_tolerance_rad=(
                     settle_orientation_tolerance_rad
                 ),
-                timeout_sec=min(remaining, max(move_timeout_sec, 8.0)),
+                timeout_sec=remaining,
                 baseline_force_xyz=baseline_force_xyz,
                 max_force_n=max_force_n,
                 force_delta_n=force_delta_n,
@@ -3463,7 +3466,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             publish_hz=publish_hz,
             settle_tolerance_m=settle_tolerance_m,
             settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
-            timeout_sec=min(remaining, max(move_timeout_sec, 12.0)),
+            timeout_sec=remaining,
             baseline_force_xyz=baseline_force_xyz,
             max_force_n=max_force_n,
             force_delta_n=force_delta_n,
