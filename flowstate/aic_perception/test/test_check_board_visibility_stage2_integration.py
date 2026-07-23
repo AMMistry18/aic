@@ -185,6 +185,14 @@ def test_stage2_uses_a_relaxed_pose_seed_before_strict_final_verification():
     assert "verify_survey_view" in method_source
 
 
+def test_stage2_searches_inside_the_execution_workspace_guard():
+    method = _method("_run_sfp_geometric_stage2")
+    method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
+
+    assert "max_reach_m=1.20" in method_source
+    assert "min_height_m=0.02" in method_source
+
+
 def test_fresh_pixels_and_timestamp_skew_gate_terminal_done():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")

@@ -1058,7 +1058,15 @@ def search_survey_pose(
                     # Recover the TCP pose that realises this camera pose.
                     base_T_tcp = base_T_refcam.compose(ref_tcp_T_cam.inverse())
 
-                    if float(np.linalg.norm(base_T_tcp.translation)) > max_reach_m:
+                    # Keep the candidate generator's TCP workspace contract
+                    # identical to the integration guard.  Checking only the
+                    # camera origin can admit a pose whose camera is above the
+                    # board while its real TCP is below the allowed plane.
+                    if (
+                        float(base_T_tcp.translation[2]) < min_height_m
+                        or float(np.linalg.norm(base_T_tcp.translation))
+                        > max_reach_m
+                    ):
                         continue
                     if not np.all(np.isfinite(base_T_tcp.rotation)):
                         continue

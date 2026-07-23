@@ -3144,6 +3144,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             grippers,
             reference_camera="center_camera",
             current_base_T_tcp=base_T_tcp,
+            # Search under exactly the execution workspace guard.  Previously
+            # the geometry module optimised candidates inside a 1.8 m sphere,
+            # then this integration rejected its preferred choice at 1.2 m
+            # without considering the other all-camera-feasible candidates.
+            max_reach_m=1.20,
+            min_height_m=0.02,
         )
         if candidate is None:
             self._stage2_not_done(
