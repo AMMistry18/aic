@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=my-solution:pre-clock-skew-fix
+FROM ${BASE_IMAGE}
+
+# Patch only the estimator changed for the clock-domain fix.  Starting from
+# the preserved model image makes the dependency environment an explicit base
+# rather than relying on BuildKit's disposable intermediate-cache metadata.
+COPY docker/aic_model/v50_overlay/aic_model/sfp_plug_pose.py /tmp/sfp_plug_pose.py
+
+RUN SITE_PACKAGES="$(.pixi/envs/default/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
+    cp /tmp/sfp_plug_pose.py /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py && \
+    cp /tmp/sfp_plug_pose.py "$SITE_PACKAGES/aic_model/sfp_plug_pose.py" && \
+    .pixi/envs/default/bin/python -m py_compile \
+      /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
+      "$SITE_PACKAGES/aic_model/sfp_plug_pose.py" && \
+    grep -q 'age = max(0.0, now - estimate_stamp)' \
+      /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py
