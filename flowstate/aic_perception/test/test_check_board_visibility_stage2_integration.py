@@ -195,12 +195,15 @@ def test_result_proto_declares_intrinsic_pose_survey_pose_output():
     assert "intrinsic_proto.Pose survey_pose" in proto
 
 
-def test_stage2_searches_inside_the_execution_workspace_guard():
+def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
 
-    assert "max_reach_m=1.20" in method_source
+    # Reach guard is the real UR5e envelope, and the survey frames exactly one
+    # sector, chosen from the target mode.
+    assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
+    assert "self._sector_for_target(survey_target)" in method_source
 
 
 def test_sfp_stage2_does_no_motion_and_has_no_time_budget():
@@ -249,21 +252,33 @@ def test_stage2_rejection_is_a_normal_not_done_result():
     assert "raise" not in method_source
 
 
-def test_target_dispatch_runs_geometry_only_for_staged_sfp_modes():
-    # Execute the small extracted policy helper, rather than merely checking
-    # source strings, so deployed NIC/SC enum values cannot silently route to
-    # the loose-SFP Stage-2 path.
-    helper = copy.deepcopy(_method("_uses_staged_sfp_stage2"))
+def test_every_deployed_target_mode_uses_the_geometric_survey():
+    # Execute the extracted policy helper rather than checking source strings.
+    # All three deployed enum values now take the geometric sector survey; the
+    # legacy adaptive search survives only as the Stage-1 insignia fallback.
+    helper = copy.deepcopy(_method("_uses_geometric_survey"))
     helper.decorator_list = []
     module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
     namespace: dict[str, object] = {}
     exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
-    dispatch = namespace["_uses_staged_sfp_stage2"]
-    assert dispatch(0)
-    assert dispatch(1)
-    assert not dispatch(2)
-    assert not dispatch(3)
+    dispatch = namespace["_uses_geometric_survey"]
+    assert dispatch(0)  # UNSPECIFIED (historical SFP default)
+    assert dispatch(1)  # STAGED_SFP_MODULE
+    assert dispatch(2)  # NIC_SFP_DESTINATION
+    assert dispatch(3)  # SC_DESTINATION_PORT
     assert not dispatch(99)
+
+
+def test_each_target_mode_maps_to_its_own_board_sector():
+    source, _ = _source_and_class()
+    selector = ast.get_source_segment(source, _method("_sector_for_target"))
+
+    assert "nic_sector_corners()" in selector
+    assert "sc_sector_corners()" in selector
+    assert "sfp_sector_corners()" in selector
+    # NIC=2, SC=3, everything else (0/1) is the staged-SFP rail.
+    assert "target == 2" in selector
+    assert "target == 3" in selector
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():

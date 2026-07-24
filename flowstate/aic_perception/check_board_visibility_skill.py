@@ -215,7 +215,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # rebuilt descriptor is rolling out: 0/1 are loose staged SFP, and
         # 2/3 deliberately retain the legacy NIC/SC completion contract.
         survey_target = int(getattr(params, "survey_target", 0))
-        staged_sfp_target = self._uses_staged_sfp_stage2(survey_target)
+        staged_sfp_target = self._uses_geometric_survey(survey_target)
         self._validate_parameters(
             min_contrast=min_contrast,
             margin_px=margin_px,
@@ -349,6 +349,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 snapshot=handoff_snapshot,
                 reports=handoff_reports,
                 result=result,
+                survey_target=survey_target,
                 timeout_sec=timeout_sec,
                 started_at=started_at,
                 max_speed_mps=max_speed_mps,
@@ -2505,10 +2506,31 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         return True
 
     @staticmethod
-    def _uses_staged_sfp_stage2(survey_target: int) -> bool:
-        """Whether this invocation owns the loose staged-SFP survey gate."""
+    def _uses_geometric_survey(survey_target: int) -> bool:
+        """Whether this invocation uses the insignia-driven sector survey.
+
+        All three deployed target modes now take the geometric path; each frames
+        its own board sector.  The legacy adaptive board search remains only as
+        the Stage-1 fallback that moves until the insignia is exposed.
+        """
         # UNSPECIFIED is retained as the historical pre-enum SFP default.
-        return int(survey_target) in (0, 1)
+        return int(survey_target) in (0, 1, 2, 3)
+
+    @staticmethod
+    def _sector_for_target(survey_target: int):
+        """Board-frame coverage sector framed by this survey target."""
+        from aic_perception.board_stage2 import (
+            nic_sector_corners,
+            sc_sector_corners,
+            sfp_sector_corners,
+        )
+
+        target = int(survey_target)
+        if target == 2:  # NIC_SFP_DESTINATION
+            return nic_sector_corners()
+        if target == 3:  # SC_DESTINATION_PORT
+            return sc_sector_corners()
+        return sfp_sector_corners()  # 0 UNSPECIFIED / 1 STAGED_SFP_MODULE
 
     @staticmethod
     def _stage2_not_done(result, reason: str) -> None:
@@ -2644,6 +2666,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         snapshot,
         reports,
         result,
+        survey_target: int,
         timeout_sec: float,
         started_at: float,
         max_speed_mps: float,
@@ -2660,10 +2683,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
     ) -> None:
         """Estimate and publish one board-relative survey pose.
 
-        The SFP path is perception-only: it estimates the board pose from the
-        insignia, computes one board-relative survey pose, and publishes it as
-        ``result.survey_pose`` for a downstream Move Robot skill.  It does not
-        command motion, so it needs no wrist force and does no controller work.
+        Perception-only for every target mode: it estimates the board pose from
+        the insignia, computes one board-relative survey pose that frames this
+        target's board sector (SFP +Y rail / NIC cards / SC ports) in all three
+        cameras, and publishes it as ``result.survey_pose`` for a downstream Move
+        Robot skill.  It commands no motion, so it needs no wrist force and does
+        no controller work.
         """
         from aic_perception.board_stage2 import (
             CameraModel,
@@ -2905,11 +2930,13 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             grippers,
             reference_camera="center_camera",
             current_base_T_tcp=base_T_tcp,
-            # Search under exactly the execution workspace guard.  Previously
-            # the geometry module optimised candidates inside a 1.8 m sphere,
-            # then this integration rejected its preferred choice at 1.2 m
-            # without considering the other all-camera-feasible candidates.
-            max_reach_m=1.20,
+            # Frame a single reachable sector (the +Y SFP pick rail), not the
+            # whole board: framing the whole board in all three canted cameras
+            # needs a standoff beyond the UR5e's ~0.85 m reach.  The reach guard
+            # is the real UR5e envelope (base_link origin); min-motion then picks
+            # the closest reachable pose that frames the sector in all cameras.
+            coverage_targets=(self._sector_for_target(survey_target),),
+            max_reach_m=0.85,
             min_height_m=0.02,
         )
         if candidate is None:

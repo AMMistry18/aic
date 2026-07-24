@@ -257,6 +257,54 @@ def board_coverage_corners() -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Per-sector coverage targets (board frame, metres), derived from
+# task_board.urdf.xacro component joint origins.  Framing the whole board in all
+# three canted wrist cameras needs a standoff beyond the UR5e's reach; a single
+# sector is small enough to frame in all three cameras from a reachable pose.
+# ---------------------------------------------------------------------------
+
+
+def _sector_box_corners(
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    z_range: tuple[float, float],
+) -> np.ndarray:
+    """Return the 8 board-frame corners of an axis-aligned sector box."""
+    corners = []
+    for x in x_range:
+        for y in y_range:
+            for z in z_range:
+                corners.append((x, y, z))
+    return np.array(corners, dtype=float)
+
+
+def sfp_sector_corners() -> np.ndarray:
+    """SFP pick modules on the +Y rail (SFP mount rail 1).
+
+    Rail at board-X 0.055; rail-1 mounts sit at Y = 0.10625 +/- 0.09625 travel;
+    the box adds the SFP body half-extent.  This is the ``STAGED_SFP_MODULE``
+    survey target.
+    """
+    return _sector_box_corners((0.02, 0.09), (0.0, 0.225), (0.01, 0.06))
+
+
+def sc_sector_corners() -> np.ndarray:
+    """SC optical ports (Zone 2): sc_port_0/1 at board-X -0.075 +/- 0.055.
+
+    The ``SC_DESTINATION_PORT`` survey target.
+    """
+    return _sector_box_corners((-0.14, -0.01), (-0.02, 0.10), (0.01, 0.05))
+
+
+def nic_sector_corners() -> np.ndarray:
+    """NIC card SFP-port destinations (Zone 1): five mounts at board-X -0.081.
+
+    The ``NIC_SFP_DESTINATION`` survey target.
+    """
+    return _sector_box_corners((-0.14, -0.03), (-0.19, 0.01), (0.01, 0.05))
+
+
+# ---------------------------------------------------------------------------
 # Rigid-transform helpers.
 # ---------------------------------------------------------------------------
 
@@ -1097,11 +1145,29 @@ def search_survey_pose(
     grippers: Mapping[str, GripperExclusion],
     *,
     reference_camera: str = "center_camera",
-    standoffs_m: Sequence[float] = (0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.25),
+    # Finer steps at the near end: downstream pose estimation wants the closest
+    # standoff that still frames the sector, not merely a feasible one.
+    standoffs_m: Sequence[float] = (
+        0.30,
+        0.35,
+        0.40,
+        0.45,
+        0.50,
+        0.55,
+        0.60,
+        0.70,
+        0.80,
+        0.90,
+        1.00,
+        1.15,
+        1.25,
+    ),
     yaws_rad: Sequence[float] | None = None,
     lateral_offsets_m: Sequence[float] | None = None,
-    offsets_x_m: Sequence[float] = (-0.12, -0.06, 0.0, 0.06, 0.12),
-    offsets_y_m: Sequence[float] = (-0.12, -0.06, 0.0, 0.06, 0.12),
+    # Small board-plane offsets only.  Large offsets produce raking views that
+    # foreshorten and self-occlude tall components (NIC cards, SC ports).
+    offsets_x_m: Sequence[float] = (-0.06, -0.03, 0.0, 0.03, 0.06),
+    offsets_y_m: Sequence[float] = (-0.06, -0.03, 0.0, 0.03, 0.06),
     coverage_targets: Sequence[np.ndarray] | None = None,
     module_envelopes_board: Sequence[np.ndarray] | None = None,
     current_base_T_tcp: Transform | None = None,
@@ -1114,6 +1180,13 @@ def search_survey_pose(
     max_reach_m: float = 1.8,
     min_height_m: float = 0.02,
     edge_margin_px: float = 12.0,
+    # Keep the reference optical axis near the board normal.  A raking view
+    # collapses the along-rail spacing of tall parts, which is what stops the
+    # pose estimator separating adjacent NIC cards / SC ports.
+    max_obliquity_rad: float = math.radians(20.0),
+    # Do not accept a pose whose sector only just fits; leave real margin so a
+    # small board-pose error cannot clip a component out of a camera.
+    min_required_clearance_px: float = 25.0,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
@@ -1176,6 +1249,7 @@ def search_survey_pose(
         # top-down pose with image roll only.
         center_base = base_T_board.apply(target_board.mean(axis=0))
         best: SurveyCandidate | None = None
+        best_key: tuple | None = None
         evaluated = 0
         for standoff in standoffs_m:
             for offset_x in offsets_x_m:
@@ -1188,6 +1262,26 @@ def search_survey_pose(
                             + board_y_base * offset_y
                         )
                         if cam_origin[2] < min_height_m:
+                            continue
+                        # Obliquity of the reference view: angle between the
+                        # board normal and the direction from the sector centre
+                        # out to the camera.  Zero means looking straight down
+                        # the normal (fully overhead).
+                        to_camera = cam_origin - center_base
+                        to_camera_norm = float(np.linalg.norm(to_camera))
+                        if to_camera_norm < 1e-9:
+                            continue
+                        obliquity = math.acos(
+                            float(
+                                np.clip(
+                                    np.dot(to_camera / to_camera_norm,
+                                           board_normal_base),
+                                    -1.0,
+                                    1.0,
+                                )
+                            )
+                        )
+                        if obliquity > max_obliquity_rad:
                             continue
                         up_hint = (
                             math.cos(yaw) * board_y_base
@@ -1249,6 +1343,10 @@ def search_survey_pose(
                         ):
                             continue
                         min_clear = min(c.clearance for c in coverages)
+                        # Reject poses that only just fit: downstream pose
+                        # estimation needs real margin on every camera.
+                        if min_clear < min_required_clearance_px:
+                            continue
                         candidate = SurveyCandidate(
                             base_T_tcp=base_T_tcp,
                             min_clearance_px=min_clear,
@@ -1272,27 +1370,22 @@ def search_survey_pose(
                             angular_motion_rad=angular_motion,
                             coverage_target=target_board,
                         )
-                        # Lexicographic, deterministic optimisation: prefer the
-                        # *closest* feasible pose (least motion), so the survey
-                        # frames the modules at the smallest necessary standoff
-                        # -- bigger modules in frame and a shorter, safer move --
-                        # then break ties by clearance and by angular motion.
+                        # Lexicographic, deterministic optimisation.  Standoff
+                        # dominates: the smallest standoff that still frames the
+                        # sector puts the most pixels on each component, which is
+                        # what lets the estimator separate adjacent NIC cards /
+                        # SC ports.  Then prefer the most overhead view, then
+                        # clearance, then the shortest move.
                         candidate_key = (
-                            -round(candidate.motion_m, 4),
+                            -round(standoff, 4),
+                            -round(obliquity, 4),
                             round(candidate.min_clearance_px, 6),
+                            -round(candidate.motion_m, 4),
                             -candidate.angular_motion_rad,
-                        )
-                        best_key = (
-                            (
-                                -round(best.motion_m, 4),
-                                round(best.min_clearance_px, 6),
-                                -best.angular_motion_rad,
-                            )
-                            if best is not None
-                            else None
                         )
                         if best is None or candidate_key > best_key:
                             best = candidate
+                            best_key = candidate_key
         return best, evaluated
 
     total_evaluated = 0
