@@ -88,23 +88,16 @@ class V50Config:
     lateral_safety_m: float = 0.006
     rotation_safety_rad: float = np.deg2rad(15.0)
     seat_align_enable: bool = True
-    seat_align_force_gain: float = 0.0
-    seat_align_moment_gain: float = 0.0
+    seat_align_force_gain: float = 0.00015
+    seat_align_moment_gain: float = 0.02
     seat_align_max_lat_m: float = 0.0015
     seat_align_max_tilt_rad: float = 0.0175
     seat_mouth_zone_m: float = 0.006
     seat_mouth_speed_scale: float = 1.0
-    seat_stall_grace_s: float = 0.0
+    seat_stall_grace_s: float = 1.5
+    seat_overtravel_m: float = 0.005
     seat_candidate_depth_m: float = 0.0445
     insertion_event_timeout_wall_s: float = 6.0
-    max_visual_rescues_per_pose: int = 1
-    max_lift_recoveries: int = 1
-    lift_distance_m: float = 0.006
-    lift_timeout_wall_s: float = 2.0
-    recovery_percept_samples: int = 3
-    recovery_percept_min_agree: int = 2
-    recovery_percept_agree_m: float = 0.004
-    recovery_percept_timeout_wall_s: float = 5.0
     plug_max_age_s: float = 0.35
 
     @classmethod
@@ -125,10 +118,10 @@ class V50Config:
             max_axial_lead_m=_env_float("RL_INSERT_V50_MAX_AXIAL_LEAD_M", 0.020),
             seat_align_enable=_env_bool("RL_INSERT_V50_SEAT_ALIGN_ENABLE", True),
             seat_align_force_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.0
+                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.00015
             ),
             seat_align_moment_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.0
+                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.02
             ),
             seat_align_max_lat_m=_env_float(
                 "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0015
@@ -140,43 +133,23 @@ class V50Config:
             seat_mouth_speed_scale=_env_float(
                 "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 1.0
             ),
-            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 0.0),
+            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 1.5),
+            seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.005),
             insertion_event_timeout_wall_s=_env_float(
                 "RL_INSERT_V50_EVENT_TIMEOUT_S", 6.0
-            ),
-            max_visual_rescues_per_pose=_env_int(
-                "RL_INSERT_V50_MAX_VISUAL_RESCUES", 1
-            ),
-            max_lift_recoveries=_env_int("RL_INSERT_V50_MAX_LIFT_RECOVERIES", 1),
-            lift_distance_m=_env_float("RL_INSERT_V50_LIFT_DISTANCE_M", 0.006),
-            # 2.0s was too tight for the deployed robot's actual (slow) motion:
-            # a 6mm recovery lift could not complete, so the bounded-lift retry
-            # aborted. Same wall-clock-too-tight cause as the align timeout.
-            lift_timeout_wall_s=_env_float("RL_INSERT_V50_LIFT_TIMEOUT_S", 5.0),
-            recovery_percept_samples=_env_int(
-                "RL_INSERT_V50_RECOVERY_PERCEPT_SAMPLES", 3
-            ),
-            recovery_percept_min_agree=_env_int(
-                "RL_INSERT_V50_RECOVERY_PERCEPT_MIN_AGREE", 2
             ),
             plug_max_age_s=_env_float("RL_INSERT_V50_PLUG_MAX_AGE_S", 0.35),
         ).validated()
 
     def validated(self) -> "V50Config":
-        if not 0.005 <= self.lift_distance_m <= 0.008:
-            raise ValueError("v50 lift recovery must stay within 5-8 mm")
         if not 0.0 < self.target_axial_force_n < self.seat_force_cap_n:
             raise ValueError("v50 target force must be below the seat force cap")
         if not self.seat_force_cap_n < self.force_abort_n <= 18.0:
             raise ValueError("v50 force cap must be below the <=18 N hard abort")
-        if self.max_visual_rescues_per_pose < 1:
-            raise ValueError("v50 requires visual contrast as the first wedge rescue")
-        if not 0 <= self.max_lift_recoveries <= 2:
-            raise ValueError("v50 lift recovery count must be bounded to 0-2")
-        if self.recovery_percept_min_agree > self.recovery_percept_samples:
-            raise ValueError("v50 recovery consensus cannot require too many samples")
         if self.axial_stiffness_n_m <= 0.0:
             raise ValueError("v50 axial stiffness must be positive")
+        if not 0.0 <= self.seat_overtravel_m <= 0.008:
+            raise ValueError("v50 seat overtravel must stay within 0-8 mm")
         if self.seat_align_max_lat_m < 0.0 or self.seat_align_max_tilt_rad < 0.0:
             raise ValueError("v50 seat alignment correction caps must be non-negative")
         if (
@@ -368,7 +341,11 @@ def next_persistent_depth(
     # This is a persistent absolute setpoint.  It grows while the plug is stuck,
     # unlike v49's ``current_tip + one_step`` command.  The lead cap bounds the
     # nominal impedance demand to approximately target_axial_force_n.
-    return min(INSERT_DEPTH_M, candidate, current_depth + config.force_lead_m)
+    return min(
+        INSERT_DEPTH_M + config.seat_overtravel_m,
+        candidate,
+        current_depth + config.force_lead_m,
+    )
 
 
 @dataclass
@@ -1039,151 +1016,6 @@ class PlugRelativeV50Controller:
             )
             self.policy.sleep_for(self.config.command_dt_sim_s)
 
-    def _visual_rescue(self) -> bool:
-        if not self.policy._visual_gap_wedge_enabled():
-            self.log.error("[v50] visual contrast recovery is disabled")
-            return False
-        self.send_feedback("wedge detected -- visual contrast recovery")
-        try:
-            hole = self.policy._run_visual_gap_wedge_recovery(
-                self.get_observation,
-                self.move_robot,
-                raw_port_pos=self.port_pos,
-                Rp=self.Rp,
-                R_seat=self.Rp,
-                local_port_kps=LOCAL_SFP_PORT_KPS,
-                stiffness=self.STIFFNESS,
-                damping=self.DAMPING,
-                step_dt=self.config.command_dt_sim_s,
-            )
-        except Exception as exc:
-            self.log.error(f"[v50] visual contrast recovery failed: {exc}")
-            return False
-        if hole is None:
-            self.log.warn("[v50] visual contrast recovery had no safe consensus")
-            return False
-        offset = self.Rp.T @ (np.asarray(hole, dtype=np.float64) - self.port_pos)
-        self.port_pos = (
-            self.port_pos + self.Rp[:, 0] * offset[0] + self.Rp[:, 1] * offset[1]
-        )
-        self.log.info(
-            f"[v50] visual opening accepted: lateral_delta_mm="
-            f"{np.round(offset[:2] * 1000.0, 2).tolist()}"
-        )
-        return True
-
-    def _lift(self) -> bool:
-        tip_start, _ = self._tip_pose()
-        target_tip = tip_start - self.Rp[:, 2] * self.config.lift_distance_m
-        start_depth = float((self.Rp.T @ (tip_start - self.port_pos))[2])
-        deadline = time.monotonic() + self.config.lift_timeout_wall_s
-        self.send_feedback(
-            f"lifting {self.config.lift_distance_m*1000.0:.0f}mm for fresh perception"
-        )
-        while time.monotonic() < deadline:
-            self.policy._enforce_action_deadline(self.move_robot)
-            self.policy.set_pose_target(
-                self.move_robot,
-                self.policy._tcp_target_for_tip(target_tip, self.Rp),
-                stiffness=self.HOLD_STIFFNESS,
-                damping=self.HOLD_DAMPING,
-            )
-            self.policy.sleep_for(self.config.command_dt_sim_s)
-            tip_pos, _ = self._tip_pose()
-            depth = float((self.Rp.T @ (tip_pos - self.port_pos))[2])
-            if start_depth - depth >= self.config.lift_distance_m - 0.001:
-                # Mark the newest image visible *after* the lift completed.  The
-                # recovery consensus below accepts only strictly newer frames, so
-                # it cannot accidentally reuse a pre-lift or in-motion image.
-                completion_observation = self.get_observation()
-                completion_stamp = (
-                    _observation_stamp_s(completion_observation)
-                    if completion_observation is not None
-                    else None
-                )
-                if completion_stamp is None:
-                    self.log.error(
-                        "[v50] lift completed but no timestamped camera frame was available"
-                    )
-                    return False
-                self.last_observation_stamp = completion_stamp
-                return True
-        self.log.error("[v50] bounded lift did not reach its 5-8mm recovery target")
-        return False
-
-    def _fresh_port_after_lift(self):
-        samples = []
-        newest_observation = None
-        after_stamp = self.last_observation_stamp
-        deadline = time.monotonic() + self.config.recovery_percept_timeout_wall_s
-        while (
-            len(samples) < self.config.recovery_percept_samples
-            and time.monotonic() < deadline
-        ):
-            observation = self._wait_new_observation(
-                after_stamp=after_stamp,
-                timeout_wall_s=min(1.0, max(0.05, deadline - time.monotonic())),
-            )
-            if observation is None:
-                continue
-            after_stamp = self.last_observation_stamp
-            newest_observation = observation
-            result = self.policy.perceive_port_pose(self.task, observation)
-            if result is None:
-                continue
-            position, quaternion, reprojection = result
-            if np.isfinite(reprojection):
-                samples.append(
-                    (
-                        np.asarray(position, dtype=np.float64),
-                        np.asarray(quaternion, dtype=np.float64),
-                        float(reprojection),
-                    )
-                )
-        if len(samples) < self.config.recovery_percept_min_agree:
-            self.log.error("[v50] fresh recovery port perception lacked consensus")
-            return None
-        positions = np.array([sample[0] for sample in samples])
-        median = np.median(positions, axis=0)
-        kept = [
-            sample
-            for sample in samples
-            if float(np.linalg.norm(sample[0] - median))
-            <= self.config.recovery_percept_agree_m
-        ]
-        if len(kept) < self.config.recovery_percept_min_agree:
-            self.log.error("[v50] fresh recovery port poses disagreed")
-            return None
-        port_pos = np.median(np.array([sample[0] for sample in kept]), axis=0)
-        best = min(kept, key=lambda sample: float(np.linalg.norm(sample[0] - port_pos)))
-        return port_pos, best[1], newest_observation
-
-    def _lift_and_refresh(self) -> bool:
-        if not self._lift():
-            return False
-        refreshed = self._fresh_port_after_lift()
-        if refreshed is None:
-            return False
-        self.port_pos, self.port_quat, _ = refreshed
-        self.Rp = quaternion_to_matrix(self.port_quat)
-        # Port inference consumes time.  Obtain one additional image set newer
-        # than every port-consensus frame before running plug pose, rather than
-        # allowing the estimator's age gate to reject or reuse an old frame.
-        observation = self._wait_new_observation(
-            after_stamp=self.last_observation_stamp,
-            timeout_wall_s=1.5,
-        )
-        if observation is None:
-            self.log.error("[v50] no post-consensus fresh frame for plug recovery")
-            return False
-        # Clear the old transform before accepting a new one.  A failed estimator
-        # can therefore never silently keep controlling from the stale grasp.
-        self.policy._v50_grasp_transform = None
-        if not self._activate_plug_pose(observation):
-            self._hold_legacy_safe_pose()
-            return False
-        return True
-
     def _hold_legacy_safe_pose(self):
         """Hold the TCP itself when no visually calibrated plug transform exists."""
 
@@ -1199,38 +1031,16 @@ class PlugRelativeV50Controller:
             self._hold_legacy_safe_pose()
             return False
 
-        for recovery_index in range(self.config.max_lift_recoveries + 1):
-            if not self._align():
-                return False
-            visual_uses = 0
-            while True:
-                self.send_feedback("v50 persistent force-regulated seating")
-                outcome = self._seat()
-                if outcome == SEATED:
-                    self.log.info(
-                        f"[v50] matching insertion event confirmed for {self.expected_event}"
-                    )
-                    self.send_feedback("correct-port insertion event confirmed")
-                    return True
-                if outcome == HARD_FAILURE:
-                    return False
-                if visual_uses < self.config.max_visual_rescues_per_pose:
-                    visual_uses += 1
-                    if self._visual_rescue() and self._align():
-                        continue
-                break
-
-            if recovery_index >= self.config.max_lift_recoveries:
-                self.log.error("[v50] visual and bounded lift recovery budget exhausted")
-                return False
-            self.log.warn(
-                f"[v50] seating still stalled after visual rescue; starting bounded "
-                f"lift/re-perception {recovery_index + 1}/{self.config.max_lift_recoveries}"
+        if not self._align():
+            return False
+        self.send_feedback("v50 persistent force-regulated seating")
+        outcome = self._seat()
+        if outcome == SEATED:
+            self.log.info(
+                f"[v50] matching insertion event confirmed for {self.expected_event}"
             )
-            if not self._lift_and_refresh():
-                return False
-            # The next loop gives the freshly perceived recovery pose its own
-            # visual-first wedge rescue before another persistent seat attempt.
+            self.send_feedback("correct-port insertion event confirmed")
+            return True
         return False
 
 

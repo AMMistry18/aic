@@ -12,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "docker" / "aic_model"))
 
 from aic_model.v50_controller import (  # noqa: E402
     HARD_FAILURE,
+    INSERT_DEPTH_M,
     PlugRelativeV50Controller,
     SEATED,
     STALLED,
@@ -26,16 +27,19 @@ from aic_model.v50_controller import (  # noqa: E402
 import patch_v49_plug_relative_v50 as overlay  # noqa: E402
 
 
-def test_v50_config_bounds_force_and_recovery():
+def test_v50_config_bounds_force_and_seating():
     config = V50Config().validated()
     assert np.isclose(config.force_lead_m, 0.016)
     assert config.target_axial_force_n < config.seat_force_cap_n < 18.0
-    assert 0.005 <= config.lift_distance_m <= 0.008
+    assert 0.0 <= config.seat_overtravel_m <= 0.008
+    assert np.isclose(config.seat_align_force_gain, 0.00015)
+    assert np.isclose(config.seat_align_moment_gain, 0.02)
+    assert np.isclose(config.seat_stall_grace_s, 1.5)
 
-    with pytest.raises(ValueError, match="5-8 mm"):
-        V50Config(lift_distance_m=0.010).validated()
     with pytest.raises(ValueError, match="hard abort"):
         V50Config(force_abort_n=19.0).validated()
+    with pytest.raises(ValueError, match="overtravel"):
+        V50Config(seat_overtravel_m=0.009).validated()
 
 
 def test_persistent_depth_accumulates_force_lead_while_stalled():
@@ -54,6 +58,20 @@ def test_persistent_depth_accumulates_force_lead_while_stalled():
         current_depth, command_depth, 1.0, force_n=10.0, config=config
     )
     assert np.isclose(held, command_depth)
+
+
+def test_persistent_depth_allows_bounded_overtravel_near_insert_depth():
+    config = V50Config(seat_overtravel_m=0.003).validated()
+    current_depth = INSERT_DEPTH_M - 0.001
+    command_depth = current_depth
+
+    for _ in range(50):
+        command_depth = next_persistent_depth(
+            current_depth, command_depth, 0.1, force_n=1.0, config=config
+        )
+
+    assert command_depth > INSERT_DEPTH_M
+    assert np.isclose(command_depth, INSERT_DEPTH_M + config.seat_overtravel_m)
 
 
 def test_wall_progress_watch_uses_elapsed_time_not_loop_count():
@@ -186,7 +204,7 @@ class _Log:
 
 class _SequenceHarness(PlugRelativeV50Controller):
     def __init__(self, outcomes, *, initial_pose=True, visual=True, refresh=True):
-        self.config = V50Config(max_lift_recoveries=1).validated()
+        self.config = V50Config().validated()
         self.outcomes = list(outcomes)
         self.initial_pose = initial_pose
         self.visual_result = visual
@@ -220,21 +238,12 @@ class _SequenceHarness(PlugRelativeV50Controller):
         return self.refresh_result
 
 
-def test_recovery_order_is_visual_seat_then_lift_and_repeats_visual():
-    harness = _SequenceHarness([STALLED, STALLED, STALLED, SEATED])
-    assert harness.run() is True
+def test_stalled_seat_fails_after_one_align_and_seat_without_recovery():
+    harness = _SequenceHarness([STALLED])
+    assert harness.run() is False
     actions = [entry for entry in harness.trace if isinstance(entry, str)]
     assert actions == [
         "fresh-plug",
-        "align",
-        "seat",
-        "visual",
-        "align",
-        "seat",
-        "lift-fresh",
-        "align",
-        "seat",
-        "visual",
         "align",
         "seat",
     ]
