@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package ai.tar2;
 
+import "intrinsic/math/proto/pose.proto";
+
 // Absolute Cartesian TCP pose in target_frame (base_link for this skill).
 message ViewPose {
   double x = 1;
@@ -131,4 +133,11 @@ message CheckBoardVisibilitySkillResult {
   double elapsed_seconds = 25;
   string last_action = 26;
   uint32 rollback_count = 27;
+
+  // For the STAGED_SFP path: the absolute base_link TCP pose the downstream
+  // Move Robot skill should reach. Wire it as the Cartesian motion target's
+  // `target_frame_offset` with moving_frame = gripper TCP and
+  // target_frame = base_link (root). Set together with target_valid when
+  // done=true. This skill no longer executes the survey move itself for SFP.
+  intrinsic_proto.Pose survey_pose = 28;
 }

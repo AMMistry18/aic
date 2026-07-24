@@ -14,10 +14,14 @@ function(add_python_skill SKILL_NAME)
     DESCRIPTOR_SET_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SKILL_NAME}_protos.desc"
   )
 
-  # Python bindings for the params and result messages.
+  # Python bindings for the params and result messages.  Intrinsic imports
+  # (e.g. intrinsic/math/proto/pose.proto) have no .proto sources shipped, so
+  # resolve them from the SDK descriptor set the same way the descriptor build
+  # above does.
   add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${SKILL_NAME}_pb2.py"
     COMMAND protoc -I${CMAKE_CURRENT_SOURCE_DIR}
+            --descriptor_set_in=${intrinsic_sdk_cmake_DESCRIPTOR_SET_FILE}
             --python_out=${CMAKE_CURRENT_BINARY_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/${SKILL_NAME}.proto
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SKILL_NAME}.proto

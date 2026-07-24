@@ -932,8 +932,16 @@ def test_verify_survey_view_passes_for_feasible_pose():
     candidate, reason = search_survey_pose(board, tcp_T_cam, cameras, grippers)
     assert candidate is not None, reason
     stamps = {name: 1_000_000_000 + i * 1_000_000 for i, name in enumerate(cameras)}
+    # Confirm the same coverage target the pose was chosen for (as the runner
+    # does); the min-motion pose just-fits that target, not a larger default.
     result = verify_survey_view(
-        board, candidate.base_T_tcp, tcp_T_cam, cameras, grippers, stamps
+        board,
+        candidate.base_T_tcp,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        stamps,
+        coverage_target=candidate.coverage_target,
     )
     assert result.passed, result.reason
     assert result.skew_ok

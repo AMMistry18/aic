@@ -1272,18 +1272,20 @@ def search_survey_pose(
                             angular_motion_rad=angular_motion,
                             coverage_target=target_board,
                         )
-                        # Lexicographic, deterministic optimisation: safety
-                        # clearance dominates; motion only resolves otherwise
-                        # equivalent poses.
+                        # Lexicographic, deterministic optimisation: prefer the
+                        # *closest* feasible pose (least motion), so the survey
+                        # frames the modules at the smallest necessary standoff
+                        # -- bigger modules in frame and a shorter, safer move --
+                        # then break ties by clearance and by angular motion.
                         candidate_key = (
+                            -round(candidate.motion_m, 4),
                             round(candidate.min_clearance_px, 6),
-                            -candidate.motion_m,
                             -candidate.angular_motion_rad,
                         )
                         best_key = (
                             (
+                                -round(best.motion_m, 4),
                                 round(best.min_clearance_px, 6),
-                                -best.motion_m,
                                 -best.angular_motion_rad,
                             )
                             if best is not None

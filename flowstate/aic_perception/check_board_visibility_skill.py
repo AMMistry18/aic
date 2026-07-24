@@ -2658,37 +2658,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         cancelled,
         motion_cancelled,
     ) -> None:
-        """Estimate, execute, and confirm one board-relative survey pose.
+        """Estimate and publish one board-relative survey pose.
 
-        No aggregate time bound: the insignia pose solve is deterministic and
-        every motion is force- and ``move_timeout_sec``-guarded, so Stage 2
-        always runs its geometric move to completion once Stage 1 hands off.
+        The SFP path is perception-only: it estimates the board pose from the
+        insignia, computes one board-relative survey pose, and publishes it as
+        ``result.survey_pose`` for a downstream Move Robot skill.  It does not
+        command motion, so it needs no wrist force and does no controller work.
         """
         from aic_perception.board_stage2 import (
             CameraModel,
             GripperExclusion,
             estimate_board_pose_from_insignia,
             quaternion_from_matrix,
-            sampled_cartesian_path_is_safe,
             search_survey_pose,
-            verify_survey_view,
         )
 
         expected = tuple(sorted(self.config.camera_frames))
-        if snapshot.force_xyz is None:
-            fresh_force = self.camera_rig.wait_for_force_xyz(
-                timeout_sec=timeout_sec,
-                max_age_sec=0.5,
-            )
-            if fresh_force is None:
-                self._stage2_not_done(
-                    result,
-                    "no fresh wrist-force sample after waiting; refusing the "
-                    "geometric SFP survey move",
-                )
-                return
-            if baseline_force_xyz is None:
-                baseline_force_xyz = fresh_force
         missing_frames = sorted(set(expected) - set(snapshot.frames))
         missing_calibration = sorted(set(expected) - set(snapshot.calibrations))
         if missing_frames:
@@ -2938,34 +2923,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         target = candidate.base_T_tcp
         displacement = target.translation - base_T_tcp.translation
         distance_m = float(np.linalg.norm(displacement))
-        if distance_m > 0.65:
-            self._stage2_not_done(
-                result,
-                f"computed survey pose is {distance_m:.3f}m away; refusing "
-                "an unsafe one-shot Cartesian move",
-            )
-            return
-        target_rotation_delta = base_T_tcp.rotation.T @ target.rotation
-        orientation_distance = math.acos(
-            float(
-                np.clip(
-                    0.5 * (np.trace(target_rotation_delta) - 1.0),
-                    -1.0,
-                    1.0,
-                )
-            )
+        board_normal = np.asarray(
+            board_pose.base_T_board.rotation[:, 2], dtype=float
         )
-        if (
-            not math.isfinite(orientation_distance)
-            or orientation_distance > math.radians(45.0) + 1e-6
-        ):
-            self._stage2_not_done(
-                result,
-                "computed survey orientation is "
-                f"{orientation_distance:.2f}rad from the acquired pose; "
-                "refusing an unsafe one-shot rotation",
-            )
-            return
+        board_origin = np.asarray(
+            board_pose.base_T_board.translation, dtype=float
+        )
+        # The survey search already enforced reach, height, <=45deg orientation
+        # change, and all-camera coverage.  Add cheap fail-closed guards, then
+        # publish the pose -- this skill no longer executes the SFP survey move.
         if (
             float(target.translation[2]) < 0.02
             or float(np.linalg.norm(target.translation)) > 1.20
@@ -2974,495 +2940,64 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result, "computed survey TCP lies outside the workspace guard"
             )
             return
-        board_normal = np.asarray(
-            board_pose.base_T_board.rotation[:, 2], dtype=float
-        )
-        board_origin = np.asarray(
-            board_pose.base_T_board.translation, dtype=float
-        )
-        current_clearance = float(
-            np.dot(base_T_tcp.translation - board_origin, board_normal)
-        )
         target_clearance = float(
             np.dot(target.translation - board_origin, board_normal)
         )
-        lateral_delta = displacement - np.dot(
-            displacement, board_normal
-        ) * board_normal
-
-        def path_is_safe(
-            start: np.ndarray,
-            end: np.ndarray,
-            *,
-            minimum_clearance: float,
-            allow_outward_retreat: bool = False,
-        ) -> bool:
-            return sampled_cartesian_path_is_safe(
-                start,
-                end,
-                board_origin=board_origin,
-                board_normal=board_normal,
-                minimum_clearance=minimum_clearance,
-                allow_outward_retreat=allow_outward_retreat,
-            )
-
         if target_clearance < 0.12:
             self._stage2_not_done(
                 result,
                 "computed SFP survey pose is too close to the board plane",
             )
             return
-        needs_orientation_waypoint = (
-            orientation_distance > settle_orientation_tolerance_rad
-        )
-        rotation_clearance_m = 0.40
-        needs_retreat = current_clearance < 0.12
-        # A lateral leg near the board is never sent directly, even when the
-        # endpoints are individually legal.  First establish a 16-cm normal
-        # standoff, then transit laterally.  This is the one and only retreat
-        # Stage 2 may insert.
-        needs_retreat = needs_retreat or (
-            float(np.linalg.norm(lateral_delta)) > 0.08
-            and min(current_clearance, target_clearance) < 0.16
-        )
-        # The repository exposes no supported IK/collision-query service.
-        # Never sweep the ~35 cm wrist-camera rig beside the board.  If a
-        # meaningful orientation change is required, retreat with the acquired
-        # orientation held, rotate in place beyond the rig's conservative
-        # bounding radius, then translate with the final orientation fixed.
-        needs_retreat = needs_retreat or (
-            needs_orientation_waypoint
-            and current_clearance < rotation_clearance_m
-        )
-        if cancelled():
-            raise skill_interface.SkillCancelledError(
-                "board search cancelled before geometric SFP motion"
-            )
 
-        if needs_retreat:
-            required_retreat_clearance = (
-                rotation_clearance_m
-                if needs_orientation_waypoint
-                else 0.16
-            )
-            retreat_distance = max(
-                0.0, required_retreat_clearance - current_clearance
-            )
-            retreat_position_array = (
-                base_T_tcp.translation + retreat_distance * board_normal
-            )
-            retreat_position = tuple(
-                float(value) for value in retreat_position_array
-            )
-            if not path_is_safe(
-                base_T_tcp.translation,
-                retreat_position_array,
-                minimum_clearance=0.12,
-                allow_outward_retreat=True,
-            ) or not path_is_safe(
-                retreat_position_array,
-                target.translation,
-                minimum_clearance=0.12,
-            ):
-                self._stage2_not_done(
-                    result,
-                    "retreat/direct geometric SFP path violates sampled "
-                    "workspace or board-normal clearance",
-                )
-                return
-            logging.info(
-                "SFP Stage 2 inserting board-normal retreat %.3fm before "
-                "%.3fm lateral transit (clearance %.3fm)",
-                retreat_distance,
-                float(np.linalg.norm(lateral_delta)),
-                current_clearance,
-            )
-            retreat = self.robot_motion.move_smooth(
-                retreat_position,
-                target_orientation=quaternion_from_matrix(base_T_tcp.rotation),
-                max_speed_mps=max_speed_mps,
-                max_angular_speed_radps=max_angular_speed_rps,
-                publish_hz=publish_hz,
-                settle_tolerance_m=settle_tolerance_m,
-                settle_angular_tolerance_rad=(
-                    settle_orientation_tolerance_rad
-                ),
-                timeout_sec=move_timeout_sec,
-                baseline_force_xyz=baseline_force_xyz,
-                max_force_n=max_force_n,
-                force_delta_n=force_delta_n,
-                cancelled=motion_cancelled,
-            )
-            if retreat.cancelled:
-                if cancelled():
-                    raise skill_interface.SkillCancelledError(retreat.message)
-                self._stage2_not_done(
-                    result,
-                    "board-normal retreat was cancelled",
-                )
-                return
-            if not retreat.success or not retreat.target_reached:
-                result.force_abort = retreat.force_abort
-                self._stage2_not_done(
-                    result,
-                    "board-normal retreat did not reach its safe waypoint: "
-                    f"{retreat.message}",
-                )
-                return
-            result.moves_executed += 1
-            result.travel_m += float(retreat.distance_m)
-            result.angular_travel_rad += float(retreat.angular_distance_rad)
-            result.moved = True
-        elif not path_is_safe(
-            base_T_tcp.translation,
-            target.translation,
-            minimum_clearance=0.12,
-        ):
-            self._stage2_not_done(
-                result,
-                "direct geometric SFP path fails sampled clearance guard",
-            )
-            return
-
-        target_position = tuple(float(value) for value in target.translation)
-        target_orientation = quaternion_from_matrix(target.rotation)
-        orientation_position_array = (
-            retreat_position_array
-            if needs_retreat
-            else base_T_tcp.translation
-        )
-        if needs_orientation_waypoint:
-            orientation_clearance = float(
-                np.dot(
-                    orientation_position_array - board_origin,
-                    board_normal,
-                )
-            )
-            if orientation_clearance < rotation_clearance_m:
-                self._stage2_not_done(
-                    result,
-                    "no conservative board clearance for the planned wrist "
-                    "orientation waypoint",
-                )
-                return
-            orientation_position = tuple(
-                float(value) for value in orientation_position_array
-            )
-            orientation_outcome = self.robot_motion.move_smooth(
-                orientation_position,
-                target_orientation=target_orientation,
-                max_speed_mps=max_speed_mps,
-                max_angular_speed_radps=max_angular_speed_rps,
-                publish_hz=publish_hz,
-                settle_tolerance_m=settle_tolerance_m,
-                settle_angular_tolerance_rad=(
-                    settle_orientation_tolerance_rad
-                ),
-                timeout_sec=move_timeout_sec,
-                baseline_force_xyz=baseline_force_xyz,
-                max_force_n=max_force_n,
-                force_delta_n=force_delta_n,
-                cancelled=motion_cancelled,
-            )
-            if orientation_outcome.cancelled:
-                if cancelled():
-                    raise skill_interface.SkillCancelledError(
-                        orientation_outcome.message
-                    )
-                self._stage2_not_done(
-                    result,
-                    "safe orientation waypoint was cancelled",
-                )
-                return
-            if (
-                not orientation_outcome.success
-                or not orientation_outcome.target_reached
-            ):
-                result.force_abort = orientation_outcome.force_abort
-                self._stage2_not_done(
-                    result,
-                    "safe orientation waypoint did not complete: "
-                    f"{orientation_outcome.message}",
-                )
-                return
-            result.moves_executed += 1
-            result.travel_m += float(orientation_outcome.distance_m)
-            result.angular_travel_rad += float(
-                orientation_outcome.angular_distance_rad
-            )
-            result.moved = True
-        result.last_action = "sfp_geometric_stage2_move"
+        # Publish the board-relative survey pose for a downstream Move Robot
+        # skill.  Wire result.survey_pose as the Cartesian motion target's
+        # target_frame_offset with moving_frame = gripper TCP and
+        # target_frame = base_link (root).
+        quaternion = quaternion_from_matrix(target.rotation)
         result.target_valid = True
         result.target_frame = self.config.base_frame
-        result.target.x, result.target.y, result.target.z = target_position
-        result.dx, result.dy, result.dz = (
-            float(displacement[0]),
-            float(displacement[1]),
-            float(displacement[2]),
-        )
+        result.target.x = float(target.translation[0])
+        result.target.y = float(target.translation[1])
+        result.target.z = float(target.translation[2])
+        result.target.qx = float(quaternion[0])
+        result.target.qy = float(quaternion[1])
+        result.target.qz = float(quaternion[2])
+        result.target.qw = float(quaternion[3])
+        result.survey_pose.position.x = float(target.translation[0])
+        result.survey_pose.position.y = float(target.translation[1])
+        result.survey_pose.position.z = float(target.translation[2])
+        result.survey_pose.orientation.x = float(quaternion[0])
+        result.survey_pose.orientation.y = float(quaternion[1])
+        result.survey_pose.orientation.z = float(quaternion[2])
+        result.survey_pose.orientation.w = float(quaternion[3])
+        result.dx = float(displacement[0])
+        result.dy = float(displacement[1])
+        result.dz = float(displacement[2])
         logging.info(
-            "SFP Stage 2 source=%s reprojection=%.2fpx target=(%.4f,%.4f,"
-            "%.4f)m standoff=%.3fm yaw=%+.3frad min_clearance=%.1fpx",
+            "SFP Stage 2 published survey pose source=%s reprojection=%.2fpx "
+            "target=(%.4f,%.4f,%.4f)m standoff=%.3fm yaw=%+.3frad "
+            "min_clearance=%.1fpx move=%.3fm",
             source_camera,
             board_pose.reprojection_error_px,
-            target_position[0],
-            target_position[1],
-            target_position[2],
+            target.translation[0],
+            target.translation[1],
+            target.translation[2],
             candidate.standoff_m,
             candidate.yaw_rad,
             candidate.min_clearance_px,
+            distance_m,
         )
-        outcome = self.robot_motion.move_smooth(
-            target_position,
-            target_orientation=target_orientation,
-            max_speed_mps=max_speed_mps,
-            max_angular_speed_radps=max_angular_speed_rps,
-            publish_hz=publish_hz,
-            settle_tolerance_m=settle_tolerance_m,
-            settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
-            timeout_sec=move_timeout_sec,
-            baseline_force_xyz=baseline_force_xyz,
-            max_force_n=max_force_n,
-            force_delta_n=force_delta_n,
-            cancelled=motion_cancelled,
-        )
-        if outcome.cancelled:
-            if cancelled():
-                raise skill_interface.SkillCancelledError(outcome.message)
-            self._stage2_not_done(
-                result, "geometric SFP motion was cancelled"
-            )
-            return
-        if not outcome.success:
-            result.force_abort = outcome.force_abort
-            self._stage2_not_done(
-                result, f"geometric SFP motion did not complete: {outcome.message}"
-            )
-            return
-        result.moves_executed += 1
-        result.travel_m += float(outcome.distance_m)
-        result.angular_travel_rad += float(outcome.angular_distance_rad)
-        result.moved = result.moved or (
-            outcome.distance_m > 0.0 or outcome.angular_distance_rad > 0.0
-        )
-        if not outcome.target_reached:
-            self._stage2_not_done(
-                result,
-                "controller stopped safely before the computed SFP survey pose",
-            )
-            return
-
-        # ------------------------------------------------------------------
-        # Post-move confirmation.  The deterministic insignia pose usually lands
-        # the survey framing directly; one fresh triplet confirms the chosen
-        # coverage target is framed in every camera, and a single bounded
-        # corrective absorbs any residual (mainly standoff) before done=true.
-        # There is no aggregate time budget: each grab and move is timeout- and
-        # force-guarded on its own.
-        # ------------------------------------------------------------------
-        def _confirm_coverage():
-            """Grab one fresh triplet and confirm coverage in every camera.
-
-            Returns ``(passed, refined_pose, current_tcp, reason)`` where
-            ``refined_pose`` is the freshly measured board pose (or ``None``) and
-            ``current_tcp`` is the actual TCP at the reference camera frame time.
-            """
-            if cancelled():
-                raise skill_interface.SkillCancelledError(
-                    "board search cancelled before survey confirmation"
-                )
-            fresh = self.camera_rig.grab(
-                timeout_sec=timeout_sec,
-                min_cameras=len(expected),
-                collection_grace_sec=0.0,
-            )
-            if (
-                fresh is None
-                or set(fresh.frames) != set(expected)
-                or not fresh.frames_within_skew(50_000_000)
-            ):
-                return (
-                    False,
-                    None,
-                    None,
-                    "fresh confirmation triplet unavailable or exceeds 50 ms skew",
-                )
-            try:
-                # Project each fresh image using the TF at *that* frame's time.
-                fresh_base_T_tcp = {
-                    name: self._base_transform_at(
-                        self.config.gripper_frame,
-                        int(fresh.frames[name]["stamp_ns"]),
-                        timeout_sec,
-                    )
-                    for name in expected
-                }
-                fresh_base_T_cam = {
-                    name: self._base_transform_at(
-                        self.config.camera_frames[name],
-                        int(fresh.frames[name]["stamp_ns"]),
-                        timeout_sec,
-                    )
-                    for name in expected
-                }
-            except Exception as error:
-                return False, None, None, f"post-move camera/TCP TF unavailable: {error}"
-            estimates = {}
-            for camera_name in expected:
-                image = fresh.frames[camera_name]["image"]
-                ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
-                observation, _reason = self._stage2_landmarks(
-                    image, reports.get(camera_name), ignored
-                )
-                if observation is None:
-                    continue
-                quad, centroid = observation
-                estimate, _pose_reason = estimate_board_pose_from_insignia(
-                    quad,
-                    centroid,
-                    camera_models[camera_name],
-                    fresh_base_T_cam[camera_name],
-                )
-                if estimate is not None:
-                    estimates[camera_name] = estimate
-            reference_tcp = fresh_base_T_tcp.get(
-                source_camera, next(iter(fresh_base_T_tcp.values()))
-            )
-            if not estimates:
-                return (
-                    False,
-                    None,
-                    reference_tcp,
-                    "no camera recovered the insignia after the move",
-                )
-            refined = estimates.get(
-                "center_camera",
-                min(estimates.values(), key=lambda e: e.reprojection_error_px),
-            )
-            failures = {}
-            for name in expected:
-                check = verify_survey_view(
-                    refined,
-                    fresh_base_T_tcp[name],
-                    {name: tcp_T_cam[name]},
-                    {name: camera_models[name]},
-                    {name: grippers[name]},
-                    {name: int(fresh.frames[name]["stamp_ns"])},
-                    coverage_target=coverage_target,
-                )
-                if not check.passed:
-                    failures[name] = (
-                        ",".join(check.coverages[0].reasons)
-                        if check.coverages and check.coverages[0].reasons
-                        else check.reason
-                    )
-            if failures:
-                reason = "; ".join(f"{name}={detail}" for name, detail in failures.items())
-                return False, refined, reference_tcp, f"coverage not satisfied: {reason}"
-            return True, refined, reference_tcp, "ok"
-
-        passed, refined_pose, current_tcp, confirm_reason = _confirm_coverage()
-
-        if not passed and refined_pose is not None and current_tcp is not None:
-            # One bounded corrective: re-solve the survey pose from the freshly
-            # measured board pose and, if it is a small reachable nudge on a safe
-            # path, move once more and re-confirm.
-            corrective, _corrective_reason = search_survey_pose(
-                refined_pose,
-                tcp_T_cam,
-                camera_models,
-                grippers,
-                reference_camera="center_camera",
-                current_base_T_tcp=current_tcp,
-                coverage_targets=(coverage_target,),
-                max_reach_m=1.20,
-                min_height_m=0.02,
-            )
-            if corrective is not None:
-                nudge = corrective.base_T_tcp
-                nudge_disp = float(
-                    np.linalg.norm(nudge.translation - current_tcp.translation)
-                )
-                nudge_rot = math.acos(
-                    float(
-                        np.clip(
-                            0.5
-                            * (
-                                np.trace(current_tcp.rotation.T @ nudge.rotation)
-                                - 1.0
-                            ),
-                            -1.0,
-                            1.0,
-                        )
-                    )
-                )
-                if (
-                    nudge_disp <= 0.15
-                    and nudge_rot <= math.radians(20.0)
-                    and float(nudge.translation[2]) >= 0.02
-                    and path_is_safe(
-                        current_tcp.translation,
-                        nudge.translation,
-                        minimum_clearance=0.12,
-                    )
-                ):
-                    logging.info(
-                        "SFP Stage 2 corrective nudge %.3fm/%.2frad to close the "
-                        "coverage residual",
-                        nudge_disp,
-                        nudge_rot,
-                    )
-                    corrective_outcome = self.robot_motion.move_smooth(
-                        tuple(float(v) for v in nudge.translation),
-                        target_orientation=quaternion_from_matrix(nudge.rotation),
-                        max_speed_mps=max_speed_mps,
-                        max_angular_speed_radps=max_angular_speed_rps,
-                        publish_hz=publish_hz,
-                        settle_tolerance_m=settle_tolerance_m,
-                        settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
-                        timeout_sec=move_timeout_sec,
-                        baseline_force_xyz=baseline_force_xyz,
-                        max_force_n=max_force_n,
-                        force_delta_n=force_delta_n,
-                        cancelled=motion_cancelled,
-                    )
-                    if corrective_outcome.cancelled and cancelled():
-                        raise skill_interface.SkillCancelledError(
-                            corrective_outcome.message
-                        )
-                    if corrective_outcome.force_abort:
-                        result.force_abort = corrective_outcome.force_abort
-                    if (
-                        corrective_outcome.success
-                        and corrective_outcome.target_reached
-                    ):
-                        result.moves_executed += 1
-                        result.travel_m += float(corrective_outcome.distance_m)
-                        result.angular_travel_rad += float(
-                            corrective_outcome.angular_distance_rad
-                        )
-                        result.moved = True
-                        passed, refined_pose, current_tcp, confirm_reason = (
-                            _confirm_coverage()
-                        )
-
-        if not passed:
-            self._stage2_not_done(
-                result,
-                f"post-move coverage confirmation failed: {confirm_reason}",
-            )
-            return
-
         result.done = True
         result.success = True
         result.component_coverage_ready = True
         result.steer_camera = source_camera
-        result.last_action = "sfp_geometric_stage2_confirmed"
+        result.last_action = "sfp_survey_pose_published"
         result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
         result.message = (
-            "geometric Stage 2 framed the SFP/SC modules in all three "
-            "calibrated cameras with conservative gripper clearance after "
-            f"{result.moves_executed} total moves"
+            "geometric Stage 2 published a board-relative survey pose framing "
+            "the SFP/SC modules (whole board when reachable) in all three "
+            "cameras; hand result.survey_pose to Move Robot"
         )
 
     @staticmethod

@@ -147,44 +147,52 @@ def test_stage2_consumes_all_camera_info_and_full_camera_tcp_tf():
     assert "frames_are_approved_camera_pair" in method_source
 
 
-def test_stage2_orders_insignia_pose_search_motion_and_single_confirm():
+def test_sfp_stage2_is_perception_only_and_publishes_a_survey_pose():
     method = _method("_run_sfp_geometric_stage2")
     estimate = _named_calls(method, "estimate_board_pose_from_insignia")
     search = _named_calls(method, "search_survey_pose")
     motions = _calls(method, "move_smooth")
     grabs = _calls(method, "grab")
-    verification = _named_calls(method, "verify_survey_view")
     method_source = ast.get_source_segment(
         SOURCE_PATH.read_text(encoding="utf-8"), method
     )
 
-    # Insignia pose for the initial seed and again inside the confirmation.
-    assert len(estimate) == 2
-    # Initial survey search plus one bounded corrective re-solve.
-    assert len(search) == 2
-    # A single confirmation triplet, not the old two-triplet gauntlet.
-    assert len(grabs) == 1
-    assert len(verification) == 1
-    assert "_confirm_coverage" in method_source
-    assert "confirmation_estimates" not in method_source
-    assert "second settled" not in method_source
-    # Optional retreat, optional orientation waypoint, the survey translation,
-    # and at most one corrective nudge.
-    assert 1 <= len(motions) <= 4
-    # Pose and search precede the first move.
-    assert estimate[0] < search[0] < motions[0]
+    # One insignia PnP and one survey search; no motion and no fresh-triplet grab.
+    assert len(estimate) == 1
+    assert len(search) == 1
+    assert len(motions) == 0
+    assert len(grabs) == 0
+    # Publishes a pose instead of executing/confirming a move.
+    assert "result.survey_pose" in method_source
+    assert "sfp_survey_pose_published" in method_source
+    for gone in (
+        "move_smooth",
+        "_confirm_coverage",
+        "verify_survey_view",
+        "path_is_safe",
+        "needs_retreat",
+    ):
+        assert gone not in method_source, gone
+    assert estimate[0] < search[0]
 
 
-def test_stage2_pose_comes_from_the_insignia_and_completion_from_coverage():
+def test_sfp_survey_pose_is_the_native_intrinsic_pose_in_base_link():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(source, method)
 
-    # Pose is the clip-proof insignia PnP; completion is a fresh all-camera
-    # coverage confirmation of the chosen target.
     assert "estimate_board_pose_from_insignia(" in method_source
-    assert "verify_survey_view" in method_source
-    assert "coverage_target=coverage_target" in method_source
+    # Published as a native intrinsic_proto.Pose (position + orientation) so it
+    # binds to Move Robot's Cartesian target_frame_offset.
+    assert "result.survey_pose.position.x" in method_source
+    assert "result.survey_pose.orientation.w" in method_source
+    assert "result.target_frame = self.config.base_frame" in method_source
+
+
+def test_result_proto_declares_intrinsic_pose_survey_pose_output():
+    proto = PROTO_PATH.read_text(encoding="utf-8")
+    assert 'import "intrinsic/math/proto/pose.proto";' in proto
+    assert "intrinsic_proto.Pose survey_pose" in proto
 
 
 def test_stage2_searches_inside_the_execution_workspace_guard():
@@ -195,36 +203,29 @@ def test_stage2_searches_inside_the_execution_workspace_guard():
     assert "min_height_m=0.02" in method_source
 
 
-def test_stage2_motion_uses_per_move_timeout_and_no_aggregate_deadline():
+def test_sfp_stage2_does_no_motion_and_has_no_time_budget():
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
 
-    # No aggregate Stage-2 time budget: every motion is bounded by the per-move
-    # timeout and force guards only.
-    assert "timeout_sec=remaining" not in method_source
-    assert method_source.count("timeout_sec=move_timeout_sec") >= 3
+    assert "move_smooth" not in method_source
     assert "deadline" not in method_source
+    assert "timeout_sec=remaining" not in method_source
 
 
-def test_single_fresh_triplet_confirmation_gates_terminal_done():
+def test_sfp_survey_pose_publish_sets_done_before_no_confirmation():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(source, method)
 
-    # A single fresh, skew-bounded triplet confirms the chosen coverage target
-    # in every camera; no second settled triplet or pose-consistency gauntlet.
-    assert "min_cameras=len(expected)" in method_source
-    assert "frames_within_skew(50_000_000)" in method_source
-    assert "coverage_target=coverage_target" in method_source
-    assert "_confirm_coverage" in method_source
+    assert "result.done = True" in method_source
+    assert "result.target_valid = True" in method_source
     assert "board_pose_set_is_consistent" not in method_source
-    assert "second settled" not in method_source
-    assert method_source.index("verify_survey_view") < method_source.index(
+    assert method_source.index("result.survey_pose.position.x") < method_source.index(
         "result.done = True"
     )
 
 
-def test_stage2_uses_image_timestamp_tf_and_samples_a_safe_cartesian_path():
+def test_stage2_uses_image_timestamp_tf_for_every_camera():
     source, _ = _source_and_class()
     transform = _method("_base_transform_at")
     transform_source = ast.get_source_segment(source, transform)
@@ -233,13 +234,8 @@ def test_stage2_uses_image_timestamp_tf_and_samples_a_safe_cartesian_path():
     assert "Time(nanoseconds=int(stamp_ns))" in transform_source
     assert "returned_ns" in transform_source
     assert "50_000_000" in transform_source
-    assert method_source.count("_base_transform_at(") >= 4
-    assert "path_is_safe" in method_source
-    assert "sampled_cartesian_path_is_safe" in method_source
-    assert "allow_outward_retreat=True" in method_source
-    assert "rotation_clearance_m = 0.40" in method_source
-    assert "safe orientation waypoint" in method_source
-    assert "one and only retreat" in method_source
+    # base_T_tcp and base_T_cam are both resolved at each image timestamp.
+    assert method_source.count("_base_transform_at(") >= 2
 
 
 def test_stage2_rejection_is_a_normal_not_done_result():

@@ -118,7 +118,24 @@ inctl asset install \
   images/check_board_visibility_skill/check_board_visibility_skill.bundle.tar
 ```
 
-Recommended serial process wiring:
+Recommended serial process wiring.
+
+For `STAGED_SFP_MODULE` (perception-only; Move Robot executes the survey move):
+
+```text
+Move Robot (fixed pre-position that frames the board)
+Switch To AIC Controller        (only if Stage 1 must move to expose the insignia)
+Check Board Visibility          (STAGED_SFP_MODULE) -> result.survey_pose
+Switch To Default Controller
+Require result.success == true && result.done == true
+Move Robot: Cartesian target
+    moving frame  = gripper TCP
+    target frame  = base_link (root)
+    target frame offset = result.survey_pose      (bind the skill output)
+IVM NIC estimate -> filter estimates -> remaining process
+```
+
+For `NIC_SFP_DESTINATION` / `SC_DESTINATION_PORT` (legacy in-skill motion, unchanged):
 
 ```text
 Move Robot (fixed survey pose)
@@ -128,6 +145,10 @@ Switch To Default Controller
 Require result.success == true && result.done == true
 IVM NIC estimate -> filter estimates -> remaining process
 ```
+
+`result.survey_pose` is a native `intrinsic_proto.Pose` in `base_link`; it is the
+desired TCP pose. It is only populated for the SFP target. For SFP the skill does
+not command the survey motion itself.
 
 Do not run Move Robot, another Insert Cable policy, or any other motion session
 in parallel with this skill. Always switch back to the default controller before
