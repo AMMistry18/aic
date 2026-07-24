@@ -383,7 +383,7 @@ class SfpPlugPoseEstimator:
         min_keypoint_confidence: float = 0.15,
         min_pose_confidence: float = 0.35,
         max_sync_spread_s: float = 0.12,
-        max_reprojection_error_px: float = 4.0,
+        max_reprojection_error_px: float = 6.0,
         max_keypoint_rmse_m: float = 0.0035,
         min_views: int = 2,
         device: str | None = None,

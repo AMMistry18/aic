@@ -66,24 +66,15 @@ trap 'docker rm -f "${container_id}" >/dev/null 2>&1 || true' EXIT
 docker cp \
   "${container_id}:/opt/ros/overlay/install/share/aic_perception/check_board_visibility_skill_protos.desc" \
   "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc"
-# The result now embeds intrinsic_proto.Pose (survey_pose); its transitive
-# descriptors must ship in the bundle for Flowstate to wire the pose output.
-docker cp \
-  "${container_id}:/opt/ros/overlay/install/share/intrinsic_sdk_cmake/intrinsic_proto.desc" \
-  "${OUTPUT_DIR}/intrinsic_proto.desc"
 docker rm -f "${container_id}" >/dev/null
 trap - EXIT
 
-# Newer inbuild: textproto + skill/SDK descs -> binary manifest, then bundle.
-"${INBUILD_BIN}" skill manifest \
-  --manifest "${AIC_ROOT}/flowstate/aic_perception/check_board_visibility_skill.manifest.textproto" \
-  --file_descriptor_sets "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc,${OUTPUT_DIR}/intrinsic_proto.desc" \
-  --file_descriptor_set_out "${OUTPUT_DIR}/check_board_visibility_skill_protos.augmented.desc" \
-  --output "${OUTPUT_DIR}/check_board_visibility_skill.manifest.bin"
-
+# The generated skill descriptor already includes the transitive descriptors
+# for intrinsic_proto.Pose.  Passing intrinsic_proto.desc as well duplicates
+# point.proto, quaternion.proto, and pose.proto, which inbuild rejects.
 "${INBUILD_BIN}" skill bundle \
-  --augmented_file_descriptor_set "${OUTPUT_DIR}/check_board_visibility_skill_protos.augmented.desc" \
-  --augmented_manifest "${OUTPUT_DIR}/check_board_visibility_skill.manifest.bin" \
+  --manifest "${AIC_ROOT}/flowstate/aic_perception/check_board_visibility_skill.manifest.textproto" \
+  --file_descriptor_set "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc" \
   --oci_image "${OUTPUT_DIR}/check_board_visibility_skill.tar" \
   --output "${OUTPUT_DIR}/check_board_visibility_skill.bundle.tar"
 

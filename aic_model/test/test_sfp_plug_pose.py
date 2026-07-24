@@ -191,6 +191,7 @@ def test_estimator_returns_fresh_relative_pose_and_fails_closed_when_stale():
         model=_FakeYolo(detections),
         min_pose_confidence=0.1,
     )
+    assert np.isclose(estimator.max_reprojection_error_px, 6.0)
 
     relative = estimator.estimate_relative_to_port(
         views,
