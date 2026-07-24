@@ -80,6 +80,13 @@ PERCEPT_MIN_AGREE = int(os.environ.get("RL_INSERT_PERCEPT_MIN_AGREE", "3"))
 PERCEPT_AGREE_TOL_M = float(os.environ.get("RL_INSERT_PERCEPT_AGREE_TOL_M", "0.004"))
 PERCEPT_SAMPLE_DT = float(os.environ.get("RL_INSERT_PERCEPT_SAMPLE_DT", "0.15"))
 MAX_HANDOFF_SELECT_M = float(os.environ.get("RL_INSERT_MAX_HANDOFF_SELECT_M", "0.020"))
+# Selection-time reproj gate (2026-07-24): the multiview product also builds
+# cross-matched ghost candidates (e.g. plug-body picks paired across cameras)
+# that triangulate NEAR the tip with ~50px+ residuals. Nearest-tip selection
+# would prefer such a ghost over a sub-1px true port that sits farther out, and
+# the consensus 25px gate then rejects every frame. Gate candidates on reproj
+# BEFORE the nearest-tip pick; the true port runs well under 1px.
+MAX_SELECT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_SELECT_REPROJ_PX", "5.0"))
 
 # raw: original Contract-A behavior; zero: isolate pose/action contract;
 # baseline: subtract the six-axis wrench observed before the handoff.
@@ -686,6 +693,16 @@ class RLInsert(Policy):
         """
         if not candidates:
             return None
+        # Reproj gate first: nearest-tip must only choose among geometrically
+        # consistent candidates, or a cross-matched ghost near the tip wins.
+        clean = [c for c in candidates if c["reproj_px"] <= MAX_SELECT_REPROJ_PX]
+        if not clean:
+            best = min(candidates, key=lambda c: c["reproj_px"])
+            self.get_logger().warn(
+                f"{label}: no candidate under {MAX_SELECT_REPROJ_PX:.1f}px select "
+                f"gate (best reproj {best['reproj_px']:.1f}px) -- rejecting frame")
+            return None
+        candidates = clean
         try:
             tcp_pos, tcp_quat = self._tcp()
             tip_pos, _ = self._tip_from_tcp(tcp_pos, tcp_quat)
