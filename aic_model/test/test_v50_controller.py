@@ -254,23 +254,66 @@ class _AlignHarness(PlugRelativeV50Controller):
         return self._f, self._m
 
 
-def test_seat_alignment_saturates_at_the_small_lateral_clamp():
+def test_seat_alignment_settles_at_the_proportional_target_not_the_clamp():
+    config = V50Config().validated()
+    f_plug = [3.2, -3.0, -7.0]
+    m_plug = [0.0, -0.65, 0.0]
+    harness = _AlignHarness(f_plug=f_plug, m_plug=m_plug, config=config)
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(60):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 7.0, acc_lat, acc_tilt
+        )
+
+    expected_lat = config.seat_align_force_gain * np.linalg.norm(f_plug[:2])
+    expected_tilt = config.seat_align_moment_gain * np.linalg.norm(m_plug[:2])
+    assert np.isclose(np.linalg.norm(acc_lat), expected_lat)
+    assert np.isclose(np.linalg.norm(acc_tilt), expected_tilt)
+    # The whole point: sustained contact must not pin the correction at the clamp.
+    assert np.linalg.norm(acc_lat) < 0.5 * config.seat_align_max_lat_m
+    assert np.linalg.norm(acc_tilt) < 0.5 * config.seat_align_max_tilt_rad
+
+
+def test_light_chamfer_contact_never_saturates_the_correction():
+    # Field log 3 run 2: 1.7 N of chamfer contact pinned the old accumulator at the
+    # clamp three samples in, and the plug stopped descending at 2.1 mm.
     config = V50Config().validated()
     harness = _AlignHarness(
-        f_plug=[3.2, -3.0, -7.0],
-        m_plug=[0.0, -0.65, 0.0],
+        f_plug=[1.6, -0.6, -3.6],
+        m_plug=[0.0, -0.18, 0.0],
         config=config,
     )
     acc_lat = np.zeros(2, dtype=np.float64)
     acc_tilt = np.zeros(2, dtype=np.float64)
 
-    for _ in range(30):
+    for _ in range(60):
         acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
-            None, 0.0, 7.0, acc_lat, acc_tilt
+            None, 0.0, 3.6, acc_lat, acc_tilt
         )
+        assert np.linalg.norm(acc_lat) < 0.25 * config.seat_align_max_lat_m
+        assert np.linalg.norm(acc_tilt) < 0.25 * config.seat_align_max_tilt_rad
+
+
+def test_seat_alignment_still_clamps_under_extreme_wrench():
+    config = V50Config().validated()
+    harness = _AlignHarness(
+        f_plug=[60.0, -40.0, -12.0],
+        m_plug=[0.0, -8.0, 0.0],
+        config=config,
+    )
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(60):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 12.0, acc_lat, acc_tilt
+        )
+        assert np.linalg.norm(acc_lat) <= config.seat_align_max_lat_m + 1e-12
+        assert np.linalg.norm(acc_tilt) <= config.seat_align_max_tilt_rad + 1e-12
 
     assert np.isclose(np.linalg.norm(acc_lat), config.seat_align_max_lat_m)
-    assert np.linalg.norm(acc_lat) < 0.0015
     assert np.isclose(np.linalg.norm(acc_tilt), config.seat_align_max_tilt_rad)
 
 
