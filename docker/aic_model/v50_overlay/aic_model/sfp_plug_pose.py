@@ -522,10 +522,12 @@ class SfpPlugPoseEstimator:
             age: float | None = None
             if now_s is not None:
                 now = stamp_to_seconds(now_s)
-                age = now - estimate_stamp
-                if age < -self.max_sync_spread_s:
-                    return self._reject(f"clock_skew:{age:.3f}s")
-                age = max(0.0, age)
+                # Camera headers can be epoch-stamped while the policy node's
+                # simulation clock is elapsed time.  A negative cross-domain
+                # age is not evidence that the image is stale, so clamp it to
+                # zero instead of rejecting it as clock skew.  Positive ages
+                # still pass through the normal stale-frame guard below.
+                age = max(0.0, now - estimate_stamp)
                 if max_age_s is not None and age > float(max_age_s):
                     return self._reject(f"stale:{age:.3f}>{float(max_age_s):.3f}s")
             elif max_age_s is not None:

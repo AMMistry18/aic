@@ -209,6 +209,15 @@ def test_estimator_returns_fresh_relative_pose_and_fails_closed_when_stale():
     np.testing.assert_allclose(relative.axis_port, expected_rotation[:, 2], atol=1e-8)
     assert relative.view_count == 3
     assert np.isclose(relative.age_s, 0.05)
+    cross_domain = estimator.estimate_relative_to_port(
+        views,
+        np.zeros(3),
+        np.eye(3),
+        now_s=1.0,
+        max_age_s=0.2,
+    )
+    assert cross_domain is not None
+    assert np.isclose(cross_domain.age_s, 0.0)
     assert estimator.estimate_relative_to_port(
         views,
         np.zeros(3),
