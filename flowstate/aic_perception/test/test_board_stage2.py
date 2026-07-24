@@ -28,11 +28,14 @@ from aic_perception.board_stage2 import (
     estimate_board_pose_from_insignia,
     evaluate_camera_coverage,
     module_coverage_corners,
+    nic_sector_corners,
     project_points,
     quaternion_from_matrix,
     sampled_cartesian_path_is_safe,
+    sc_sector_corners,
     search_survey_pose,
     sfp_envelope_center,
+    sfp_sector_corners,
     sfp_envelope_corners,
     sfp_module_detail_boxes,
     verify_survey_view,
@@ -806,6 +809,85 @@ def test_production_rig_default_search_finds_all_camera_safe_view(
     assert candidate.feasible
     assert len(candidate.coverages) == 3
     assert all(c.gripper_clearance_px >= 0.0 for c in candidate.coverages)
+
+
+def _sector_survey(sector, **overrides):
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose()
+    kwargs = dict(
+        coverage_targets=(sector,),
+        max_reach_m=0.85,
+        min_height_m=0.02,
+    )
+    kwargs.update(overrides)
+    candidate, reason = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, **kwargs
+    )
+    return candidate, reason, board, tcp_T_cam
+
+
+def _reference_obliquity_rad(candidate, board, tcp_T_cam):
+    """Angle between the board normal and the reference camera's viewpoint."""
+    center = board.base_T_board.apply(candidate.coverage_target.mean(axis=0))
+    to_camera = (
+        candidate.base_T_tcp.compose(tcp_T_cam["center_camera"]).translation - center
+    )
+    to_camera = to_camera / np.linalg.norm(to_camera)
+    normal = board.base_T_board.rotation[:, 2]
+    return math.acos(float(np.clip(np.dot(to_camera, normal / np.linalg.norm(normal)), -1.0, 1.0)))
+
+
+@pytest.mark.parametrize(
+    "sector",
+    [sfp_sector_corners(), sc_sector_corners(), nic_sector_corners()],
+    ids=["sfp", "sc", "nic"],
+)
+def test_sector_survey_is_close_and_near_overhead(sector):
+    """Tall parts only separate from a close, near-normal view.
+
+    A raking or distant view foreshortens the along-rail spacing of the NIC
+    cards and SC ports, which is what stops the downstream estimator telling
+    adjacent parts apart.
+    """
+    candidate, reason, board, tcp_T_cam = _sector_survey(sector)
+    assert candidate is not None, reason
+    assert candidate.standoff_m <= 0.70
+    assert math.degrees(_reference_obliquity_rad(candidate, board, tcp_T_cam)) <= 20.0
+    assert candidate.min_clearance_px >= 40.0
+
+
+def test_sector_survey_takes_the_closest_standoff_not_the_roomiest():
+    """Standoff dominates the objective; clearance only breaks ties."""
+    sector = nic_sector_corners()
+    close, reason, _, _ = _sector_survey(sector)
+    assert close is not None, reason
+    farther, reason, _, _ = _sector_survey(
+        sector, standoffs_m=(close.standoff_m + 0.06,)
+    )
+    assert farther is not None, reason
+    # The roomier pose exists and is rejected purely because it is farther.
+    assert farther.min_clearance_px > close.min_clearance_px
+    assert close.standoff_m < farther.standoff_m
+
+
+def test_sector_survey_rejects_a_pose_that_only_just_fits():
+    """The clearance floor is a hard reject, not a preference."""
+    sector = nic_sector_corners()
+    candidate, reason, _, _ = _sector_survey(sector)
+    assert candidate is not None, reason
+    assert candidate.min_clearance_px >= 40.0
+    raised, reason, _, _ = _sector_survey(
+        sector, min_required_clearance_px=candidate.min_clearance_px + 1.0
+    )
+    # Raising the floor cannot return the marginal pose again: whatever comes
+    # back clears the raised bar.
+    assert (
+        raised is None
+        or raised.min_clearance_px >= candidate.min_clearance_px + 1.0
+    )
+    # An unreachable floor fails closed instead of degrading to a tight fit.
+    impossible, _, _, _ = _sector_survey(sector, min_required_clearance_px=10_000.0)
+    assert impossible is None
 
 
 def test_production_rig_old_single_axis_grid_misses_case_new_grid_recovers():

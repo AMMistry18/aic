@@ -1154,9 +1154,17 @@ def search_survey_pose(
         0.45,
         0.50,
         0.55,
+        0.58,
         0.60,
+        0.62,
+        0.64,
+        0.66,
+        0.68,
         0.70,
+        0.73,
+        0.76,
         0.80,
+        0.85,
         0.90,
         1.00,
         1.15,
@@ -1185,8 +1193,9 @@ def search_survey_pose(
     # pose estimator separating adjacent NIC cards / SC ports.
     max_obliquity_rad: float = math.radians(20.0),
     # Do not accept a pose whose sector only just fits; leave real margin so a
-    # small board-pose error cannot clip a component out of a camera.
-    min_required_clearance_px: float = 25.0,
+    # small board-pose or execution error cannot clip a component out of a
+    # camera.  At the survey standoffs this is roughly 30 mm of slack.
+    min_required_clearance_px: float = 40.0,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
@@ -1195,14 +1204,17 @@ def search_survey_pose(
     region).  For each target every candidate camera pose projects the target
     through all supplied cameras; a candidate is feasible only when every camera
     has the target in front, fully inside the image with a positive boundary
-    margin, and clear of the gripper keep-out with a positive margin.  The first
-    target that yields any feasible candidate wins; among those the pose that
-    maximises the minimum clearance across the three cameras is returned, with
-    the chosen board-frame target attached as ``candidate.coverage_target``.  So
-    the returned pose frames the modules in all three cameras at minimum, and the
-    whole board when reachable.  The distant-scale and per-module detail gates are
-    intentionally not applied here.  Returns ``(None, reason)`` when no candidate
-    is feasible or reachable for any target.
+    margin, clear of the gripper keep-out with a positive margin, and holding at
+    least ``min_required_clearance_px`` of that margin so a small pose error
+    cannot clip a component.  The first target that yields any feasible candidate
+    wins; among those the pose with the *smallest standoff* is returned -- the
+    closest view puts the most pixels on each component, which is what lets the
+    downstream estimator separate adjacent NIC cards and SC ports -- and ties are
+    broken towards the most overhead view, then clearance, then the shortest
+    move.  The chosen board-frame target is attached as
+    ``candidate.coverage_target``.  The distant-scale and per-module detail gates
+    are intentionally not applied here.  Returns ``(None, reason)`` when no
+    candidate is feasible or reachable for any target.
     """
 
     if reference_camera not in tcp_T_cam:

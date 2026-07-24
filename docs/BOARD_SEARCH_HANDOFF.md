@@ -1,22 +1,31 @@
 # Board-search handoff
 
-Updated: 2026-07-23
+Updated: 2026-07-24
 
 ## Pinned implementation
 
 The current implementation is the **insignia-driven deterministic survey**. It
 supersedes the outline-PnP geometric Stage 2 pinned at `525eb40`. Record the
 exact commit here when this change merges; until then the pin is the working
-tree on `main`. NIC and SC preserve the legacy Stage-1 completion behavior.
+tree on `main`. Legacy adaptive search is now Stage 1 only -- the fallback that
+runs when the insignia is not in view at all. All deployed `survey_target`
+values (SFP, NIC, SC) route to the geometric sector survey.
+
+Note on branches: the sector-survey work was authored on
+`agent/sync-model-overlay-and-skill-bundling` (`252e8ac`, `f33ce83`) while the
+fixed build script and the current teammate work landed on `main`. The working
+tree carries the union; reconcile the branches before pinning a commit here.
 
 Authoritative modules:
 - `flowstate/aic_perception/aic_perception/board_visibility.py`
   (`detect_insignia_polygon`)
 - `flowstate/aic_perception/aic_perception/board_stage2.py`
   (`estimate_board_pose_from_insignia`, `board_coverage_corners`,
-  `module_coverage_corners`, two-tier `search_survey_pose`, `verify_survey_view`)
+  `module_coverage_corners`, `sfp_sector_corners`, `sc_sector_corners`,
+  `nic_sector_corners`, `search_survey_pose`, `verify_survey_view`)
 - `flowstate/aic_perception/check_board_visibility_skill.py`
-  (`_stage2_landmarks`, `_execute_inner`, `_run_sfp_geometric_stage2`)
+  (`_stage2_landmarks`, `_execute_inner`, `_uses_geometric_survey`,
+  `_sector_for_target`, `_run_sfp_geometric_stage2`)
 
 ## Behavior contract
 
@@ -35,20 +44,32 @@ Stage 2 is deterministic:
   centroid resolving the rectangle ambiguity). This is clip-proof: it does not
   require a fully visible plate outline or a "full" Stage-1 report;
 - it computes one board-relative TCP survey pose by inverting the production
-  three-camera URDF rig, searching standoff, both board-plane offsets, oblique
-  look direction, and roll, filtered by the execution workspace (reach 1.20 m,
-  height 0.02 m) and sampled Cartesian path clearance;
-- coverage is **two-tier**: it prefers a pose that frames the whole board face
-  in all three cameras, and otherwise falls back to a pose that frames the
-  SFP/SC module region (both Y-side LC/SFP/SC rails over full travel). The only
-  per-camera acceptance is target-in-frame plus positive gripper clearance;
+  three-camera URDF rig, searching standoff, both board-plane offsets, look
+  direction, and roll, filtered by the execution workspace (reach 0.85 m, the
+  UR5e envelope; height 0.02 m) and sampled Cartesian path clearance. Height
+  and lateral placement both fall out of the estimated `base_T_board`, so the
+  pose tracks a board that moves or tilts;
+- coverage is **per sector**, selected by `survey_target`: SFP modules (0/1),
+  NIC cards (2), SC ports (3). Each sector is a board-frame box covering that
+  component group's full rail travel; the whole sector must be framed in all
+  three cameras, because IVM pose estimation needs every camera to see it. The
+  only per-camera acceptance is target-in-frame plus positive gripper
+  clearance;
+- selection is tuned for **separability of adjacent parts**. Standoff dominates
+  the objective (closest feasible pose wins, ~0.65 m rather than ~0.85 m), ties
+  break towards the most overhead view, and two hard rejects back this up: the
+  reference optical axis stays within 20 degrees of the board normal, and every
+  camera must hold at least 40 px of clearance. A raking or distant view
+  foreshortens the along-rail spacing of tall parts, which is what stopped IVM
+  telling adjacent NIC cards apart;
 - it allows at most 45 degrees of orientation change and performs any
   meaningful wrist reorientation only after retreating beyond a conservative
   0.40 m rig sweep radius; and
-- after the move, one fresh triplet (<=50 ms skew) must show the chosen
-  coverage target framed in all three cameras. A single bounded corrective
-  re-solve/move absorbs any residual before `done=true`. There is **no**
-  aggregate Stage-2 time budget and **no** two-triplet consistency gauntlet.
+- the skill is **perception-only**: it publishes the result as a native
+  `intrinsic_proto.Pose` on `result.survey_pose` (with `result.target_frame =
+  base_link`) for a downstream Move Robot Cartesian target, and does not move
+  to the survey pose itself. There is **no** aggregate Stage-2 time budget and
+  **no** two-triplet consistency gauntlet.
 
 Any calibration, geometry, reach, path, or confirmation failure returns
 `success=true, done=false` so the Flowstate process can decide whether to retry.
