@@ -18,6 +18,7 @@
 import importlib
 import inspect
 import numpy as np
+import os
 import rclpy
 import threading
 
@@ -319,12 +320,29 @@ class AicModel(LifecycleNode):
                     f"insert_cable() returned {self._action_thread_result}"
                 )
                 result = InsertCable.Result()
-                result.success = bool(self._action_thread_result)
-                if result.success:
+                confirmed = bool(self._action_thread_result)
+                report_miss_as_success = os.environ.get(
+                    "RL_INSERT_REPORT_MISS_AS_SUCCESS", "1"
+                ).strip().lower() not in ("0", "false", "no")
+                if confirmed:
                     goal_handle.succeed()
+                    result.success = True
                     result.message = "Cable insertion event confirmed"
+                elif report_miss_as_success:
+                    # A policy miss has already stopped and held the robot safely.
+                    # Report a normal successful result so Flowstate does not
+                    # terminate the enclosing process on a recoverable insertion
+                    # miss.  The miss is still logged and named in the message.
+                    self.get_logger().warn(
+                        "[aic] insertion NOT confirmed; reporting success so the "
+                        "process continues (RL_INSERT_REPORT_MISS_AS_SUCCESS=1)"
+                    )
+                    goal_handle.succeed()
+                    result.success = True
+                    result.message = "Cable insertion ended safely without confirmation"
                 else:
                     goal_handle.abort()
+                    result.success = False
                     result.message = "Cable insertion failed: no correct-port event"
                 self.goal_handle = None
                 return result

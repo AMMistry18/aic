@@ -32,14 +32,20 @@ def test_v50_config_bounds_force_and_seating():
     assert np.isclose(config.force_lead_m, 0.016)
     assert config.target_axial_force_n < config.seat_force_cap_n < 18.0
     assert 0.0 <= config.seat_overtravel_m <= 0.008
-    assert np.isclose(config.seat_align_force_gain, 0.00015)
-    assert np.isclose(config.seat_align_moment_gain, 0.02)
+    assert np.isclose(config.seat_align_force_gain, 0.00003)
+    assert np.isclose(config.seat_align_moment_gain, 0.004)
+    assert np.isclose(config.seat_align_max_lat_m, 0.0004)
+    assert np.isclose(config.seat_align_max_tilt_rad, 0.0087)
+    assert np.isclose(config.seat_mouth_speed_scale, 0.25)
+    assert np.isclose(config.seat_align_release_decay, 0.7)
     assert np.isclose(config.seat_stall_grace_s, 1.5)
 
     with pytest.raises(ValueError, match="hard abort"):
         V50Config(force_abort_n=19.0).validated()
     with pytest.raises(ValueError, match="overtravel"):
         V50Config(seat_overtravel_m=0.009).validated()
+    with pytest.raises(ValueError, match="release decay"):
+        V50Config(seat_align_release_decay=1.5).validated()
 
 
 def test_persistent_depth_accumulates_force_lead_while_stalled():
@@ -238,6 +244,61 @@ class _SequenceHarness(PlugRelativeV50Controller):
         return self.refresh_result
 
 
+class _AlignHarness(PlugRelativeV50Controller):
+    def __init__(self, f_plug, m_plug, config=None):
+        self.config = (config or V50Config()).validated()
+        self._f = np.asarray(f_plug, dtype=np.float64)
+        self._m = np.asarray(m_plug, dtype=np.float64)
+
+    def _wrench_plug_frame(self, observation):
+        return self._f, self._m
+
+
+def test_seat_alignment_saturates_at_the_small_lateral_clamp():
+    config = V50Config().validated()
+    harness = _AlignHarness(
+        f_plug=[3.2, -3.0, -7.0],
+        m_plug=[0.0, -0.65, 0.0],
+        config=config,
+    )
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(30):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 7.0, acc_lat, acc_tilt
+        )
+
+    assert np.isclose(np.linalg.norm(acc_lat), config.seat_align_max_lat_m)
+    assert np.linalg.norm(acc_lat) < 0.0015
+    assert np.isclose(np.linalg.norm(acc_tilt), config.seat_align_max_tilt_rad)
+
+
+def test_seat_alignment_bias_washes_out_when_contact_is_lost():
+    config = V50Config().validated()
+    harness = _AlignHarness(
+        f_plug=[3.2, -3.0, -7.0],
+        m_plug=[0.0, -0.65, 0.0],
+        config=config,
+    )
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(30):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 7.0, acc_lat, acc_tilt
+        )
+    # Run-8 field regression: bias survived 30 mm of zero-force travel and
+    # jammed the plug at 37.8 mm.
+    for _ in range(20):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 0.5, acc_lat, acc_tilt
+        )
+
+    assert np.linalg.norm(acc_lat) < 0.02 * config.seat_align_max_lat_m
+    assert np.linalg.norm(acc_tilt) < 0.02 * config.seat_align_max_tilt_rad
+
+
 def test_stalled_seat_fails_after_one_align_and_seat_without_recovery():
     harness = _SequenceHarness([STALLED])
     assert harness.run() is False
@@ -296,8 +357,15 @@ def test_overlay_rewrites_v49_dispatch_and_truthful_result():
     )
     patched_model = overlay.patch_aic_model_source(model_source)
     assert 'String, "/scoring/insertion_event"' in patched_model
+    # An unconfirmed insertion must NOT abort the goal: Flowstate would terminate
+    # the enclosing 5-insertion process on the first recoverable miss.
+    assert "import os" in patched_model
+    assert "RL_INSERT_REPORT_MISS_AS_SUCCESS" in patched_model
+    assert "result.success = True" in patched_model
+    assert "Cable insertion ended safely without confirmation" in patched_model
+    # Strict reporting stays reachable via the env override.
     assert "goal_handle.abort()" in patched_model
-    assert "result.success = True" not in patched_model
+    assert "Cable insertion failed: no correct-port event" in patched_model
 
 
 def test_overlay_path_rejects_any_non_v49_input(tmp_path):

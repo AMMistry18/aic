@@ -88,12 +88,13 @@ class V50Config:
     lateral_safety_m: float = 0.006
     rotation_safety_rad: float = np.deg2rad(15.0)
     seat_align_enable: bool = True
-    seat_align_force_gain: float = 0.00015
-    seat_align_moment_gain: float = 0.02
-    seat_align_max_lat_m: float = 0.0015
-    seat_align_max_tilt_rad: float = 0.0175
+    seat_align_force_gain: float = 0.00003
+    seat_align_moment_gain: float = 0.004
+    seat_align_max_lat_m: float = 0.0004
+    seat_align_max_tilt_rad: float = 0.0087
+    seat_align_release_decay: float = 0.7
     seat_mouth_zone_m: float = 0.006
-    seat_mouth_speed_scale: float = 1.0
+    seat_mouth_speed_scale: float = 0.25
     seat_stall_grace_s: float = 1.5
     seat_overtravel_m: float = 0.005
     seat_candidate_depth_m: float = 0.0445
@@ -118,20 +119,23 @@ class V50Config:
             max_axial_lead_m=_env_float("RL_INSERT_V50_MAX_AXIAL_LEAD_M", 0.020),
             seat_align_enable=_env_bool("RL_INSERT_V50_SEAT_ALIGN_ENABLE", True),
             seat_align_force_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.00015
+                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.00003
             ),
             seat_align_moment_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.02
+                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.004
             ),
             seat_align_max_lat_m=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0015
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0004
             ),
             seat_align_max_tilt_rad=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_RAD", 0.0175
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_RAD", 0.0087
+            ),
+            seat_align_release_decay=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_RELEASE_DECAY", 0.7
             ),
             seat_mouth_zone_m=_env_float("RL_INSERT_V50_SEAT_MOUTH_ZONE_M", 0.006),
             seat_mouth_speed_scale=_env_float(
-                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 1.0
+                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.25
             ),
             seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 1.5),
             seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.005),
@@ -152,6 +156,8 @@ class V50Config:
             raise ValueError("v50 seat overtravel must stay within 0-8 mm")
         if self.seat_align_max_lat_m < 0.0 or self.seat_align_max_tilt_rad < 0.0:
             raise ValueError("v50 seat alignment correction caps must be non-negative")
+        if not 0.0 <= self.seat_align_release_decay <= 1.0:
+            raise ValueError("v50 seat alignment release decay must be within 0-1")
         if (
             self.seat_mouth_zone_m < 0.0
             or self.seat_mouth_speed_scale < 0.0
@@ -660,6 +666,9 @@ class PlugRelativeV50Controller:
             d_tilt_would = np.zeros(2, dtype=np.float64)
             d_lat_applied = np.zeros(2, dtype=np.float64)
             d_tilt_applied = np.zeros(2, dtype=np.float64)
+            decay = self.config.seat_align_release_decay
+            acc_lat = np.asarray(acc_lat, dtype=np.float64).reshape(2) * decay
+            acc_tilt = np.asarray(acc_tilt, dtype=np.float64).reshape(2) * decay
         acc_lat = clamp_vector_norm(
             np.asarray(acc_lat, dtype=np.float64).reshape(2) + d_lat_applied,
             self.config.seat_align_max_lat_m,
