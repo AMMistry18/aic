@@ -2671,6 +2671,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             estimate_board_pose_from_insignia,
             quaternion_from_matrix,
             search_survey_pose,
+            sfp_sector_corners,
         )
 
         expected = tuple(sorted(self.config.camera_frames))
@@ -2905,11 +2906,13 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             grippers,
             reference_camera="center_camera",
             current_base_T_tcp=base_T_tcp,
-            # Search under exactly the execution workspace guard.  Previously
-            # the geometry module optimised candidates inside a 1.8 m sphere,
-            # then this integration rejected its preferred choice at 1.2 m
-            # without considering the other all-camera-feasible candidates.
-            max_reach_m=1.20,
+            # Frame a single reachable sector (the +Y SFP pick rail), not the
+            # whole board: framing the whole board in all three canted cameras
+            # needs a standoff beyond the UR5e's ~0.85 m reach.  The reach guard
+            # is the real UR5e envelope (base_link origin); min-motion then picks
+            # the closest reachable pose that frames the sector in all cameras.
+            coverage_targets=(sfp_sector_corners(),),
+            max_reach_m=0.85,
             min_height_m=0.02,
         )
         if candidate is None:

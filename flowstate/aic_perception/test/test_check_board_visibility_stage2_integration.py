@@ -195,12 +195,14 @@ def test_result_proto_declares_intrinsic_pose_survey_pose_output():
     assert "intrinsic_proto.Pose survey_pose" in proto
 
 
-def test_stage2_searches_inside_the_execution_workspace_guard():
+def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
 
-    assert "max_reach_m=1.20" in method_source
+    # Reach guard is the real UR5e envelope, and the survey frames one sector.
+    assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
+    assert "sfp_sector_corners()" in method_source
 
 
 def test_sfp_stage2_does_no_motion_and_has_no_time_budget():

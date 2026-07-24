@@ -257,6 +257,54 @@ def board_coverage_corners() -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Per-sector coverage targets (board frame, metres), derived from
+# task_board.urdf.xacro component joint origins.  Framing the whole board in all
+# three canted wrist cameras needs a standoff beyond the UR5e's reach; a single
+# sector is small enough to frame in all three cameras from a reachable pose.
+# ---------------------------------------------------------------------------
+
+
+def _sector_box_corners(
+    x_range: tuple[float, float],
+    y_range: tuple[float, float],
+    z_range: tuple[float, float],
+) -> np.ndarray:
+    """Return the 8 board-frame corners of an axis-aligned sector box."""
+    corners = []
+    for x in x_range:
+        for y in y_range:
+            for z in z_range:
+                corners.append((x, y, z))
+    return np.array(corners, dtype=float)
+
+
+def sfp_sector_corners() -> np.ndarray:
+    """SFP pick modules on the +Y rail (SFP mount rail 1).
+
+    Rail at board-X 0.055; rail-1 mounts sit at Y = 0.10625 +/- 0.09625 travel;
+    the box adds the SFP body half-extent.  This is the ``STAGED_SFP_MODULE``
+    survey target.
+    """
+    return _sector_box_corners((0.02, 0.09), (0.0, 0.225), (0.01, 0.06))
+
+
+def sc_sector_corners() -> np.ndarray:
+    """SC optical ports (Zone 2): sc_port_0/1 at board-X -0.075 +/- 0.055.
+
+    The ``SC_DESTINATION_PORT`` survey target.
+    """
+    return _sector_box_corners((-0.14, -0.01), (-0.02, 0.10), (0.01, 0.05))
+
+
+def nic_sector_corners() -> np.ndarray:
+    """NIC card SFP-port destinations (Zone 1): five mounts at board-X -0.081.
+
+    The ``NIC_SFP_DESTINATION`` survey target.
+    """
+    return _sector_box_corners((-0.14, -0.03), (-0.19, 0.01), (0.01, 0.05))
+
+
+# ---------------------------------------------------------------------------
 # Rigid-transform helpers.
 # ---------------------------------------------------------------------------
 
