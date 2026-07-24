@@ -74,6 +74,52 @@ def detect_purple_logo(image: np.ndarray):
     return union, centroid, total, bbox
 
 
+def detect_insignia_polygon(image: np.ndarray):
+    """Detect the insignia and return its 4 corner vertices for planar PnP.
+
+    The magenta insignia is a large, asymmetric, thick-stroked open bracket.  The
+    corners of its axis-aligned bounding rectangle are real physical corners of
+    the mark (see ``INSIGNIA_RECT_CORNERS`` in ``board_stage2``), so those four
+    detected corners are a complete planar-PnP correspondence and the asymmetric
+    mask centroid breaks the residual rectangle ambiguity.  Unlike the board
+    outline this stays in frame at survey standoffs, so pose no longer depends on
+    a fully visible plate.
+
+    Returns ``(quad, centroid)`` where ``quad`` is the detected outer rectangle
+    (``4x2`` pixels, any order/winding -- the PnP caller resolves correspondence)
+    and ``centroid`` is the insignia mask centroid ``(x, y)``.  Returns ``None``
+    when no credible insignia is present.
+    """
+
+    import cv2
+
+    detected = detect_purple_logo(image)
+    if detected is None:
+        return None
+    mask, centroid, _total, _bbox = detected
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return None
+    # The bracket can fragment into several purple blobs; the union hull over
+    # every external contour recovers the whole mark's outer rectangle.
+    points = np.vstack([c.reshape(-1, 2) for c in contours]).astype(np.float32)
+    if len(points) < 4:
+        return None
+    hull = cv2.convexHull(points)
+    perimeter = cv2.arcLength(hull, True)
+    quad = None
+    for epsilon_frac in (0.01, 0.02, 0.03, 0.04, 0.06, 0.08, 0.10):
+        approximation = cv2.approxPolyDP(hull, epsilon_frac * perimeter, True)
+        if len(approximation) == 4 and cv2.isContourConvex(approximation):
+            quad = approximation.reshape(4, 2).astype(float)
+            break
+    if quad is None:
+        quad = cv2.boxPoints(cv2.minAreaRect(hull)).astype(float)
+    return quad, np.asarray(centroid, dtype=float)
+
+
 @dataclass(frozen=True)
 class MaskReport:
     """Board segmentation result for one camera image."""

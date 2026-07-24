@@ -289,10 +289,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             planner.roll_align_threshold_deg,
         )
         started_at = time.monotonic()
-        # Keep Stage 1's original deadline and planner behavior unchanged.
-        # Stage 2 is invoked only after this planner reaches its own terminal
-        # condition; it does not impose an acquisition budget or reserve.
-        deadline = started_at + search_timeout_sec
+        # Stage 1 has no wall-clock deadline: the planner terminates on its own
+        # stall condition, an exposed insignia hands off to Stage 2 early, and
+        # every move is force- and move_timeout-guarded.  This guarantees Stage 2
+        # always runs after Stage 1 rather than being pre-empted by a timeout.
         baseline_force_xyz = None
         initial_pose = None
         initial_joint1 = None
@@ -309,7 +309,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         level_vertical_polarity = 1.0
         pending_level_vertical_sample = None
         def motion_cancelled() -> bool:
-            return bool(cancelled() or time.monotonic() >= deadline)
+            return bool(cancelled())
 
         def require_motion_force(current_snapshot):
             """Return a snapshot with fresh force, but only when motion needs it.
@@ -326,9 +326,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 if baseline_force_xyz is None:
                     baseline_force_xyz = current_snapshot.force_xyz
                 return current_snapshot
-            force_wait_sec = min(
-                timeout_sec, max(0.0, deadline - time.monotonic())
-            )
+            force_wait_sec = timeout_sec
             logging.warning(
                 "robot motion requested without force in the camera snapshot; "
                 "waiting up to %.1fs for fresh wrist-force feedback",
@@ -345,23 +343,37 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             logging.info("fresh wrist-force feedback recovered before motion")
             return replace(current_snapshot, force_xyz=fresh_force)
 
+        def handoff_to_stage2(handoff_snapshot, handoff_reports):
+            """Run the geometric survey from the freshest triplet."""
+            self._run_sfp_geometric_stage2(
+                snapshot=handoff_snapshot,
+                reports=handoff_reports,
+                result=result,
+                timeout_sec=timeout_sec,
+                started_at=started_at,
+                max_speed_mps=max_speed_mps,
+                max_angular_speed_rps=max_angular_speed_rps,
+                publish_hz=publish_hz,
+                settle_tolerance_m=settle_tolerance_m,
+                settle_orientation_tolerance_rad=(
+                    settle_orientation_tolerance_rad
+                ),
+                move_timeout_sec=move_timeout_sec,
+                baseline_force_xyz=baseline_force_xyz,
+                max_force_n=max_force_n,
+                force_delta_n=force_delta_n,
+                cancelled=cancelled,
+                motion_cancelled=motion_cancelled,
+            )
+
         while True:
             result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
             if cancelled():
                 raise skill_interface.SkillCancelledError(
                     "board search cancelled before the next move"
                 )
-            remaining_search_sec = deadline - time.monotonic()
-            if remaining_search_sec <= 0.0:
-                result.success = False
-                result.message = (
-                    f"adaptive viewpoint search reached its "
-                    f"{search_timeout_sec:.1f}s safety deadline"
-                )
-                return
-
             snapshot = self.camera_rig.grab(
-                timeout_sec=min(timeout_sec, remaining_search_sec)
+                timeout_sec=timeout_sec
             )
             if snapshot is None:
                 result.success = False
@@ -623,9 +635,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 )
                 for name, item in reports.items()
             }
+            # Short Stage 1: as soon as the insignia is cleanly visible in a
+            # calibrated camera, hand off to the deterministic geometric survey.
+            # Stage 2's pose and survey move do not depend on further Stage-1
+            # centering, so there is nothing to gain by continuing the search.
+            if staged_sfp_target and self._stage2_has_complete_landmark(
+                snapshot, reports
+            ):
+                logging.info(
+                    "insignia exposed in a calibrated camera; handing off to "
+                    "geometric Stage 2"
+                )
+                handoff_to_stage2(snapshot, reports)
+                return
+
             action = planner.next_action(
                 planning_reports,
-                deadline_reached=time.monotonic() >= deadline,
+                deadline_reached=False,
             )
             result.last_action = action.kind.value
 
@@ -648,63 +674,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         f"{result.moves_executed} adaptive moves"
                     )
                     return
-                # For SFP, leave the original Stage-1 planner untouched and
-                # run the geometric survey only after it has independently
-                # completed its usual three-camera terminal condition.
-                self._run_sfp_geometric_stage2(
-                    snapshot=snapshot,
-                    reports=reports,
-                    result=result,
-                    timeout_sec=timeout_sec,
-                    deadline=deadline,
-                    started_at=started_at,
-                    max_speed_mps=max_speed_mps,
-                    max_angular_speed_rps=max_angular_speed_rps,
-                    publish_hz=publish_hz,
-                    settle_tolerance_m=settle_tolerance_m,
-                    settle_orientation_tolerance_rad=(
-                        settle_orientation_tolerance_rad
-                    ),
-                    move_timeout_sec=move_timeout_sec,
-                    baseline_force_xyz=baseline_force_xyz,
-                    max_force_n=max_force_n,
-                    force_delta_n=force_delta_n,
-                    cancelled=cancelled,
-                    motion_cancelled=motion_cancelled,
-                )
+                # For SFP, the planner reached its own terminal condition
+                # without the insignia handoff firing first; run the geometric
+                # survey from this final triplet.
+                handoff_to_stage2(snapshot, reports)
                 return
             if action.terminal:
                 if staged_sfp_target:
-                    # Preserve the legacy planner's terminal decision and all
-                    # of its preceding motion exactly as-is.  Its SFP result
-                    # is the handoff point for Stage 2, not a request for an
-                    # additional Stage-1 acquisition loop.
+                    # The planner ended (stall/no-progress); its final triplet is
+                    # the Stage-2 handoff point, not a request for more Stage-1
+                    # acquisition.
                     logging.info(
-                        "legacy Stage-1 planner ended (%s); handing its final "
-                        "triplet directly to Stage 2",
+                        "Stage-1 planner ended (%s); handing its final triplet "
+                        "to geometric Stage 2",
                         action.reason,
                     )
-                    self._run_sfp_geometric_stage2(
-                        snapshot=snapshot,
-                        reports=reports,
-                        result=result,
-                        timeout_sec=timeout_sec,
-                        deadline=deadline,
-                        started_at=started_at,
-                        max_speed_mps=max_speed_mps,
-                        max_angular_speed_rps=max_angular_speed_rps,
-                        publish_hz=publish_hz,
-                        settle_tolerance_m=settle_tolerance_m,
-                        settle_orientation_tolerance_rad=(
-                            settle_orientation_tolerance_rad
-                        ),
-                        move_timeout_sec=move_timeout_sec,
-                        baseline_force_xyz=baseline_force_xyz,
-                        max_force_n=max_force_n,
-                        force_delta_n=force_delta_n,
-                        cancelled=cancelled,
-                        motion_cancelled=motion_cancelled,
-                    )
+                    handoff_to_stage2(snapshot, reports)
                     return
                 result.success = False
                 result.message = action.reason
@@ -2537,109 +2522,30 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
 
     @staticmethod
     def _stage2_landmarks(image, report, ignored_pixels):
-        """Extract a Stage-2 geometric seed from the handoff image.
+        """Extract the Stage-2 insignia seed from the handoff image.
 
-        This deliberately does *not* reuse ``report.full`` as a handoff
-        condition.  Stage 1 may end with a cropped board, and SFP Stage 2
-        must still run from that final triplet.  The only image-side seed
-        requirements here are the measurements Stage 2 itself needs: a real,
-        unobstructed purple logo and a recoverable board outline.  Motion and
-        final all-camera visibility remain independently guarded below.
+        Returns ``((insignia_quad, insignia_centroid), "ok")`` or
+        ``(None, reason)``.  Pose is driven by the large asymmetric purple
+        insignia rather than the board outline: the insignia stays fully in frame
+        at survey standoffs where the plate clips, so this no longer requires a
+        recoverable outline or a "full" Stage-1 report.  The only seed
+        requirements are a credible insignia that is fully inside the image and
+        unobstructed by the gripper.  ``report`` is retained for signature
+        compatibility and is unused.
         """
         import cv2
 
-        from aic_perception.board_visibility import detect_purple_logo
+        from aic_perception.board_visibility import detect_insignia_polygon
 
-        logo = detect_purple_logo(image)
-        if logo is None:
-            return None, "complete purple logo was not detected"
-        logo_mask, logo_centroid, logo_area, logo_bbox = logo
+        detected = detect_insignia_polygon(image)
+        if detected is None:
+            return None, "purple insignia was not detected"
+        quad, centroid = detected
         height, width = image.shape[:2]
-        x0, y0, x1, y1 = logo_bbox
-        logo_margin = min(x0, y0, width - 1 - x1, height - 1 - y1)
-        if logo_margin < 8:
-            return None, "purple logo touches the physical image boundary"
         ignored = np.asarray(ignored_pixels, dtype=bool)
         if ignored.shape != (height, width):
             return None, "gripper mask dimensions do not match the image"
-        uncertainty = cv2.dilate(
-            ignored.astype(np.uint8), np.ones((9, 9), np.uint8)
-        ).astype(bool)
-        if np.any(logo_mask.astype(bool) & uncertainty):
-            return None, "purple logo intersects the gripper uncertainty mask"
-        logo_width = x1 - x0 + 1
-        logo_height = y1 - y0 + 1
-        logo_box_area = float(logo_width * logo_height)
-        logo_fill = float(logo_area) / max(1.0, logo_box_area)
-        logo_aspect = float(logo_width) / max(1.0, float(logo_height))
-        if (
-            min(logo_width, logo_height) < 12
-            or not 0.05 <= logo_fill <= 0.85
-            or not 0.35 <= logo_aspect <= 2.8
-        ):
-            return None, "purple logo shape is clipped or too small for pose"
-
-        source = np.asarray(image)
-        if source.ndim == 3 and source.shape[2] == 4:
-            gray = cv2.cvtColor(source, cv2.COLOR_BGRA2GRAY)
-        elif source.ndim == 3:
-            gray = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = source
-        _, dark = cv2.threshold(
-            gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
-        )
-        dark[ignored] = 0
-        dark[logo_mask.astype(bool)] = 255
-        # Remove thin cable/card protrusions while preserving the plate core.
-        kernel_size = max(5, int(round(0.012 * min(height, width))) | 1)
-        kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT, (kernel_size, kernel_size)
-        )
-        plate = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, kernel)
-        plate = cv2.morphologyEx(plate, cv2.MORPH_OPEN, kernel)
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(plate, 8)
-        if count <= 1:
-            return None, "dark board component could not be recovered"
-        logo_x = int(round(logo_centroid[0]))
-        logo_y = int(round(logo_centroid[1]))
-        label = int(labels[logo_y, logo_x])
-        if label == 0:
-            # The logo can sit on a bright inlay. Choose the plate component
-            # with the greatest overlap with the Stage-1 board bounding box.
-            if report.bbox is None:
-                return None, "logo is not connected to a board component"
-            bx0, by0, bx1, by1 = report.bbox
-            overlap_scores = []
-            for index in range(1, count):
-                sx, sy, sw, sh, _ = stats[index]
-                overlap = max(0, min(sx + sw, bx1 + 1) - max(sx, bx0))
-                overlap *= max(0, min(sy + sh, by1 + 1) - max(sy, by0))
-                overlap_scores.append((overlap, index))
-            label = max(overlap_scores)[1]
-        component = (labels == label).astype(np.uint8)
-        contours, _ = cv2.findContours(
-            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-        if not contours:
-            return None, "board outline contour is unavailable"
-        contour = max(contours, key=cv2.contourArea)
-        hull = cv2.convexHull(contour)
-        perimeter = cv2.arcLength(hull, True)
-        quad = None
-        for epsilon_frac in (0.01, 0.02, 0.03, 0.04, 0.06, 0.08):
-            approximation = cv2.approxPolyDP(
-                hull, epsilon_frac * perimeter, True
-            )
-            if len(approximation) == 4 and cv2.isContourConvex(approximation):
-                quad = approximation.reshape(4, 2).astype(float)
-                break
-        if quad is None:
-            quad = cv2.boxPoints(cv2.minAreaRect(hull)).astype(float)
-        if abs(float(cv2.contourArea(quad.astype(np.float32)))) < 0.08 * (
-            height * width
-        ):
-            return None, "board outline is too small for stable planar PnP"
+        # The four detected corners must sit inside the frame for a stable PnP.
         quad_margin = min(
             float(quad[:, 0].min()),
             float(quad[:, 1].min()),
@@ -2647,8 +2553,26 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             float(height - 1 - quad[:, 1].max()),
         )
         if quad_margin < 3.0:
-            return None, "board outline touches the physical image boundary"
-        return (quad, np.asarray(logo_centroid, dtype=float)), "ok"
+            return None, "insignia touches the physical image boundary"
+        # A degenerate/near-collinear detection cannot yield a pose.
+        if abs(float(cv2.contourArea(quad.astype(np.float32)))) < 0.001 * (
+            height * width
+        ):
+            return None, "insignia quad is too small or degenerate for PnP"
+        # Refuse an occluded insignia: rasterise its convex region and require it
+        # clear of the dilated gripper keep-out.
+        uncertainty = cv2.dilate(
+            ignored.astype(np.uint8), np.ones((9, 9), np.uint8)
+        ).astype(bool)
+        insignia_fill = np.zeros((height, width), dtype=np.uint8)
+        cv2.fillConvexPoly(
+            insignia_fill,
+            cv2.convexHull(quad.round().astype(np.int32)),
+            1,
+        )
+        if np.any(insignia_fill.astype(bool) & uncertainty):
+            return None, "insignia intersects the gripper uncertainty mask"
+        return (quad, np.asarray(centroid, dtype=float)), "ok"
 
     def _base_transform_at(
         self, child_frame: str, stamp_ns: int, timeout_sec: float
@@ -2721,7 +2645,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         reports,
         result,
         timeout_sec: float,
-        deadline: float,
         started_at: float,
         max_speed_mps: float,
         max_angular_speed_rps: float,
@@ -2735,12 +2658,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         cancelled,
         motion_cancelled,
     ) -> None:
-        """Estimate, execute, and verify one board-relative loose-SFP pose."""
+        """Estimate, execute, and confirm one board-relative survey pose.
+
+        No aggregate time bound: the insignia pose solve is deterministic and
+        every motion is force- and ``move_timeout_sec``-guarded, so Stage 2
+        always runs its geometric move to completion once Stage 1 hands off.
+        """
         from aic_perception.board_stage2 import (
             CameraModel,
             GripperExclusion,
-            board_pose_set_is_consistent,
-            estimate_board_pose,
+            estimate_board_pose_from_insignia,
             quaternion_from_matrix,
             sampled_cartesian_path_is_safe,
             search_survey_pose,
@@ -2749,11 +2676,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
 
         expected = tuple(sorted(self.config.camera_frames))
         if snapshot.force_xyz is None:
-            force_wait_sec = min(
-                timeout_sec, max(0.0, deadline - time.monotonic())
-            )
             fresh_force = self.camera_rig.wait_for_force_xyz(
-                timeout_sec=force_wait_sec,
+                timeout_sec=timeout_sec,
                 max_age_sec=0.5,
             )
             if fresh_force is None:
@@ -2855,8 +2779,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
             self._stage2_not_done(
                 result,
-                "no calibrated camera contains a complete unobstructed purple "
-                f"logo and board outline ({reasons})",
+                "no calibrated camera contains an unobstructed, fully framed "
+                f"insignia ({reasons})",
             )
             return
 
@@ -2897,20 +2821,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         pose_estimates = []
         pose_failures = {}
         for camera_name in complete_cameras:
-            (board_quad, logo_centroid), _ = observations[camera_name]
-            estimate, pose_reason = estimate_board_pose(
-                board_quad,
-                logo_centroid,
+            (insignia_quad, insignia_centroid), _ = observations[camera_name]
+            estimate, pose_reason = estimate_board_pose_from_insignia(
+                insignia_quad,
+                insignia_centroid,
                 camera_models[camera_name],
                 base_T_cam[camera_name],
-                # The default 6 px threshold is appropriate for accepting a
-                # final measured board pose.  It was incorrectly used as a
-                # pre-motion handoff gate, causing Stage 2 to return without
-                # trying a safe survey pose in otherwise usable scenes.  Use
-                # this estimate only as a bounded motion seed; completion
-                # still uses fresh, strict all-camera verification below.
-                max_reprojection_error_px=20.0,
-                max_logo_error_px=120.0,
             )
             if estimate is None:
                 pose_failures[camera_name] = pose_reason
@@ -2919,7 +2835,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         if not pose_estimates:
             self._stage2_not_done(
                 result,
-                "board pose confidence rejected in every complete-logo camera: "
+                "insignia pose rejected in every insignia camera: "
                 + "; ".join(
                     f"{name}={reason}"
                     for name, reason in pose_failures.items()
@@ -3013,9 +2929,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         )
         if candidate is None:
             self._stage2_not_done(
-                result, f"no safe all-camera SFP survey pose: {search_reason}"
+                result, f"no safe all-camera survey pose: {search_reason}"
             )
             return
+        # The board-frame region this pose frames in all cameras (whole board or
+        # the module region); the post-move confirm re-checks exactly this.
+        coverage_target = candidate.coverage_target
         target = candidate.base_T_tcp
         displacement = target.translation - base_T_tcp.translation
         distance_m = float(np.linalg.norm(displacement))
@@ -3115,12 +3034,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             needs_orientation_waypoint
             and current_clearance < rotation_clearance_m
         )
-        remaining = deadline - time.monotonic()
-        if remaining <= 1.0:
-            self._stage2_not_done(
-                result, "search deadline left no time for the geometric move"
-            )
-            return
         if cancelled():
             raise skill_interface.SkillCancelledError(
                 "board search cancelled before geometric SFP motion"
@@ -3174,10 +3087,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 settle_angular_tolerance_rad=(
                     settle_orientation_tolerance_rad
                 ),
-                # Stage 2 owns the remaining invocation budget.  Do not
-                # reject a valid long Cartesian profile merely because the
-                # legacy per-move timeout was shorter than that budget.
-                timeout_sec=remaining,
+                timeout_sec=move_timeout_sec,
                 baseline_force_xyz=baseline_force_xyz,
                 max_force_n=max_force_n,
                 force_delta_n=force_delta_n,
@@ -3188,7 +3098,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     raise skill_interface.SkillCancelledError(retreat.message)
                 self._stage2_not_done(
                     result,
-                    "search deadline reached during board-normal retreat",
+                    "board-normal retreat was cancelled",
                 )
                 return
             if not retreat.success or not retreat.target_reached:
@@ -3203,13 +3113,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             result.travel_m += float(retreat.distance_m)
             result.angular_travel_rad += float(retreat.angular_distance_rad)
             result.moved = True
-            remaining = deadline - time.monotonic()
-            if remaining <= 1.0:
-                self._stage2_not_done(
-                    result,
-                    "search deadline expired after the board-normal retreat",
-                )
-                return
         elif not path_is_safe(
             base_T_tcp.translation,
             target.translation,
@@ -3255,7 +3158,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 settle_angular_tolerance_rad=(
                     settle_orientation_tolerance_rad
                 ),
-                timeout_sec=remaining,
+                timeout_sec=move_timeout_sec,
                 baseline_force_xyz=baseline_force_xyz,
                 max_force_n=max_force_n,
                 force_delta_n=force_delta_n,
@@ -3268,8 +3171,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                 self._stage2_not_done(
                     result,
-                    "search deadline reached during the safe orientation "
-                    "waypoint",
+                    "safe orientation waypoint was cancelled",
                 )
                 return
             if (
@@ -3289,14 +3191,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 orientation_outcome.angular_distance_rad
             )
             result.moved = True
-            remaining = deadline - time.monotonic()
-            if remaining <= 1.0:
-                self._stage2_not_done(
-                    result,
-                    "search deadline expired after the safe orientation "
-                    "waypoint",
-                )
-                return
         result.last_action = "sfp_geometric_stage2_move"
         result.target_valid = True
         result.target_frame = self.config.base_frame
@@ -3326,7 +3220,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             publish_hz=publish_hz,
             settle_tolerance_m=settle_tolerance_m,
             settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
-            timeout_sec=remaining,
+            timeout_sec=move_timeout_sec,
             baseline_force_xyz=baseline_force_xyz,
             max_force_n=max_force_n,
             force_delta_n=force_delta_n,
@@ -3336,7 +3230,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             if cancelled():
                 raise skill_interface.SkillCancelledError(outcome.message)
             self._stage2_not_done(
-                result, "search deadline reached during geometric SFP motion"
+                result, "geometric SFP motion was cancelled"
             )
             return
         if not outcome.success:
@@ -3358,326 +3252,204 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
             return
 
-        verification_timeout = min(
-            timeout_sec, max(0.0, deadline - time.monotonic())
-        )
-        if verification_timeout <= 0.0:
-            self._stage2_not_done(
-                result, "search deadline expired before fresh verification"
-            )
-            return
-        fresh = self.camera_rig.grab(
-            timeout_sec=verification_timeout,
-            min_cameras=len(expected),
-            collection_grace_sec=0.0,
-        )
-        if fresh is None or set(fresh.frames) != set(expected):
-            self._stage2_not_done(
-                result, "fresh three-camera verification triplet unavailable"
-            )
-            return
-        if not fresh.frames_within_skew(50_000_000):
-            self._stage2_not_done(
-                result,
-                "fresh three-camera verification exceeds 50 ms timestamp skew",
-            )
-            return
-        from aic_perception.board_visibility import analyze_board
+        # ------------------------------------------------------------------
+        # Post-move confirmation.  The deterministic insignia pose usually lands
+        # the survey framing directly; one fresh triplet confirms the chosen
+        # coverage target is framed in every camera, and a single bounded
+        # corrective absorbs any residual (mainly standoff) before done=true.
+        # There is no aggregate time budget: each grab and move is timeout- and
+        # force-guarded on its own.
+        # ------------------------------------------------------------------
+        def _confirm_coverage():
+            """Grab one fresh triplet and confirm coverage in every camera.
 
-        image_rejections = {}
-        fresh_reports = {}
-        for camera_name in expected:
-            image = fresh.frames[camera_name]["image"]
-            ignored = self.gripper_masks.ignored_pixels(
-                camera_name, image.shape
-            )
-            fresh_report = analyze_board(
-                image,
-                margin_px=3,
-                min_area_frac=0.001,
-                ignore_bottom_frac=0.0,
-                min_contrast=20.0,
-                min_rectangularity=0.20,
-                min_detail_area_frac=0.005,
-                context_pad_frac=0.0,
-                ignore_mask=ignored,
-            )
-            fresh_reports[camera_name] = fresh_report
-            reasons = []
-            if not fresh_report.seen:
-                reasons.append("board_context_not_detected")
-            if fresh_report.artificial_bottom_contact:
-                reasons.append("board_contacts_gripper_mask")
-            if fresh_report.gripper_overlap_px > 0:
-                reasons.append(
-                    f"board_gripper_overlap={fresh_report.gripper_overlap_px}px"
+            Returns ``(passed, refined_pose, current_tcp, reason)`` where
+            ``refined_pose`` is the freshly measured board pose (or ``None``) and
+            ``current_tcp`` is the actual TCP at the reference camera frame time.
+            """
+            if cancelled():
+                raise skill_interface.SkillCancelledError(
+                    "board search cancelled before survey confirmation"
                 )
-            if reasons:
-                image_rejections[camera_name] = reasons
-        if image_rejections:
-            details = "; ".join(
-                f"{name}={','.join(reasons)}"
-                for name, reasons in image_rejections.items()
+            fresh = self.camera_rig.grab(
+                timeout_sec=timeout_sec,
+                min_cameras=len(expected),
+                collection_grace_sec=0.0,
             )
-            self._stage2_not_done(
-                result,
-                "fresh camera pixels rejected the predicted SFP survey view: "
-                f"{details}",
-            )
-            return
-        try:
-            # Do not project a fresh image using the pose at verification
-            # wall-clock time.  Each board PnP and each camera projection is
-            # tied to that camera's frame timestamp.
-            fresh_base_T_tcp = {
-                name: self._base_transform_at(
-                    self.config.gripper_frame,
-                    int(fresh.frames[name]["stamp_ns"]),
-                    timeout_sec,
+            if (
+                fresh is None
+                or set(fresh.frames) != set(expected)
+                or not fresh.frames_within_skew(50_000_000)
+            ):
+                return (
+                    False,
+                    None,
+                    None,
+                    "fresh confirmation triplet unavailable or exceeds 50 ms skew",
                 )
-                for name in expected
-            }
-            fresh_base_T_cam = {
-                name: self._base_transform_at(
-                    self.config.camera_frames[name],
-                    int(fresh.frames[name]["stamp_ns"]),
-                    timeout_sec,
+            try:
+                # Project each fresh image using the TF at *that* frame's time.
+                fresh_base_T_tcp = {
+                    name: self._base_transform_at(
+                        self.config.gripper_frame,
+                        int(fresh.frames[name]["stamp_ns"]),
+                        timeout_sec,
+                    )
+                    for name in expected
+                }
+                fresh_base_T_cam = {
+                    name: self._base_transform_at(
+                        self.config.camera_frames[name],
+                        int(fresh.frames[name]["stamp_ns"]),
+                        timeout_sec,
+                    )
+                    for name in expected
+                }
+            except Exception as error:
+                return False, None, None, f"post-move camera/TCP TF unavailable: {error}"
+            estimates = {}
+            for camera_name in expected:
+                image = fresh.frames[camera_name]["image"]
+                ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
+                observation, _reason = self._stage2_landmarks(
+                    image, reports.get(camera_name), ignored
                 )
-                for name in expected
-            }
-        except Exception as error:
-            self._stage2_not_done(
-                result,
-                "timestamp-bound post-move camera/TCP TF unavailable: "
-                f"{error}",
-            )
-            return
-        fresh_estimates = {}
-        fresh_pose_failures = {}
-        for camera_name in (
-            "center_camera",
-            "left_camera",
-            "right_camera",
-        ):
-            image = fresh.frames[camera_name]["image"]
-            ignored = self.gripper_masks.ignored_pixels(
-                camera_name, image.shape
-            )
-            observation, reason = self._stage2_landmarks(
-                image, fresh_reports[camera_name], ignored
-            )
-            if observation is None:
-                fresh_pose_failures[camera_name] = reason
-                continue
-            fresh_quad, fresh_logo = observation
-            estimate, reason = estimate_board_pose(
-                fresh_quad,
-                fresh_logo,
-                camera_models[camera_name],
-                fresh_base_T_cam[camera_name],
-            )
-            if estimate is None:
-                fresh_pose_failures[camera_name] = reason
-            else:
-                fresh_estimates[camera_name] = estimate
-        fresh_consistent, fresh_consistency_reason = (
-            board_pose_set_is_consistent(
-                fresh_estimates,
-                board_pose,
-                expected,
-            )
-        )
-        if not fresh_consistent:
-            self._stage2_not_done(
-                result,
-                "fresh triplet board poses are incomplete or inconsistent: "
-                f"{fresh_consistency_reason}; "
-                + "; ".join(
-                    f"{name}={reason}"
-                    for name, reason in fresh_pose_failures.items()
+                if observation is None:
+                    continue
+                quad, centroid = observation
+                estimate, _pose_reason = estimate_board_pose_from_insignia(
+                    quad,
+                    centroid,
+                    camera_models[camera_name],
+                    fresh_base_T_cam[camera_name],
                 )
+                if estimate is not None:
+                    estimates[camera_name] = estimate
+            reference_tcp = fresh_base_T_tcp.get(
+                source_camera, next(iter(fresh_base_T_tcp.values()))
             )
-            return
-        # Verify each projection against the TCP and optical TF captured at
-        # *that* camera's image time.  `verify_survey_view` intentionally
-        # accepts a mapping, so one-camera calls avoid smearing the rig pose
-        # across a 50-ms synchronized triplet.
-        verification_by_camera = {}
-        for estimate in fresh_estimates.values():
-            name = estimate.camera_name
-            verification_by_camera[name] = verify_survey_view(
-                estimate,
-                fresh_base_T_tcp[name],
-                {name: tcp_T_cam[name]},
-                {name: camera_models[name]},
-                {name: grippers[name]},
-                {name: int(fresh.frames[name]["stamp_ns"])},
-                max_skew_ns=50_000_000,
+            if not estimates:
+                return (
+                    False,
+                    None,
+                    reference_tcp,
+                    "no camera recovered the insignia after the move",
+                )
+            refined = estimates.get(
+                "center_camera",
+                min(estimates.values(), key=lambda e: e.reprojection_error_px),
             )
-        missing_verified = set(expected) - set(verification_by_camera)
-        verification_failed = {
-            name: check
-            for name, check in verification_by_camera.items()
-            if not check.passed
-        }
-        if missing_verified or verification_failed:
-            details = "; ".join(
-                f"{name}="
-                f"{','.join(coverage.reasons) or coverage.reason}"
-                for name, coverage in verification_by_camera.items()
-            )
-            self._stage2_not_done(
-                result,
-                f"fresh all-camera SFP verification failed: "
-                f"missing={sorted(missing_verified)} ({details})",
-            )
-            return
+            failures = {}
+            for name in expected:
+                check = verify_survey_view(
+                    refined,
+                    fresh_base_T_tcp[name],
+                    {name: tcp_T_cam[name]},
+                    {name: camera_models[name]},
+                    {name: grippers[name]},
+                    {name: int(fresh.frames[name]["stamp_ns"])},
+                    coverage_target=coverage_target,
+                )
+                if not check.passed:
+                    failures[name] = (
+                        ",".join(check.coverages[0].reasons)
+                        if check.coverages and check.coverages[0].reasons
+                        else check.reason
+                    )
+            if failures:
+                reason = "; ".join(f"{name}={detail}" for name, detail in failures.items())
+                return False, refined, reference_tcp, f"coverage not satisfied: {reason}"
+            return True, refined, reference_tcp, "ok"
 
-        confirmation_timeout = min(
-            timeout_sec, max(0.0, deadline - time.monotonic())
-        )
-        if confirmation_timeout <= 0.0:
-            self._stage2_not_done(
-                result, "deadline expired before the settled confirmation triplet"
-            )
-            return
-        confirmation = self.camera_rig.grab(
-            timeout_sec=confirmation_timeout,
-            min_cameras=len(expected),
-            collection_grace_sec=0.0,
-        )
-        if (
-            confirmation is None
-            or set(confirmation.frames) != set(expected)
-            or not confirmation.frames_within_skew(50_000_000)
-        ):
-            self._stage2_not_done(
-                result, "second settled three-camera triplet is unavailable"
-            )
-            return
-        confirmation_rejections = {}
-        confirmation_reports = {}
-        for camera_name in expected:
-            image = confirmation.frames[camera_name]["image"]
-            ignored = self.gripper_masks.ignored_pixels(
-                camera_name, image.shape
-            )
-            confirmation_report = analyze_board(
-                image,
-                margin_px=3,
-                min_area_frac=0.001,
-                ignore_bottom_frac=0.0,
-                min_contrast=20.0,
-                min_rectangularity=0.20,
-                min_detail_area_frac=0.005,
-                context_pad_frac=0.0,
-                ignore_mask=ignored,
-            )
-            confirmation_reports[camera_name] = confirmation_report
-            reasons = []
-            if not confirmation_report.seen:
-                reasons.append("board_context_not_detected")
-            if confirmation_report.artificial_bottom_contact:
-                reasons.append("board_contacts_gripper_mask")
-            if confirmation_report.gripper_overlap_px > 0:
-                reasons.append(
-                    "board_gripper_overlap="
-                    f"{confirmation_report.gripper_overlap_px}px"
-                )
-            if reasons:
-                confirmation_rejections[camera_name] = reasons
-        try:
-            confirmation_base_T_tcp = {
-                name: self._base_transform_at(
-                    self.config.gripper_frame,
-                    int(confirmation.frames[name]["stamp_ns"]),
-                    timeout_sec,
-                )
-                for name in expected
-            }
-            confirmation_base_T_cam = {
-                name: self._base_transform_at(
-                    self.config.camera_frames[name],
-                    int(confirmation.frames[name]["stamp_ns"]),
-                    timeout_sec,
-                )
-                for name in expected
-            }
-        except Exception as error:
-            self._stage2_not_done(
-                result,
-                "timestamp-bound confirmation camera/TCP TF unavailable: "
-                f"{error}",
-            )
-            return
-        confirmation_estimates = {}
-        for camera_name in expected:
-            image = confirmation.frames[camera_name]["image"]
-            ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
-            observation, reason = self._stage2_landmarks(
-                image, confirmation_reports[camera_name], ignored
-            )
-            if observation is None:
-                confirmation_rejections.setdefault(camera_name, []).append(reason)
-                continue
-            estimate, reason = estimate_board_pose(
-                observation[0],
-                observation[1],
-                camera_models[camera_name],
-                confirmation_base_T_cam[camera_name],
-            )
-            if estimate is None:
-                confirmation_rejections.setdefault(camera_name, []).append(
-                    f"PnP={reason}"
-                )
-                continue
-            confirmation_estimates[camera_name] = estimate
+        passed, refined_pose, current_tcp, confirm_reason = _confirm_coverage()
 
-        confirmation_consistent, confirmation_consistency_reason = (
-            board_pose_set_is_consistent(
-                confirmation_estimates,
-                board_pose,
-                expected,
+        if not passed and refined_pose is not None and current_tcp is not None:
+            # One bounded corrective: re-solve the survey pose from the freshly
+            # measured board pose and, if it is a small reachable nudge on a safe
+            # path, move once more and re-confirm.
+            corrective, _corrective_reason = search_survey_pose(
+                refined_pose,
+                tcp_T_cam,
+                camera_models,
+                grippers,
+                reference_camera="center_camera",
+                current_base_T_tcp=current_tcp,
+                coverage_targets=(coverage_target,),
+                max_reach_m=1.20,
+                min_height_m=0.02,
             )
-        )
-        if not confirmation_consistent:
-            self._stage2_not_done(
-                result,
-                "confirmation board poses are incomplete or inconsistent: "
-                f"{confirmation_consistency_reason}",
-            )
-            return
+            if corrective is not None:
+                nudge = corrective.base_T_tcp
+                nudge_disp = float(
+                    np.linalg.norm(nudge.translation - current_tcp.translation)
+                )
+                nudge_rot = math.acos(
+                    float(
+                        np.clip(
+                            0.5
+                            * (
+                                np.trace(current_tcp.rotation.T @ nudge.rotation)
+                                - 1.0
+                            ),
+                            -1.0,
+                            1.0,
+                        )
+                    )
+                )
+                if (
+                    nudge_disp <= 0.15
+                    and nudge_rot <= math.radians(20.0)
+                    and float(nudge.translation[2]) >= 0.02
+                    and path_is_safe(
+                        current_tcp.translation,
+                        nudge.translation,
+                        minimum_clearance=0.12,
+                    )
+                ):
+                    logging.info(
+                        "SFP Stage 2 corrective nudge %.3fm/%.2frad to close the "
+                        "coverage residual",
+                        nudge_disp,
+                        nudge_rot,
+                    )
+                    corrective_outcome = self.robot_motion.move_smooth(
+                        tuple(float(v) for v in nudge.translation),
+                        target_orientation=quaternion_from_matrix(nudge.rotation),
+                        max_speed_mps=max_speed_mps,
+                        max_angular_speed_radps=max_angular_speed_rps,
+                        publish_hz=publish_hz,
+                        settle_tolerance_m=settle_tolerance_m,
+                        settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
+                        timeout_sec=move_timeout_sec,
+                        baseline_force_xyz=baseline_force_xyz,
+                        max_force_n=max_force_n,
+                        force_delta_n=force_delta_n,
+                        cancelled=motion_cancelled,
+                    )
+                    if corrective_outcome.cancelled and cancelled():
+                        raise skill_interface.SkillCancelledError(
+                            corrective_outcome.message
+                        )
+                    if corrective_outcome.force_abort:
+                        result.force_abort = corrective_outcome.force_abort
+                    if (
+                        corrective_outcome.success
+                        and corrective_outcome.target_reached
+                    ):
+                        result.moves_executed += 1
+                        result.travel_m += float(corrective_outcome.distance_m)
+                        result.angular_travel_rad += float(
+                            corrective_outcome.angular_distance_rad
+                        )
+                        result.moved = True
+                        passed, refined_pose, current_tcp, confirm_reason = (
+                            _confirm_coverage()
+                        )
 
-        confirmation_projection = {}
-        for name, estimate in confirmation_estimates.items():
-            confirmation_projection[name] = verify_survey_view(
-                estimate,
-                confirmation_base_T_tcp[name],
-                {name: tcp_T_cam[name]},
-                {name: camera_models[name]},
-                {name: grippers[name]},
-                {name: int(confirmation.frames[name]["stamp_ns"])},
-                max_skew_ns=50_000_000,
-            )
-        missing_confirmation = set(expected) - set(confirmation_projection)
-        failed_confirmation = {
-            name: projection
-            for name, projection in confirmation_projection.items()
-            if not projection.passed
-        }
-        if confirmation_rejections or missing_confirmation or failed_confirmation:
-            details = "; ".join(
-                f"{name}={','.join(reasons)}"
-                for name, reasons in confirmation_rejections.items()
-            )
+        if not passed:
             self._stage2_not_done(
                 result,
-                "second settled triplet failed image/projection verification"
-                + (
-                    f": missing={sorted(missing_confirmation)}; {details}"
-                    if details or missing_confirmation
-                    else ""
-                ),
+                f"post-move coverage confirmation failed: {confirm_reason}",
             )
             return
 
@@ -3685,12 +3457,12 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         result.success = True
         result.component_coverage_ready = True
         result.steer_camera = source_camera
-        result.last_action = "sfp_geometric_stage2_verified"
+        result.last_action = "sfp_geometric_stage2_confirmed"
         result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
         result.message = (
-            "geometric Stage 2 verified the complete loose-SFP envelope "
-            "inside all three fresh calibrated camera views with conservative "
-            f"gripper clearance after {result.moves_executed} total moves"
+            "geometric Stage 2 framed the SFP/SC modules in all three "
+            "calibrated cameras with conservative gripper clearance after "
+            f"{result.moves_executed} total moves"
         )
 
     @staticmethod

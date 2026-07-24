@@ -16,9 +16,13 @@ The repository intentionally combines two explicit baselines:
 - **Insertion:** the latest local SFP V50 plug-relative controller and pose
   model. Learned insertion is disabled. `RLInsert.py` forces script mode and
   does not load an RL actor.
-- **Board search:** geometric staged-SFP Stage 2 from commit `b65a7a0`
-  (`Add geometric SFP survey stage`). It preserves legacy NIC/SC completion
-  while requiring calibrated, synchronized all-camera SFP visibility.
+- **Board search:** the insignia-driven deterministic survey. A short Stage 1
+  exposes the asymmetric purple insignia; Stage 2 recovers the full board pose by
+  planar PnP of the insignia (clip-proof, no plate-outline dependency) and
+  inverts the three-camera rig to a survey pose that frames the whole board when
+  reachable and the SFP/SC module region at minimum, confirmed by one fresh
+  all-camera triplet. Stage 1 has no wall-clock deadline and preserves legacy
+  NIC/SC completion. See [Board-search handoff](BOARD_SEARCH_HANDOFF.md).
 
 Do not infer the active implementation from an old feature branch, deployment
 note, W&B run, or versioned handoff. Start from `main` and these three files.

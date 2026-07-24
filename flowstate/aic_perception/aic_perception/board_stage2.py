@@ -104,6 +104,32 @@ LOGO_MATERIAL_CENTROID = np.array(
 # collision plate centre.
 LOGO_PLATE_CENTER = LOGO_MATERIAL_CENTROID
 
+# Axis-aligned bounding rectangle of the insignia in the board frame (metres),
+# wound CCW looking down +Z from the (+X, +Y) corner to match
+# ``BOARD_OUTLINE_CORNERS``.  Its four corners coincide with real bracket-stroke
+# corners of ``LOGO_MATERIAL_VERTICES`` (max/min X at the outer verticals, max/min
+# Y at the outer horizontals), so a four-point planar PnP against this rectangle
+# is a genuine correspondence.  This is the primary, clip-proof pose target: the
+# insignia stays in frame at survey standoffs where the full plate outline does not.
+_INSIGNIA_Z = float(LOGO_MATERIAL_VERTICES[:, 2].mean())
+_INSIGNIA_X_MIN = float(LOGO_MATERIAL_VERTICES[:, 0].min())
+_INSIGNIA_X_MAX = float(LOGO_MATERIAL_VERTICES[:, 0].max())
+_INSIGNIA_Y_MIN = float(LOGO_MATERIAL_VERTICES[:, 1].min())
+_INSIGNIA_Y_MAX = float(LOGO_MATERIAL_VERTICES[:, 1].max())
+INSIGNIA_RECT_CORNERS = np.array(
+    [
+        [_INSIGNIA_X_MAX, _INSIGNIA_Y_MAX, _INSIGNIA_Z],
+        [_INSIGNIA_X_MIN, _INSIGNIA_Y_MAX, _INSIGNIA_Z],
+        [_INSIGNIA_X_MIN, _INSIGNIA_Y_MIN, _INSIGNIA_Z],
+        [_INSIGNIA_X_MAX, _INSIGNIA_Y_MIN, _INSIGNIA_Z],
+    ],
+    dtype=float,
+)
+# Asymmetric material centroid used to break the near-square rectangle's
+# rotation/mirror ambiguity (offset ~1cm in -Y and slightly +X from the bbox
+# centre): the same disambiguation role the logo plays for the outline PnP.
+INSIGNIA_CENTROID = LOGO_MATERIAL_CENTROID
+
 # SFP mount rails (board frame).
 SFP_RAIL_X = 0.055
 SFP_RAIL_Y_ABS = 0.10625
@@ -183,6 +209,51 @@ def sfp_module_detail_boxes() -> tuple[np.ndarray, ...]:
                     points.append((x, yy, z))
         boxes.append(np.asarray(points, dtype=float))
     return tuple(boxes)
+
+
+# LC / SFP / SC mount-rail board-X positions (task_board.urdf.xacro).  The module
+# region spans all three rail families on both Y sides over their full travel.
+LC_RAIL_X = 0.0275
+SC_RAIL_X = 0.0985
+MOUNT_RAIL_TRANSLATION = 0.09625
+
+
+def module_coverage_corners() -> np.ndarray:
+    """Return the 8 board-frame corners of the SFP/SC module region.
+
+    The **minimum** coverage target: the whole pick + assembly strip where the
+    modules and their cables sit -- every LC/SFP/SC mount rail on both Y sides
+    over the full +/-``MOUNT_RAIL_TRANSLATION`` travel, padded by the SFP body
+    half-extent.  Widens ``sfp_envelope_corners`` in board-X to include the SC
+    rail; a survey pose framing this frames all module rows in all three cameras.
+    """
+
+    x_min = LC_RAIL_X - SFP_BODY_PAD_XY
+    x_max = SC_RAIL_X + SFP_BODY_PAD_XY
+    y_reach = SFP_RAIL_Y_ABS + MOUNT_RAIL_TRANSLATION + SFP_BODY_PAD_XY
+    corners = []
+    for x in (x_min, x_max):
+        for y in (-y_reach, y_reach):
+            for z in (SFP_ENVELOPE_Z_MIN, SFP_ENVELOPE_Z_MAX):
+                corners.append((x, y, z))
+    return np.array(corners, dtype=float)
+
+
+def board_coverage_corners() -> np.ndarray:
+    """Return the 8 board-frame corners of the whole board face.
+
+    The **preferred** coverage target: the full 0.30 x 0.425 m plate outline
+    extruded from the plate top up over the tallest module.  A survey pose
+    framing this in all three cameras is a strict superset of the module region,
+    so it also satisfies the minimum SFP/SC requirement.
+    """
+
+    corners = []
+    for x in (-BOARD_OUTLINE_HALF_X, BOARD_OUTLINE_HALF_X):
+        for y in (-BOARD_OUTLINE_HALF_Y, BOARD_OUTLINE_HALF_Y):
+            for z in (BOARD_TOP_Z, SFP_ENVELOPE_Z_MAX):
+                corners.append((x, y, z))
+    return np.array(corners, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -461,13 +532,20 @@ def estimate_board_pose(
     max_reprojection_error_px: float = 6.0,
     min_ambiguity_ratio: float = 1.5,
     max_logo_error_px: float = 60.0,
+    object_corners: np.ndarray | None = None,
+    disambiguation_object_point: np.ndarray | None = None,
 ) -> tuple[BoardPoseEstimate | None, str]:
-    """Estimate the board's 6-DoF pose from the outline quad and logo.
+    """Estimate the board's 6-DoF pose from a planar quad and a disambig point.
 
-    ``image_quad`` are the four detected board-outline corners (pixels, any
-    order/winding).  ``logo_centroid_px`` is the detected purple-insignia
-    centroid, used purely to break the fourfold planar-pose ambiguity.  The full
-    ``base_T_cam`` extrinsic maps the recovered ``cam_T_board`` into ``base``.
+    ``image_quad`` are the four detected corners (pixels, any order/winding) of a
+    known board-frame rectangle -- by default the board outline
+    (``BOARD_OUTLINE_CORNERS``); pass ``object_corners`` to PnP a different one
+    (e.g. ``INSIGNIA_RECT_CORNERS`` for the clip-proof insignia).
+    ``logo_centroid_px`` is a detected asymmetric point (the purple insignia
+    centroid) used purely to break the rectangle's rotation/mirror ambiguity;
+    ``disambiguation_object_point`` is its board-frame counterpart (default
+    ``LOGO_PLATE_CENTER``).  The full ``base_T_cam`` extrinsic maps the recovered
+    ``cam_T_board`` into ``base``.
 
     Returns ``(estimate, reason)``.  ``estimate`` is ``None`` when the board is
     ambiguous, the reprojection error is too high, or the logo contradicts the
@@ -494,7 +572,16 @@ def estimate_board_pose(
     if abs(signed_area) < 16.0:
         return None, "board outline quad is degenerate (area below 16 px^2)"
 
-    object_points = BOARD_OUTLINE_CORNERS.astype(np.float64)
+    object_points = (
+        BOARD_OUTLINE_CORNERS if object_corners is None else np.asarray(object_corners)
+    ).astype(np.float64)
+    if object_points.shape != (4, 3) or not np.all(np.isfinite(object_points)):
+        return None, "object corners must be four finite board-frame points"
+    disambiguation_point = (
+        LOGO_PLATE_CENTER
+        if disambiguation_object_point is None
+        else np.asarray(disambiguation_object_point, dtype=float)
+    )
     dist = camera.distortion.astype(np.float64)
 
     # The detected quad's winding direction is unknown (a downward-looking
@@ -567,7 +654,7 @@ def estimate_board_pose(
             return None, "logo centroid is not a finite pixel coordinate"
         for err, rmat, tvec in hypotheses:
             cam_T_board = Transform(rmat, tvec)
-            logo_cam = cam_T_board.apply(LOGO_PLATE_CENTER)
+            logo_cam = cam_T_board.apply(disambiguation_point)
             logo_pixels, logo_in_front = project_points(logo_cam[None, :], camera)
             if not bool(logo_in_front[0]):
                 logo_errors.append(math.inf)
@@ -626,6 +713,40 @@ def estimate_board_pose(
         camera_name=camera.name,
     )
     return estimate, "ok"
+
+
+def estimate_board_pose_from_insignia(
+    insignia_quad: np.ndarray,
+    insignia_centroid_px: Sequence[float],
+    camera: CameraModel,
+    base_T_cam: Transform,
+    *,
+    max_reprojection_error_px: float = 8.0,
+    min_ambiguity_ratio: float = 1.2,
+    max_logo_error_px: float = 40.0,
+) -> tuple[BoardPoseEstimate | None, str]:
+    """Estimate the board pose from the insignia bracket alone (clip-proof).
+
+    PnPs the detected insignia bounding-rectangle corners against
+    ``INSIGNIA_RECT_CORNERS`` and uses the asymmetric mask centroid to resolve
+    the rectangle ambiguity.  This is the primary Stage-2 pose source because the
+    large insignia stays fully in frame at survey standoffs where the plate
+    outline clips.  The tolerances are looser than the outline default because a
+    ~9.5 cm marker reprojects a little less tightly than the full plate, and the
+    centroid must select among four near-square rotations.
+    """
+
+    return estimate_board_pose(
+        insignia_quad,
+        insignia_centroid_px,
+        camera,
+        base_T_cam,
+        max_reprojection_error_px=max_reprojection_error_px,
+        min_ambiguity_ratio=min_ambiguity_ratio,
+        max_logo_error_px=max_logo_error_px,
+        object_corners=INSIGNIA_RECT_CORNERS,
+        disambiguation_object_point=INSIGNIA_CENTROID,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +986,11 @@ class SurveyCandidate:
     min_module_pixel_scale: float = 0.0
     motion_m: float = math.inf
     angular_motion_rad: float = math.inf
+    # The board-frame corner set this pose was found to frame in all cameras
+    # (whole board or the module region); the post-move confirm re-checks it.
+    coverage_target: np.ndarray | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def feasible(self) -> bool:
@@ -976,6 +1102,7 @@ def search_survey_pose(
     lateral_offsets_m: Sequence[float] | None = None,
     offsets_x_m: Sequence[float] = (-0.12, -0.06, 0.0, 0.06, 0.12),
     offsets_y_m: Sequence[float] = (-0.12, -0.06, 0.0, 0.06, 0.12),
+    coverage_targets: Sequence[np.ndarray] | None = None,
     module_envelopes_board: Sequence[np.ndarray] | None = None,
     current_base_T_tcp: Transform | None = None,
     max_angular_motion_rad: float = math.radians(45.0),
@@ -986,17 +1113,23 @@ def search_survey_pose(
     # this geometric proposal.
     max_reach_m: float = 1.8,
     min_height_m: float = 0.02,
+    edge_margin_px: float = 12.0,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
-    For every candidate the entire loose-SFP envelope is projected through all
-    supplied cameras using each camera's intrinsics and the fixed
-    ``tcp_T_cam`` extrinsic.  A candidate is feasible only when every camera has
-    the envelope in front, fully inside the image with a positive boundary
-    margin, clear of the gripper keep-out with a positive margin, and at an
-    adequate pixel scale.  Among feasible candidates the one that maximises the
-    minimum clearance across the three cameras is returned.  Returns
-    ``(None, reason)`` when no candidate is feasible or reachable.
+    ``coverage_targets`` are board-frame corner sets tried in order (most
+    preferred first; default: the whole board face, then the SFP/SC module
+    region).  For each target every candidate camera pose projects the target
+    through all supplied cameras; a candidate is feasible only when every camera
+    has the target in front, fully inside the image with a positive boundary
+    margin, and clear of the gripper keep-out with a positive margin.  The first
+    target that yields any feasible candidate wins; among those the pose that
+    maximises the minimum clearance across the three cameras is returned, with
+    the chosen board-frame target attached as ``candidate.coverage_target``.  So
+    the returned pose frames the modules in all three cameras at minimum, and the
+    whole board when reachable.  The distant-scale and per-module detail gates are
+    intentionally not applied here.  Returns ``(None, reason)`` when no candidate
+    is feasible or reachable for any target.
     """
 
     if reference_camera not in tcp_T_cam:
@@ -1019,124 +1152,158 @@ def search_survey_pose(
     # the complete board-plane search.
     if lateral_offsets_m is not None:
         offsets_x_m = lateral_offsets_m
+    if coverage_targets is None:
+        coverage_targets = (board_coverage_corners(), module_coverage_corners())
+    coverage_targets = tuple(
+        np.asarray(target, dtype=float) for target in coverage_targets
+    )
+    if not coverage_targets:
+        return None, "no coverage targets supplied"
 
     base_T_board = board_pose.base_T_board
     board_normal_base = base_T_board.rotation[:, 2]
     board_normal_base = board_normal_base / np.linalg.norm(board_normal_base)
-    envelope_board = sfp_envelope_corners()
-    envelope_center_board = sfp_envelope_center()
-    envelope_center_base = base_T_board.apply(envelope_center_board)
-
     # In-plane basis for lateral offsets and the up hint (board X/Y in base).
     board_x_base = base_T_board.rotation[:, 0]
     board_y_base = base_T_board.rotation[:, 1]
     ref_tcp_T_cam = tcp_T_cam[reference_camera]
 
-    best: SurveyCandidate | None = None
-    best_reason = "no feasible survey candidate satisfied all three cameras"
-    evaluated = 0
-
-    for standoff in standoffs_m:
-        for offset_x in offsets_x_m:
-            for offset_y in offsets_y_m:
-                for yaw in yaws_rad:
-                    # The reference optical origin is searched over a full
-                    # board-relative 3-D grid.  It aims at the SFP centre,
-                    # giving real pitch/roll variation rather than a top-down
-                    # pose with image roll only.
-                    cam_origin = (
-                        envelope_center_base
-                        + board_normal_base * standoff
-                        + board_x_base * offset_x
-                        + board_y_base * offset_y
-                    )
-                    if cam_origin[2] < min_height_m:
-                        continue
-                    up_hint = math.cos(yaw) * board_y_base + math.sin(yaw) * board_x_base
-                    cam_rot = _look_at_rotation(cam_origin, envelope_center_base, up_hint)
-                    base_T_refcam = Transform(cam_rot, cam_origin)
-                    # Recover the TCP pose that realises this camera pose.
-                    base_T_tcp = base_T_refcam.compose(ref_tcp_T_cam.inverse())
-
-                    # Keep the candidate generator's TCP workspace contract
-                    # identical to the integration guard.  Checking only the
-                    # camera origin can admit a pose whose camera is above the
-                    # board while its real TCP is below the allowed plane.
-                    if (
-                        float(base_T_tcp.translation[2]) < min_height_m
-                        or float(np.linalg.norm(base_T_tcp.translation))
-                        > max_reach_m
-                    ):
-                        continue
-                    if not np.all(np.isfinite(base_T_tcp.rotation)):
-                        continue
-                    angular_motion = (
-                        _rotation_distance_rad(
-                            current_base_T_tcp.rotation,
-                            base_T_tcp.rotation,
+    def _best_for_target(
+        target_board: np.ndarray,
+    ) -> tuple[SurveyCandidate | None, int]:
+        # Aim the reference optical axis at the target centroid and search a
+        # board-relative 3-D grid, giving real pitch/roll variation rather than a
+        # top-down pose with image roll only.
+        center_base = base_T_board.apply(target_board.mean(axis=0))
+        best: SurveyCandidate | None = None
+        evaluated = 0
+        for standoff in standoffs_m:
+            for offset_x in offsets_x_m:
+                for offset_y in offsets_y_m:
+                    for yaw in yaws_rad:
+                        cam_origin = (
+                            center_base
+                            + board_normal_base * standoff
+                            + board_x_base * offset_x
+                            + board_y_base * offset_y
                         )
-                        if current_base_T_tcp is not None
-                        else 0.0
-                    )
-                    if angular_motion > max_angular_motion_rad:
-                        continue
-
-                    coverages = []
-                    for name, camera in cameras.items():
-                        base_T_camera = base_T_tcp.compose(tcp_T_cam[name])
-                        cam_from_board = base_T_camera.inverse().compose(base_T_board)
-                        gripper = grippers[name]
-                        coverages.append(
-                            evaluate_camera_coverage(
-                                envelope_board,
-                                None,
-                                cam_from_board,
-                                camera,
-                                gripper,
-                                module_envelopes_board=module_envelopes_board,
+                        if cam_origin[2] < min_height_m:
+                            continue
+                        up_hint = (
+                            math.cos(yaw) * board_y_base
+                            + math.sin(yaw) * board_x_base
+                        )
+                        cam_rot = _look_at_rotation(
+                            cam_origin, center_base, up_hint
+                        )
+                        base_T_refcam = Transform(cam_rot, cam_origin)
+                        # Recover the TCP pose that realises this camera pose.
+                        base_T_tcp = base_T_refcam.compose(ref_tcp_T_cam.inverse())
+                        # Checking only the camera origin can admit a pose whose
+                        # camera is above the board while its real TCP is below
+                        # the allowed plane; guard the TCP itself.
+                        if (
+                            float(base_T_tcp.translation[2]) < min_height_m
+                            or float(np.linalg.norm(base_T_tcp.translation))
+                            > max_reach_m
+                        ):
+                            continue
+                        if not np.all(np.isfinite(base_T_tcp.rotation)):
+                            continue
+                        angular_motion = (
+                            _rotation_distance_rad(
+                                current_base_T_tcp.rotation,
+                                base_T_tcp.rotation,
                             )
-                        )
-                    evaluated += 1
-                    if not coverages or not all(c.feasible for c in coverages):
-                        continue
-                    min_clear = min(c.clearance for c in coverages)
-                    candidate = SurveyCandidate(
-                        base_T_tcp=base_T_tcp,
-                        min_clearance_px=min_clear,
-                        coverages=tuple(coverages),
-                        standoff_m=standoff,
-                        yaw_rad=yaw,
-                        offset_x_m=float(offset_x),
-                        offset_y_m=float(offset_y),
-                        min_module_pixel_scale=min(c.module_pixel_scale for c in coverages),
-                        motion_m=(
-                            float(np.linalg.norm(base_T_tcp.translation - current_base_T_tcp.translation))
                             if current_base_T_tcp is not None
-                            else float(np.linalg.norm(base_T_tcp.translation))
-                        ),
-                        angular_motion_rad=angular_motion,
-                    )
-                    # Lexicographic, deterministic optimisation.  All candidates
-                    # here are feasible; safety clearance dominates detail, and
-                    # motion only resolves otherwise equivalent poses.
-                    candidate_key = (
-                        round(candidate.min_clearance_px, 6),
-                        round(candidate.min_module_pixel_scale, 8),
-                        -candidate.motion_m,
-                        -candidate.angular_motion_rad,
-                    )
-                    best_key = (
-                        round(best.min_clearance_px, 6),
-                        round(best.min_module_pixel_scale, 8),
-                        -best.motion_m,
-                        -best.angular_motion_rad,
-                    ) if best is not None else None
-                    if best is None or candidate_key > best_key:
-                        best = candidate
+                            else 0.0
+                        )
+                        if angular_motion > max_angular_motion_rad:
+                            continue
 
-    if best is None:
-        return None, f"{best_reason} ({evaluated} candidates evaluated)"
-    return best, "ok"
+                        coverages = []
+                        for name, camera in cameras.items():
+                            base_T_camera = base_T_tcp.compose(tcp_T_cam[name])
+                            cam_from_board = (
+                                base_T_camera.inverse().compose(base_T_board)
+                            )
+                            coverages.append(
+                                evaluate_camera_coverage(
+                                    target_board,
+                                    None,
+                                    cam_from_board,
+                                    camera,
+                                    grippers[name],
+                                    edge_margin_px=edge_margin_px,
+                                    # Only "framed and gripper-clear in every
+                                    # camera" gates here; disable the distant-scale
+                                    # and per-module detail checks.
+                                    min_pixel_scale=0.0,
+                                    module_envelopes_board=(),
+                                    min_module_pixel_scale=0.0,
+                                )
+                            )
+                        evaluated += 1
+                        if not coverages or not all(
+                            c.feasible for c in coverages
+                        ):
+                            continue
+                        min_clear = min(c.clearance for c in coverages)
+                        candidate = SurveyCandidate(
+                            base_T_tcp=base_T_tcp,
+                            min_clearance_px=min_clear,
+                            coverages=tuple(coverages),
+                            standoff_m=standoff,
+                            yaw_rad=yaw,
+                            offset_x_m=float(offset_x),
+                            offset_y_m=float(offset_y),
+                            motion_m=(
+                                float(
+                                    np.linalg.norm(
+                                        base_T_tcp.translation
+                                        - current_base_T_tcp.translation
+                                    )
+                                )
+                                if current_base_T_tcp is not None
+                                else float(
+                                    np.linalg.norm(base_T_tcp.translation)
+                                )
+                            ),
+                            angular_motion_rad=angular_motion,
+                            coverage_target=target_board,
+                        )
+                        # Lexicographic, deterministic optimisation: safety
+                        # clearance dominates; motion only resolves otherwise
+                        # equivalent poses.
+                        candidate_key = (
+                            round(candidate.min_clearance_px, 6),
+                            -candidate.motion_m,
+                            -candidate.angular_motion_rad,
+                        )
+                        best_key = (
+                            (
+                                round(best.min_clearance_px, 6),
+                                -best.motion_m,
+                                -best.angular_motion_rad,
+                            )
+                            if best is not None
+                            else None
+                        )
+                        if best is None or candidate_key > best_key:
+                            best = candidate
+        return best, evaluated
+
+    total_evaluated = 0
+    for target_board in coverage_targets:
+        best, evaluated = _best_for_target(target_board)
+        total_evaluated += evaluated
+        if best is not None:
+            return best, "ok"
+    return (
+        None,
+        "no feasible survey candidate satisfied all cameras for any coverage "
+        f"target ({total_evaluated} candidates evaluated)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1163,11 +1330,16 @@ def verify_survey_view(
     stamps_ns: Mapping[str, int],
     *,
     max_skew_ns: int = 50_000_000,
+    coverage_target: np.ndarray | None = None,
+    edge_margin_px: float = 12.0,
 ) -> VerificationResult:
-    """Verify the loose-SFP envelope is framed in all cameras after settling.
+    """Verify the chosen coverage target is framed in all cameras after settling.
 
-    Requires the three fresh frames to be within ``max_skew_ns`` of each other
-    and the projected envelope to pass in every camera.
+    Requires the fresh frames to be within ``max_skew_ns`` of each other and the
+    projected ``coverage_target`` (default: the module region) to be in front,
+    inside the image with a positive boundary margin, and gripper-clear in every
+    camera -- the same single acceptance ``search_survey_pose`` used to pick the
+    pose.  The distant-scale and per-module detail gates are intentionally off.
     """
 
     if len(stamps_ns) < len(cameras):
@@ -1185,7 +1357,11 @@ def verify_survey_view(
         )
 
     base_T_board = board_pose.base_T_board
-    envelope_board = sfp_envelope_corners()
+    envelope_board = (
+        module_coverage_corners()
+        if coverage_target is None
+        else np.asarray(coverage_target, dtype=float)
+    )
     coverages = []
     for name, camera in cameras.items():
         if name not in tcp_T_cam:
@@ -1197,7 +1373,15 @@ def verify_survey_view(
         gripper = grippers.get(name, GripperExclusion(None))
         coverages.append(
             evaluate_camera_coverage(
-                envelope_board, None, cam_from_board, camera, gripper
+                envelope_board,
+                None,
+                cam_from_board,
+                camera,
+                gripper,
+                edge_margin_px=edge_margin_px,
+                min_pixel_scale=0.0,
+                module_envelopes_board=(),
+                min_module_pixel_scale=0.0,
             )
         )
     passed = bool(coverages) and all(c.feasible for c in coverages)

@@ -12,6 +12,8 @@ from aic_perception.board_stage2 import (
     BoardPoseEstimate,
     CameraModel,
     GripperExclusion,
+    INSIGNIA_CENTROID,
+    INSIGNIA_RECT_CORNERS,
     LOGO_MATERIAL_CENTROID,
     LOGO_MATERIAL_VERTICES,
     LOGO_PLATE_CENTER,
@@ -20,9 +22,12 @@ from aic_perception.board_stage2 import (
     SFP_RAIL_Y_ABS,
     Transform,
     bbox_from_mask,
+    board_coverage_corners,
     board_pose_set_is_consistent,
     estimate_board_pose,
+    estimate_board_pose_from_insignia,
     evaluate_camera_coverage,
+    module_coverage_corners,
     project_points,
     quaternion_from_matrix,
     sampled_cartesian_path_is_safe,
@@ -32,7 +37,10 @@ from aic_perception.board_stage2 import (
     sfp_module_detail_boxes,
     verify_survey_view,
 )
-from aic_perception.board_visibility import rotation_matrix_from_quaternion
+from aic_perception.board_visibility import (
+    detect_insignia_polygon,
+    rotation_matrix_from_quaternion,
+)
 from aic_perception.gripper_masks import GripperMaskBank
 
 
@@ -646,8 +654,18 @@ def test_search_survey_pose_maximises_min_clearance():
     for name, cam in cameras.items():
         base_T_camera = base_T_tcp.compose(tcp_T_cam[name])
         cam_from_board = base_T_camera.inverse().compose(board.base_T_board)
+        # Re-score against the candidate's own chosen coverage target (whole
+        # board or module region), disabling the same scale/detail gates the
+        # search disabled, so the reported min clearance is reproduced.
         cov = evaluate_camera_coverage(
-            sfp_envelope_corners(), None, cam_from_board, cam, grippers[name]
+            candidate.coverage_target,
+            None,
+            cam_from_board,
+            cam,
+            grippers[name],
+            min_pixel_scale=0.0,
+            module_envelopes_board=(),
+            min_module_pixel_scale=0.0,
         )
         recomputed.append(cov.clearance)
     assert min(recomputed) == pytest.approx(candidate.min_clearance_px, abs=1e-6)
@@ -830,7 +848,8 @@ def test_search_uses_true_oblique_view_and_both_board_plane_axes():
     assert candidate.offset_y_m == pytest.approx(0.08)
     ref_cam = candidate.base_T_tcp.compose(tcp_T_cam["center_camera"])
     view_axis = ref_cam.rotation[:, 2]
-    target = board.base_T_board.apply(sfp_envelope_center())
+    # The reference axis aims at the chosen coverage target's centroid.
+    target = board.base_T_board.apply(candidate.coverage_target.mean(axis=0))
     expected = target - ref_cam.translation
     expected /= np.linalg.norm(expected)
     assert np.dot(view_axis, expected) > 0.999999
@@ -970,3 +989,138 @@ def test_bbox_from_mask():
     mask[5:10, 8:15] = True
     assert bbox_from_mask(mask) == (8.0, 5.0, 14.0, 9.0)
     assert bbox_from_mask(np.zeros((5, 5), dtype=bool)) is None
+
+
+# ---------------------------------------------------------------------------
+# Insignia-driven pose (clip-proof) and two-tier coverage.
+# ---------------------------------------------------------------------------
+
+
+def _render_insignia(base_T_board, base_T_cam, camera):
+    """Project the insignia rectangle corners + centroid to pixels."""
+    cam_from_board = base_T_cam.inverse().compose(base_T_board)
+    quad_cam = cam_from_board.apply(INSIGNIA_RECT_CORNERS)
+    quad_px, in_front = project_points(quad_cam, camera)
+    assert in_front.all()
+    centroid_cam = cam_from_board.apply(INSIGNIA_CENTROID[None, :])
+    centroid_px, _ = project_points(centroid_cam, camera)
+    return quad_px, centroid_px[0]
+
+
+@pytest.mark.parametrize(
+    "yaw_deg,tilt_deg,tilt_axis",
+    [
+        (0.0, 0.0, [1, 0, 0]),
+        (40.0, 10.0, [1, 0, 0]),
+        (-115.0, 15.0, [0, 1, 0]),
+        (160.0, 18.0, [1, 1, 0]),
+    ],
+)
+def test_estimate_board_pose_from_insignia_recovers_pose(yaw_deg, tilt_deg, tilt_axis):
+    camera = make_camera()
+    R_board = axis_angle_rotation([0, 0, 1], math.radians(yaw_deg))
+    R_board = axis_angle_rotation(tilt_axis, math.radians(tilt_deg)) @ R_board
+    base_T_board = Transform(R_board, np.array([0.0, 0.0, 0.0]))
+    base_T_cam = Transform(
+        np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]]),
+        np.array([0.02, -0.01, 0.45]),
+    )
+    quad_px, centroid_px = _render_insignia(base_T_board, base_T_cam, camera)
+
+    est, reason = estimate_board_pose_from_insignia(
+        quad_px, centroid_px, camera, base_T_cam
+    )
+    assert est is not None, reason
+    assert est.reprojection_error_px < 1.0
+    assert np.allclose(est.base_T_board.translation, base_T_board.translation, atol=3e-3)
+    angle = _rotation_distance(est.base_T_board.rotation, base_T_board.rotation)
+    assert angle < math.radians(2.0)
+
+
+def _rotation_distance(a, b):
+    delta = np.asarray(a).T @ np.asarray(b)
+    return math.acos(float(np.clip(0.5 * (np.trace(delta) - 1.0), -1.0, 1.0)))
+
+
+def test_insignia_pose_does_not_depend_on_a_visible_board_outline():
+    """The insignia PnP works even when the full plate is cropped out of frame."""
+    camera = make_camera()
+    base_T_board = Transform(np.eye(3), np.zeros(3))
+    # Close standoff so the 0.425 m plate outline would clip, but the ~9.5 cm
+    # insignia stays fully framed.
+    base_T_cam = Transform(
+        np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]]),
+        np.array([INSIGNIA_CENTROID[0], INSIGNIA_CENTROID[1], 0.30]),
+    )
+    # The full board outline is off-frame at this pose...
+    board_cam = base_T_cam.inverse().compose(base_T_board).apply(BOARD_OUTLINE_CORNERS)
+    board_px, _ = project_points(board_cam, camera)
+    off_frame = (
+        (board_px[:, 0] < 0).any()
+        or (board_px[:, 0] > camera.width).any()
+        or (board_px[:, 1] < 0).any()
+        or (board_px[:, 1] > camera.height).any()
+    )
+    assert off_frame, "test setup should crop the plate outline"
+    # ...yet the insignia PnP still recovers the pose.
+    quad_px, centroid_px = _render_insignia(base_T_board, base_T_cam, camera)
+    est, reason = estimate_board_pose_from_insignia(quad_px, centroid_px, camera, base_T_cam)
+    assert est is not None, reason
+    assert np.allclose(est.base_T_board.translation, base_T_board.translation, atol=3e-3)
+
+
+def test_detect_insignia_polygon_on_a_synthetic_bracket():
+    """A rendered purple bracket yields four ordered corners and a centroid."""
+    W, H = 320, 240
+    image = np.zeros((H, W, 3), dtype=np.uint8)
+    # A magenta open bracket (three sides), asymmetric, well inside the frame.
+    magenta = (211, 0, 211)  # BGR ~ H150 purple
+    x0, y0, x1, y1 = 90, 70, 210, 180
+    t = 12
+    image[y0:y1, x0:x0 + t] = magenta          # left vertical
+    image[y0:y0 + t, x0:x1] = magenta          # top horizontal
+    image[y1 - t:y1, x0:x1] = magenta          # bottom horizontal (open right)
+    detected = detect_insignia_polygon(image)
+    assert detected is not None
+    quad, centroid = detected
+    assert quad.shape == (4, 2)
+    # The recovered rectangle spans roughly the drawn bracket extent.
+    assert quad[:, 0].min() < x0 + 6 and quad[:, 0].max() > x1 - 6
+    assert quad[:, 1].min() < y0 + 6 and quad[:, 1].max() > y1 - 6
+    assert 0 <= centroid[0] <= W and 0 <= centroid[1] <= H
+    # A hueless (grayscale) image has no insignia.
+    assert detect_insignia_polygon(np.full((H, W, 3), 40, np.uint8)) is None
+
+
+def test_coverage_targets_module_is_subset_of_whole_board():
+    board = board_coverage_corners()
+    module = module_coverage_corners()
+    assert board.shape == (8, 3) and module.shape == (8, 3)
+    # Whole-board face spans the full 0.30 x 0.425 m plate.
+    assert board[:, 0].min() == pytest.approx(-0.15)
+    assert board[:, 0].max() == pytest.approx(0.15)
+    assert board[:, 1].min() == pytest.approx(-0.2125)
+    assert board[:, 1].max() == pytest.approx(0.2125)
+    # The module region covers both Y-side rails including the SC rail (X~0.0985).
+    assert module[:, 0].max() > SFP_RAIL_X
+    assert module[:, 1].max() > SFP_RAIL_Y_ABS + SFP_RAIL_TRANSLATION
+
+
+def test_search_prefers_whole_board_then_falls_back_to_module_region():
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    # Default two-tier: whole board preferred.
+    candidate, reason = search_survey_pose(board, tcp_T_cam, cameras, grippers)
+    assert candidate is not None, reason
+    assert candidate.coverage_target is not None
+    # If whole board is unreachable in all three cameras, the module region is
+    # still framed (explicit single-target search proves feasibility).
+    module_only, module_reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        coverage_targets=(module_coverage_corners(),),
+    )
+    assert module_only is not None, module_reason
+    assert all(c.feasible for c in module_only.coverages)

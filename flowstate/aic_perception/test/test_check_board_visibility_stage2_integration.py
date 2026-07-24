@@ -58,21 +58,27 @@ def test_stage1_done_hands_off_in_place_instead_of_returning_success():
     terminal_start = source.index("if action.terminal:", done_start)
     done_branch = source[done_start:terminal_start]
 
-    assert "_run_sfp_geometric_stage2" in done_branch
-    # The shared deployed skill keeps the legacy terminal contract for the
-    # NIC/SC enum values, while SFP (0/1) continues into Stage 2.
+    # The DONE branch hands SFP off through the shared closure and keeps the
+    # legacy terminal contract for the NIC/SC enum values.
+    assert "handoff_to_stage2(snapshot, reports)" in done_branch
     assert "if not staged_sfp_target" in done_branch
     assert "result.done = True" in done_branch
-    assert "deadline=deadline" in done_branch
+    # Stage 1 no longer imposes a wall-clock deadline on the handoff.
+    assert "deadline" not in done_branch
 
 
-def test_stage1_keeps_its_original_configured_deadline():
+def test_stage1_has_no_wall_clock_deadline_and_hands_off_on_exposed_insignia():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "deadline = started_at + search_timeout_sec" in method_source
+    # Stage 1 imposes no wall-clock deadline; the planner terminates on its own
+    # stall condition and an exposed insignia hands off to Stage 2 early.
+    assert "deadline = started_at" not in method_source
     assert "stage2_reserve_sec" not in method_source
+    assert "deadline_reached=False" in method_source
+    assert "_stage2_has_complete_landmark(" in method_source
+    assert "handoff_to_stage2(snapshot, reports)" in method_source
 
 
 def test_stage1_does_not_inject_logo_acquisition_moves():
@@ -91,23 +97,28 @@ def test_stagnated_legacy_stage1_hands_its_final_triplet_to_stage2():
 
     assert "if action.terminal:" in method_source
     assert "if staged_sfp_target:" in method_source
-    assert "legacy Stage-1 planner ended" in method_source
-    assert "directly to Stage 2" in method_source
+    assert "Stage-1 planner ended" in method_source
+    assert "to geometric Stage 2" in method_source
+    assert "handoff_to_stage2(snapshot, reports)" in method_source
+    # The shared closure still invokes the geometric stage.
     assert "self._run_sfp_geometric_stage2(" in method_source
 
 
-def test_stage2_does_not_reuse_stage1_full_board_as_a_handoff_gate():
+def test_stage2_seed_uses_insignia_not_the_board_outline_or_full_report():
     source, _ = _source_and_class()
     landmarks = _method("_stage2_landmarks")
     method_source = ast.get_source_segment(source, landmarks)
 
     for contract in (
-        "logo_margin < 8",
-        "purple logo intersects the gripper uncertainty mask",
-        "board outline touches the physical image boundary",
-        "approxPolyDP",
+        "detect_insignia_polygon",
+        "insignia intersects the gripper uncertainty mask",
+        "insignia touches the physical image boundary",
     ):
         assert contract in method_source
+    # The board outline is no longer a handoff dependency: no dark-plate quad
+    # recovery remains in the seed.
+    assert "cv2.connectedComponentsWithStats" not in method_source
+    assert "board outline contour is unavailable" not in method_source
     report_attributes = {
         node.attr
         for node in ast.walk(landmarks)
@@ -136,49 +147,44 @@ def test_stage2_consumes_all_camera_info_and_full_camera_tcp_tf():
     assert "frames_are_approved_camera_pair" in method_source
 
 
-def test_stage2_orders_pose_search_motion_fresh_triplet_and_verification():
+def test_stage2_orders_insignia_pose_search_motion_and_single_confirm():
     method = _method("_run_sfp_geometric_stage2")
-    estimate = _named_calls(method, "estimate_board_pose")
+    estimate = _named_calls(method, "estimate_board_pose_from_insignia")
     search = _named_calls(method, "search_survey_pose")
     motions = _calls(method, "move_smooth")
-    fresh_grab = _calls(method, "grab")
+    grabs = _calls(method, "grab")
     verification = _named_calls(method, "verify_survey_view")
-
-    # Initial, fresh, and independently re-PnP'd confirmation triplets.
-    assert len(estimate) == 3
-    assert len(search) == 1
-    assert len(fresh_grab) == 2
-    # The two calls are inside per-camera loops, so each triplet is verified
-    # with each camera's own timestamped pose rather than one shared pose.
-    assert len(verification) == 2
-    method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
-    assert "for estimate in fresh_estimates" in method_source
-    assert "for name, estimate in confirmation_estimates.items()" in method_source
-    # Optional outward retreat, optional in-place orientation waypoint, then
-    # the fixed-orientation survey translation.
-    assert 1 <= len(motions) <= 3
-    assert (
-        estimate[0]
-        < search[0]
-        < motions[-1]
-        < fresh_grab[0]
-        < estimate[1]
-        < verification[0]
+    method_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"), method
     )
-    assert verification[0] < fresh_grab[1] < verification[-1]
+
+    # Insignia pose for the initial seed and again inside the confirmation.
+    assert len(estimate) == 2
+    # Initial survey search plus one bounded corrective re-solve.
+    assert len(search) == 2
+    # A single confirmation triplet, not the old two-triplet gauntlet.
+    assert len(grabs) == 1
+    assert len(verification) == 1
+    assert "_confirm_coverage" in method_source
+    assert "confirmation_estimates" not in method_source
+    assert "second settled" not in method_source
+    # Optional retreat, optional orientation waypoint, the survey translation,
+    # and at most one corrective nudge.
+    assert 1 <= len(motions) <= 4
+    # Pose and search precede the first move.
+    assert estimate[0] < search[0] < motions[0]
 
 
-def test_stage2_uses_a_relaxed_pose_seed_before_strict_final_verification():
+def test_stage2_pose_comes_from_the_insignia_and_completion_from_coverage():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(source, method)
 
-    # Stage 2 must not reject a usable handoff merely because the initial
-    # outline is noisier than the final-pose threshold.  Its physical motion
-    # and terminal verification remain separately guarded below.
-    assert "max_reprojection_error_px=20.0" in method_source
-    assert "max_logo_error_px=120.0" in method_source
+    # Pose is the clip-proof insignia PnP; completion is a fresh all-camera
+    # coverage confirmation of the chosen target.
+    assert "estimate_board_pose_from_insignia(" in method_source
     assert "verify_survey_view" in method_source
+    assert "coverage_target=coverage_target" in method_source
 
 
 def test_stage2_searches_inside_the_execution_workspace_guard():
@@ -189,28 +195,31 @@ def test_stage2_searches_inside_the_execution_workspace_guard():
     assert "min_height_m=0.02" in method_source
 
 
-def test_stage2_motion_uses_remaining_deadline_not_legacy_per_move_caps():
+def test_stage2_motion_uses_per_move_timeout_and_no_aggregate_deadline():
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
 
-    assert method_source.count("timeout_sec=remaining") == 3
-    assert "max(move_timeout_sec, 8.0)" not in method_source
-    assert "max(move_timeout_sec, 12.0)" not in method_source
+    # No aggregate Stage-2 time budget: every motion is bounded by the per-move
+    # timeout and force guards only.
+    assert "timeout_sec=remaining" not in method_source
+    assert method_source.count("timeout_sec=move_timeout_sec") >= 3
+    assert "deadline" not in method_source
 
 
-def test_fresh_pixels_and_timestamp_skew_gate_terminal_done():
+def test_single_fresh_triplet_confirmation_gates_terminal_done():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(source, method)
 
+    # A single fresh, skew-bounded triplet confirms the chosen coverage target
+    # in every camera; no second settled triplet or pose-consistency gauntlet.
     assert "min_cameras=len(expected)" in method_source
     assert "frames_within_skew(50_000_000)" in method_source
-    assert "fresh_report = analyze_board" in method_source
-    assert "fresh_report.gripper_overlap_px > 0" in method_source
-    assert "fresh_estimates" in method_source
-    assert len(_named_calls(method, "board_pose_set_is_consistent")) == 2
-    assert "second settled three-camera triplet" in method_source
-    assert method_source.index("verification_by_camera") < method_source.index(
+    assert "coverage_target=coverage_target" in method_source
+    assert "_confirm_coverage" in method_source
+    assert "board_pose_set_is_consistent" not in method_source
+    assert "second settled" not in method_source
+    assert method_source.index("verify_survey_view") < method_source.index(
         "result.done = True"
     )
 
@@ -224,7 +233,7 @@ def test_stage2_uses_image_timestamp_tf_and_samples_a_safe_cartesian_path():
     assert "Time(nanoseconds=int(stamp_ns))" in transform_source
     assert "returned_ns" in transform_source
     assert "50_000_000" in transform_source
-    assert method_source.count("_base_transform_at(") >= 6
+    assert method_source.count("_base_transform_at(") >= 4
     assert "path_is_safe" in method_source
     assert "sampled_cartesian_path_is_safe" in method_source
     assert "allow_outward_retreat=True" in method_source
