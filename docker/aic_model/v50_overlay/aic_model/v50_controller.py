@@ -14,7 +14,7 @@ the cameras become occluded during seating.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import time
@@ -37,6 +37,16 @@ LOCAL_SFP_PORT_KPS = np.array(
 SEATED = "seated"
 STALLED = "stalled"
 HARD_FAILURE = "hard_failure"
+# To activate the correction, set FORCE_GAIN ~0.00015 (m/N) and MOMENT_GAIN
+# ~0.02 (rad/N·m) after verifying sign/frame from SEAT_WRENCH logs; these are
+# starting points to bench-tune.
+# Activate P3 after reviewing SEAT_SLOPE/SEAT_WRENCH logs: set
+# MOUTH_SPEED_SCALE~0.5 and STALL_GRACE_S~3.0 (starting points, bench-tune).
+SEAT_ALIGN_OBSERVE_FORCE_GAIN = 0.00015
+SEAT_ALIGN_OBSERVE_MOMENT_GAIN = 0.02
+SEAT_WRENCH_LOG_PERIOD_S = 0.2
+SEAT_SLOPE_LOG_PERIOD_S = 0.2
+SEAT_SLOPE_WINDOW_S = 0.5
 
 
 def _env_float(name: str, default: float) -> float:
@@ -47,12 +57,19 @@ def _env_int(name: str, default: int) -> int:
     return int(os.environ.get(name, str(default)))
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class V50Config:
     """Safety and timing limits, expressed in wall time where applicable."""
 
     command_dt_sim_s: float = 0.05
-    align_timeout_wall_s: float = 5.0
+    align_timeout_wall_s: float = 15.0
     align_lateral_tol_m: float = 0.0010
     align_rotation_tol_rad: float = np.deg2rad(1.5)
     align_max_lateral_step_m: float = 0.0015
@@ -70,6 +87,14 @@ class V50Config:
     max_axial_lead_m: float = 0.020
     lateral_safety_m: float = 0.006
     rotation_safety_rad: float = np.deg2rad(15.0)
+    seat_align_enable: bool = True
+    seat_align_force_gain: float = 0.0
+    seat_align_moment_gain: float = 0.0
+    seat_align_max_lat_m: float = 0.0015
+    seat_align_max_tilt_rad: float = 0.0175
+    seat_mouth_zone_m: float = 0.006
+    seat_mouth_speed_scale: float = 1.0
+    seat_stall_grace_s: float = 0.0
     seat_candidate_depth_m: float = 0.0445
     insertion_event_timeout_wall_s: float = 6.0
     max_visual_rescues_per_pose: int = 1
@@ -86,7 +111,7 @@ class V50Config:
     def from_env(cls) -> "V50Config":
         return cls(
             command_dt_sim_s=_env_float("RL_INSERT_V50_COMMAND_DT_S", 0.05),
-            align_timeout_wall_s=_env_float("RL_INSERT_V50_ALIGN_TIMEOUT_S", 5.0),
+            align_timeout_wall_s=_env_float("RL_INSERT_V50_ALIGN_TIMEOUT_S", 15.0),
             stall_timeout_wall_s=_env_float("RL_INSERT_V50_STALL_TIMEOUT_S", 2.5),
             stall_progress_m=_env_float("RL_INSERT_V50_STALL_PROGRESS_M", 0.0008),
             free_speed_m_s=_env_float("RL_INSERT_V50_FREE_SPEED_M_S", 0.015),
@@ -98,6 +123,24 @@ class V50Config:
             force_abort_wall_s=_env_float("RL_INSERT_V50_FORCE_ABORT_DWELL_S", 0.25),
             axial_stiffness_n_m=_env_float("RL_INSERT_V50_AXIAL_STIFFNESS_N_M", 500.0),
             max_axial_lead_m=_env_float("RL_INSERT_V50_MAX_AXIAL_LEAD_M", 0.020),
+            seat_align_enable=_env_bool("RL_INSERT_V50_SEAT_ALIGN_ENABLE", True),
+            seat_align_force_gain=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.0
+            ),
+            seat_align_moment_gain=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.0
+            ),
+            seat_align_max_lat_m=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0015
+            ),
+            seat_align_max_tilt_rad=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_RAD", 0.0175
+            ),
+            seat_mouth_zone_m=_env_float("RL_INSERT_V50_SEAT_MOUTH_ZONE_M", 0.006),
+            seat_mouth_speed_scale=_env_float(
+                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 1.0
+            ),
+            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 0.0),
             insertion_event_timeout_wall_s=_env_float(
                 "RL_INSERT_V50_EVENT_TIMEOUT_S", 6.0
             ),
@@ -106,6 +149,10 @@ class V50Config:
             ),
             max_lift_recoveries=_env_int("RL_INSERT_V50_MAX_LIFT_RECOVERIES", 1),
             lift_distance_m=_env_float("RL_INSERT_V50_LIFT_DISTANCE_M", 0.006),
+            # 2.0s was too tight for the deployed robot's actual (slow) motion:
+            # a 6mm recovery lift could not complete, so the bounded-lift retry
+            # aborted. Same wall-clock-too-tight cause as the align timeout.
+            lift_timeout_wall_s=_env_float("RL_INSERT_V50_LIFT_TIMEOUT_S", 5.0),
             recovery_percept_samples=_env_int(
                 "RL_INSERT_V50_RECOVERY_PERCEPT_SAMPLES", 3
             ),
@@ -130,6 +177,14 @@ class V50Config:
             raise ValueError("v50 recovery consensus cannot require too many samples")
         if self.axial_stiffness_n_m <= 0.0:
             raise ValueError("v50 axial stiffness must be positive")
+        if self.seat_align_max_lat_m < 0.0 or self.seat_align_max_tilt_rad < 0.0:
+            raise ValueError("v50 seat alignment correction caps must be non-negative")
+        if (
+            self.seat_mouth_zone_m < 0.0
+            or self.seat_mouth_speed_scale < 0.0
+            or self.seat_stall_grace_s < 0.0
+        ):
+            raise ValueError("v50 P3 observe-first parameters must be non-negative")
         return self
 
     @property
@@ -219,6 +274,18 @@ def rotation_from_axis_angle(vector) -> np.ndarray:
         dtype=np.float64,
     )
     return np.eye(3) + np.sin(angle) * K + (1.0 - np.cos(angle)) * (K @ K)
+
+
+def clamp_vector_norm(vector, max_norm: float) -> np.ndarray:
+    value = np.asarray(vector, dtype=np.float64).reshape(-1)
+    norm = float(np.linalg.norm(value))
+    if not np.isfinite(norm):
+        return np.zeros_like(value)
+    if max_norm <= 0.0:
+        return np.zeros_like(value)
+    if norm > max_norm:
+        return value * (max_norm / norm)
+    return value
 
 
 def solve_tip_in_tcp(tcp_pos, tcp_quat, tip_pos, tip_rotation):
@@ -580,6 +647,69 @@ class PlugRelativeV50Controller:
         wrench = self.policy._wrench_vector(observation) - self.policy._wrench_baseline
         return float(np.linalg.norm(wrench[:3]))
 
+    def _wrench_plug_frame(self, observation):
+        if observation is None:
+            nan3 = np.full(3, np.nan, dtype=np.float64)
+            return nan3, nan3.copy()
+        wrench_wrist = (
+            self.policy._wrench_vector(observation) - self.policy._wrench_baseline
+        )
+        _, tcp_quat = self.policy._tcp()
+        R_tcp = quaternion_to_matrix(tcp_quat)
+        wrist_to_plug = self.Rp.T @ R_tcp
+        return wrist_to_plug @ wrench_wrist[:3], wrist_to_plug @ wrench_wrist[3:]
+
+    def _seat_alignment_sample(self, observation, depth, force, acc_lat, acc_tilt):
+        f_plug, m_plug = self._wrench_plug_frame(observation)
+        contact = bool(np.isfinite(force) and force >= self.config.contact_force_n)
+        finite_wrench = bool(np.all(np.isfinite(f_plug[:2])) and np.all(np.isfinite(m_plug[:2])))
+        if contact and finite_wrench:
+            log_force_gain = (
+                self.config.seat_align_force_gain
+                if self.config.seat_align_force_gain != 0.0
+                else SEAT_ALIGN_OBSERVE_FORCE_GAIN
+            )
+            log_moment_gain = (
+                self.config.seat_align_moment_gain
+                if self.config.seat_align_moment_gain != 0.0
+                else SEAT_ALIGN_OBSERVE_MOMENT_GAIN
+            )
+            d_lat_would = -log_force_gain * f_plug[:2]
+            d_tilt_would = -log_moment_gain * m_plug[:2]
+            d_lat_applied = -self.config.seat_align_force_gain * f_plug[:2]
+            d_tilt_applied = -self.config.seat_align_moment_gain * m_plug[:2]
+        else:
+            d_lat_would = np.zeros(2, dtype=np.float64)
+            d_tilt_would = np.zeros(2, dtype=np.float64)
+            d_lat_applied = np.zeros(2, dtype=np.float64)
+            d_tilt_applied = np.zeros(2, dtype=np.float64)
+        acc_lat = clamp_vector_norm(
+            np.asarray(acc_lat, dtype=np.float64).reshape(2) + d_lat_applied,
+            self.config.seat_align_max_lat_m,
+        )
+        acc_tilt = clamp_vector_norm(
+            np.asarray(acc_tilt, dtype=np.float64).reshape(2) + d_tilt_applied,
+            self.config.seat_align_max_tilt_rad,
+        )
+        return acc_lat, acc_tilt, (depth, f_plug, m_plug, d_lat_would, d_tilt_would)
+
+    def _log_seat_wrench(self, sample, acc_lat, acc_tilt, *, summary: Optional[str] = None):
+        depth, f_plug, m_plug, d_lat_would, d_tilt_would = sample
+        suffix = f" summary={summary}" if summary else ""
+        self.log.info(
+            f"[v50] SEAT_WRENCH depth={depth*1000.0:.1f}mm "
+            f"axial_N={f_plug[2]:.2f} "
+            f"lat_N={np.round(f_plug[:2], 2).tolist()} "
+            f"|lat|={np.linalg.norm(f_plug[:2]):.2f} "
+            f"moment_Nm={np.round(m_plug[:2], 3).tolist()} "
+            f"|M|={np.linalg.norm(m_plug[:2]):.3f} "
+            f"nudge_would_mm={np.round(d_lat_would * 1000.0, 3).tolist()} "
+            f"tilt_would_deg={np.degrees(np.linalg.norm(d_tilt_would)):.3f} "
+            f"nudge_applied_mm={np.round(acc_lat * 1000.0, 3).tolist()} "
+            f"tilt_applied_deg={np.degrees(np.linalg.norm(acc_tilt)):.3f}"
+            f"{suffix}"
+        )
+
     def _hold_tip(self, tip_pos, tip_rotation) -> None:
         self.policy.set_pose_target(
             self.move_robot,
@@ -762,6 +892,33 @@ class PlugRelativeV50Controller:
         last_command_time = now
         progress = WallProgressWatch.start(depth, now, self.config)
         hard_force_since = None
+        acc_lat = np.zeros(2, dtype=np.float64)
+        acc_tilt = np.zeros(2, dtype=np.float64)
+        last_wrench_log_time = 0.0
+        slope_samples = []
+        last_slope_log_time = 0.0
+        stall_grace_deadline = None
+
+        def log_seat_slope(*, summary: Optional[str] = None):
+            if not slope_samples:
+                return
+            _, first_depth, first_force = slope_samples[0]
+            _, last_depth, last_force = slope_samples[-1]
+            d_depth_mm = (last_depth - first_depth) * 1000.0
+            d_force = last_force - first_force
+            if np.isfinite(d_depth_mm) and abs(d_depth_mm) > 1e-6:
+                d_force_per_mm = d_force / d_depth_mm
+            elif np.isfinite(d_force) and abs(d_force) > 1e-9:
+                d_force_per_mm = float(np.copysign(np.inf, d_force))
+            else:
+                d_force_per_mm = 0.0
+            suffix = f" summary={summary}" if summary else ""
+            self.log.info(
+                f"[v50] SEAT_SLOPE depth={last_depth*1000.0:.1f}mm "
+                f"axial_N={last_force:.2f} dDepth_mm={d_depth_mm:.3f} "
+                f"dForce_N={d_force:.2f} dForce_per_mm={d_force_per_mm:.2f}"
+                f"{suffix}"
+            )
 
         while True:
             self.policy._enforce_action_deadline(self.move_robot)
@@ -774,6 +931,25 @@ class PlugRelativeV50Controller:
             rotation = float(np.linalg.norm(rotation_error))
             force = self._force_magnitude(observation)
             now = time.monotonic()
+            seat_wrench_sample = None
+            if self.config.seat_align_enable:
+                acc_lat, acc_tilt, seat_wrench_sample = self._seat_alignment_sample(
+                    observation, depth, force, acc_lat, acc_tilt
+                )
+                if now - last_wrench_log_time >= SEAT_WRENCH_LOG_PERIOD_S:
+                    self._log_seat_wrench(seat_wrench_sample, acc_lat, acc_tilt)
+                    last_wrench_log_time = now
+            if seat_wrench_sample is not None:
+                axial_force = float(seat_wrench_sample[1][2])
+            else:
+                f_plug, _ = self._wrench_plug_frame(observation)
+                axial_force = float(f_plug[2])
+            slope_samples.append((now, depth, axial_force))
+            while slope_samples and now - slope_samples[0][0] > SEAT_SLOPE_WINDOW_S:
+                slope_samples.pop(0)
+            if now - last_slope_log_time >= SEAT_SLOPE_LOG_PERIOD_S:
+                log_seat_slope()
+                last_slope_log_time = now
 
             if np.isfinite(force) and force > self.config.force_abort_n:
                 self._hold_tip(tip_pos, self.Rp)
@@ -793,31 +969,96 @@ class PlugRelativeV50Controller:
                     f"[v50] wedge geometry: lateral={lateral*1000:.1f}mm "
                     f"rotation={np.degrees(rotation):.1f}deg"
                 )
+                if seat_wrench_sample is not None:
+                    self._log_seat_wrench(
+                        seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
+                    )
+                log_seat_slope(summary="stall")
                 return STALLED
 
             if depth >= self.config.seat_candidate_depth_m:
                 fixed_tip = self.port_pos + self.Rp[:, 2] * INSERT_DEPTH_M
                 return self._wait_for_insertion_event(fixed_tip)
 
-            if progress.stalled(depth, now):
-                self.log.warn(
-                    f"[v50] wall-time stall: depth={depth*1000:.1f}mm "
-                    f"best={progress.best_depth*1000:.1f}mm force={force:.2f}N"
+            stalled_now = progress.stalled(depth, now)
+            if stall_grace_deadline is not None and not stalled_now:
+                self.log.info(
+                    f"[v50] stall grace recovered: depth={depth*1000:.1f}mm "
+                    f"best={progress.best_depth*1000:.1f}mm"
                 )
-                return STALLED
+                stall_grace_deadline = None
+            if stalled_now:
+                if self.config.seat_stall_grace_s > 0.0:
+                    if stall_grace_deadline is None:
+                        stall_grace_deadline = now + self.config.seat_stall_grace_s
+                        self.log.warn(
+                            f"[v50] wall-time stall grace: depth={depth*1000:.1f}mm "
+                            f"best={progress.best_depth*1000:.1f}mm force={force:.2f}N "
+                            f"grace_s={self.config.seat_stall_grace_s:.1f}"
+                        )
+                    if now >= stall_grace_deadline:
+                        self.log.warn(
+                            f"[v50] wall-time stall: depth={depth*1000:.1f}mm "
+                            f"best={progress.best_depth*1000:.1f}mm force={force:.2f}N"
+                        )
+                        if seat_wrench_sample is not None:
+                            self._log_seat_wrench(
+                                seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
+                            )
+                        log_seat_slope(summary="stall")
+                        return STALLED
+                else:
+                    self.log.warn(
+                        f"[v50] wall-time stall: depth={depth*1000:.1f}mm "
+                        f"best={progress.best_depth*1000:.1f}mm force={force:.2f}N"
+                    )
+                    if seat_wrench_sample is not None:
+                        self._log_seat_wrench(
+                            seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
+                        )
+                    log_seat_slope(summary="stall")
+                    return STALLED
 
+            depth_config = self.config
+            if (
+                self.config.seat_mouth_speed_scale != 1.0
+                and depth < self.config.seat_mouth_zone_m
+            ):
+                depth_config = replace(
+                    self.config,
+                    free_speed_m_s=(
+                        self.config.free_speed_m_s
+                        * self.config.seat_mouth_speed_scale
+                    ),
+                    contact_speed_m_s=(
+                        self.config.contact_speed_m_s
+                        * self.config.seat_mouth_speed_scale
+                    ),
+                )
             command_depth = next_persistent_depth(
                 depth,
                 command_depth,
                 now - last_command_time,
                 force,
-                self.config,
+                depth_config,
             )
             last_command_time = now
             target_tip = self.port_pos + self.Rp[:, 2] * command_depth
+            target_rotation = self.Rp
+            if self.config.seat_align_enable and (
+                np.any(acc_lat != 0.0) or np.any(acc_tilt != 0.0)
+            ):
+                target_tip = (
+                    target_tip
+                    + self.Rp[:, 0] * acc_lat[0]
+                    + self.Rp[:, 1] * acc_lat[1]
+                )
+                target_rotation = self.Rp @ rotation_from_axis_angle(
+                    np.array([acc_tilt[0], acc_tilt[1], 0.0], dtype=np.float64)
+                )
             self.policy.set_pose_target(
                 self.move_robot,
-                self.policy._tcp_target_for_tip(target_tip, self.Rp),
+                self.policy._tcp_target_for_tip(target_tip, target_rotation),
                 stiffness=self.STIFFNESS,
                 damping=self.DAMPING,
             )
