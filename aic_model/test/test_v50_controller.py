@@ -18,6 +18,7 @@ from aic_model.v50_controller import (  # noqa: E402
     STALLED,
     V50Config,
     WallProgressWatch,
+    _normalize_event,
     next_persistent_depth,
     prime_v50_plug_pose,
     solve_tip_in_tcp,
@@ -46,6 +47,60 @@ def test_v50_config_bounds_force_and_seating():
         V50Config(seat_overtravel_m=0.009).validated()
     with pytest.raises(ValueError, match="release decay"):
         V50Config(seat_align_release_decay=1.5).validated()
+
+
+def test_event_normalization_strips_the_cable_instance_prefix():
+    # Field logs: the scoring topic names the cable instance, the Task does not,
+    # so the raw strings never compared equal even on a correct insertion.
+    assert (
+        _normalize_event("cable_0#0#nic_card_mount_0/sfp_port_0")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    # The prefix numbers are not fixed -- later runs published cable_1#0#.
+    assert (
+        _normalize_event("cable_1#0#nic_card_mount_0/sfp_port_1")
+        == "nic_card_mount_0/sfp_port_1"
+    )
+    assert (
+        _normalize_event("cable_12#34#nic_card_mount_2/sfp_port_1")
+        == "nic_card_mount_2/sfp_port_1"
+    )
+
+
+def test_event_normalization_leaves_ordinary_values_alone():
+    # Already normalized.
+    assert (
+        _normalize_event("nic_card_mount_0/sfp_port_0") == "nic_card_mount_0/sfp_port_0"
+    )
+    # Whitespace and slash handling must survive the change.
+    assert (
+        _normalize_event("  /nic_card_mount_0/sfp_port_0/  ")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    assert (
+        _normalize_event("\t/cable_0#0#nic_card_mount_0/sfp_port_0/\n")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    assert _normalize_event("") == ""
+    assert _normalize_event(None) == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Only a leading, fully-numeric cable_<n>#<n># prefix is removed.
+        "cable_a#0#nic_card_mount_0/sfp_port_0",
+        "cable_0#nic_card_mount_0/sfp_port_0",
+        "cable#0#nic_card_mount_0/sfp_port_0",
+        "cable_0#0nic_card_mount_0/sfp_port_0",
+        # Not at the start.
+        "sfp_cable_0#0#nic_card_mount_0/sfp_port_0",
+        # A hash elsewhere in the name must not be treated as a prefix.
+        "nic_card_mount_0/sfp_port_0#0",
+    ],
+)
+def test_event_normalization_does_not_touch_nonmatching_values(value):
+    assert _normalize_event(value) == value
 
 
 def test_persistent_depth_accumulates_force_lead_while_stalled():

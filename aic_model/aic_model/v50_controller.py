@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
+import re
 import time
 from typing import Optional
 
@@ -452,8 +453,16 @@ def _observation_stamp_s(observation) -> Optional[float]:
     return max(values) if values else None
 
 
+# The scoring topic identifies the cable instance that completed the insertion,
+# e.g. "cable_0#0#nic_card_mount_0/sfp_port_0", while Task names only the module
+# and port. Without stripping that prefix the equality test in _event_status can
+# never match, so a correct insertion still reports a wrong-port hard failure.
+_CABLE_INSTANCE_PREFIX = re.compile(r"^cable_\d+#\d+#")
+
+
 def _normalize_event(value: object) -> str:
-    return str(value or "").strip().strip("/")
+    text = str(value or "").strip().strip("/")
+    return _CABLE_INSTANCE_PREFIX.sub("", text, count=1).strip("/")
 
 
 def _plug_views_from_observation(policy, observation):
