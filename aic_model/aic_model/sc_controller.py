@@ -20,11 +20,16 @@ Ground truth, all derived from the shipped assets (not measured, not guessed):
     to ``sc_port_link``, so the seat point is 2 mm behind the port origin and the
     insertion axis is ``sc_port_link`` -Y.
   * Opening walls: side walls centred at x=+/-12.047 mm (1.687 mm thick) give
-    inner faces at +/-11.204 mm; the top/bottom plates at z=+/-4.35 mm (0.6 mm
-    thick) give inner faces at +/-4.05 mm.  The duplex opening is therefore
-    22.41 mm x 8.10 mm, split by a 2.99 mm centre divider into two 9.71 mm bores
-    on a 12.7 mm pitch (the standard SC duplex pitch -- a useful sanity check
-    that this reading of the collision set is right).
+    inner faces at +/-11.204 mm.  The ceiling is ``cube_collider_box.001``
+    (z 4.225 mm, 0.850 mm thick, and 25.781 mm wide so it spans the whole face),
+    inner surface at **+3.800**; the floor is ``.002``, inner surface at -4.050.
+    The duplex opening is therefore 22.41 mm x **7.85 mm** and is NOT symmetric
+    about z=0, split by a 2.99 mm centre divider into two 9.71 mm bores on a
+    12.7 mm pitch (the standard SC duplex pitch -- a useful sanity check that
+    this reading of the collision set is right).
+    The ``cube_collider_box_mid*`` boxes at +4.050 are recessed inside ``.001``
+    and only 5-10 mm wide, so they never lower the ceiling; taking them for the
+    top plate is what produced the 8.10 mm figure recorded here previously.
 
 ``aic_description/urdf/task_board.urdf.xacro``
   * SC ports are posed rpy ``(1.57 + roll, pitch, 1.57 + yaw)`` on the board, so
@@ -35,14 +40,19 @@ Ground truth, all derived from the shipped assets (not measured, not guessed):
     is reusable here unchanged.
   * ``sc_port_link`` +X maps to board +Y, so the duplex opening's long axis lies
     along board Y.
-  * The two board slots sit at y=0.0295 and y=0.0705, i.e. **41 mm apart** --
-    nearly double the SFP cage pitch, so nearest-tip port selection has far more
-    margin here than it does for SFP.
+  * STALE -- do not rely on this: the qualification xacro placed two slots at
+    y=0.0295 and y=0.0705, i.e. 41 mm apart.  ``task_board.urdf.xacro`` now
+    declares ``sc_port_0..4`` (3 on rail 0, 2 on rail 1), matching the ~6
+    adapters visible in field imagery, so neighbours can be far closer than
+    41 mm.  Adapters cannot overlap, so their own 25.78 mm outer width is the
+    only safe lower bound on port-to-port spacing.
 
 ``aic_model/aic_model/sc_plug_pose_geometry.py``
-  * The plug body is 20.0 mm x 6.4 mm.  Against the 22.41 x 8.10 mm opening that
-    is 1.2 mm of lateral and 0.85 mm of vertical clearance per side -- a much
-    looser fit than SFP, which is the main reason a script is plausible here.
+  * The plug body is 20.0 mm x 6.4 mm.  Against the 22.41 x 7.85 mm opening that
+    is 1.2 mm of lateral and **0.725 mm** of vertical clearance per side -- still
+    a much looser fit than SFP, which is the main reason a script is plausible
+    here, but vertical is the binding axis and it is tighter than once recorded.
+    Budget grasp repeatability against 0.725 mm, not 1.2 mm.
 
 TWO THINGS ARE UNCALIBRATED AND WILL NOT WORK UNTIL RESOLVED:
 
@@ -138,31 +148,71 @@ def _env_vector(name: str, default: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------
 SC_INSERT_DEPTH_M = 0.01564          # sc_port_base_link_entrance -> sc_port_base_link
 SC_OPENING_WIDTH_M = 0.02241         # duplex inner width  (port +X / board +Y)
-SC_OPENING_HEIGHT_M = 0.00810        # duplex inner height (port +Z / board +X)
+# Clear height, and the opening is NOT symmetric about z=0.  The ceiling is
+# cube_collider_box.001 -- z 4.225 mm, 0.850 mm thick, x-size 25.781 mm, so it
+# spans the full face and its inner surface is at +3.800.  The three
+# cube_collider_box_mid* boxes sit at +4.050..+4.650, i.e. entirely inside
+# .001's z-range and only 5-10 mm wide, so they never lower the ceiling; reading
+# +4.050 off them (and assuming symmetry) is what produced the old 8.10 figure.
+# Floor is .002's inner surface at -4.050.  3.800 + 4.050 = 7.850.
+SC_OPENING_HEIGHT_M = 0.00785        # duplex inner height (port +Z / board +X)
 SC_BORE_WIDTH_M = 0.00971            # one bore, between side wall and divider
 SC_BORE_PITCH_M = 0.01270            # standard SC duplex pitch
 SC_PLUG_WIDTH_M = 0.02000            # from sc_plug_pose_geometry keypoints
 SC_PLUG_HEIGHT_M = 0.00640
 
-# The four YOLO keypoints may bound either the whole duplex opening or a single
-# bore.  Both hypotheses are checked at runtime; ``classify_opening`` returns the
-# label and the lateral offset that maps the perceived centroid onto the duplex
-# centre (which is what the duplex plug actually inserts into).
+# The model does not outline any physical feature, so the hypotheses must be the
+# LABEL CONVENTIONS the two collectors in this repo project, not SDF geometry.
+# There are exactly two, and they disagree:
+#
+#   DataCollectorScPoseGT.py   SC_HALF_WIDTH_M 0.0044 / SC_HALF_HEIGHT_M 0.0030
+#                              ->  8.8  x 6.00 mm   (aspect 1.467)
+#   DataCollectorPoseSC.py     SC_FULL_WIDTH_M 0.02578 / SC_FULL_LENGTH_M 0.00927
+#                              -> 25.78 x 9.27 mm   (aspect 2.781)
+#
+# The shipped best_sc_pose.pt follows the FIRST.  Measured, not assumed: running
+# the weights over testing/check_sc_previews and scaling by the SC duplex bore
+# pitch (12.70 mm, a fixed mechanical dimension and so independent of segmenting
+# anything) gives 9.00 x 5.94 and 8.73 x 6.01 mm -- 8.8 x 6.0 to about 1%.  The
+# quad's diagonals agree to 1-3% while adjacent sides differ 1.44-1.51, so it is
+# a rectangle and not a diamond with those diagonals.  Its centroid sits on the
+# DUPLEX CENTRE (1.2-1.9 mm from the bore-pair midpoint, against 5.3-5.4 mm from
+# either bore), which is why both conventions carry a zero bore offset below.
+#
+# Note train_sc.py's --data default points at pose_sc, which is the SECOND
+# collector's output directory -- so the shipped weights were not produced by the
+# default invocation.  Keep both entries: classify_opening then reports which
+# model is actually loaded, and one build works with the current weights and any
+# retrain, A/B-able through AIC_SC_POSE_WEIGHTS without a code change.
+#
+# The SDF-derived guesses that used to live here (duplex 22.41 x 8.10, bore
+# 9.71 x 8.10) matched neither, and cost two field runs: they made every genuine
+# detection classify as "single_bore" and emit a warning claiming the pose needed
+# a 6.35 mm correction it does not need.
+SC_GT_LABEL_WIDTH_M = 0.0088         # DataCollectorScPoseGT, 2 * SC_HALF_WIDTH_M
+SC_GT_LABEL_HEIGHT_M = 0.0060        # DataCollectorScPoseGT, 2 * SC_HALF_HEIGHT_M
+SC_FACE_LABEL_WIDTH_M = 0.02578      # DataCollectorPoseSC, outer face
+SC_FACE_LABEL_HEIGHT_M = 0.00927     # DataCollectorPoseSC, outer face
 SC_OPENING_HYPOTHESES = (
-    ("duplex", SC_OPENING_WIDTH_M, SC_OPENING_HEIGHT_M),
-    ("single_bore", SC_BORE_WIDTH_M, SC_OPENING_HEIGHT_M),
+    ("gt_label", SC_GT_LABEL_WIDTH_M, SC_GT_LABEL_HEIGHT_M),
+    ("outer_face", SC_FACE_LABEL_WIDTH_M, SC_FACE_LABEL_HEIGHT_M),
 )
 
 # Local rectangle for the single-view PnP fallback, in the same corner order the
 # SFP estimator uses (KP0 top-left, KP1 top-right, KP2 bottom-right, KP3
-# bottom-left).  Defaults to the duplex hypothesis; override if a run's
-# SC_OPENING lines say otherwise.
+# bottom-left).  This MUST be the convention the loaded weights emit, not the
+# port's physical opening: PnP scales the pose by the ratio between this
+# rectangle and the observed one, so the old 22.41 mm entry would have placed the
+# port ~2.5x too far away.  Nothing calls solvePnP for SC today (the only SC pose
+# path is multi-view triangulation, which needs no model rectangle), so this is a
+# trap for whoever wires that fallback up rather than a live bug -- but wire it to
+# the hypothesis ``classify_opening`` actually selects, not to this default.
 LOCAL_SC_PORT_KPS = np.array(
     [
-        [+SC_OPENING_WIDTH_M / 2.0, +SC_OPENING_HEIGHT_M / 2.0, 0.0],
-        [-SC_OPENING_WIDTH_M / 2.0, +SC_OPENING_HEIGHT_M / 2.0, 0.0],
-        [-SC_OPENING_WIDTH_M / 2.0, -SC_OPENING_HEIGHT_M / 2.0, 0.0],
-        [+SC_OPENING_WIDTH_M / 2.0, -SC_OPENING_HEIGHT_M / 2.0, 0.0],
+        [+SC_GT_LABEL_WIDTH_M / 2.0, +SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
+        [-SC_GT_LABEL_WIDTH_M / 2.0, +SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
+        [-SC_GT_LABEL_WIDTH_M / 2.0, -SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
+        [+SC_GT_LABEL_WIDTH_M / 2.0, -SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
     ],
     dtype=np.float64,
 )
@@ -211,25 +261,59 @@ SC_MAX_SELECT_REPROJ_PX = _env_float("RL_INSERT_SC_MAX_SELECT_REPROJ_PX", 5.0)
 # uncalibrated, so it must not be what a perception gate is centred on.
 SC_MAX_DETECT_PX_FROM_TIP = _env_float("RL_INSERT_SC_MAX_DETECT_PX_FROM_TIP", 250.0)
 SC_MAX_DETS_PER_CAM = max(1, int(_env_float("RL_INSERT_SC_MAX_DETS_PER_CAM", 8)))
-# The board slots are 41 mm apart, so a generous handoff gate still cannot
-# select the neighbouring port.
+# WARNING -- this gate no longer has the margin its value was chosen for, and it
+# is a 3D distance, so handoff height is mixed into a lateral decision.
+# It was sized against 41 mm slot spacing, which is stale (see the ground truth
+# above: the board now carries sc_port_0..4).  The only safe bound is that
+# adapters cannot overlap, so neighbours are >= 25.78 mm apart laterally -- and
+# at a 15 mm handoff height a shoulder-to-shoulder neighbour sits at
+# sqrt(25.78^2 + 15^2) ~= 29.8 mm, i.e. just INSIDE this 30 mm gate.
+# Tightening the number alone is not the fix: it would start rejecting the real
+# target whenever the macro hands off higher.  The fix is to gate on lateral
+# (board XY) distance, since insertion is straight down board -Z -- then the
+# target is ~0-3 mm and any neighbour >= 25.78 mm regardless of height.
+# Left as-is deliberately: changing selection behaviour belongs in its own
+# change, with its own field run.
 SC_MAX_HANDOFF_SELECT_M = _env_float("RL_INSERT_SC_MAX_HANDOFF_SELECT_M", 0.030)
 SC_HANDOFF_MAX_DIST_M = _env_float("RL_INSERT_SC_HANDOFF_MAX_DIST_M", 0.120)
+# How far "inside" the port the tip may compute to at handoff before the run is
+# refused.  Zero is the physical truth -- the plug is outside until it is pushed
+# in -- so this is pure tolerance for perception noise and a macro that hands off
+# right at the mouth, not a licence to start partly inserted.
+SC_MAX_HANDOFF_DEPTH_M = _env_float("RL_INSERT_SC_MAX_HANDOFF_DEPTH_M", 0.002)
 # Dimensional gate on the triangulated rectangle.  The floor is deliberately NOT
-# the port's physical size.  The shipped best_sc_pose.pt does not outline the
-# port at all: it labels a small rectangle centred on the mouth, 8.8 x 6.0 mm,
-# about a quarter of the 25.78 mm adapter.  Measured by running the weights over
-# testing/check_sc_previews -- the predicted quad spans 0.25-0.26 of the visible
-# adapter in every frame, and its diagonals are equal to within 3%, so it is a
-# centred rectangle and not the outer face, a single bore, or a diamond.
-# The old 0.005 floor left barely 1 mm of margin on the 6.0 mm short axis, and
-# ordinary triangulation noise then rejected every genuine candidate: the
-# 2026-07-25 field run discarded all 7 frames without ever forming a candidate.
-# Keep this well clear of 6 mm.  If the model is ever retrained onto the 25.78 mm
-# convention this can rise again, but it must be derived from the *matched*
-# hypothesis rather than re-guessed.
+# the port's physical size, and NOT the label size either -- see below.
+#
+# The quad spans 0.25-0.26 of the adapter in every preview frame, but read that
+# fraction carefully: it is 0.25 of the FULL VISIBLE BODY, which is the 34.67 mm
+# FOA-005A including its mounting flanges (sc_port_visual.glb node 16, extents
+# 34.671 x 27.432 x 9.271 mm), NOT of the 25.78 mm outer face.  0.256 x 34.671 =
+# 8.88 mm, which is the label.  Against 25.78 mm the same fraction computes to
+# 6.6 mm and sends you looking for a convention that does not exist.  Two
+# separate sessions made exactly that substitution before the bore-pitch ruler
+# settled it; the absolute numbers are in SC_OPENING_HYPOTHESES above.
+#
+# The floor must clear the TRIANGULATED size, which is materially smaller than
+# the label: the 2026-07-25 field runs measured 7.09-7.40 mm x 3.95-4.07 mm
+# against a 8.8 x 6.0 mm label, because the target port is detected at only
+# ~0.32-0.45 confidence in the left and right cameras (a different adapter wins
+# 0.91 there) and weak corners pull the triangulated quad in towards its own
+# centroid.  A ~4.0 mm short axis is a full 1 mm BELOW the old 0.005 floor, so
+# that gate was rejecting every genuine candidate deterministically, not
+# marginally -- which is why the failure reproduced exactly x7.
+#
+# Derive any future raise from the *matched* hypothesis and the observed
+# shrinkage, never from the label or the SDF alone.
 SC_MIN_OPENING_M = _env_float("RL_INSERT_SC_MIN_OPENING_M", 0.002)
 SC_MAX_OPENING_M = _env_float("RL_INSERT_SC_MAX_OPENING_M", 0.030)
+
+# Warn when the triangulated rectangle is this far from its closest known label
+# convention.  The 2026-07-25 field runs sat at ~3.65 mm (7.09x4.06 against the
+# 8.8x6.0 gt_label) purely from weak outer-camera detections, so a threshold at
+# or below that would fire every single frame and train people to ignore it.
+# Matching NEITHER convention looks like ~19-24 mm, so 6 mm separates "known
+# shrinkage" from "the loaded weights are not one of the two we know about".
+SC_OPENING_RESIDUAL_WARN_M = _env_float("RL_INSERT_SC_OPENING_RESIDUAL_WARN_M", 0.006)
 
 
 @dataclass
@@ -403,13 +487,18 @@ def next_sc_depth(
 
 
 def classify_opening(width_m: float, height_m: float):
-    """Name the keypoint convention a triangulated rectangle matches.
+    """Name the label convention a triangulated rectangle matches.
 
-    Returns ``(label, residual_m, lateral_offset_m)``.  ``lateral_offset_m`` is
-    the shift, along the opening's long (+X) axis, from the perceived centroid to
-    the duplex centre that the duplex plug actually enters -- zero for the duplex
-    hypothesis, and half a bore pitch for the single-bore one, though its sign
-    cannot be known without also knowing which bore was detected.
+    Returns ``(label, residual_m, lateral_offset_m)``.
+
+    ``lateral_offset_m`` is always 0.0 and is kept only so callers and logs do
+    not have to change.  Both collectors project their rectangle from
+    ``sc_port_base_link_entrance`` -- the duplex centre -- so a detection is
+    never half a bore off, whichever convention produced it.  Measurement backs
+    this: the predicted quad's centroid sits 1.2-1.9 mm from the bore-pair
+    midpoint against 5.3-5.4 mm from either individual bore.  The SC port also
+    declares ONE TouchPlugin where the NIC declares two, and the duplex plug
+    enters as a single unit, so there is no bore to choose.
 
     This exists because the keypoint convention of ``best_sc_pose.pt`` is not
     recorded anywhere; measuring it beats guessing it.
@@ -420,8 +509,7 @@ def classify_opening(width_m: float, height_m: float):
         if best is None or residual < best[1]:
             best = (label, residual)
     label, residual = best
-    offset = 0.0 if label == "duplex" else SC_BORE_PITCH_M / 2.0
-    return label, float(residual), float(offset)
+    return label, float(residual), 0.0
 
 
 def seat_frame(Rp, R_tip):
@@ -1139,19 +1227,29 @@ def perceive_sc_port_pose(policy, task, obs):
             return None
         chosen = min(in_range, key=lambda c: float(np.linalg.norm(c["X"] - tip_pos)))
 
+    expected = dict((label, (w, h)) for label, w, h in SC_OPENING_HYPOTHESES)
+    exp_w, exp_h = expected[chosen["opening"]]
     log.info(
         f"[sc] SC_OPENING convention={chosen['opening']} "
         f"width={chosen['width']*1000:.2f}mm height={chosen['height']*1000:.2f}mm "
+        f"expected={exp_w*1000:.2f}x{exp_h*1000:.2f}mm "
         f"residual={chosen['opening_residual_m']*1000:.2f}mm "
-        f"bore_offset={chosen['bore_offset_m']*1000:.2f}mm "
         f"reproj={chosen['reproj_px']:.1f}px"
     )
-    if chosen["opening"] != "duplex":
+    # Both conventions project from the duplex centre, so there is no bore to
+    # choose and no offset to apply -- the old warning here claimed a 6.35 mm
+    # correction that would have pushed the plug half a bore off-centre.  What is
+    # worth warning about is a rectangle that matches NEITHER convention, which
+    # means the loaded weights are not one of the two this repo knows how to
+    # label, or triangulation has degraded badly.
+    if chosen["opening_residual_m"] > SC_OPENING_RESIDUAL_WARN_M:
         log.warn(
-            "[sc] keypoints match a SINGLE BORE, not the duplex opening -- the "
-            "duplex plug enters the opening centre, so this pose is offset by "
-            f"{chosen['bore_offset_m']*1000:.2f}mm along the opening's long axis "
-            "and its sign is unknown. Resolve the keypoint convention before use."
+            f"[sc] triangulated opening {chosen['width']*1000:.2f}x"
+            f"{chosen['height']*1000:.2f}mm is {chosen['opening_residual_m']*1000:.2f}mm "
+            f"from its closest known label convention ({chosen['opening']}, "
+            f"{exp_w*1000:.2f}x{exp_h*1000:.2f}mm). Expect shrinkage when the "
+            "outer cameras detect the target weakly; check the SC_PERCEPT_BEST "
+            "per-camera confidences before trusting the scale."
         )
     return (
         np.asarray(chosen["X"], dtype=np.float64),
@@ -1246,6 +1344,29 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         log.error(
             f"[sc] tip is {dist*1000:.0f}mm from the mouth -- outside the "
             "last-inch envelope; the upstream macro must hand off closer"
+        )
+        return False
+
+    # The plug cannot already be inside a port it has not been pushed into, so a
+    # positive handoff depth is physically impossible and means the computed tip
+    # is not where the plug is.  Nothing downstream can recover from that: depth
+    # feeds seat_candidate_depth_m, so an inflated reading makes _seat skip the
+    # entire approach and wait for an insertion event that cannot arrive, which
+    # RL_INSERT_REPORT_MISS_AS_SUCCESS then reports as success.
+    #
+    # 2026-07-25 both field runs read +7.04 and +6.99 mm here BEFORE any motion,
+    # and the second went on to "seat" at 21.13 mm -- deeper than the 15.64 mm
+    # fully-seated depth -- with 0.22 N axial, i.e. touching nothing at all.
+    # Fail loudly instead, and name the cause: this is the uncalibrated tip
+    # transform (6c), not perception, which agreed 6/6 at 4.50 px.
+    if handoff_delta[2] > SC_MAX_HANDOFF_DEPTH_M:
+        log.error(
+            f"[sc] handoff depth is {handoff_delta[2]*1000:+.2f}mm -- the plug tip "
+            "is computed to be INSIDE the port before any motion, which is "
+            f"impossible (gate {SC_MAX_HANDOFF_DEPTH_M*1000:.1f}mm). "
+            f"SC_TIP_IN_TCP_POS is {'CALIBRATED' if SC_TIP_CALIBRATED else 'the UNCALIBRATED SFP default'}"
+            "; re-solve it with RL_INSERT_CALIB_DUMP=1 over ~10 grasps. Refusing "
+            "to seat against a tip position this wrong."
         )
         return False
 

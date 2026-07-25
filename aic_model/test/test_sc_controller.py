@@ -18,7 +18,6 @@ from aic_model.v50_controller import rotation_from_axis_angle  # noqa: E402
 from aic_model.sc_controller import (  # noqa: E402
     SC_TIP_IN_TCP_POS,
     SCConfig,
-    SC_BORE_PITCH_M,
     SC_INSERT_DEPTH_M,
     SC_OPENING_HEIGHT_M,
     SC_OPENING_WIDTH_M,
@@ -88,17 +87,59 @@ def test_persistent_depth_holds_at_the_force_cap():
     assert np.isclose(held, 0.008)
 
 
-def test_opening_classification_distinguishes_duplex_from_single_bore():
-    label, residual, offset = classify_opening(SC_OPENING_WIDTH_M, SC_OPENING_HEIGHT_M)
-    assert label == "duplex"
+def test_opening_classification_names_the_two_real_label_conventions():
+    # The hypotheses must be what the COLLECTORS project, not SDF geometry: the
+    # model outlines neither the duplex opening nor a bore.
+    label, residual, _ = classify_opening(0.0088, 0.0060)
+    assert label == "gt_label", "DataCollectorScPoseGT's 8.8x6.0 rectangle"
     assert residual < 1e-9
-    assert offset == 0.0
 
-    label, _, offset = classify_opening(0.0097, SC_OPENING_HEIGHT_M)
-    assert label == "single_bore"
-    # A single-bore detection is half a duplex pitch off the point the duplex
-    # plug actually enters.
-    assert np.isclose(offset, SC_BORE_PITCH_M / 2.0)
+    label, residual, _ = classify_opening(0.02578, 0.00927)
+    assert label == "outer_face", "DataCollectorPoseSC's 25.78x9.27 outer face"
+    assert residual < 1e-9
+
+
+def test_field_measured_opening_classifies_as_the_shipped_label_convention():
+    # 2026-07-25 run: 7.09 x 4.06 mm triangulated. Undersized against the label
+    # because the outer cameras detect the target weakly, but unambiguously the
+    # gt_label convention rather than the 25.78 mm face.
+    label, residual, _ = classify_opening(0.00709, 0.00406)
+    assert label == "gt_label"
+    assert residual < sc_controller.SC_OPENING_RESIDUAL_WARN_M, (
+        "known triangulation shrinkage must not trip the 'unknown convention' warning"
+    )
+
+
+def test_no_bore_offset_is_ever_reported():
+    # Both collectors project from sc_port_base_link_entrance -- the duplex
+    # centre -- so a detection is never half a bore off. The old code returned
+    # half a pitch here and logged a warning telling the operator to correct by
+    # 6.35 mm, which would have pushed the plug off-centre by exactly that.
+    for w, h in ((0.0088, 0.0060), (0.02578, 0.00927), (0.00709, 0.00406),
+                 (0.00971, 0.00785)):
+        assert classify_opening(w, h)[2] == 0.0
+
+
+def test_pnp_rectangle_matches_the_convention_the_weights_emit():
+    # PnP scales the pose by the ratio of this rectangle to the observed one, so
+    # the old 22.41 mm duplex entry would have placed the port ~2.5x too far.
+    spans = sc_controller.LOCAL_SC_PORT_KPS.max(axis=0) - sc_controller.LOCAL_SC_PORT_KPS.min(axis=0)
+    assert np.isclose(spans[0], 0.0088)
+    assert np.isclose(spans[1], 0.0060)
+    assert np.allclose(sc_controller.LOCAL_SC_PORT_KPS.mean(axis=0), 0.0), (
+        "must stay centred on the entrance, which is what both collectors project from"
+    )
+
+
+def test_clear_opening_height_is_the_asymmetric_sdf_value():
+    # The ceiling is cube_collider_box.001 (inner face +3.800), not the recessed
+    # cube_collider_box_mid* boxes at +4.050. Reading the latter gives 8.10 mm
+    # and overstates the vertical clearance by 17%.
+    assert np.isclose(SC_OPENING_HEIGHT_M, 0.00785)
+    vertical_clearance = (SC_OPENING_HEIGHT_M - sc_controller.SC_PLUG_HEIGHT_M) / 2.0
+    assert np.isclose(vertical_clearance, 0.000725)
+    lateral_clearance = (SC_OPENING_WIDTH_M - sc_controller.SC_PLUG_WIDTH_M) / 2.0
+    assert vertical_clearance < lateral_clearance, "vertical is the binding axis"
 
 
 def test_tip_transform_round_trips():
@@ -302,12 +343,16 @@ class _RecordingLog:
     def __init__(self):
         self.info_lines = []
         self.warn_lines = []
+        self.error_lines = []
 
     def info(self, message):
         self.info_lines.append(str(message))
 
     def warn(self, message):
         self.warn_lines.append(str(message))
+
+    def error(self, message):
+        self.error_lines.append(str(message))
 
 
 def _project(point):
@@ -705,3 +750,89 @@ def test_run_sc_insertion_hands_the_controller_a_preserved_twist_frame(monkeypat
     assert np.allclose(seen["Rp"], Rp), "perception frame must still be passed through"
     assert not np.allclose(seen["Rs"], seen["Rp"]), "a seat frame must actually be built"
     assert np.allclose(seen["Rs"], sc_controller.seat_frame(Rp, R_tip))
+
+
+# ---------------------------------------------------------------------------
+# Handoff depth sign guard.
+# ---------------------------------------------------------------------------
+def _run_sc_with_handoff_depth(monkeypatch, depth_m, log):
+    """Drive run_sc_insertion with the tip placed at a chosen depth."""
+    Rp, R_tip = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    R_tcp = R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T
+    tcp_quat = matrix_to_quat(R_tcp)
+    # want (Rp.T @ (tip - port))[2] == depth_m, with a little lateral offset
+    want_tip = port_pos + Rp[:, 2] * depth_m + Rp[:, 0] * 0.0035
+    tip_at_origin, _ = sc_tip_pose_from_tcp(np.zeros(3), tcp_quat)
+    tcp_pos = want_tip - tip_at_origin
+
+    class _RunPolicy(_StubPolicy):
+        _wrench_baseline = None
+
+        def get_logger(self):
+            return log
+
+        def _wrench_vector(self, _obs):
+            return np.zeros(6, dtype=np.float64)
+
+    ran = {"seated": False}
+
+    class _NeverReached:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def run(self):
+            ran["seated"] = True
+            return True
+
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
+                        lambda *_: (port_pos, FIELD_PORT_QUAT, 4.35))
+    monkeypatch.setattr(sc_controller, "ScInsertionController", _NeverReached)
+    result = sc_controller.run_sc_insertion(
+        _RunPolicy(tcp_pos, tcp_quat), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+    return result, ran["seated"]
+
+
+def test_handoff_refuses_a_tip_computed_inside_the_port(monkeypatch):
+    """The 2026-07-25 failure: +6.99 mm before any motion, then a fake seat.
+
+    A positive handoff depth is physically impossible -- the plug is outside the
+    port until it is pushed in.  Left unchecked it exceeds seat_candidate_depth_m,
+    so _seat skips the whole approach and waits for an event that cannot arrive,
+    which RL_INSERT_REPORT_MISS_AS_SUCCESS reports as success.
+    """
+    log = _RecordingLog()
+
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.00699, log)
+
+    assert result is False
+    assert not seated, "must refuse before constructing the controller"
+    line = "\n".join(log.error_lines)
+    assert "INSIDE the port" in line
+    assert "+6.99mm" in line, "the impossible measurement must be in the log"
+    assert "SC_TIP_IN_TCP_POS" in line, "must name the cause, not just the symptom"
+
+
+def test_handoff_accepts_a_plug_sitting_outside_the_mouth(monkeypatch):
+    # Where the plug actually is at handoff: outside, approaching along -insert.
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, -0.00699, _RecordingLog())
+
+    assert result is True
+    assert seated
+
+
+def test_handoff_tolerates_a_plug_right_at_the_mouth(monkeypatch):
+    # Zero is the physical truth and perception noise straddles it; the gate is
+    # tolerance for that, not a licence to start partly inserted.
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.0005, _RecordingLog())
+
+    assert result is True
+    assert seated
+
+
+def test_handoff_depth_gate_is_tighter_than_the_seat_trigger(monkeypatch):
+    # The gate is only useful if it fires well before a depth that would let
+    # _seat skip its approach entirely.
+    assert sc_controller.SC_MAX_HANDOFF_DEPTH_M < SCConfig().validated().seat_candidate_depth_m
