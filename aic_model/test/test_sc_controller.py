@@ -8,7 +8,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aic_model"))
 
+import aic_model.sc_controller as sc_controller  # noqa: E402
 from aic_model.sc_controller import (  # noqa: E402
+    SC_TIP_IN_TCP_POS,
     SCConfig,
     SC_BORE_PITCH_M,
     SC_INSERT_DEPTH_M,
@@ -16,6 +18,7 @@ from aic_model.sc_controller import (  # noqa: E402
     SC_OPENING_WIDTH_M,
     ScInsertionController,
     _normalize_event,
+    _select_sc_detections_for_triangulation,
     classify_opening,
     next_sc_depth,
     sc_tip_pose_from_tcp,
@@ -125,6 +128,99 @@ class _AlignHarness(ScInsertionController):
         return self._f, self._m
 
 
+class _FakeProjectionCore:
+    def build_projection_matrix(self, K, T):
+        return np.array(
+            [
+                [0.0, 0.0, 0.0, 100.0],
+                [0.0, 0.0, 0.0, 100.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+
+
+class _FakeScPolicy:
+    def __init__(self, tcp_available=True):
+        self._pc = _FakeProjectionCore()
+        self._tcp_available = tcp_available
+
+    def _tcp(self):
+        if not self._tcp_available:
+            raise RuntimeError("tcp unavailable")
+        return np.zeros(3, dtype=np.float64), np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+
+
+def _sc_det(cx, cy, conf):
+    kps = np.array(
+        [
+            [cx - 1.0, cy - 1.0],
+            [cx + 1.0, cy - 1.0],
+            [cx + 1.0, cy + 1.0],
+            [cx - 1.0, cy + 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return {
+        "kps": kps,
+        "conf": conf,
+        "K": np.eye(3, dtype=np.float64),
+        "T": np.eye(4, dtype=np.float64),
+        "P": np.eye(3, 4, dtype=np.float64),
+    }
+
+
+def test_sc_tip_prefilter_drops_detection_outside_radius():
+    per_cam = {
+        "cam_a": [_sc_det(100.0, 100.0, 0.7), _sc_det(500.0, 100.0, 0.9)],
+        "cam_b": [_sc_det(100.0, 100.0, 0.8)],
+    }
+
+    selected = _select_sc_detections_for_triangulation(_FakeScPolicy(), per_cam)
+
+    assert len(selected["cam_a"]) == 1
+    np.testing.assert_allclose(np.mean(selected["cam_a"][0]["kps"], axis=0), [100.0, 100.0])
+
+
+def test_sc_tip_prefilter_keeps_detection_inside_radius():
+    per_cam = {
+        "cam_a": [_sc_det(240.0, 100.0, 0.4)],
+        "cam_b": [_sc_det(100.0, 100.0, 0.8)],
+    }
+
+    selected = _select_sc_detections_for_triangulation(_FakeScPolicy(), per_cam)
+
+    assert selected["cam_a"] == per_cam["cam_a"]
+
+
+def test_sc_tip_prefilter_falls_back_to_confidence_when_tip_unavailable():
+    per_cam = {
+        "cam_a": [_sc_det(900.0, 900.0, 0.1), _sc_det(800.0, 800.0, 0.9)],
+        "cam_b": [_sc_det(700.0, 700.0, 0.8)],
+    }
+
+    selected = _select_sc_detections_for_triangulation(
+        _FakeScPolicy(tcp_available=False), per_cam
+    )
+
+    assert len(selected["cam_a"]) == 2
+    assert selected["cam_a"][0]["conf"] == 0.9
+    assert selected["cam_a"][1]["conf"] == 0.1
+
+
+def test_sc_tip_prefilter_keeps_each_camera_nonempty_when_detection_is_in_radius():
+    per_cam = {
+        "cam_a": [_sc_det(500.0, 100.0, 0.9), _sc_det(99.0, 101.0, 0.3)],
+        "cam_b": [_sc_det(-300.0, 100.0, 0.9), _sc_det(101.0, 99.0, 0.4)],
+    }
+
+    selected = _select_sc_detections_for_triangulation(_FakeScPolicy(), per_cam)
+
+    assert all(selected[cam] for cam in per_cam)
+    np.testing.assert_allclose(np.mean(selected["cam_a"][0]["kps"], axis=0), [99.0, 101.0])
+    np.testing.assert_allclose(np.mean(selected["cam_b"][0]["kps"], axis=0), [101.0, 99.0])
+
+
 def test_alignment_is_proportional_and_never_saturates_on_light_contact():
     config = SCConfig().validated()
     harness = _AlignHarness(f_plug=[1.6, -0.6, -3.0], m_plug=[0.0, -0.18, 0.0], config=config)
@@ -159,3 +255,111 @@ def test_alignment_washes_out_when_contact_is_lost():
             None, 0.0, 0.5, acc_lat, acc_tilt
         )
     assert np.linalg.norm(acc_lat) < 0.02 * settled
+
+
+# --- pre-filter anchoring and emptied-camera reporting ---------------------
+_FX = 1000.0
+_CX = 576.0
+_CY = 512.0
+_TCP_Z = 0.5
+
+
+class _PinholeCore:
+    """A real pinhole projection, so the filter's anchor point actually matters.
+
+    _FakeProjectionCore maps every 3D point to the same pixel, which cannot tell
+    a TCP-anchored filter from a tip-anchored one.
+    """
+
+    def build_projection_matrix(self, K, T):
+        return np.array(
+            [[_FX, 0.0, _CX, 0.0],
+             [0.0, _FX, _CY, 0.0],
+             [0.0, 0.0, 1.0, 0.0]],
+            dtype=np.float64,
+        )
+
+
+class _PinholePolicy:
+    def __init__(self):
+        self._pc = _PinholeCore()
+
+    def _tcp(self):
+        # Identity orientation, so tip = tcp + SC_TIP_IN_TCP_POS exactly.
+        return (
+            np.array([0.0, 0.0, _TCP_Z], dtype=np.float64),
+            np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        )
+
+
+class _RecordingLog:
+    def __init__(self):
+        self.info_lines = []
+        self.warn_lines = []
+
+    def info(self, message):
+        self.info_lines.append(str(message))
+
+    def warn(self, message):
+        self.warn_lines.append(str(message))
+
+
+def _project(point):
+    x, y, z = point
+    return np.array([_FX * x / z + _CX, _FX * y / z + _CY], dtype=np.float64)
+
+
+def test_sc_prefilter_anchors_on_the_tcp_not_the_uncalibrated_tip(monkeypatch):
+    # The SC tip transform is the uncalibrated SFP default, so centring a
+    # perception gate on it would inherit that error.
+    tcp_px = _project([0.0, 0.0, _TCP_Z])
+    tip_px = _project(np.array([0.0, 0.0, _TCP_Z]) + SC_TIP_IN_TCP_POS)
+    separation = float(np.linalg.norm(tip_px - tcp_px))
+    assert separation > 10.0, "fixture must separate the two anchors"
+
+    # Radius small enough that only the correct anchor's detection survives.
+    monkeypatch.setattr(sc_controller, "SC_MAX_DETECT_PX_FROM_TIP", separation / 2.0)
+    per_cam = {
+        "cam_a": [_sc_det(*tcp_px, 0.5), _sc_det(*tip_px, 0.9)],
+        "cam_b": [_sc_det(*tcp_px, 0.5)],
+    }
+
+    selected = _select_sc_detections_for_triangulation(_PinholePolicy(), per_cam)
+
+    assert len(selected["cam_a"]) == 1
+    np.testing.assert_allclose(
+        np.mean(selected["cam_a"][0]["kps"], axis=0), tcp_px, atol=1e-6
+    )
+
+
+def test_sc_prefilter_names_the_camera_it_empties(monkeypatch):
+    # Emptying a camera makes triangulation impossible, and the caller only says
+    # "no candidates"; the pre-filter must say it was the cause.
+    monkeypatch.setattr(sc_controller, "SC_MAX_DETECT_PX_FROM_TIP", 5.0)
+    tcp_px = _project([0.0, 0.0, _TCP_Z])
+    per_cam = {
+        "cam_a": [_sc_det(tcp_px[0] + 400.0, tcp_px[1], 0.9)],
+        "cam_b": [_sc_det(*tcp_px, 0.8)],
+    }
+    log = _RecordingLog()
+
+    selected = _select_sc_detections_for_triangulation(_PinholePolicy(), per_cam, log=log)
+
+    assert selected["cam_a"] == []
+    assert selected["cam_b"]
+    assert any("removed all" in line and "cam_a" in line for line in log.warn_lines)
+    assert any("mode=tcp_filter" in line for line in log.info_lines)
+
+
+def test_sc_prefilter_does_not_warn_when_a_camera_survives(monkeypatch):
+    monkeypatch.setattr(sc_controller, "SC_MAX_DETECT_PX_FROM_TIP", 250.0)
+    tcp_px = _project([0.0, 0.0, _TCP_Z])
+    per_cam = {
+        "cam_a": [_sc_det(*tcp_px, 0.9)],
+        "cam_b": [_sc_det(*tcp_px, 0.8)],
+    }
+    log = _RecordingLog()
+
+    _select_sc_detections_for_triangulation(_PinholePolicy(), per_cam, log=log)
+
+    assert log.warn_lines == []
