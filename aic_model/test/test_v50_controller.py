@@ -18,6 +18,7 @@ from aic_model.v50_controller import (  # noqa: E402
     STALLED,
     V50Config,
     WallProgressWatch,
+    _normalize_event,
     next_persistent_depth,
     prime_v50_plug_pose,
     solve_tip_in_tcp,
@@ -46,6 +47,60 @@ def test_v50_config_bounds_force_and_seating():
         V50Config(seat_overtravel_m=0.009).validated()
     with pytest.raises(ValueError, match="release decay"):
         V50Config(seat_align_release_decay=1.5).validated()
+
+
+def test_event_normalization_strips_the_cable_instance_prefix():
+    # Field logs: the scoring topic names the cable instance, the Task does not,
+    # so the raw strings never compared equal even on a correct insertion.
+    assert (
+        _normalize_event("cable_0#0#nic_card_mount_0/sfp_port_0")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    # The prefix numbers are not fixed -- later runs published cable_1#0#.
+    assert (
+        _normalize_event("cable_1#0#nic_card_mount_0/sfp_port_1")
+        == "nic_card_mount_0/sfp_port_1"
+    )
+    assert (
+        _normalize_event("cable_12#34#nic_card_mount_2/sfp_port_1")
+        == "nic_card_mount_2/sfp_port_1"
+    )
+
+
+def test_event_normalization_leaves_ordinary_values_alone():
+    # Already normalized.
+    assert (
+        _normalize_event("nic_card_mount_0/sfp_port_0") == "nic_card_mount_0/sfp_port_0"
+    )
+    # Whitespace and slash handling must survive the change.
+    assert (
+        _normalize_event("  /nic_card_mount_0/sfp_port_0/  ")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    assert (
+        _normalize_event("\t/cable_0#0#nic_card_mount_0/sfp_port_0/\n")
+        == "nic_card_mount_0/sfp_port_0"
+    )
+    assert _normalize_event("") == ""
+    assert _normalize_event(None) == ""
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        # Only a leading, fully-numeric cable_<n>#<n># prefix is removed.
+        "cable_a#0#nic_card_mount_0/sfp_port_0",
+        "cable_0#nic_card_mount_0/sfp_port_0",
+        "cable#0#nic_card_mount_0/sfp_port_0",
+        "cable_0#0nic_card_mount_0/sfp_port_0",
+        # Not at the start.
+        "sfp_cable_0#0#nic_card_mount_0/sfp_port_0",
+        # A hash elsewhere in the name must not be treated as a prefix.
+        "nic_card_mount_0/sfp_port_0#0",
+    ],
+)
+def test_event_normalization_does_not_touch_nonmatching_values(value):
+    assert _normalize_event(value) == value
 
 
 def test_persistent_depth_accumulates_force_lead_while_stalled():
@@ -254,23 +309,66 @@ class _AlignHarness(PlugRelativeV50Controller):
         return self._f, self._m
 
 
-def test_seat_alignment_saturates_at_the_small_lateral_clamp():
+def test_seat_alignment_settles_at_the_proportional_target_not_the_clamp():
+    config = V50Config().validated()
+    f_plug = [3.2, -3.0, -7.0]
+    m_plug = [0.0, -0.65, 0.0]
+    harness = _AlignHarness(f_plug=f_plug, m_plug=m_plug, config=config)
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(60):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 7.0, acc_lat, acc_tilt
+        )
+
+    expected_lat = config.seat_align_force_gain * np.linalg.norm(f_plug[:2])
+    expected_tilt = config.seat_align_moment_gain * np.linalg.norm(m_plug[:2])
+    assert np.isclose(np.linalg.norm(acc_lat), expected_lat)
+    assert np.isclose(np.linalg.norm(acc_tilt), expected_tilt)
+    # The whole point: sustained contact must not pin the correction at the clamp.
+    assert np.linalg.norm(acc_lat) < 0.5 * config.seat_align_max_lat_m
+    assert np.linalg.norm(acc_tilt) < 0.5 * config.seat_align_max_tilt_rad
+
+
+def test_light_chamfer_contact_never_saturates_the_correction():
+    # Field log 3 run 2: 1.7 N of chamfer contact pinned the old accumulator at the
+    # clamp three samples in, and the plug stopped descending at 2.1 mm.
     config = V50Config().validated()
     harness = _AlignHarness(
-        f_plug=[3.2, -3.0, -7.0],
-        m_plug=[0.0, -0.65, 0.0],
+        f_plug=[1.6, -0.6, -3.6],
+        m_plug=[0.0, -0.18, 0.0],
         config=config,
     )
     acc_lat = np.zeros(2, dtype=np.float64)
     acc_tilt = np.zeros(2, dtype=np.float64)
 
-    for _ in range(30):
+    for _ in range(60):
         acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
-            None, 0.0, 7.0, acc_lat, acc_tilt
+            None, 0.0, 3.6, acc_lat, acc_tilt
         )
+        assert np.linalg.norm(acc_lat) < 0.25 * config.seat_align_max_lat_m
+        assert np.linalg.norm(acc_tilt) < 0.25 * config.seat_align_max_tilt_rad
+
+
+def test_seat_alignment_still_clamps_under_extreme_wrench():
+    config = V50Config().validated()
+    harness = _AlignHarness(
+        f_plug=[60.0, -40.0, -12.0],
+        m_plug=[0.0, -8.0, 0.0],
+        config=config,
+    )
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(60):
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 12.0, acc_lat, acc_tilt
+        )
+        assert np.linalg.norm(acc_lat) <= config.seat_align_max_lat_m + 1e-12
+        assert np.linalg.norm(acc_tilt) <= config.seat_align_max_tilt_rad + 1e-12
 
     assert np.isclose(np.linalg.norm(acc_lat), config.seat_align_max_lat_m)
-    assert np.linalg.norm(acc_lat) < 0.0015
     assert np.isclose(np.linalg.norm(acc_tilt), config.seat_align_max_tilt_rad)
 
 

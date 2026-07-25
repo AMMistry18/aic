@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
+import re
 import time
 from typing import Optional
 
@@ -92,6 +93,8 @@ class V50Config:
     seat_align_moment_gain: float = 0.004
     seat_align_max_lat_m: float = 0.0004
     seat_align_max_tilt_rad: float = 0.0087
+    # Low-pass coefficient on the seat alignment correction: 0 = raw proportional,
+    # ->1 = heavily smoothed. Named "release" for the env var it already ships with.
     seat_align_release_decay: float = 0.7
     seat_mouth_zone_m: float = 0.006
     seat_mouth_speed_scale: float = 0.25
@@ -450,8 +453,16 @@ def _observation_stamp_s(observation) -> Optional[float]:
     return max(values) if values else None
 
 
+# The scoring topic identifies the cable instance that completed the insertion,
+# e.g. "cable_0#0#nic_card_mount_0/sfp_port_0", while Task names only the module
+# and port. Without stripping that prefix the equality test in _event_status can
+# never match, so a correct insertion still reports a wrong-port hard failure.
+_CABLE_INSTANCE_PREFIX = re.compile(r"^cable_\d+#\d+#")
+
+
 def _normalize_event(value: object) -> str:
-    return str(value or "").strip().strip("/")
+    text = str(value or "").strip().strip("/")
+    return _CABLE_INSTANCE_PREFIX.sub("", text, count=1).strip("/")
 
 
 def _plug_views_from_observation(policy, observation):
@@ -618,6 +629,20 @@ class PlugRelativeV50Controller:
         return wrist_to_plug @ wrench_wrist[:3], wrist_to_plug @ wrench_wrist[3:]
 
     def _seat_alignment_sample(self, observation, depth, force, acc_lat, acc_tilt):
+        """Low-passed *proportional* wrench correction, not an accumulator.
+
+        This used to integrate the per-sample correction and rely on the clamp to
+        bound it, which meant any sustained contact force saturated it. Field log 3
+        runs 2 and 5: the correction pinned at the clamp three samples after first
+        chamfer touch, at only 1.7 N, and the plug stopped descending while axial
+        force climbed to 7 N. Shrinking the clamp in f07d3a1 moved that jam from
+        37 mm to 2 mm rather than removing it, because the leak only ran on the
+        out-of-contact branch and so never fired under load.
+
+        A low-pass of a clamped proportional target settles at the target (~0.12 mm
+        at 4 N lateral) instead of the clamp, and decays to zero on its own once the
+        contact goes away -- in or out of contact.
+        """
         f_plug, m_plug = self._wrench_plug_frame(observation)
         contact = bool(np.isfinite(force) and force >= self.config.contact_force_n)
         finite_wrench = bool(np.all(np.isfinite(f_plug[:2])) and np.all(np.isfinite(m_plug[:2])))
@@ -634,22 +659,28 @@ class PlugRelativeV50Controller:
             )
             d_lat_would = -log_force_gain * f_plug[:2]
             d_tilt_would = -log_moment_gain * m_plug[:2]
-            d_lat_applied = -self.config.seat_align_force_gain * f_plug[:2]
-            d_tilt_applied = -self.config.seat_align_moment_gain * m_plug[:2]
+            target_lat = clamp_vector_norm(
+                -self.config.seat_align_force_gain * f_plug[:2],
+                self.config.seat_align_max_lat_m,
+            )
+            target_tilt = clamp_vector_norm(
+                -self.config.seat_align_moment_gain * m_plug[:2],
+                self.config.seat_align_max_tilt_rad,
+            )
         else:
             d_lat_would = np.zeros(2, dtype=np.float64)
             d_tilt_would = np.zeros(2, dtype=np.float64)
-            d_lat_applied = np.zeros(2, dtype=np.float64)
-            d_tilt_applied = np.zeros(2, dtype=np.float64)
-            decay = self.config.seat_align_release_decay
-            acc_lat = np.asarray(acc_lat, dtype=np.float64).reshape(2) * decay
-            acc_tilt = np.asarray(acc_tilt, dtype=np.float64).reshape(2) * decay
+            target_lat = np.zeros(2, dtype=np.float64)
+            target_tilt = np.zeros(2, dtype=np.float64)
+        decay = self.config.seat_align_release_decay
         acc_lat = clamp_vector_norm(
-            np.asarray(acc_lat, dtype=np.float64).reshape(2) + d_lat_applied,
+            decay * np.asarray(acc_lat, dtype=np.float64).reshape(2)
+            + (1.0 - decay) * target_lat,
             self.config.seat_align_max_lat_m,
         )
         acc_tilt = clamp_vector_norm(
-            np.asarray(acc_tilt, dtype=np.float64).reshape(2) + d_tilt_applied,
+            decay * np.asarray(acc_tilt, dtype=np.float64).reshape(2)
+            + (1.0 - decay) * target_tilt,
             self.config.seat_align_max_tilt_rad,
         )
         return acc_lat, acc_tilt, (depth, f_plug, m_plug, d_lat_would, d_tilt_would)

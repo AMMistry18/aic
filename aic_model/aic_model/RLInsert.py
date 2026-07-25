@@ -907,8 +907,8 @@ class RLInsert(Policy):
         plug_type = (task.plug_type or "sfp").lower()
         log.info(f"[rl] task: cable={task.cable_name} plug={task.plug_name} "
                  f"({plug_type}) port={task.port_name} module={task.target_module_name}")
-        if plug_type != "sfp":
-            log.error("[rl] this single-file policy is SFP-only")
+        if plug_type not in ("sfp", "sc"):
+            log.error(f"[rl] unsupported plug type '{plug_type}' (expected sfp or sc)")
             return False
 
         self._wait_for_stable_clock()
@@ -938,6 +938,13 @@ class RLInsert(Policy):
             from .board_search import BoardSearch
             ok = BoardSearch(self).run(get_observation, move_robot)
             log.info(f"[board_search] whole board in view: {ok}")
+
+        # SC branches to its own scripted controller: different bore depth,
+        # different force ladder, and a fixed grasp (there is no SC plug-pose
+        # model). Everything below this point is SFP-specific.
+        if plug_type == "sc":
+            from .sc_controller import run_sc_insertion
+            return run_sc_insertion(self, task, get_observation, move_robot, send_feedback)
 
         # --- perceive the SFP port pose (multi-frame consensus so one bad frame
         #     or a wrong-port pick does not commit us to the wrong cage)
