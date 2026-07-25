@@ -287,46 +287,55 @@ def test_each_target_mode_maps_to_its_own_board_sector():
     assert "target == 3" in selector
 
 
-def test_only_the_recessed_port_sectors_use_the_single_camera_top_view():
-    # Execute the policy helper so the NIC/SC single-camera high top-down framing
-    # cannot silently drift onto the SFP modules (which keep the all-camera view).
-    helper = copy.deepcopy(_method("_single_camera_top_view"))
+def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
+    """The NIC SFP bores open straight up and are 45.8 mm deep behind a 16x12 mm
+    aperture, so a port only shows its black depth to a ray within 7.5 deg of the
+    board normal.  The view settings must therefore look straight down (no
+    cross-rail tilt, tight obliquity) from the farthest reachable standoff -- a
+    tilted view resolves *zero* of the ten ports.  Executed, not just grepped, so
+    the policy cannot silently drift back onto the SC bore-tilt recipe.
+    """
+    helper = copy.deepcopy(_method("_survey_view_settings"))
     helper.decorator_list = []
     module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
-    namespace: dict[str, object] = {}
+    namespace: dict[str, object] = {"math": math}
     exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
-    top_view = namespace["_single_camera_top_view"]
+    settings = namespace["_survey_view_settings"]
 
-    assert not top_view(0)  # UNSPECIFIED (SFP default) -> all-camera framing
-    assert not top_view(1)  # STAGED_SFP_MODULE -> all-camera framing
-    assert top_view(2)      # NIC -> single-camera high top-down
-    assert top_view(3)      # SC -> single-camera high top-down
-    assert not top_view(99)
-    # Wired into the search: these sectors drop the all-camera requirement and
-    # prefer the farthest (highest, least-distorted) reachable standoff.
+    nic = settings(2)
+    assert nic["cross_rail_sign"] == 0.0, "a cross-rail tilt hides the bores"
+    assert nic["max_obliquity_rad"] <= math.radians(3.0)
+    assert nic["prefer_far_standoff"] is True  # outermost port needs the distance
+    assert nic["require_all_cameras_frame"] is True
+    # All-camera framing needs a smaller keep-out margin than the 40 px default;
+    # the gripper mask already dilates the silhouette by 32 px underneath this.
+    assert 20.0 <= nic["min_required_clearance_px"] <= 30.0
+    # The wrist-camera self-collision gate (arm_ik.UR5eArm.flange_T_probes) can
+    # rule out every candidate within the default 45 deg / 7-roll sample at some
+    # board yaws; NIC widens both so a clear-of-forearm pose can still be found.
+    assert nic["max_angular_motion_rad"] >= math.radians(89.0)
+    assert len(nic["yaws_rad"]) >= 20
+
+    sc = settings(3)  # sideways-recessed: keeps the bore tilt, single camera
+    assert sc["cross_rail_sign"] == -1.0
+    assert sc["require_all_cameras_frame"] is False
+
+    for sfp_target in (0, 1, 99):  # SFP modules keep the close all-camera view
+        sfp = settings(sfp_target)
+        assert sfp["require_all_cameras_frame"] is True
+        assert sfp["prefer_far_standoff"] is False
+        assert sfp["cross_rail_sign"] == 0.0
+
     method_source = ast.get_source_segment(
         SOURCE_PATH.read_text(encoding="utf-8"),
         _method("_run_sfp_geometric_stage2"),
     )
-    assert (
-        "require_all_cameras_frame=not self._single_camera_top_view(survey_target)"
-        in method_source
-    )
-    assert (
-        "prefer_far_standoff=self._single_camera_top_view(survey_target)"
-        in method_source
-    )
-    # ...and shift the camera onto the bore-facing (-X) side with a modest tilt,
-    # trying the committed bore band before the flat fallback.
+    assert "**self._survey_view_settings(survey_target)" in method_source
     assert (
         "for tilt_band in self._bore_view_tilt_bands(survey_target)"
         in method_source
     )
     assert "cross_rail_tilt_band_rad=tilt_band" in method_source
-    assert (
-        "cross_rail_sign=-1.0 if self._single_camera_top_view(survey_target)"
-        in method_source
-    )
 
 
 def test_bore_view_tilt_bands_commit_to_the_side_then_fall_back_flat():
@@ -340,15 +349,17 @@ def test_bore_view_tilt_bands_commit_to_the_side_then_fall_back_flat():
     assert bands_for(0) == (None,)  # SFP -> near-overhead
     assert bands_for(1) == (None,)
     assert bands_for(99) == (None,)
-    for target in (2, 3):  # NIC / SC -> committed bore band, then flat fallback
-        bands = bands_for(target)
-        assert len(bands) >= 2
-        for lo, hi in bands:
-            assert 0.0 <= lo < hi <= math.radians(30.0)
-        # The first tier is a real commitment to the bore-facing side (lo > 0);
-        # the last tier degrades to flat (lo == 0) so a move is never stalled.
-        assert bands[0][0] > 0.0
-        assert bands[-1][0] == 0.0
+    # NIC's bores open straight *up*, so tilting across the rail occludes them --
+    # it must stay out of this list however the SC recipe evolves.
+    assert bands_for(2) == (None,)
+    bands = bands_for(3)  # SC -> committed bore band, then flat fallback
+    assert len(bands) >= 2
+    for lo, hi in bands:
+        assert 0.0 <= lo < hi <= math.radians(30.0)
+    # The first tier is a real commitment to the bore-facing side (lo > 0);
+    # the last tier degrades to flat (lo == 0) so a move is never stalled.
+    assert bands[0][0] > 0.0
+    assert bands[-1][0] == 0.0
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():

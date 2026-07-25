@@ -5,7 +5,14 @@ import math
 import numpy as np
 import pytest
 
-from aic_perception.arm_ik import UR5eArm, JOINT_LIMITS
+from aic_perception.arm_ik import (
+    UR5eArm,
+    JOINT_LIMITS,
+    _DH_A,
+    _DH_ALPHA,
+    _DH_D,
+    _dh_matrix,
+)
 from aic_perception.board_stage2 import Transform
 
 
@@ -33,39 +40,75 @@ def test_zero_config_matches_ur5e_geometry():
     assert np.linalg.norm(flange.rotation @ flange.rotation.T - np.eye(3)) < 1e-9
 
 
-def test_fk_ik_round_trip_recovers_reachable_poses():
-    """With a near seed (as the skill supplies the current joints) almost every
-    reachable pose is recovered exactly; the rare miss is a near-singular pose,
-    which a reachability gate is entitled to reject."""
+def test_mjcf_chain_is_the_classical_ur5e_dh_chain():
+    """The MJCF link chain and the DH parameters describe the same arm.
+
+    The closed-form solver is derived on the DH chain and applied directly to
+    poses expressed in the MJCF model frame, with no adapter transform at either
+    end.  That is only valid because the two products are identical -- assert it
+    rather than assume it.
+    """
+    arm = UR5eArm()
+    rng = np.random.default_rng(11)
+    for q in _random_joints(rng, 25) + [np.zeros(6)]:
+        dh = np.eye(4)
+        for i in range(6):
+            dh = dh @ _dh_matrix(q[i], _DH_A[i], _DH_D[i], _DH_ALPHA[i])
+        mjcf = arm.fk_flange(q)
+        assert np.allclose(mjcf.rotation, dh[:3, :3], atol=1e-12)
+        assert np.allclose(mjcf.translation, dh[:3, 3], atol=1e-12)
+
+
+def test_fk_ik_round_trip_recovers_every_reachable_pose_exactly():
+    """A closed-form solver has no seed dependence and no local minima: every
+    pose the arm can strike is recovered, to machine precision."""
     arm = UR5eArm()
     rng = np.random.default_rng(1)
-    solved = 0
-    trials = _random_joints(rng, 80)
-    for q_true in trials:
+    for q_true in _random_joints(rng, 120):
         target = arm.fk(q_true)
         q = arm.solve(target, seed=q_true + rng.normal(0, 0.1, 6))
-        if q is None:
-            continue
+        assert q is not None, "closed-form IK missed a self-generated pose"
         pos, ori = arm.fk_residual(q, target)
-        assert pos < 2e-3 and ori < 1e-2
-        # Solutions respect the joint limits.
-        assert np.all(q >= JOINT_LIMITS[:, 0] - 1e-6)
-        assert np.all(q <= JOINT_LIMITS[:, 1] + 1e-6)
-        solved += 1
-    assert solved >= int(0.97 * len(trials))
+        assert pos < 1e-9 and ori < 1e-9
+        assert np.all(q >= JOINT_LIMITS[:, 0] - 1e-9)
+        assert np.all(q <= JOINT_LIMITS[:, 1] + 1e-9)
 
 
-def test_cold_solve_without_seed_finds_a_branch():
-    """Canonical seeds alone recover most reachable poses (no truth hint)."""
+def test_solve_without_a_seed_is_just_as_complete():
+    """No seed, no penalty -- this is what makes the gate's "unreachable"
+    verdict trustworthy rather than a search that gave up."""
     arm = UR5eArm()
     rng = np.random.default_rng(2)
-    found = 0
-    trials = _random_joints(rng, 60)
-    for q_true in trials:
+    for q_true in _random_joints(rng, 120):
+        assert arm.reachable(arm.fk(q_true))
+
+
+def test_solve_all_enumerates_the_branches_and_each_one_is_exact():
+    """The eight UR configurations (shoulder x wrist x elbow) are enumerated, so
+    a pose is only rejected when *no* branch reaches it."""
+    arm = UR5eArm()
+    rng = np.random.default_rng(3)
+    counts = []
+    for q_true in _random_joints(rng, 40):
         target = arm.fk(q_true)
-        if arm.reachable(target):
-            found += 1
-    assert found >= int(0.9 * len(trials))
+        solutions = arm.solve_all(target)
+        counts.append(len(solutions))
+        for q in solutions:
+            pos, ori = arm.fk_residual(q, target)
+            assert pos < 1e-9 and ori < 1e-9
+    # Interior poses have several distinct arm configurations, not just one.
+    assert max(counts) == 8
+    assert float(np.mean(counts)) > 4.0
+
+
+def test_solve_picks_the_branch_nearest_the_seed():
+    """The skill passes the live joint state; the returned configuration should
+    be the one the controller would actually adopt."""
+    arm = UR5eArm()
+    q_true = np.array([0.4, -1.3, 1.5, -1.7, -1.5, 0.2])
+    target = arm.fk(q_true)
+    assert len(arm.solve_all(target)) > 1
+    assert np.allclose(arm.solve(target, seed=q_true), q_true, atol=1e-9)
 
 
 def test_calibration_recovers_tool_offset_and_is_exact_at_the_sample():
@@ -111,6 +154,85 @@ def test_autocalibrate_recovers_a_flipped_base_convention():
     )
     assert arm.reachable(reachable_pose)
     assert not arm.reachable(Transform(np.eye(3), np.array([2.0, 0.0, 0.5])))
+
+
+def test_high_survey_poses_are_out_of_reach_but_the_close_ones_are_not():
+    """The NIC search's far/high candidates are genuinely unreachable.
+
+    Framing all five 145 mm cards in the centre camera wants a 0.7-1.25 m
+    standoff, and the board sits at the height of the arm's own base -- so the
+    far half of that sweep asks the TCP to hover a metre above the base while
+    looking *down*, which no UR5e configuration does.  The gate must say so
+    (that is why the search now gates every framed candidate, taking the
+    farthest one that is genuinely reachable) and must still accept the close
+    end of the sweep.
+    """
+    arm = UR5eArm(flange_T_tcp=Transform(np.eye(3), np.array([0.0, 0.0, 0.197])))
+    looking_down = np.diag([1.0, -1.0, -1.0])
+    over_the_board = np.array([-0.40, 0.22, 0.0])
+    heights = [
+        z
+        for z in np.arange(0.30, 1.10, 0.05)
+        if arm.reachable(Transform(looking_down, over_the_board + [0, 0, z]))
+    ]
+    assert heights, "a downward survey view over the board must exist somewhere"
+    # One contiguous band that ends well below the far standoffs the NIC search
+    # generates -- there is no second, higher window to reach for.
+    assert min(heights) < 0.35 and 0.55 < max(heights) < 0.70
+
+
+def test_wrist_camera_keep_out_rejects_a_pose_the_workcell_planner_refused():
+    """Ground truth from a real run, not a synthetic case.
+
+    For the published survey pose (-0.1001, 0.4162, 0.6859) the workcell planner
+    reported *every* IK solution colliding -- ``robot.forearm_link`` against
+    ``left_camera.camera_link`` -- and the move failed outright.  Its four
+    reported configurations are this module's two branches, wrapped +/-360 deg;
+    that they reproduce the published TCP to 0 mm also pins the whole model (DH
+    chain, base=Rz180, 197.1 mm tool) against the real robot.
+
+    A purely kinematic gate calls the pose reachable, which is exactly how it got
+    published.  With the wrist cameras registered as flange probes it must not.
+    """
+    from dataclasses import replace
+    from aic_perception.arm_ik import _rot_z
+
+    tool = Transform(np.eye(3), np.array([0.0, 0.0, 0.1971]))
+    arm = UR5eArm(flange_T_tcp=tool, base=Transform(_rot_z(math.pi), np.zeros(3)))
+    planner_configs_deg = [
+        [-77.4232, -98.0038, -24.1589, -133.821, 118.235, -75.7524],
+        [-77.4232, -98.0038, -24.1589, 226.179, 118.235, -75.7524],
+        [-77.4232, -98.0038, -24.1589, -133.821, -241.765, 284.248],
+        [282.577, -121.178, 24.1589, -158.964, -241.765, 284.248],
+    ]
+    published = np.array([-0.1001, 0.4162, 0.6859])
+    for config in planner_configs_deg:
+        assert np.allclose(
+            arm.fk(np.radians(config)).translation, published, atol=1e-4
+        ), "model disagrees with the robot the planner was driving"
+
+    # The wrist cameras, placed off the flange exactly as the production rig has
+    # them (the extrinsics the skill already recovers from the permitted TF).
+    from test_board_stage2 import _production_camera_rig
+
+    _cameras, tcp_T_cam, _grippers = _production_camera_rig()
+    gated = replace(
+        arm,
+        flange_T_probes=tuple(tool.compose(e) for e in tcp_T_cam.values()),
+    )
+
+    pose = arm.fk(np.radians(planner_configs_deg[0]))
+    assert arm.reachable(pose), "kinematically it does solve -- that was the trap"
+    assert not gated.reachable(pose), "gate must refuse what the planner refuses"
+    # Every branch is inside the keep-out, which is why the planner had nothing.
+    assert all(
+        gated.self_clearance(q) < gated.min_self_clearance_m
+        for q in gated.solve_all(pose)
+    )
+
+    # An ordinary extended-wrist pose is unaffected.
+    open_pose = arm.fk([0.2, -1.4, 1.5, -1.6, -1.57, 0.0])
+    assert gated.reachable(open_pose)
 
 
 def test_unreachable_pose_is_rejected():

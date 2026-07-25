@@ -297,17 +297,24 @@ def sc_sector_corners() -> np.ndarray:
 
 
 def nic_sector_corners() -> np.ndarray:
-    """NIC card SFP-port destinations (Zone 1): five mounts at board-X -0.081.
+    """NIC card SFP-port destinations (Zone 1): the ten port bores themselves.
 
-    The box frames the **cage band** at the card tips -- the SFP cages sit at
-    board Z ~= 0.13 and the tips reach ~0.17, so the box spans Z 0.07..0.17.
-    That covers the ports the IVM matches (framing only the mount base left them
-    clipped) while staying short enough that the tilted bore-view pose can hold
-    the whole band in frame; spanning the full 145 mm card height instead made
-    every tilted candidate spill the tips out of the frame.  The
-    ``NIC_SFP_DESTINATION`` survey target.
+    The box is centred on the **port entrances**, not on the card bodies, because
+    the search aims the optical axis at this box's centroid and what has to be
+    read is the bore.  Each port is a 16 x 12 mm aperture at the top of a 45.8 mm
+    recess whose axis points straight up (0.7 deg off the board normal, from
+    ``aic_world.xml``), so a port only shows the black depth the IVM keys on to a
+    ray within ``atan(6/45.8) = 7.5 deg`` of that axis.  The ten entrances (five
+    cards x two ports) sit at board Z 0.1793 spanning X -0.100..-0.077 and
+    Y -0.186..-0.026; this box pads that laterally by 12 mm and drops to Z 0.125
+    so the cage bodies stay framed with their ports.
+
+    The previous box was centred on the card band (X -0.14..-0.03, Y -0.19..0.01,
+    Z 0.07..0.17). Its centroid sat 16 mm off the port cluster, which aimed the
+    camera off-centre and pushed the outermost port past the 7.5 deg cone -- worth
+    two of the ten ports.  The ``NIC_SFP_DESTINATION`` survey target.
     """
-    return _sector_box_corners((-0.14, -0.03), (-0.19, 0.01), (0.07, 0.17))
+    return _sector_box_corners((-0.1124, -0.0652), (-0.1978, -0.0138), (0.125, 0.185))
 
 
 # ---------------------------------------------------------------------------
@@ -1237,13 +1244,15 @@ def search_survey_pose(
     # ``max_reach_m`` sphere -- which both admits kinematically-impossible poses
     # (Move Robot then reports "IK not computable") and rejects genuinely
     # reachable far-side poses, making the search settle for a near, wrong-side
-    # view.  It is applied as a final gate over the best-ranked feasible
-    # candidates (at most ``max_reach_checks`` numerical solves), so the search
-    # commits to the best pose that is both correctly framed *and* reachable.
-    # ``None`` keeps the legacy sphere for callers/tests without a kinematic
-    # model.
+    # view.  It is applied as a final gate over *every* framed candidate in rank
+    # order, so the search commits to the best pose that is both correctly framed
+    # *and* reachable.  Gating the whole ranked list matters: for the NIC sector
+    # only the closest handful of framed poses are inside the arm's envelope,
+    # while ``prefer_far_standoff`` ranks the (unreachable) far ones first, so a
+    # truncated gate finds nothing reachable and the search fails with poses
+    # available.  ``None`` keeps the legacy sphere for callers/tests without a
+    # kinematic model.
     reachable: Callable[[Transform], bool] | None = None,
-    max_reach_checks: int = 24,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
@@ -1565,9 +1574,9 @@ def search_survey_pose(
         feasible.sort(key=lambda item: item[0], reverse=True)
         if reachable is None:
             return feasible[0][2], evaluated, framed
-        # Apply the real reachability gate to the best candidates in order and
+        # Apply the real reachability gate to the candidates in rank order and
         # commit to the first that the arm can actually achieve.
-        for _key, _order, candidate in feasible[:max_reach_checks]:
+        for _key, _order, candidate in feasible:
             if reachable(candidate.base_T_tcp):
                 return candidate, evaluated, framed
         return None, evaluated, framed

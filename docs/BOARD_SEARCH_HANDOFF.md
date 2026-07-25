@@ -105,9 +105,15 @@ the wrong (closed-back) side and the IVM could not read the ports.
 
 **Real reachability.** New module `flowstate/aic_perception/aic_perception/
 arm_ik.py` provides exact forward kinematics for the workcell UR5e (the chain
-taken verbatim from `aic_utils/aic_mujoco/mjcf/aic_robot.xml`) and a
-damped-least-squares IK used as a boolean reachability gate: "does a
-joint-limit-valid solution exist?". The `base_link<->kinematic-base` convention *and* the flange->TCP tool offset
+taken verbatim from `aic_utils/aic_mujoco/mjcf/aic_robot.xml`) and the
+**closed-form analytic** IK for that chain, used as a boolean reachability gate:
+"does a joint-limit-valid solution exist?". The MJCF chain is bit-for-bit the
+classical UR5e DH chain (asserted by
+`test_arm_ik.test_mjcf_chain_is_the_classical_ur5e_dh_chain`), so the textbook
+eight-branch UR solution applies directly with no adapter transform. Analytic,
+not iterative, for two reasons: the verdict is exact in both directions (no
+seeds, no local minima -- a rejection means the pose is genuinely outside the
+workspace), and at ~0.2 ms it is cheap enough to gate *every* framed candidate. The `base_link<->kinematic-base` convention *and* the flange->TCP tool offset
 are **recovered together from the live, static (joint-state, base_T_tcp)
 sample** by `UR5eArm.autocalibrate`: it tries each candidate base rotation and
 keeps the one whose resulting tool offset is physically plausible (~0.15-0.30 m,
@@ -123,21 +129,94 @@ the robot's own kinematics are used -- no task-board TF -- so the permitted-TF
 policy is unchanged. `search_survey_pose` takes an optional
 `reachable(base_T_tcp) -> bool`; it collects every framed, gripper-clear
 candidate, ranks them, and commits to the **best-ranked pose that is actually
-reachable** (numerical IK over the top `max_reach_checks=24`), returning
-`framed N but none reachable` when applicable. The IK is intentionally *more
-lenient* than Move Robot (full joint limits, no collision), so anything it
-rejects is genuinely unsolvable -- it cannot regress a previously-working pose,
-and a rejection yields a graceful `done=false`, never a bad move.
+reachable**, returning `framed N but none reachable` when applicable. The IK is
+intentionally *more lenient* than Move Robot (full joint limits, no collision),
+so anything it rejects is genuinely unsolvable -- it cannot regress a
+previously-working pose, and a rejection yields a graceful `done=false`, never a
+bad move.
 
-**Bore commitment.** `_bore_view_tilt_bands` replaces `_bore_view_tilt_band_rad`:
-NIC/SC try a **committed** cross-rail tilt band `(12 deg, 22 deg)` first and
-fall back to the flat `(0, 22 deg)` band only if no reachable pose satisfies it.
-Without the committed tier, `prefer_far_standoff` would trade the bore tilt for
-a farther, flatter wrong-side view. `cross_rail_sign=-1` keeps the camera on the
-board -X (mouth) side; that side is board-relative and tracks the insignia, so
-the fix is that the far-side pose is now *found and reached*, not that the side
-was wrong. The 0.80 m NIC reach cap is removed; reach is decided by the IK gate,
-with the 0.85 m sphere surviving only as a loose fallback.
+**The gate must scan the whole ranking, not a shortlist.** This is what broke the
+first deployment (`255 framed ... but none had a reachable joint-limit-valid IK
+solution` -> `done=false` -> Move Robot crashed on the empty pose). For the NIC
+sector, framing all five cards in the centre camera needs a 0.66-1.3 m standoff,
+and the board sits at the height of the arm's own base -- so **only the closest
+handful of framed poses are inside the UR5e envelope**, while
+`prefer_far_standoff` ranks the far ones *first*. Offline, at the nominal board
+placement, the single reachable pose sat at rank 262 of 263; a gate that checked
+only the top 24 was guaranteed to miss it. Gating the full list restores the
+intent of `prefer_far_standoff` -- "the farthest standoff the arm can actually
+reach" -- and finds a pose in 96/96 swept scenarios (board yaw 0-315 deg, tilt
+0-10 deg, +/-50 mm placement, two Stage-1 exit poses).
+
+**NIC looks straight DOWN the port bores -- the cross-rail tilt was backwards.**
+Measured from `aic_world.xml`: each NIC SFP port is a **16 x 12 mm aperture at the
+top of a 45.8 mm recess whose axis points straight up** -- board-frame bore axis
+`(0.001, -0.013, -0.9999)`, i.e. **0.7 deg off the board normal**, entrance at
+board Z 0.1793. So a port only shows the black depth the IVM keys on to a ray
+within `atan(6/45.8) = 7.5 deg` of the board normal; past that the cage wall
+occludes the backstop and the port reads as a flat grey rectangle. The old code
+assumed the mouths opened sideways toward board -X and deliberately tilted the
+camera 12-22 deg onto that side. Scored against the port cone, that committed
+band resolved **0 of 10 ports** at the board yaws where it was reachable. NIC
+therefore leaves `_bore_view_tilt_bands` (returns `(None,)`) and takes
+`max_obliquity_rad = 2 deg` instead. Only **SC** keeps the cross-rail tilt: its
+ports really are recessed sideways.
+
+Two more consequences, both now in `_survey_view_settings`:
+
+* **`nic_sector_corners()` is centred on the ten port entrances**, not on the card
+  bodies. The search aims the optical axis at the sector centroid, and the old
+  box's centroid sat 16 mm off the port cluster -- enough to push the outermost
+  port past the 7.5 deg cone, worth two of the ten ports.
+* **`prefer_far_standoff` is right here for a real reason.** The ten ports span
+  160 mm, so the outermost sits `atan(0.081/d)` off axis and needs `d >= 0.62 m`
+  above the port plane. Preferring the *nearest* framing resolves only 6/10.
+
+Scored over 96 scenarios in isolation (no collision model): **96/96 poses found,
+all ten ports resolved in 96/96**, worst ray 7.2 deg, standoff 0.66-0.80 m. All
+three cameras frame the sector, which needs `min_required_clearance_px=25` rather
+than the 40 px default -- the gripper mask already dilates the silhouette by
+32 px, so the cards still stay 57 mm-equivalent clear of true gripper pixels.
+
+**The gate must know about the wrist cameras.** A purely kinematic gate published
+a pose the workcell planner then refused outright: `IK could not find a collision
+free configuration ... robot.forearm_link vs left_camera.camera_link`, every
+solution colliding. The three cameras stick ~108 mm off the flange axis and swing
+onto the forearm whenever the wrist folds back. `UR5eArm` therefore takes
+`flange_T_probes` (the camera extrinsics the skill already has from permitted TF)
+and `min_self_clearance_m`; `reachable()`/`solve()` now require a branch that
+keeps every probe clear of the elbow->wrist_1 segment. Calibrated against that
+failure: the refused pose's best branch put a camera **111 mm** from the forearm
+centreline, so the threshold is **140 mm** (26% margin).
+`test_wrist_camera_keep_out_rejects_a_pose_the_workcell_planner_refused` pins it,
+and also confirms the planner's own configurations reproduce the published TCP
+through this model **to 0.0 mm** -- the first end-to-end validation of the DH
+chain, `base=Rz180` and the 197.1 mm tool against the real robot.
+
+Adding the collision keep-out costs poses: at the default 45 deg reorientation
+cap / 7-roll sample it drops to 82/96 -- some orientations have no
+collision-clear candidate within that budget. NIC therefore widens its own
+search (`_survey_view_settings`, target 2 only -- SFP/SC untouched):
+`max_angular_motion_rad=90 deg`, `yaws_rad` = 24 values (15 deg steps) instead of
+the 7-value/45-deg default. **Final measured result, full production settings
+including the collision gate: 90/96 poses found, 80/90 resolving all ten ports**,
+camera-forearm clearance 141-207 mm, reorientation used 0-90 deg. The 6 misses
+cluster at board yaw 45 deg and 70 deg (jittered placement); confirmed a genuine
+geometric conflict, not a sampling gap -- even a 72-value (5 deg) roll sweep at
+yaw 45 tops out at 140.7 mm of clearance, and that one candidate still only
+resolves 6/10 ports. The fixed camera-rig splay (yaws 90/30/150 deg) and that
+board orientation leave a near-empty intersection of reachable / collision-clear
+/ port-cone poses. Not worth shaving the ground-truth-calibrated 140 mm threshold
+to chase it. This is exactly what the graceful `done=false` path plus the
+still-outstanding BT `result.done` gate exist for.
+
+**Bore commitment (SC only).** `_bore_view_tilt_bands` returns a committed
+`(12 deg, 22 deg)` cross-rail band then a flat `(0, 22 deg)` fallback for the SC
+sector, whose ports are recessed sideways; `cross_rail_sign=-1` keeps the camera
+on the board -X (mouth) side, which is board-relative and tracks the insignia. The
+0.80 m NIC reach cap is removed; reach is decided by the IK gate, with the 0.85 m
+sphere surviving only as a loose fallback. The published log line reports
+`bore_band=` so a run shows which tier won (`none` for NIC).
 
 Tests: `test/test_arm_ik.py` (FK/IK round-trip, calibration, limits, rejection),
 reachability-gate plumbing in `test/test_board_stage2.py`, and updated source

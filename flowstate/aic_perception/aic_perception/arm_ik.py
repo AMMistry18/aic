@@ -1,4 +1,4 @@
-"""Closed-chain UR5e kinematics and a numerical reachability test.
+"""Closed-chain UR5e kinematics and an exact reachability test.
 
 The survey search (``board_stage2.search_survey_pose``) historically judged a
 candidate TCP pose "reachable" by a single base-origin sphere
@@ -12,13 +12,18 @@ frames the parts from the wrong side.
 
 This module provides an exact forward kinematics for the UR5e wrist chain taken
 directly from the production MuJoCo model (``aic_utils/aic_mujoco/mjcf/
-aic_robot.xml`` -- the same kinematics the workcell uses) and a damped
-least-squares inverse-kinematics solver used purely as a *reachability gate*:
-"does a joint-limit-valid solution exist near a sensible seed?".  The tool
-offset (flange -> gripper/tcp) is **self-calibrated from one live
-(joint-state, base_T_tcp) sample**, so no fragile frame convention is
-hard-coded; the caller validates the model against live feedback before
-trusting it and otherwise falls back to the sphere.
+aic_robot.xml`` -- the same kinematics the workcell uses) and the **closed-form
+analytic** inverse kinematics for that chain, used as a *reachability gate*:
+"does a joint-limit-valid solution exist?".  Analytic rather than iterative
+because the gate's answer must be trustworthy in both directions: it enumerates
+all eight UR branches exactly, so a rejection means the pose is genuinely
+outside the workspace (no seed dependence, no local minima, no false
+negatives), and it costs microseconds -- cheap enough to gate every framed
+candidate rather than a truncated shortlist.  The tool offset (flange ->
+gripper/tcp) is **self-calibrated from one live (joint-state, base_T_tcp)
+sample**, so no fragile frame convention is hard-coded; the caller validates the
+model against live feedback before trusting it and otherwise falls back to the
+sphere.
 
 Only the robot's own kinematics are used here -- no task-board / port / scoring
 transforms -- so this stays within the skill's permitted-TF policy.
@@ -63,12 +68,16 @@ JOINT_LIMITS: np.ndarray = np.array(
     dtype=float,
 )
 
-# Coarse reach envelope of the wrist-3 origin from the shoulder centre, used as a
-# cheap pre-filter before the (more expensive) numerical solve.  Generous on
-# purpose: the numerical IK is the authority; this only drops the obviously
-# impossible.  Sum of the arm link extents with margin.
-_REACH_MAX_M = 0.425 + 0.3922 + 0.1333 + 0.0997 + 0.0996 + 0.05
-_REACH_MIN_M = 0.05
+# Denavit-Hartenberg parameters of the same chain, in the classical UR form
+#     T_i = Rz(theta_i) . Tz(d_i) . Tx(a_i) . Rx(alpha_i)
+# The MJCF chain above *is* this chain: ``fk_flange`` and the DH product agree to
+# ~1e-15 with no adapter transform on either end (asserted by
+# ``test_arm_ik.test_mjcf_chain_is_the_classical_ur5e_dh_chain``).  That identity
+# is what lets the textbook closed-form UR solution below run directly in this
+# module's frame.
+_DH_A = (0.0, -0.425, -0.3922, 0.0, 0.0, 0.0)
+_DH_D = (0.1625, 0.0, 0.0, 0.1333, 0.0997, 0.0996)
+_DH_ALPHA = (math.pi / 2.0, 0.0, 0.0, math.pi / 2.0, -math.pi / 2.0, 0.0)
 
 
 def _quat_wxyz_to_matrix_raw(w, x, y, z):
@@ -93,26 +102,6 @@ _LINK_R: tuple[np.ndarray, ...] = tuple(
 _LINK_T: tuple[np.ndarray, ...] = tuple(
     np.asarray(pos, dtype=float) for pos, _quat in _LINKS
 )
-
-
-def _quat_wxyz_to_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
-    n = math.sqrt(w * w + x * x + y * y + z * z)
-    if n < 1e-12:
-        return np.eye(3)
-    w, x, y, z = w / n, x / n, y / n, z / n
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ],
-        dtype=float,
-    )
-
-
-def _rz(theta: float) -> np.ndarray:
-    c, s = math.cos(theta), math.sin(theta)
-    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
 
 
 def _log_so3(rotation: np.ndarray) -> np.ndarray:
@@ -150,22 +139,37 @@ def _log_so3(rotation: np.ndarray) -> np.ndarray:
     return w * (theta / (2.0 * math.sin(theta)))
 
 
-# Canonical seeds (radians) spanning a grid of shoulder-pan (which end of the
-# workspace the arm faces -- the dominant DOF for reaching a far-side pose),
-# shoulder-lift, and elbow up/down, so the local solver can find a valid branch
-# even when the current pose is a poor starting point.  The current joint state
-# is always tried first.
-def _build_canonical_seeds() -> tuple[tuple[float, ...], ...]:
-    seeds = []
-    for pan in (-math.pi, -math.pi / 2.0, 0.0, math.pi / 2.0, math.pi):
-        for elbow in (1.6, -1.6):
-            lift = -1.4
-            wrist1 = -math.pi / 2.0 - lift - elbow  # keep the tool roughly level
-            seeds.append((pan, lift, elbow, wrist1, -math.pi / 2.0, 0.0))
-    return tuple(seeds)
+def _dh_matrix(theta: float, a: float, d: float, alpha: float) -> np.ndarray:
+    ct, st = math.cos(theta), math.sin(theta)
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    return np.array(
+        [
+            [ct, -st * ca, st * sa, a * ct],
+            [st, ct * ca, -ct * sa, a * st],
+            [0.0, sa, ca, d],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
 
 
-_CANONICAL_SEEDS: tuple[tuple[float, ...], ...] = _build_canonical_seeds()
+def _rigid_inverse(matrix: np.ndarray) -> np.ndarray:
+    inverse = np.eye(4)
+    rot_t = matrix[:3, :3].T
+    inverse[:3, :3] = rot_t
+    inverse[:3, 3] = -rot_t @ matrix[:3, 3]
+    return inverse
+
+
+def _wrap_pi(angle: float) -> float:
+    """Wrap to (-pi, pi].  Every joint limit is at least +/-pi, so the wrapped
+    principal value is inside the limits whenever any co-terminal angle is."""
+    return -((-angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+def _wrap_pi_array(angles: np.ndarray) -> np.ndarray:
+    """Signed shortest angular difference, elementwise."""
+    return -((-angles + math.pi) % (2.0 * math.pi) - math.pi)
 
 
 def _rot_z(theta: float) -> np.ndarray:
@@ -207,6 +211,20 @@ class UR5eArm:
 
     flange_T_tcp: Transform = Transform(np.eye(3), np.zeros(3))
     base: Transform = Transform(np.eye(3), np.zeros(3))
+    # Points rigidly attached to the flange that must not be driven into the
+    # forearm -- in practice the three wrist cameras, which stick ~108 mm off the
+    # flange axis and swing into the forearm whenever the wrist folds back.  A
+    # pose is only reachable if *some* branch keeps them clear: the planner
+    # rejects the rest, and "IK could not find a collision free configuration"
+    # fails the move just as hard as an unreachable pose.  Empty (the default)
+    # disables the check, keeping pure kinematics for callers without the rig.
+    flange_T_probes: tuple[Transform, ...] = ()
+    # Calibrated against ground truth: for a survey pose the workcell planner
+    # rejected outright (robot.forearm_link vs left_camera.camera_link, all
+    # solutions), the best branch put a camera 111 mm from the forearm centreline.
+    # 140 mm keeps a 26% margin over that while retaining ~40% of framed NIC
+    # candidates, which is far more than the search needs.
+    min_self_clearance_m: float = 0.140
 
     def _to_model(self, base_link_pose: Transform) -> Transform:
         """Express a base_link-frame pose in the kinematic (model) base frame."""
@@ -246,16 +264,6 @@ class UR5eArm:
         return self.base.compose(
             self.fk_flange(joints).compose(self.flange_T_tcp)
         )
-
-    def jacobian(self, joints: Sequence[float]) -> tuple[np.ndarray, Transform]:
-        axes, points, flange = self._chain(joints)
-        base_T_tcp = flange.compose(self.flange_T_tcp)
-        p_tcp = base_T_tcp.translation
-        jac = np.zeros((6, 6), dtype=float)
-        for i in range(6):
-            jac[:3, i] = np.cross(axes[i], p_tcp - points[i])
-            jac[3:, i] = axes[i]
-        return jac, base_T_tcp
 
     # -- calibration ---------------------------------------------------------
     @classmethod
@@ -318,74 +326,138 @@ class UR5eArm:
         )
         return pos, ori
 
-    # -- inverse kinematics --------------------------------------------------
-    def _wrist_center_reachable(self, model_T_tcp: Transform) -> bool:
-        flange = model_T_tcp.compose(self.flange_T_tcp.inverse())
-        shoulder = np.array([0.0, 0.0, float(_LINKS[0][0][2])], dtype=float)
-        d = float(np.linalg.norm(flange.translation - shoulder))
-        return _REACH_MIN_M <= d <= _REACH_MAX_M
-
-    def solve(
+    # -- inverse kinematics (closed form) ------------------------------------
+    def solve_all(
         self,
         base_T_tcp: Transform,
-        seed: Sequence[float] | None = None,
-        *,
-        pos_tol_m: float = 1e-3,
-        ori_tol_rad: float = 5e-3,
-        max_iters: int = 80,
-        damping: float = 0.06,
-    ) -> np.ndarray | None:
-        """Return joint angles reaching ``base_T_tcp`` within limits, or None.
+        free_wrist_angle: float = 0.0,
+    ) -> list[np.ndarray]:
+        """Every joint-limit-valid configuration achieving ``base_T_tcp``.
+
+        The classical UR closed form: the wrist centre fixes shoulder pan
+        (2 branches), the tool axis fixes wrist 2 (2 branches), and the
+        remaining planar 2R arm fixes the elbow (2 branches) -- at most eight
+        exact solutions, enumerated with no seed and no iteration.  An empty
+        list therefore means the pose is genuinely outside the arm's workspace.
 
         ``base_T_tcp`` is in the workcell ``base_link`` frame; it is mapped into
         the kinematic model base via the calibrated ``base`` convention.
+        ``free_wrist_angle`` is the wrist-3 angle adopted at the wrist
+        singularity, where it is indeterminate.
         """
-        model_T_tcp = self._to_model(base_T_tcp)
-        if not self._wrist_center_reachable(model_T_tcp):
-            return None
-        target_p = model_T_tcp.translation
-        target_R = model_T_tcp.rotation
-        lower = JOINT_LIMITS[:, 0]
-        upper = JOINT_LIMITS[:, 1]
-        eye6 = np.eye(6)
-        seeds: list[np.ndarray] = []
-        if seed is not None:
-            seeds.append(np.asarray(seed, dtype=float))
-        seeds.extend(np.asarray(s, dtype=float) for s in _CANONICAL_SEEDS)
-        for q0 in seeds:
-            q = np.clip(q0.copy(), lower, upper)
-            prev_err = math.inf
-            stalls = 0
-            for _ in range(max_iters):
-                jac, base_T_now = self.jacobian(q)
-                e = np.empty(6, dtype=float)
-                e[:3] = target_p - base_T_now.translation
-                e[3:] = _log_so3(target_R @ base_T_now.rotation.T)
-                err = float(np.linalg.norm(e))
-                if (
-                    float(np.linalg.norm(e[:3])) < pos_tol_m
-                    and float(np.linalg.norm(e[3:])) < ori_tol_rad
-                ):
-                    if np.all(q >= lower - 1e-6) and np.all(q <= upper + 1e-6):
-                        return np.clip(q, lower, upper)
-                    break  # converged but out of limits: try next seed
-                # Abandon a seed that has stopped making progress (a local
-                # minimum) so the fixed iteration budget is not wasted.
-                if err > prev_err - 1e-4:
-                    stalls += 1
-                    if stalls >= 6:
-                        break
+        # Target flange pose in the DH/model frame.
+        flange = self._to_model(base_T_tcp).compose(self.flange_T_tcp.inverse())
+        target = np.eye(4)
+        target[:3, :3] = flange.rotation
+        target[:3, 3] = flange.translation
+        d1, _, _, d4, d5, d6 = _DH_D
+        _, a2, a3, _, _, _ = _DH_A
+
+        # -- shoulder pan: the wrist centre lies on a cylinder of radius d4
+        # about the (vertical) joint-1 axis, giving two symmetric branches.
+        wrist_center = target[:3, 3] - d6 * target[:3, 2]
+        radius = math.hypot(wrist_center[0], wrist_center[1])
+        if radius < abs(d4):
+            return []  # inside the shoulder's dead cylinder
+        bearing = math.atan2(wrist_center[1], wrist_center[0])
+        offset = math.asin(max(-1.0, min(1.0, d4 / radius)))
+        solutions: list[np.ndarray] = []
+        for theta1 in (bearing + offset, bearing + math.pi - offset):
+            s1, c1 = math.sin(theta1), math.cos(theta1)
+            # -- wrist 2: the tool's offset from the arm plane fixes |theta5|.
+            cos5 = (target[0, 3] * s1 - target[1, 3] * c1 - d4) / d6
+            if abs(cos5) > 1.0:
+                continue
+            for theta5 in (math.acos(cos5), -math.acos(cos5)):
+                sin5 = math.sin(theta5)
+                if abs(sin5) < 1e-7:
+                    # Wrist singularity: theta6 is free (theta4 absorbs it).
+                    theta6 = free_wrist_angle
                 else:
-                    stalls = 0
-                prev_err = err
-                jjt = jac @ jac.T + (damping * damping) * eye6
-                dq = jac.T @ np.linalg.solve(jjt, e)
-                # Bound the step so the linearisation stays valid.
-                norm = float(np.linalg.norm(dq))
-                if norm > 0.5:
-                    dq *= 0.5 / norm
-                q = np.clip(q + dq, lower, upper)
-        return None
+                    theta6 = math.atan2(
+                        (target[1, 1] * c1 - target[0, 1] * s1) / sin5,
+                        (target[0, 0] * s1 - target[1, 0] * c1) / sin5,
+                    )
+                # -- the remaining chain is a planar 2R arm in the joint-1 frame.
+                arm_1_4 = (
+                    _rigid_inverse(_dh_matrix(theta1, _DH_A[0], d1, _DH_ALPHA[0]))
+                    @ target
+                    @ _rigid_inverse(_dh_matrix(theta6, _DH_A[5], d6, _DH_ALPHA[5]))
+                    @ _rigid_inverse(_dh_matrix(theta5, _DH_A[4], d5, _DH_ALPHA[4]))
+                )
+                px, py = float(arm_1_4[0, 3]), float(arm_1_4[1, 3])
+                cos3 = (px * px + py * py - a2 * a2 - a3 * a3) / (2.0 * a2 * a3)
+                if abs(cos3) > 1.0:
+                    continue  # elbow cannot span this distance
+                sum_234 = math.atan2(arm_1_4[1, 0], arm_1_4[0, 0])
+                for theta3 in (math.acos(cos3), -math.acos(cos3)):
+                    theta2 = math.atan2(py, px) - math.atan2(
+                        a3 * math.sin(theta3), a2 + a3 * math.cos(theta3)
+                    )
+                    joints = np.array(
+                        [
+                            _wrap_pi(theta1),
+                            _wrap_pi(theta2),
+                            _wrap_pi(theta3),
+                            _wrap_pi(sum_234 - theta2 - theta3),
+                            _wrap_pi(theta5),
+                            _wrap_pi(theta6),
+                        ]
+                    )
+                    if np.all(joints >= JOINT_LIMITS[:, 0] - 1e-9) and np.all(
+                        joints <= JOINT_LIMITS[:, 1] + 1e-9
+                    ):
+                        solutions.append(joints)
+        return solutions
+
+    def self_clearance(self, joints: Sequence[float]) -> float:
+        """Distance from the nearest flange probe to the forearm centreline.
+
+        ``forearm_link`` runs from the elbow (joint-3 origin) to wrist_1
+        (joint-4 origin); the wrist cameras ride on the flange.  Folding the
+        wrist back swings them onto that segment, which is the self-collision
+        the workcell planner reports.  ``inf`` when no probes are configured.
+        """
+        if not self.flange_T_probes:
+            return math.inf
+        _axes, points, flange = self._chain(joints)
+        elbow, wrist_1 = points[2], points[3]
+        segment = wrist_1 - elbow
+        length_sq = float(segment @ segment)
+        worst = math.inf
+        for probe in self.flange_T_probes:
+            point = flange.compose(probe).translation
+            t = 0.0
+            if length_sq > 1e-12:
+                t = float((point - elbow) @ segment) / length_sq
+                t = min(1.0, max(0.0, t))
+            worst = min(worst, float(np.linalg.norm(point - (elbow + t * segment))))
+        return worst
+
+    def solve(
+        self, base_T_tcp: Transform, seed: Sequence[float] | None = None
+    ) -> np.ndarray | None:
+        """Joint angles reaching ``base_T_tcp`` within limits and clear of the
+        arm's own forearm, or None.
+
+        With a ``seed`` (the current joint state) the branch requiring the least
+        joint travel is returned, which is the configuration the controller
+        would realistically adopt.
+        """
+        solutions = [
+            q
+            for q in self.solve_all(base_T_tcp)
+            if self.self_clearance(q) >= self.min_self_clearance_m
+        ]
+        if not solutions:
+            return None
+        if seed is None:
+            return solutions[0]
+        reference = np.asarray(seed, dtype=float)
+        return min(
+            solutions,
+            key=lambda q: float(np.abs(_wrap_pi_array(q - reference)).sum()),
+        )
 
     def reachable(
         self, base_T_tcp: Transform, seed: Sequence[float] | None = None

@@ -1,11 +1,27 @@
 # NIC/SC Survey-Pose + Reachability — Full Session Handoff
 
 **Written:** 2026-07-25, for a fresh session picking up mid-problem.
-**Status:** BLOCKED. The reachability gate is correctly calibrated but now
-rejects *every* framed survey pose at some board orientations, so Stage 2
-returns `done=false`, and the downstream Move Robot then crashes on the empty
-pose. Read §8 (what fails now) and §9 (the core tension) first, then decide
-§10.
+**Updated:** 2026-07-25 (same day, second pass) — **RESOLVED in code, not yet
+deployed / not yet hardware-validated.** Two rounds this session:
+
+1. **Reachability shortlist bug** (original write-up, §8): the gate only
+   checked the top 24 ranked candidates while `prefer_far_standoff` ranks the
+   unreachable far poses first — the single reachable pose sat at rank 262 of
+   263. Fixed by closed-form UR5e IK + gating the whole ranked list.
+2. **After a hardware run** (this pass, §9): the fix from round 1 was deployed
+   and mostly worked (70/250 deg board yaw), but (a) NIC's view geometry was
+   backwards — the SFP ports open straight up, not sideways, so the code's
+   deliberate cross-rail tilt resolved **zero** ports wherever it was reachable
+   — and (b) the reachability gate had no collision model, so it published a
+   pose the workcell planner refused outright as a self-collision
+   (`robot.forearm_link` vs `left_camera.camera_link`). Both fixed; see §9.
+   Measured result over 96 scenarios: **90/96 poses found, 80/90 resolving all
+   10 ports** — the remaining 6 are a genuine geometric conflict at specific
+   board yaws (§9.4), not a bug.
+
+The BT `done` guard (§8 Failure A) is **still outstanding** and is not skill
+code — it is the single most important remaining step before a real run, since
+even the improved search returns `done=false` at some orientations by design.
 
 ---
 
@@ -20,16 +36,25 @@ pose. Read §8 (what fails now) and §9 (the core tension) first, then decide
   base-origin *sphere* reachability test with a **real UR5e IK reachability
   gate** (`arm_ik.py`), because the sphere both published unreachable poses
   (Move Robot "IK not computable") and rejected reachable far/bore-side poses.
-- **Where it broke:** the IK gate now correctly self-calibrates the base frame
-  (`base=Rz180`, tool 197 mm) but then finds **0 of 255 framed candidates
-  reachable** at board yaw 0°. Two open possibilities: (a) the numerical IK is
-  too weak (misses reachable far-side branches → false negatives), or (b) the
-  framed candidates are *genuinely* all unreachable because framing the tall NIC
-  cards forces a far/high standoff that is at/beyond reach — a **fundamental
-  conflict** between "frame the cards" and "stay reachable". See §9.
+- **Where it broke, and why (measured, §8):** the gate self-calibrated correctly
+  (`base=Rz180`, tool 197 mm) but reported 0 of 255 framed candidates reachable.
+  The cause was a **ranking/budget interaction**, not the IK and not the view
+  geometry alone: framing the NIC sector needs a 0.66–1.3 m standoff and the
+  board sits at the height of the arm's own base, so only the **closest** framed
+  poses are inside the envelope — while `prefer_far_standoff` ranks the far ones
+  **first**. The gate then checked only the top `max_reach_checks=24`, which were
+  all far and all unreachable, and gave up with a good pose available.
+- **Fix (shipped in this repo, untested on hardware):** (1) replaced the
+  damped-least-squares IK with the **closed-form eight-branch UR5e solution** —
+  exact, seedless, ~0.2 ms instead of ~260 ms; (2) the gate now scans **every**
+  framed candidate in rank order, so `prefer_far_standoff` means "the farthest
+  standoff the arm can actually reach". Offline this finds a pose in **96/96**
+  swept scenarios. 253 tests green (was 248).
 - **Immediate crash** (`norm(quat)==0`) is a **behavior-tree bug**: it runs Move
   Robot on the empty `survey_pose` when `done=false`. The BT must gate Move
-  Robot on `result.done` (and `result.success`). This is not skill code.
+  Robot on `result.done` (and `result.success`). This is not skill code, and it
+  is **still outstanding** — the fix above makes `done=false` rare, not
+  impossible.
 
 ---
 
@@ -146,14 +171,18 @@ near/wrong-side). Contents:
   a3=−0.3922, d4=0.1333, d5=0.0997, d6≈0.0996; joint limits: elbow ±π, rest
   ±2π; joint order = `ARM_JOINT_NAMES`). Verified: zero-config flange =
   `(-0.817, -0.233, 0.063)` = exactly `(-(a2+a3), -(d4+d6), d1-d5)`.
-- **Numerical IK** = damped least-squares (Levenberg) with a geometric Jacobian,
-  seeded at the current joints + a **10-seed** pan×elbow grid, joint-limit
-  clamping, a stall early-out, and a wrist-center annulus pre-filter. Used as a
-  boolean gate ("does a joint-limit-valid solution exist?"). `max_iters=80`,
-  `damping=0.06`, `max_reach_checks=24` (only the top-24 ranked candidates get
-  the numerical solve). ~1 ms/solve with a near seed; ~130 ms worst-case
-  unreachable; near-seed round-trip 100 %, **cold round-trip only ~96.7 %**
-  (this matters — see §9).
+- **Closed-form IK** (replaced the damped-least-squares solver). The MJCF chain
+  above is bit-for-bit the classical UR5e DH chain (`a`, `d`, `alpha` in
+  `_DH_A/_DH_D/_DH_ALPHA`; equality asserted to 1e-12 by
+  `test_mjcf_chain_is_the_classical_ur5e_dh_chain`), so the textbook UR solution
+  runs directly in the model frame with **no adapter transform**. `solve_all`
+  enumerates all 8 branches (shoulder × wrist × elbow); `solve(seed)` returns the
+  branch nearest the seed; `reachable` is `bool(solve_all(...))`. Measured over
+  3000 random configs: **0 misses**, worst residual 2.3e-12 m / 0 rad,
+  mean 7.07 branches per pose, ~0.2 ms/pose (133 µs to reject an unreachable
+  one). The old DLS was ~260 ms/check and missed ~3 % of poses cold — which is
+  why the gate could only afford a 24-candidate shortlist, and that shortlist is
+  what actually broke the run (§8).
 - **`autocalibrate`** (KEY): the workcell `base_link` TF differs from the UR
   kinematic base by the classic **180°-about-Z flip**. From ONE static
   `(measured_joints, base_T_tcp)` sample it tries candidate base rotations
@@ -196,7 +225,7 @@ Repo root: `c:\Users\anshu\College\aic\aic` (the real git repo + code live in
   `estimate_board_pose_from_insignia`, `nic_sector_corners`/`sc_`/`sfp_`,
   `board_coverage_corners`, `module_coverage_corners`, **`search_survey_pose`**
   (now takes `reachable: Callable[[Transform],bool] | None` and
-  `max_reach_checks`), `verify_survey_view`.
+  no longer `max_reach_checks` — deleted), `verify_survey_view`.
 - `flowstate/aic_perception/check_board_visibility_skill.py` —
   `_run_sfp_geometric_stage2` (Stage-2 runner; builds the `reachable` callable
   via `UR5eArm.autocalibrate`, loops `_bore_view_tilt_bands`, calls
@@ -292,97 +321,174 @@ The full colcon test flow the user runs in WSL:
 
 ---
 
-## 8. What fails RIGHT NOW (precise)
+## 8. Root cause (measured offline, 2026-07-25)
 
-**Failure A (the immediate crash):**
-`ai.intrinsic.move_robot:10601 … Failed to create Pose from proto which contains
-a non-unit quaternion with norm(quat)==0 … position { } orientation { }`.
-Root cause: Stage 2 returned `done=false` (no reachable pose), so `survey_pose`
-is empty (identity/zero), and the **behavior tree ran Move Robot on it anyway**.
-FIX (BT-side, not skill): gate the Move Robot branch on
-`result.success && result.done`; on not-done, skip/replan instead of moving.
+**Failure A (the crash):** `move_robot ... norm(quat)==0`. Stage 2 returned
+`done=false`, so `survey_pose` was empty, and the **behavior tree ran Move Robot
+on it anyway**. FIX (BT-side, not skill): gate the Move Robot branch on
+`result.success && result.done`. **Still outstanding.**
 
-**Failure B (the real problem):** at board yaw 0°, Stage 2 logs
-`no safe all-camera survey pose: 255 pose(s) framed the target in all required
-cameras but none had a reachable joint-limit-valid IK solution (294 candidates
-evaluated)`. The gate is calibrated correctly (base=Rz180, tool 197 mm) yet
-finds **zero** reachable framed poses. The user is (reasonably) frustrated: "why
-is it failing to compute successful IK solutions at all poses — this seems
-inherently broken." It reproduces at yaw 0 and "all poses."
+**Failure B (`255 framed but none reachable`): SOLVED.** Neither hypothesis in
+the original §9 was the whole story; the reproduction settles it.
 
----
+Reproduced offline with the real workcell geometry, read out of
+`aic_utils/aic_mujoco/mjcf/aic_world.xml`: the kinematic base ("tabletop") sits
+at world `(-0.2, 0.2, 1.14)` and `task_board_base_link` at
+`(0.1445, -0.0602, 1.14)`, yaw `-177.26 deg`. Through the `base=Rz180`
+convention that is a board at **`(-0.3445, 0.2602, 0.0)` in `base_link`, yaw
++2.7 deg** — i.e. the "board yaw 0" failing case, and it explains why the
+published poses had negative X. Note the board plate is at **exactly the height
+of the arm's own base**.
 
-## 9. Leading hypotheses & the CORE TENSION (read this)
+Feeding that through the production NIC search, with the gate instrumented to
+scan every candidate rather than 24:
 
-Two non-exclusive explanations for Failure B:
+| band | framed | reachable | rank of the first reachable |
+|---|---|---|---|
+| committed bore (12-22 deg) | 389 | 0 | — |
+| flat fallback (0-22 deg) | 263 | 1 | **262 of 263** |
 
-**H1 — the numerical IK is too weak (false negatives).** The far/bore-side
-survey poses require arm configurations *far* from the current joints (shoulder
-rotation + possible elbow flip to reach the far side). The DLS is seeded at the
-current joints + only 10 canonical seeds; its **cold round-trip is only ~96.7 %**,
-and for these specific far configs the miss rate is plausibly much higher — so
-it rejects poses the real robot *can* reach. If true, the gate is the bug, not
-the geometry. **Strong candidate.**
+- Framing the five cards in the centre camera requires a **0.66-1.3 m
+  standoff**; the framed set contains nothing closer.
+- Because the board is level with the arm's base, those standoffs put the TCP
+  0.79-1.15 m out and up to **1.05 m above the base, looking down** — which no
+  UR5e configuration achieves. Only the very closest framed poses are reachable.
+- `prefer_far_standoff=True` ranks the **farthest first**, so the 24-candidate
+  shortlist consisted entirely of ~1.1 m poses. Guaranteed miss.
 
-**H2 — the framed candidates are genuinely (near-)unreachable.** NIC framing
-uses `prefer_far_standoff=True` + the cage box (tall cards) → the center camera
-only frames the sector at HIGH standoff (0.85–1.0 m); at that standoff the TCP
-is ~0.8+ m from base — at/over the reach edge. The bore-side −X shift pushes it
-further. So *every framed candidate* may sit outside the reachable envelope.
-This is a **fundamental conflict**: "frame the tall cards well" wants far/high;
-"stay reachable" wants near. The sphere hid this (it happily passed far poses);
-the IK gate exposes it honestly. At 70° a reachable pose existed; at 0° maybe
-not. **Also strong.**
+So: **H2 was largely right** (the framed population really is mostly out of
+reach — an honest geometry conflict), **H1 was largely wrong** (the closed-form
+solver reproduces the DLS verdicts on this population; the DLS was not
+manufacturing false negatives here), and the actual bug was the **shortlist**,
+which neither hypothesis named.
 
-These have OPPOSITE fixes, so the next session must distinguish them first:
-- If **H1**: make IK trustworthy — implement **closed-form analytic UR5e IK**
-  (8 branches, exact, no seed dependence). This is now safe because
-  `autocalibrate` gives the exact base (Rz180) + tool, so the closed-form
-  solver can run in the calibrated model frame. Then reachability is definitive.
-- If **H2**: change the VIEW STRATEGY — allow the NIC sector to be framed from a
-  CLOSER, reachable standoff (drop or cap `prefer_far`, shrink the cage box,
-  relax `require_all_cameras`/`min_required_clearance`), i.e. accept a nearer
-  view that the IVM can still use. This loops back to the view-geometry question
-  the user spent a long time on; the constraint now is "must be reachable."
+## 9. The fix
 
-**How to distinguish (offline, no rebuild):** in
-`c:/Users/anshu/College/aic/aic/flowstate/aic_perception`, reproduce a realistic
-scenario (see the sweep scripts this session used: import
-`test/test_board_stage2.py::_production_camera_rig`, build a board pose, a
-`UR5eArm` with a 0.16 m tool and `base=Rz180`, seed IK with a plausible
-current-joint config). For the exact failing poses, do a **400k brute-force**
-over joint space (as done this session) to check whether ANY config reaches them
-within a few mm — if yes and DLS said no → H1; if no → H2. Better: get the real
-`(measured_joints, base_T_tcp)` and the 255 candidate `base_T_tcp` from the live
-run (add a one-line log dumping the top candidate's pose + the brute-force
-result) to settle it in one deploy.
+1. **Closed-form UR5e IK** (`arm_ik.solve_all`) replaces the DLS — see §3.4.
+   Exact and ~1300x faster, which is what makes step 2 affordable.
+2. **Gate every framed candidate in rank order** (`max_reach_checks` deleted from
+   `search_survey_pose`). `prefer_far_standoff` now means what it says: the
+   farthest standoff that is genuinely reachable.
 
-**The user's stated preference:** "go back to when perception actually got
-proper IK and derive from there." Concretely that means: consider reverting the
-hard IK gate to the sphere (or making the gate *soft* — prefer reachable but
-fall back to the best geometric pose rather than `done=false`), get moves
-happening again, and rebuild reachability more carefully. A **soft gate** +
-the BT `done` guard would at least stop the crash and restore motion while H1/H2
-is resolved.
+Offline sweep — board yaw 0/45/70/90/140/180/250/315 deg x tilt 0/10 deg x
+placement (0,0)/(+50,+30)/(-50,-40) mm x two Stage-1 exit poses = **96/96
+scenarios produce a pose** (before: 0/96 at yaw 0). Regression tests:
+`test_reachability_gate_scans_every_framed_candidate_not_a_shortlist`
+(board_stage2) and the rewritten exactness tests in `test_arm_ik.py`.
+
+## 10. SUPERSEDED — the bore-side tilt question (kept for history)
+
+Everything below this line described the pre-fix NIC recipe, which tilted the
+camera 12-22 deg across the rail on the assumption the SFP port mouths opened
+sideways. **That assumption was wrong** (see §9.1) and the whole premise of "buy
+the bore tilt at yaw 0" no longer applies — NIC does not tilt at all anymore.
+Left in place only so the reasoning trail isn't lost; §9.1-§9.3 are current.
 
 ---
 
-## 10. Recommended next steps (in order)
+### 9.1 The view geometry was backwards (found from a real run, 2026-07-25)
 
-1. **Stop the crash (BT):** gate Move Robot on `result.success && result.done`.
-   Non-negotiable regardless of H1/H2.
-2. **Decide the gate posture** with the user: hard gate (current, honest but can
-   produce `done=false`) vs **soft gate** (publish best reachable, else best
-   geometric — restores motion, risks an occasional Move-Robot IK reject). A
-   soft gate is the pragmatic bridge.
-3. **Settle H1 vs H2** with the brute-force test / a one-deploy pose dump.
-4. If H1 → **closed-form UR5e IK** (replace DLS). If H2 → **reachable-first view
-   strategy** (cap standoff to reachable, closer NIC view; verify IVM still
-   detects). Likely BOTH are partly true → do both.
-5. Re-run the full suite (`pytest test/ -q`), update `docs/BOARD_SEARCH_HANDOFF.md`,
-   rebuild + install (§5).
+A hardware run at 70/250 deg board yaw worked but the 250 deg case took the arm
+through an ugly ~360 deg joint-6 swing to reach the published pose (a downstream
+IK-branch-selection question, not a skill bug — see §9.3). A third run, at the
+board orientation in the user's screenshots, failed outright:
 
----
+```
+IK could not find a collision free configuration.
+Collision reported: robot.forearm_link vs left_camera.camera_link (all 4 solutions)
+published pose: (-0.1001, 0.4162, 0.6859), bore_band=12-22deg
+```
+
+Measuring the actual SFP port geometry from `aic_world.xml` (mount 2, the
+`nic_card_mount` -> `nic_card_link` -> `sfp_port_N_link` -> `..._entrance` chain)
+settled a question the code had been guessing at: each port is a **16 x 12 mm
+aperture at the top of a 45.8 mm recess whose axis points straight *up*** —
+board-frame bore axis `(0.001, -0.013, -0.9999)`, i.e. 0.7 deg off the board
+normal, entrance at board Z 0.1793. A port only shows the black depth the IVM
+keys on to a ray within `atan(6/45.8) = 7.5 deg` of that axis; past that the
+cage wall occludes the backstop and the port reads as a flat grey rectangle.
+
+The code's cross-rail bore tilt (12-22 deg, committed) was built on the opposite
+assumption — that the mouths opened sideways, the way the SC ports genuinely do.
+Scored against the measured cone, that band resolved **0 of 10 ports** wherever
+it was reachable. This — not reachability — is the reason NIC framing never got
+more than 2-4 cards historically, and it explains the user's own annotated
+screenshot: tilted views (X'd) read the cages edge-on; straight-down views
+(checked) show the black holes.
+
+**Fix (`check_board_visibility_skill.py::_survey_view_settings`, target 2):**
+look straight down (`max_obliquity_rad=2 deg`, no cross-rail tilt — NIC dropped
+out of `_bore_view_tilt_bands`, which now only serves SC), all three cameras
+(`require_all_cameras_frame=True`), farthest reachable standoff
+(`prefer_far_standoff=True` — now justified by real geometry: the ten ports
+span 160 mm, so the outermost needs `d >= 0.62 m` above the port plane to stay
+in the 7.5 deg cone), and `min_required_clearance_px=25` (down from 40 — needed
+for the three cameras to fit together; the gripper mask already dilates the
+silhouette by 32 px underneath this, so cards still stay 57 mm-equivalent clear
+of real gripper pixels). `nic_sector_corners()` is now centred on the ten port
+entrances rather than the card bodies (the old centroid sat 16 mm off the port
+cluster, enough to push the outermost port past the cone on its own).
+
+### 9.2 The reachability gate had no collision model
+
+The `robot.forearm_link` collision above is real and the IK gate — purely
+kinematic — had no way to see it. Its four reported joint configurations
+reproduce the published TCP through `arm_ik`'s FK to **0.0 mm**, which is also
+the first end-to-end validation of the whole model (DH chain, `base=Rz180`,
+197.1 mm tool) against the real robot, not just self-consistency tests. The
+planner's best branch put a wrist camera **111 mm** from the forearm centreline
+— all four solutions collided.
+
+**Fix:** `UR5eArm` gained `flange_T_probes` (points rigidly attached to the
+flange — the three wrist cameras, populated from the same TF-derived extrinsics
+the skill already has) and `min_self_clearance_m` (calibrated to **140 mm**, a
+26% margin over the 111 mm ground truth). `solve()`/`reachable()` now require a
+branch clearing every probe from the elbow->wrist_1 segment.
+`test_wrist_camera_keep_out_rejects_a_pose_the_workcell_planner_refused` in
+`test_arm_ik.py` carries the planner's exact four configs as a permanent
+regression.
+
+### 9.3 The ~360 deg joint-6 swing at yaw 250
+
+Not a skill bug. The skill publishes a **Cartesian** `survey_pose`; Move Robot's
+own planner chooses the joint configuration and path to reach it, including
+which branch of joint 6 (`-133.8 deg` vs its co-terminal `226.2 deg`) to use. If
+that swing recurs on a future run it is a Move Robot / motion-planning question,
+not something `search_survey_pose` controls — it has no visibility into joint
+angles at all, only Cartesian poses.
+
+### 9.4 Result — measured over 96 scenarios (board yaw 0-315 deg x tilt 0-10 deg
+x +/-50 mm placement x two Stage-1 exit poses), full production settings
+including the collision gate:
+
+| metric | value |
+|---|---|
+| pose found | **90/96** |
+| all 10 ports resolved (of found) | 80/90 |
+| worst port ray | 8.7 deg (cone limit 7.5 — the degraded fallback poses below) |
+| standoff | 0.55-0.80 m |
+| camera-forearm clearance | 141-207 mm (threshold 140) |
+| reorientation used | 0-90 deg (cap 90) |
+
+The 6 misses cluster at board yaw 45 deg (nominal and jittered placement) and
+70 deg (jittered only). **Confirmed a hard geometric ceiling, not a sampling
+gap:** at yaw 45 even a 72-value roll sweep (5 deg steps, vs the production
+24-value/15 deg) tops out at **140.7 mm** of forearm clearance, and that single
+candidate resolves only 6/10 ports — the fixed camera-rig splay (yaws 90/30/150
+deg) and this specific board orientation squeeze the reachable envelope, the
+7.5 deg port cone, and the 140 mm keep-out into a near-empty intersection. Not
+worth shaving the collision threshold to grab it: the ground-truth-calibrated
+140 mm should not move, and the one pose that clears a lower bar still doesn't
+resolve all the ports. This is exactly the case the graceful `done=false` +
+BT `result.done` gate (§8, Failure A — **still outstanding**) exists for: no
+good pose, so no move, rather than a bad move.
+
+`NIC_VIEW` settings that produced this (see `_survey_view_settings(2)`):
+`max_obliquity_rad=2 deg`, `min_required_clearance_px=25`,
+`max_angular_motion_rad=90 deg`, `yaws_rad` = 24 values (15 deg steps, vs the
+7-value/45-deg-band default other sectors keep) — search cost is correspondingly
+higher (tens of seconds per candidate set vs ~3 s pre-collision-gate) but this
+runs once per Stage-2 handoff, not in a control loop.
 
 ## 11. Key numbers & geometry reference
 
@@ -398,9 +504,15 @@ is resolved.
 - Survey search NIC/SC: `cross_rail_sign=-1`, bands ((12°,22°),(0°,22°)),
   `require_all_cameras_frame=False`, `prefer_far_standoff=True`,
   `min_required_clearance_px=40`, `max_reach_m=0.85`, `min_height_m=0.02`,
-  `max_reach_checks=24`, standoffs 0.30…1.25.
+  standoffs 0.30…1.25 (the gate now checks every framed candidate).
 - Observed failing published poses (sphere, pre-gate): `(-0.28,0.07,0.76)` std
   0.90; `(-0.09,0.41,0.74)` std 0.85 → Move Robot IK reject.
+- Workcell placement (from `aic_world.xml`, for offline reproduction): kinematic
+  base at world `(-0.2, 0.2, 1.14)`; `task_board_base_link` at
+  `(0.1445, -0.0602, 1.14)` quat `(w=0.0239514, z=-0.999713)` → in `base_link`,
+  board origin `(-0.3445, 0.2602, 0.0)` at yaw `+2.7°`, level with the arm base.
+- Post-fix pick at that placement: standoff 0.73 m, TCP `(-0.396,0.183,0.626)`,
+  |t| 0.763 m, cross-tilt 0° (flat band).
 
 ---
 

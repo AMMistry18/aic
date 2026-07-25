@@ -1418,3 +1418,38 @@ def test_reachability_gate_falls_through_to_the_next_reachable_candidate():
     )
     assert gated is not None, r1
     assert not np.allclose(gated.base_T_tcp.translation, top)
+
+
+def test_reachability_gate_scans_every_framed_candidate_not_a_shortlist():
+    """The one reachable pose may rank last, so the gate must scan the lot.
+
+    This is the production failure this gate was written for: for the NIC sector
+    only the *closest* framed poses are inside the UR5e envelope, while
+    ``prefer_far_standoff`` ranks the far ones first -- so the single reachable
+    candidate sat ~260 places down a 263-long ranking.  A gate that only checked
+    a shortlist of the best-ranked poses reported "framed N but none reachable"
+    and Stage 2 returned done=false with a perfectly good pose available.
+    """
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    seen = []
+
+    def census(base_T_tcp):
+        seen.append(np.asarray(base_T_tcp.translation))
+        return False
+
+    assert search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, reachable=census
+    )[0] is None
+    assert len(seen) > 30, "too few framed candidates to prove the point"
+    last = seen[-1]
+
+    # Only the very last-ranked pose is reachable: the gate must still find it.
+    def only_the_last(base_T_tcp):
+        return bool(np.allclose(base_T_tcp.translation, last))
+
+    gated, reason = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, reachable=only_the_last
+    )
+    assert gated is not None, reason
+    assert np.allclose(gated.base_T_tcp.translation, last)
