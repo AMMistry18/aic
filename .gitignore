@@ -42,3 +42,10 @@ RL/output/
 # Evaluation results: rosbag recordings (.mcap) and scoring/metadata are large,
 # regenerable outputs — too big for GitHub (100 MB/file limit). Kept on disk only.
 aic_results/
+
+# Session scratch. .artifacts/ holds ~800 MB worktree copies per entry alongside
+# the handoff docs, so ignore it wholesale and re-include only what we track.
+.artifacts/*
+!.artifacts/HANDOFF_*.md
+!.artifacts/sc_detections.png
+.worktrees/
