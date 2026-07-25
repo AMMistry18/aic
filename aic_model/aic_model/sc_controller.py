@@ -20,16 +20,16 @@ Ground truth, all derived from the shipped assets (not measured, not guessed):
     to ``sc_port_link``, so the seat point is 2 mm behind the port origin and the
     insertion axis is ``sc_port_link`` -Y.
   * Opening walls: side walls centred at x=+/-12.047 mm (1.687 mm thick) give
-    inner faces at +/-11.204 mm.  The ceiling is ``cube_collider_box.001``
-    (z 4.225 mm, 0.850 mm thick, and 25.781 mm wide so it spans the whole face),
-    inner surface at **+3.800**; the floor is ``.002``, inner surface at -4.050.
-    The duplex opening is therefore 22.41 mm x **7.85 mm** and is NOT symmetric
-    about z=0, split by a 2.99 mm centre divider into two 9.71 mm bores on a
-    12.7 mm pitch (the standard SC duplex pitch -- a useful sanity check that
-    this reading of the collision set is right).
-    The ``cube_collider_box_mid*`` boxes at +4.050 are recessed inside ``.001``
-    and only 5-10 mm wide, so they never lower the ceiling; taking them for the
-    top plate is what produced the 8.10 mm figure recorded here previously.
+    inner faces at +/-11.204 mm.  Height is depth-dependent: the full-depth
+    ``cube_collider_box_mid*`` rails put the ceiling at +4.050, but
+    ``cube_collider_box.001`` is a 10.8 mm-deep lip across the middle of the
+    channel that drops it to **+3.800**; the floor is ``.002`` at -4.050
+    throughout.  The plug passes through the lip, so the binding opening is
+    22.41 mm x **7.85 mm**, asymmetric about z=0.  It is split by a 2.99 mm
+    centre divider into two 9.71 mm bores on a 12.7 mm pitch (the standard SC
+    duplex pitch -- a useful sanity check that this reading is right).
+    8.10 mm is the height clear of the lip and is a real dimension; it is just
+    not the one a clearance budget can be built on.
 
 ``aic_description/urdf/task_board.urdf.xacro``
   * SC ports are posed rpy ``(1.57 + roll, pitch, 1.57 + yaw)`` on the board, so
@@ -148,13 +148,19 @@ def _env_vector(name: str, default: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------
 SC_INSERT_DEPTH_M = 0.01564          # sc_port_base_link_entrance -> sc_port_base_link
 SC_OPENING_WIDTH_M = 0.02241         # duplex inner width  (port +X / board +Y)
-# Clear height, and the opening is NOT symmetric about z=0.  The ceiling is
-# cube_collider_box.001 -- z 4.225 mm, 0.850 mm thick, x-size 25.781 mm, so it
-# spans the full face and its inner surface is at +3.800.  The three
-# cube_collider_box_mid* boxes sit at +4.050..+4.650, i.e. entirely inside
-# .001's z-range and only 5-10 mm wide, so they never lower the ceiling; reading
-# +4.050 off them (and assuming symmetry) is what produced the old 8.10 figure.
-# Floor is .002's inner surface at -4.050.  3.800 + 4.050 = 7.850.
+# MINIMUM clear height along the insertion path.  The channel is neither
+# symmetric about z=0 nor constant along its depth, so there are two defensible
+# numbers here and only one of them is a clearance budget:
+#   * cube_collider_box_mid / _mid02 / _mid03 run the FULL 27.432 mm depth at
+#     z 4.050..4.650, so the ceiling is +4.050 over most of the channel.
+#   * cube_collider_box.001 is a LIP, not a plate: full width (x 25.781) but
+#     only 10.8 mm deep, centred at y=0, spanning z 3.800..4.650.  Through that
+#     band the ceiling drops to +3.800.
+#   * Floor is .002 at -4.050, full depth.
+# The plug traverses the lip -- 15.64 mm of insertion from the y=+13.716 face
+# reaches y=-1.92, and the lip spans y=-5.4..+5.4 -- so the binding height is
+# 3.800 + 4.050 = 7.850 mm.  8.10 mm is the height everywhere else and is not a
+# misreading; it is simply not the number a tolerance budget can use.
 SC_OPENING_HEIGHT_M = 0.00785        # duplex inner height (port +Z / board +X)
 SC_BORE_WIDTH_M = 0.00971            # one bore, between side wall and divider
 SC_BORE_PITCH_M = 0.01270            # standard SC duplex pitch
@@ -264,7 +270,12 @@ SC_MAX_DETS_PER_CAM = max(1, int(_env_float("RL_INSERT_SC_MAX_DETS_PER_CAM", 8))
 # WARNING -- this gate no longer has the margin its value was chosen for, and it
 # is a 3D distance, so handoff height is mixed into a lateral decision.
 # It was sized against 41 mm slot spacing, which is stale (see the ground truth
-# above: the board now carries sc_port_0..4).  The only safe bound is that
+# above: the board now carries sc_port_0..4).  Upstream
+# docs/task_board_description.md is explicit that the board "supports up to five
+# SC ports, distributed across two rails" and that ports "slide along their rails
+# to allow for randomized positional offsets" over [0, 0.115] m -- so there is no
+# fixed pitch to lean on at all, and two ports on one rail can end up adjacent.
+# The only safe bound is that
 # adapters cannot overlap, so neighbours are >= 25.78 mm apart laterally -- and
 # at a 15 mm handoff height a shoulder-to-shoulder neighbour sits at
 # sqrt(25.78^2 + 15^2) ~= 29.8 mm, i.e. just INSIDE this 30 mm gate.

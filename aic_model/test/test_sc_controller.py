@@ -131,10 +131,11 @@ def test_pnp_rectangle_matches_the_convention_the_weights_emit():
     )
 
 
-def test_clear_opening_height_is_the_asymmetric_sdf_value():
-    # The ceiling is cube_collider_box.001 (inner face +3.800), not the recessed
-    # cube_collider_box_mid* boxes at +4.050. Reading the latter gives 8.10 mm
-    # and overstates the vertical clearance by 17%.
+def test_clear_opening_height_is_the_binding_value_not_the_roomiest():
+    # The channel height varies along its depth: +4.050 under the full-depth
+    # _mid* rails, but +3.800 through the 10.8 mm-deep cube_collider_box.001
+    # lip, which the plug must pass. Budgeting against the roomier 8.10 mm
+    # overstates vertical clearance by 17%.
     assert np.isclose(SC_OPENING_HEIGHT_M, 0.00785)
     vertical_clearance = (SC_OPENING_HEIGHT_M - sc_controller.SC_PLUG_HEIGHT_M) / 2.0
     assert np.isclose(vertical_clearance, 0.000725)
