@@ -362,6 +362,12 @@ SC_MAX_OPENING_M = _env_float("RL_INSERT_SC_MAX_OPENING_M", 0.030)
 # shrinkage" from "the loaded weights are not one of the two we know about".
 SC_OPENING_RESIDUAL_WARN_M = _env_float("RL_INSERT_SC_OPENING_RESIDUAL_WARN_M", 0.006)
 
+# Search cyclic relabellings of each camera's four keypoints before triangulating
+# (see _best_keypoint_correspondence).  Costs 4^(n_cameras-1) triangulations per
+# combination -- 16 for three cameras -- against a failure that otherwise rejects
+# every frame.  Set to 0 to get the old index-to-index behaviour back.
+SC_KEYPOINT_ROLL_SEARCH = _env_bool("RL_INSERT_SC_KEYPOINT_ROLL_SEARCH", True)
+
 
 @dataclass
 class SCConfig:
@@ -1197,6 +1203,85 @@ def _log_sc_rejections(log, rejects, limit=8):
     )
 
 
+def _rolled_kps(kps, roll: int) -> np.ndarray:
+    """The same four corners, relabelled by a cyclic shift."""
+    return np.roll(np.asarray(kps, dtype=np.float64)[:4], -roll, axis=0)
+
+
+def _triangulate_quad(policy, picks, rolls) -> np.ndarray:
+    Ps = [pick["P"] for pick in picks]
+    rolled = [_rolled_kps(pick["kps"], r) for pick, r in zip(picks, rolls)]
+    return np.array(
+        [policy._pc.triangulate([tuple(k[i]) for k in rolled], Ps) for i in range(4)],
+        dtype=np.float64,
+    )
+
+
+def _mean_reproj_px(policy, picks, rolls, kp_3d):
+    errors = []
+    for pick, roll in zip(picks, rolls):
+        kps = _rolled_kps(pick["kps"], roll)
+        for i in range(4):
+            err = policy._reproject_error_px(kp_3d[i], pick["K"], pick["T"], kps[i])
+            if err is not None:
+                errors.append(err)
+    return float(np.mean(errors)) if errors else None
+
+
+def _best_keypoint_correspondence(policy, picks):
+    """Resolve which camera's corner 0 is which physical corner.
+
+    ``detect_sc_pose`` returns four keypoints per detection, but their starting
+    corner is not stable between viewpoints -- a weakly-detected port can come
+    back labelled from a different corner than the same port in another camera.
+    Triangulating index-to-index then pairs corner 0 with corner 2 and produces a
+    quad that is not the port at all.
+
+    2026-07-25 18:46 is the worked example: the left camera saw the same physical
+    port as the centre camera (centroids within 1.1 px) but labelled it rotated
+    by two.  Matching as-is put the corners 18.6 px apart; rotating by two put
+    them 2.4 px apart.  The result reprojected at 11.5 px against a 5.0 px gate,
+    with residuals uniformly high on ALL FOUR corners -- the signature of a
+    labelling mismatch rather than one bad corner -- and measured the opening
+    3.35 x 7.14 mm instead of 7.09 x 4.06, i.e. transposed.
+
+    So try each cyclic relabelling and keep whichever actually reprojects.  The
+    first camera is held fixed as the reference (a roll applied to every camera
+    at once is a pure relabelling: same 3D points, same reprojection error), so
+    the search is 4^(n-1) -- 16 assignments for three cameras.
+
+    Returns ``(kp_3d, rolls, mean_reproj_px)`` or None.
+    """
+    options = range(4) if SC_KEYPOINT_ROLL_SEARCH else (0,)
+    best = None
+    for rolls in itertools.product((0,), *([options] * (len(picks) - 1))):
+        try:
+            kp_3d = _triangulate_quad(policy, picks, rolls)
+        except Exception:
+            continue
+        mean_px = _mean_reproj_px(policy, picks, rolls, kp_3d)
+        if mean_px is None:
+            continue
+        if best is None or mean_px < best[2]:
+            best = (kp_3d, rolls, mean_px)
+    if best is None:
+        return None
+
+    # A roll applied to EVERY camera leaves the triangulated points and the
+    # reprojection untouched and only renames the corners, so it is free to
+    # normalise the convention: the label rectangle is 8.8 wide x 6.0 tall, so
+    # `width` must come out as the long axis.  Without this, a reference camera
+    # that happens to start a quarter-turn round transposes width and height,
+    # which classify_opening and the candidate score both read.
+    kp_3d, rolls, mean_px = best
+    width = float(np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)))
+    height = float(np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5)))
+    if height > width:
+        rolls = tuple((r + 1) % 4 for r in rolls)
+        kp_3d = np.roll(kp_3d, -1, axis=0)
+    return kp_3d, rolls, mean_px
+
+
 def sc_multiview_candidates(policy, per_cam):
     """Triangulate the four SC keypoints across cameras.
 
@@ -1212,17 +1297,25 @@ def sc_multiview_candidates(policy, per_cam):
 
     candidates = []
     rejects = []
+    rolled_count = 0
     for picks in itertools.product(*[per_cam[cam] for cam in cams]):
-        kp_3d = []
         try:
-            for i in range(4):
-                pts_2d = [tuple(pick["kps"][i]) for pick in picks]
-                Ps = [pick["P"] for pick in picks]
-                kp_3d.append(policy._pc.triangulate(pts_2d, Ps))
+            resolved = _best_keypoint_correspondence(policy, picks)
         except Exception as exc:
             rejects.append(("triangulate_error", f"{type(exc).__name__}"))
             continue
-        kp_3d = np.array(kp_3d, dtype=np.float64)
+        if resolved is None:
+            rejects.append(("triangulate_error", "no correspondence reprojected"))
+            continue
+        kp_3d, rolls, _ = resolved
+        if any(rolls):
+            rolled_count += 1
+        # Everything downstream -- reprojection, diagnostics, the kps recorded on
+        # the candidate -- must see the SAME relabelling that was triangulated.
+        picks = tuple(
+            dict(pick, kps=_rolled_kps(pick["kps"], roll))
+            for pick, roll in zip(picks, rolls)
+        )
         X = kp_3d.mean(axis=0)
         if X[2] < -0.05 or X[2] > 0.25:
             rejects.append(("depth", f"z={X[2] * 1000:.0f}mm"))
@@ -1280,6 +1373,16 @@ def sc_multiview_candidates(policy, per_cam):
     # produces one candidate out of eight is also worth knowing about.
     if rejects:
         _log_sc_rejections(log, rejects)
+    if rolled_count:
+        # Not an error -- this is the fix working -- but it says the detector's
+        # corner order is unstable between viewpoints, which is what would have
+        # to be retrained away.  Track it: if it climbs towards every
+        # combination, the roll search is carrying the whole pipeline.
+        log.info(
+            f"[sc] SC_KEYPOINT_ROLL {rolled_count} combination(s) needed a corner "
+            "relabelling to reproject; index-to-index matching would have "
+            "rejected them"
+        )
 
     candidates.sort(key=lambda c: c["score"])
     return candidates

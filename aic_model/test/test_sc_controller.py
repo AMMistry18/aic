@@ -992,3 +992,87 @@ def test_calibration_dump_runs_even_when_perception_fails(monkeypatch):
 
     assert result is False, "perception failure must still fail the run"
     assert dumped["n"] == 1, "but the grasp sample must have been taken anyway"
+
+
+# ---------------------------------------------------------------------------
+# Keypoint corner-order (roll) resolution.
+# ---------------------------------------------------------------------------
+def _roll_one_camera(per_cam, cam, roll):
+    """Relabel one camera's corners, as a weak detection does in the field."""
+    out = dict(per_cam)
+    det = dict(out[cam][0])
+    det["kps"] = np.roll(np.asarray(det["kps"], dtype=np.float64), -roll, axis=0)
+    out[cam] = [det]
+    return out
+
+
+@pytest.mark.parametrize("roll", [1, 2, 3])
+def test_a_relabelled_camera_still_triangulates(roll):
+    """The 2026-07-25 18:46 failure, reproduced for every cyclic relabelling.
+
+    Index-to-index matching pairs corner 0 with corner 2 and reprojects at
+    ~11.5 px against a 5.0 px gate. Searching the relabellings recovers the
+    true rectangle.
+    """
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", roll)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert candidates, f"a camera labelled from corner {roll} must still resolve"
+    best = candidates[0]
+    assert best["reproj_px"] < 1.0, "the recovered correspondence must reproject cleanly"
+    assert best["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+    assert best["height"] == pytest.approx(_LABEL_HEIGHT_M, abs=1e-5)
+
+
+def test_index_to_index_matching_really_does_fail_without_the_search(monkeypatch):
+    # Pin that the parametrised test above is testing something real: with the
+    # search off, a relabelled camera is exactly the field failure.
+    monkeypatch.setattr(sc_controller, "SC_KEYPOINT_ROLL_SEARCH", False)
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", 2)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert not candidates or candidates[0]["reproj_px"] > 5.0, (
+        "without the search a 180-degree relabelling must blow the select gate"
+    )
+
+
+def test_correct_correspondence_is_left_alone():
+    # No relabelling needed: the search must not disturb a clean detection.
+    clean = _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), clean)
+
+    assert candidates
+    assert candidates[0]["reproj_px"] < 1e-6
+    assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+
+
+def test_width_is_normalised_to_the_long_axis():
+    # The label is 8.8 wide x 6.0 tall. A reference camera that starts a quarter
+    # turn round would otherwise transpose them, and both classify_opening and
+    # the candidate score read width/height.
+    views = _roll_one_camera(
+        _roll_one_camera(_stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_a", 1),
+        "cam_b", 1)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert candidates
+    assert candidates[0]["width"] > candidates[0]["height"]
+    assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+
+
+def test_roll_usage_is_reported():
+    log = _RecordingLog()
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", 2)
+
+    sc_controller.sc_multiview_candidates(_stereo_policy(log), views)
+
+    assert any("SC_KEYPOINT_ROLL" in line for line in log.info_lines), (
+        "an unstable detector corner order must be visible in the logs"
+    )
