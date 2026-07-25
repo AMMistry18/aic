@@ -9,6 +9,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aic_model"))
 
 import aic_model.sc_controller as sc_controller  # noqa: E402
+from aic_model.rl_insert_contract import (  # noqa: E402
+    matrix_to_quat,
+    port_frame,
+    quat_to_matrix,
+)
+from aic_model.v50_controller import rotation_from_axis_angle  # noqa: E402
 from aic_model.sc_controller import (  # noqa: E402
     SC_TIP_IN_TCP_POS,
     SCConfig,
@@ -499,3 +505,203 @@ def test_rejected_combinations_name_the_gate_and_the_measurement():
     assert "SC_PERCEPT_REJECT" in line
     assert "'size'" in line
     assert "0.8x0.5mm" in line, "the measured rectangle must appear, not just the reason"
+
+
+# ---------------------------------------------------------------------------
+# Seat frame: insertion axis from perception, in-plane twist from the plug.
+# ---------------------------------------------------------------------------
+# Field run 2026-07-25 logged rot_err_deg=[3.19, -4.37, -89.55] on every one of
+# the 7 consensus frames.  The controller chased that ~90 deg and timed out.  It
+# is a frame-convention offset (SFP grasp transform standing in for the
+# uncalibrated SC one), not a real misalignment -- see SC_PRESERVE_HANDOFF_YAW.
+FIELD_PORT_QUAT = np.array([0.0, 0.68978, 0.72402, 0.0], dtype=np.float64)
+FIELD_ROT_ERR_DEG = np.array([3.19, -4.37, -89.55], dtype=np.float64)
+
+
+def _field_frames():
+    """The perceived port frame and plug orientation from the 2026-07-25 run."""
+    Rp = port_frame(FIELD_PORT_QUAT)
+    R_tip = Rp @ rotation_from_axis_angle(np.radians(FIELD_ROT_ERR_DEG))
+    return Rp, R_tip
+
+
+class _FakeNode:
+    _insertion_event_generation = 0
+
+
+class _StubPolicy:
+    """Enough policy for __init__ and _errors(); no ROS, no motion."""
+
+    def __init__(self, tcp_pos, tcp_quat):
+        self._parent_node = _FakeNode()
+        self._tcp_pos = np.asarray(tcp_pos, dtype=np.float64)
+        self._tcp_quat = np.asarray(tcp_quat, dtype=np.float64)
+
+    def get_logger(self):
+        return _RecordingLog()
+
+    def _tcp(self):
+        return self._tcp_pos, self._tcp_quat
+
+
+class _StubTask:
+    target_module_name = "sc_port_0"
+    port_name = "sc_port_base"
+
+
+def _controller_for(R_tip, port_pos, Rp, Rs):
+    """Build a controller whose plug currently sits at ``R_tip``."""
+    R_tcp = R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T
+    tcp_quat = matrix_to_quat(R_tcp)
+    # place the TCP so the derived tip lands exactly on the port mouth
+    tcp_pos = np.zeros(3, dtype=np.float64)
+    tip_pos, _ = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    tcp_pos = port_pos - (tip_pos - tcp_pos)
+    return ScInsertionController(
+        _StubPolicy(tcp_pos, tcp_quat), _StubTask(),
+        lambda: None, None, lambda *_: None,
+        port_pos=port_pos, port_quat=FIELD_PORT_QUAT, Rp=Rp, Rs=Rs,
+    )
+
+
+def test_seat_frame_keeps_the_insertion_axis_and_takes_the_twist_from_the_plug():
+    Rp, R_tip = _field_frames()
+
+    Rs = sc_controller.seat_frame(Rp, R_tip)
+
+    assert np.allclose(Rs[:, 2], Rp[:, 2]), "insertion axis must still come from perception"
+    assert np.allclose(Rs.T @ Rs, np.eye(3), atol=1e-9), "must stay orthonormal"
+    assert float(np.linalg.det(Rs)) == pytest.approx(1.0), "must stay right-handed"
+    # Rs[:,0] is the plug's own x-axis flattened into the opening plane.
+    flattened = R_tip[:, 0] - float(np.dot(R_tip[:, 0], Rp[:, 2])) * Rp[:, 2]
+    assert np.allclose(Rs[:, 0], flattened / np.linalg.norm(flattened))
+
+
+def test_field_2026_07_25_yaw_offset_no_longer_costs_60_alignment_steps():
+    """The regression this change exists for: reproduce the run that timed out.
+
+    _align slews at align_max_rotation_step_rad per iteration, so the rotation
+    error divided by that cap is the number of iterations alignment needs.  The
+    old behaviour needed ~60 against a 15 s budget and never converged.
+    """
+    Rp, R_tip = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    step = SCConfig().validated().align_max_rotation_step_rad
+
+    chasing = _controller_for(R_tip, port_pos, Rp, Rs=Rp)          # old behaviour
+    preserving = _controller_for(R_tip, port_pos, Rp,
+                                 Rs=sc_controller.seat_frame(Rp, R_tip))
+
+    _, _, old_err, _, _ = chasing._errors()
+    _, _, new_err, _, _ = preserving._errors()
+    old_deg = float(np.degrees(np.linalg.norm(old_err)))
+    new_deg = float(np.degrees(np.linalg.norm(new_err)))
+
+    assert old_deg == pytest.approx(89.71, abs=0.1), "fixture must reproduce the field error"
+    assert np.ceil(np.radians(old_deg) / step) >= 55, "old behaviour needed ~60 steps"
+    # What is left is the genuine handoff tilt, inside the 6.9 deg budget the
+    # 1.2 mm lateral clearance allows on a 20 mm plug.
+    assert new_deg < 6.9
+    assert np.ceil(np.radians(new_deg) / step) <= 5, "must now converge in a few steps"
+
+
+def test_seat_frame_does_not_disturb_position_servoing():
+    # Rp and Rs share column 2, so the lateral plane is identical; only rotation
+    # targets may move.  If a position term ever migrates onto Rs this fails.
+    Rp, R_tip = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    offset = np.array([0.0012, -0.0008, 0.004], dtype=np.float64)
+
+    chasing = _controller_for(R_tip, port_pos - offset, Rp, Rs=Rp)
+    preserving = _controller_for(R_tip, port_pos - offset, Rp,
+                                 Rs=sc_controller.seat_frame(Rp, R_tip))
+
+    old_depth, old_lat, _, _, _ = chasing._errors()
+    new_depth, new_lat, _, _, _ = preserving._errors()
+
+    assert old_depth == pytest.approx(new_depth)
+    assert np.allclose(old_lat, new_lat)
+
+
+def test_seat_tilt_correction_is_applied_in_the_frame_it_was_measured_in():
+    """_wrench_plug_frame resolves the wrench through Rp, so acc_tilt is about
+    Rp's lateral axes.  _seat must compose it as ``Rp @ tilt @ R_yaw``; writing
+    the obvious ``Rs @ tilt`` instead would rotate the correction by the very
+    offset the seat frame exists to absorb.
+    """
+    Rp, R_tip = _field_frames()
+    Rs = sc_controller.seat_frame(Rp, R_tip)
+    ctrl = _controller_for(R_tip, np.zeros(3), Rp, Rs=Rs)
+    tilt = rotation_from_axis_angle(np.array([0.010, -0.020, 0.0]))
+
+    correct = ctrl.Rp @ tilt @ ctrl.R_yaw
+    naive = ctrl.Rs @ tilt
+
+    # the tilt lands on the world axis it was actually measured about
+    assert np.allclose(correct @ ctrl.Rs.T, Rp @ tilt @ Rp.T)
+    assert not np.allclose(correct, naive), "the 90 deg offset really does matter here"
+
+
+def test_seat_frame_falls_back_when_the_plug_has_no_in_plane_direction():
+    Rp, _ = _field_frames()
+    # plug x-axis parallel to the insertion axis: nothing to preserve
+    degenerate = np.column_stack([Rp[:, 2], Rp[:, 0], Rp[:, 1]])
+
+    assert np.allclose(sc_controller.seat_frame(Rp, degenerate), Rp)
+
+
+def test_controller_defaults_to_the_perception_frame():
+    # Omitting Rs must reproduce the pre-2026-07-25 behaviour exactly.
+    Rp, R_tip = _field_frames()
+    ctrl = ScInsertionController(
+        _StubPolicy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _StubTask(),
+        lambda: None, None, lambda *_: None,
+        port_pos=np.zeros(3), port_quat=FIELD_PORT_QUAT, Rp=Rp,
+    )
+
+    assert np.allclose(ctrl.Rs, ctrl.Rp)
+    assert np.allclose(ctrl.R_yaw, np.eye(3))
+
+
+def test_run_sc_insertion_hands_the_controller_a_preserved_twist_frame(monkeypatch):
+    """Guard the wiring, not just the geometry.
+
+    The unit tests above construct the controller directly, so they would still
+    pass if run_sc_insertion quietly stopped building a seat frame -- exactly the
+    kind of thing a rebase drops. Assert the frame actually reaches the
+    controller.
+    """
+    Rp, R_tip = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    R_tcp = R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T
+    tcp_quat = matrix_to_quat(R_tcp)
+    tip_pos, _ = sc_tip_pose_from_tcp(np.zeros(3), tcp_quat)
+    tcp_pos = port_pos - tip_pos
+
+    seen = {}
+
+    class _CapturingController:
+        def __init__(self, *_args, **kwargs):
+            seen.update(kwargs)
+
+        def run(self):
+            return True
+
+    class _RunPolicy(_StubPolicy):
+        _wrench_baseline = None
+
+        def _wrench_vector(self, _obs):
+            return np.zeros(6, dtype=np.float64)
+
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
+                        lambda *_: (port_pos, FIELD_PORT_QUAT, 4.35))
+    monkeypatch.setattr(sc_controller, "ScInsertionController", _CapturingController)
+
+    assert sc_controller.run_sc_insertion(
+        _RunPolicy(tcp_pos, tcp_quat), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+
+    assert np.allclose(seen["Rp"], Rp), "perception frame must still be passed through"
+    assert not np.allclose(seen["Rs"], seen["Rp"]), "a seat frame must actually be built"
+    assert np.allclose(seen["Rs"], sc_controller.seat_frame(Rp, R_tip))

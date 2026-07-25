@@ -172,6 +172,33 @@ SC_TIP_IN_TCP_POS = _env_vector("RL_INSERT_SC_TIP_IN_TCP_POS", SFP_TIP_IN_TCP_PO
 SC_TIP_IN_TCP_QUAT = _env_vector("RL_INSERT_SC_TIP_IN_TCP_QUAT", SFP_TIP_IN_TCP_QUAT)
 SC_TIP_CALIBRATED = _env_bool("RL_INSERT_SC_TIP_CALIBRATED", False)
 
+# Take the insertion axis from perception but keep the twist the macro handed us,
+# instead of rotating the plug onto the perceived port yaw.
+#
+# 2026-07-25 field run: `rot_err_deg=[3.19, -4.37, -89.55]` -- 89.71 deg about an
+# axis 3.46 deg off the insertion axis, stable across all 7 consensus frames.
+# That is a frame-convention offset, not a perception error:
+#   * `_estimate_sfp_port_orientation` builds its in-plane axis from exactly the
+#     vector `sc_multiview_candidates` calls `width`, and width (7.39mm) >
+#     height (3.97mm), so Rp[:,0] really is the opening's long axis;
+#   * a non-square rectangle pins that axis to within 180 deg, never 90 deg;
+#   * the duplex plug is 20.0mm across and the opening 7.85mm tall, so a plug
+#     genuinely turned 90 deg could not enter at all -- yet the handoff was only
+#     3.74/1.75mm off laterally.
+# It is the SFP grasp transform standing in for the uncalibrated SC one (6c).
+#
+# The cost of chasing it was the whole run: `_align` slews at
+# ``align_max_rotation_step_rad`` (1.5 deg) per iteration against a 15 s wall
+# budget, so 89.7 deg needs >=60 iterations and times out.  Removing an exact
+# -90 deg about the port Z leaves 4.89 deg, i.e. the macro's handoff twist is
+# already inside the 6.9 deg budget the 1.2mm lateral clearance allows.
+#
+# Do NOT "fix" the timeout by raising the budget or the step cap: that lets the
+# robot complete a 90 deg turn it should never make, and drive a 20mm plug at a
+# 7.85mm opening.  Once 6c lands this offset collapses to ~0 and the flag stops
+# mattering; it stays as the way to A/B the two behaviours in sim.
+SC_PRESERVE_HANDOFF_YAW = _env_bool("RL_INSERT_SC_PRESERVE_HANDOFF_YAW", True)
+
 SC_WRENCH_LOG_PERIOD_S = _env_float("RL_INSERT_SC_WRENCH_LOG_PERIOD_S", 0.25)
 SC_PERCEPT_SAMPLES = _env_int("RL_INSERT_SC_PERCEPT_SAMPLES", 7)
 SC_PERCEPT_MIN_AGREE = _env_int("RL_INSERT_SC_PERCEPT_MIN_AGREE", 3)
@@ -397,6 +424,35 @@ def classify_opening(width_m: float, height_m: float):
     return label, float(residual), float(offset)
 
 
+def seat_frame(Rp, R_tip):
+    """Insertion axis from perception, in-plane twist preserved from the plug.
+
+    ``Rp`` columns are ``[lat_x, lat_y, insert_axis]``.  This returns a frame
+    with the SAME third column -- perception's insertion axis is trusted, and it
+    is a constant (``_estimate_sfp_port_orientation`` hardcodes world -Z) -- but
+    whose in-plane axes are rotated to sit under the plug's current twist rather
+    than under the perceived port yaw.  See ``SC_PRESERVE_HANDOFF_YAW``.
+
+    The result is still orthonormal and right-handed, so it is a drop-in for
+    ``Rp`` anywhere a rotation target is commanded.  Falls back to ``Rp`` when
+    the plug's own x-axis is parallel to the insertion axis and there is no
+    in-plane direction to preserve.
+    """
+    Rp = np.asarray(Rp, dtype=np.float64).reshape(3, 3)
+    R_tip = np.asarray(R_tip, dtype=np.float64).reshape(3, 3)
+    z = Rp[:, 2]
+    z_norm = float(np.linalg.norm(z))
+    if z_norm < 1e-12:
+        return Rp.copy()
+    z = z / z_norm
+    x = R_tip[:, 0] - float(np.dot(R_tip[:, 0], z)) * z
+    x_norm = float(np.linalg.norm(x))
+    if x_norm < 1e-6:
+        return Rp.copy()
+    x = x / x_norm
+    return np.column_stack([x, np.cross(z, x), z])
+
+
 class ScInsertionController:
     """Align to the perceived SC opening, then force-regulate to the seat."""
 
@@ -406,7 +462,7 @@ class ScInsertionController:
     HOLD_DAMPING = [80.0, 80.0, 80.0, 30.0, 30.0, 30.0]
 
     def __init__(self, policy, task, get_observation, move_robot, send_feedback,
-                 *, port_pos, port_quat, Rp, config=None):
+                 *, port_pos, port_quat, Rp, Rs=None, config=None):
         self.policy = policy
         self.task = task
         self.get_observation = get_observation
@@ -416,6 +472,16 @@ class ScInsertionController:
         self.port_pos = np.asarray(port_pos, dtype=np.float64).reshape(3)
         self.port_quat = np.asarray(port_quat, dtype=np.float64).reshape(4)
         self.Rp = np.asarray(Rp, dtype=np.float64).reshape(3, 3)
+        # Rp drives POSITION (and the wrench frame); Rs drives ROTATION targets.
+        # They share column 2, so the lateral plane -- and therefore every
+        # position correction -- is identical either way; only the in-plane
+        # twist differs.  Rs defaults to Rp, which is the pre-2026-07-25
+        # behaviour and what the geometry tests construct.
+        self.Rs = self.Rp.copy() if Rs is None else np.asarray(
+            Rs, dtype=np.float64).reshape(3, 3)
+        # Constant in-plane rotation from Rp to Rs.  Corrections measured in the
+        # Rp frame are re-expressed through this before being commanded on Rs.
+        self.R_yaw = self.Rp.T @ self.Rs
         self.log = policy.get_logger()
         parent = policy._parent_node
         self.event_generation = int(getattr(parent, "_insertion_event_generation", 0))
@@ -447,7 +513,7 @@ class ScInsertionController:
     def _errors(self):
         tip_pos, tip_rotation = self._tip_pose()
         delta = self.Rp.T @ (tip_pos - self.port_pos)
-        rotation_error = axis_angle(self.Rp.T @ tip_rotation)
+        rotation_error = axis_angle(self.Rs.T @ tip_rotation)
         return float(delta[2]), delta[:2], rotation_error, tip_pos, tip_rotation
 
     def _hold_tip(self, tip_pos, tip_rotation) -> None:
@@ -552,7 +618,7 @@ class ScInsertionController:
             force = self._force_magnitude(observation)
             tip_pos, _ = self._tip_pose()
             if np.isfinite(force) and force > self.config.force_abort_n:
-                self._hold_tip(tip_pos, self.Rp)
+                self._hold_tip(tip_pos, self.Rs)
                 hard_force_since = hard_force_since or time.monotonic()
                 if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
@@ -563,7 +629,7 @@ class ScInsertionController:
                 hard_force_since = None
                 self.policy.set_pose_target(
                     self.move_robot,
-                    self._tcp_target(fixed_tip, self.Rp),
+                    self._tcp_target(fixed_tip, self.Rs),
                     stiffness=self.STIFFNESS,
                     damping=self.DAMPING,
                 )
@@ -605,9 +671,9 @@ class ScInsertionController:
             )
             if rotation > self.config.align_max_rotation_step_rad:
                 remaining = 1.0 - self.config.align_max_rotation_step_rad / rotation
-                target_rotation = self.Rp @ rotation_from_axis_angle(remaining * rotation_error)
+                target_rotation = self.Rs @ rotation_from_axis_angle(remaining * rotation_error)
             else:
-                target_rotation = self.Rp
+                target_rotation = self.Rs
             self.policy.set_pose_target(
                 self.move_robot,
                 self._tcp_target(target_tip, target_rotation),
@@ -654,7 +720,7 @@ class ScInsertionController:
                     last_wrench_log_time = now
 
             if np.isfinite(force) and force > self.config.force_abort_n:
-                self._hold_tip(tip_pos, self.Rp)
+                self._hold_tip(tip_pos, self.Rs)
                 hard_force_since = hard_force_since or now
                 if now - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
@@ -721,16 +787,21 @@ class ScInsertionController:
             last_command_time = now
 
             target_tip = self.port_pos + self.Rp[:, 2] * command_depth
-            target_rotation = self.Rp
+            target_rotation = self.Rs
             if self.config.seat_align_enable and (
                 np.any(acc_lat != 0.0) or np.any(acc_tilt != 0.0)
             ):
                 target_tip = (
                     target_tip + self.Rp[:, 0] * acc_lat[0] + self.Rp[:, 1] * acc_lat[1]
                 )
+                # acc_tilt is measured about Rp's lateral axes (_wrench_plug_frame
+                # resolves the wrench through Rp), so apply it in the Rp frame and
+                # only then carry the constant twist across to the seat frame.
+                # Commanding it on Rs directly would rotate the correction by the
+                # very offset this frame exists to absorb.
                 target_rotation = self.Rp @ rotation_from_axis_angle(
                     np.array([acc_tilt[0], acc_tilt[1], 0.0], dtype=np.float64)
-                )
+                ) @ self.R_yaw
             self.policy.set_pose_target(
                 self.move_robot,
                 self._tcp_target(target_tip, target_rotation),
@@ -1178,9 +1249,23 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         )
         return False
 
+    Rs = seat_frame(Rp, R_tip) if SC_PRESERVE_HANDOFF_YAW else Rp
+    # Rp.T @ Rs is a pure rotation about the insertion axis, so this is the
+    # single number that says how far the perceived port yaw sits from the twist
+    # the macro handed us.  Expect ~-90 deg until SC_TIP_IN_TCP is calibrated;
+    # once it is, this should collapse towards zero.  If it is ever large AND
+    # not near a right angle, the convention story here is wrong -- re-measure
+    # before trusting either frame.
+    twist = float(np.degrees(axis_angle(Rp.T @ Rs)[2]))
+    log.info(
+        f"[sc] seat frame: preserve_handoff_yaw={SC_PRESERVE_HANDOFF_YAW} "
+        f"twist_vs_perceived_yaw_deg={twist:.2f} "
+        f"(rotation the controller is NOT commanding)"
+    )
+
     return ScInsertionController(
         policy, task, get_observation, move_robot, send_feedback,
-        port_pos=port_pos, port_quat=port_quat, Rp=Rp,
+        port_pos=port_pos, port_quat=port_quat, Rp=Rp, Rs=Rs,
     ).run()
 
 
@@ -1191,6 +1276,7 @@ __all__ = [
     "SC_INSERT_DEPTH_M",
     "SC_OPENING_HEIGHT_M",
     "SC_OPENING_WIDTH_M",
+    "SC_PRESERVE_HANDOFF_YAW",
     "ScInsertionController",
     "classify_opening",
     "next_sc_depth",
@@ -1199,5 +1285,6 @@ __all__ = [
     "run_sc_insertion",
     "sc_multiview_candidates",
     "sc_tip_pose_from_tcp",
+    "seat_frame",
     "tcp_pose_for_sc_tip",
 ]
