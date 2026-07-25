@@ -2533,6 +2533,45 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         return sfp_sector_corners()  # 0 UNSPECIFIED / 1 STAGED_SFP_MODULE
 
     @staticmethod
+    def _single_camera_top_view(survey_target: int) -> bool:
+        """Whether this sector uses the high, single-camera, top-down view.
+
+        NIC cards and SC ports are detected by looking straight *down into* their
+        recessed ports -- dark holes that face out along the board normal, so a
+        tilted view reads them edge-on and the detector misses the part.  They
+        must also be seen *undistorted*: the NIC cards are 145 mm fins that
+        protrude toward the lens, so a close view foreshortens them badly and the
+        tool occludes an end card; a high, far view sees the whole card small and
+        clean, which is what the model match needs (matching the working
+        reference pose).  The three splayed wrist cameras cannot frame the tall
+        cards together at all, so only the center camera is required to frame the
+        sector and the farthest reachable standoff is preferred.  The SFP pick
+        modules read fine from the standard close all-camera framing.
+        """
+        return int(survey_target) in (2, 3)  # NIC_SFP_DESTINATION / SC_DESTINATION_PORT
+
+    @staticmethod
+    def _bore_view_tilt_bands(survey_target: int):
+        """Cross-rail tilt bands (priority order) for shifting onto the bore side.
+
+        The recessed ports must be read from the bore-facing side, so the search
+        is asked for a **committed** tilt band first ((12 deg, 22 deg): the
+        camera is meaningfully on that side, looking into the ports).  Only if no
+        reachable pose satisfies it -- now that reachability is a real UR5e IK
+        check, "reachable" is meaningful -- does it fall back to the flat band
+        ((0, 22 deg)) rather than stalling the downstream move.  Without the
+        committed tier ``prefer_far_standoff`` would trade the bore tilt away for
+        a farther, flatter (wrong-side) view.  ``(None,)`` for the SFP sectors,
+        which stay near-overhead.
+        """
+        if int(survey_target) in (2, 3):  # NIC / SC
+            return (
+                (math.radians(12.0), math.radians(22.0)),
+                (0.0, math.radians(22.0)),
+            )
+        return (None,)
+
+    @staticmethod
     def _stage2_not_done(result, reason: str) -> None:
         """Return a geometric-stage rejection without aborting the flowchart."""
         result.success = True
@@ -2697,6 +2736,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             quaternion_from_matrix,
             search_survey_pose,
         )
+        from aic_perception.arm_ik import UR5eArm
 
         expected = tuple(sorted(self.config.camera_frames))
         missing_frames = sorted(set(expected) - set(snapshot.frames))
@@ -2923,7 +2963,59 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             grippers[camera_name] = GripperExclusion(
                 mask=gripper_mask, margin_px=32.0
             )
-        candidate, search_reason = search_survey_pose(
+
+        # Real reachability gate.  A UR5e IK check (the arm's own kinematics --
+        # no task-board TF) replaces the base-origin sphere so the search commits
+        # to poses the arm can actually achieve -- including reaching to the far,
+        # bore-facing side when the ports face away -- and never publishes one
+        # Move Robot cannot solve.  The flange->TCP offset is self-calibrated
+        # from the live, static (joint-state, TCP) sample; if the recovered
+        # offset is implausible (an unexpected base-frame convention) we fall
+        # back to the sphere rather than trusting a bad model.
+        reachable_fn = None
+        try:
+            measured_joints = [
+                self.robot_motion.current_joint(index) for index in range(6)
+            ]
+            if all(value is not None for value in measured_joints):
+                # Recover the base_link<->model frame convention and the tool
+                # offset together from this one static sample (the workcell
+                # base_link classically differs from the UR kinematic base by a
+                # 180-deg-about-Z flip).  The failure string lists every
+                # candidate's offset for diagnosis.
+                arm, cal_desc = UR5eArm.autocalibrate(measured_joints, base_T_tcp)
+                if arm is not None:
+                    seed = np.asarray(measured_joints, dtype=float)
+                    reachable_fn = (
+                        lambda pose, _arm=arm, _seed=seed: _arm.reachable(
+                            pose, _seed
+                        )
+                    )
+                    logging.info(
+                        "arm IK reachability gate active: %s", cal_desc
+                    )
+                else:
+                    logging.info(
+                        "arm IK calibration failed (%s); using sphere reach",
+                        cal_desc,
+                    )
+            else:
+                logging.info(
+                    "measured arm joints unavailable; using sphere reach"
+                )
+        except Exception as ik_error:  # pragma: no cover - defensive
+            logging.info(
+                "arm IK reachability unavailable (%s); using sphere reach",
+                ik_error,
+            )
+
+        candidate = None
+        search_reason = "no coverage bands were tried"
+        # Try the committed bore band first, then the flat fallback (only for the
+        # recessed-port sectors; a single-element (None,) for the rest).  The
+        # first band that yields a reachable, correctly-framed pose wins.
+        for tilt_band in self._bore_view_tilt_bands(survey_target):
+          candidate, search_reason = search_survey_pose(
             board_pose,
             tcp_T_cam,
             camera_models,
@@ -2936,9 +3028,31 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             # is the real UR5e envelope (base_link origin); min-motion then picks
             # the closest reachable pose that frames the sector in all cameras.
             coverage_targets=(self._sector_for_target(survey_target),),
+            # NIC cards and SC ports are read from a high view looking down the
+            # SFP cage bores.  The mouths open toward the board -X face, so the
+            # camera is shifted onto that side (`cross_rail_sign=-1`) by a modest
+            # in-band tilt -- flat, but "more on that side" -- to look into the
+            # recesses rather than across them.  Only the center camera need frame
+            # the sector (the splayed rig cannot hold all five), and the farthest
+            # reachable standoff is preferred so the protruding cards are seen
+            # small and undistorted with the tool clear.  SFP keeps the standard
+            # close all-camera near-overhead framing.
+            cross_rail_tilt_band_rad=tilt_band,
+            cross_rail_sign=-1.0 if self._single_camera_top_view(survey_target) else 0.0,
+            require_all_cameras_frame=not self._single_camera_top_view(survey_target),
+            prefer_far_standoff=self._single_camera_top_view(survey_target),
+            # Reachability is now decided by the UR5e IK gate (``reachable``),
+            # not this base-origin sphere -- the sphere wrongly rejected the
+            # reachable far, bore-facing poses and admitted unsolvable ones.  The
+            # sphere only survives as a loose fallback when IK is unavailable, so
+            # keep the full envelope here.  Standoff is still bounded into the
+            # 0.5-1 m band by ``standoffs_m``/``prefer_far_standoff``.
+            reachable=reachable_fn,
             max_reach_m=0.85,
             min_height_m=0.02,
-        )
+          )
+          if candidate is not None:
+            break
         if candidate is None:
             self._stage2_not_done(
                 result, f"no safe all-camera survey pose: {search_reason}"

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -299,9 +299,15 @@ def sc_sector_corners() -> np.ndarray:
 def nic_sector_corners() -> np.ndarray:
     """NIC card SFP-port destinations (Zone 1): five mounts at board-X -0.081.
 
-    The ``NIC_SFP_DESTINATION`` survey target.
+    The box frames the **cage band** at the card tips -- the SFP cages sit at
+    board Z ~= 0.13 and the tips reach ~0.17, so the box spans Z 0.07..0.17.
+    That covers the ports the IVM matches (framing only the mount base left them
+    clipped) while staying short enough that the tilted bore-view pose can hold
+    the whole band in frame; spanning the full 145 mm card height instead made
+    every tilted candidate spill the tips out of the frame.  The
+    ``NIC_SFP_DESTINATION`` survey target.
     """
-    return _sector_box_corners((-0.14, -0.03), (-0.19, 0.01), (0.01, 0.05))
+    return _sector_box_corners((-0.14, -0.03), (-0.19, 0.01), (0.07, 0.17))
 
 
 # ---------------------------------------------------------------------------
@@ -1196,6 +1202,48 @@ def search_survey_pose(
     # small board-pose or execution error cannot clip a component out of a
     # camera.  At the survey standoffs this is roughly 30 mm of slack.
     min_required_clearance_px: float = 40.0,
+    # Directional (rail-aware) obliquity for sectors of thin, repeated parts
+    # (NIC cards, SC ports) whose model-based pose is ill-conditioned when viewed
+    # straight down the part's protrusion axis.  When a (min, max) band is given
+    # the search tilts the view *across* the sector's long (rail) axis by an
+    # angle inside the band, holding the *along-rail* tilt within
+    # ``max_along_rail_tilt_rad`` of zero, so each part's depth is revealed
+    # without the neighbours occluding it.  ``None`` keeps the isotropic
+    # ``max_obliquity_rad`` behaviour used for the SFP and full-board targets.
+    cross_rail_tilt_band_rad: tuple[float, float] | None = None,
+    max_along_rail_tilt_rad: float = math.radians(8.0),
+    # Restrict the cross-rail tilt to one side of the board: -1 keeps the camera
+    # on the sector's -cross (board -X for a Y-rail) side, +1 the +cross side, 0
+    # searches both.  Recessed ports open toward one face (the SFP cage mouths
+    # protrude toward board -X), so the camera must sit on that side to look down
+    # the bore; the opposite side sees the closed backs.
+    cross_rail_sign: float = 0.0,
+    # When False only the reference camera must fully frame the sector; the
+    # splayed side cameras are not required to.  The three wrist cameras cannot
+    # hold all five NIC cards in frame together nearer than ~0.65 m, so a
+    # detector that keys on a single dominant top-down view (looking straight
+    # into the recessed SFP cages) needs this relaxation to get much closer.
+    require_all_cameras_frame: bool = True,
+    # Prefer the *farthest* feasible standoff instead of the closest.  Tall parts
+    # that protrude toward the camera (NIC cards, 145 mm fins) suffer heavy
+    # perspective distortion and worse tool occlusion up close; a higher, farther
+    # view sees the whole part cleanly and undistorted -- which is what the
+    # model-based estimator needs, and matches the working reference pose that
+    # sits high and sees the cards small.
+    prefer_far_standoff: bool = False,
+    # Real reachability.  When supplied, ``reachable(base_T_tcp) -> bool`` is the
+    # authority on whether the arm can actually achieve a candidate TCP pose
+    # (joint-limit-valid IK solution), replacing the crude base-origin
+    # ``max_reach_m`` sphere -- which both admits kinematically-impossible poses
+    # (Move Robot then reports "IK not computable") and rejects genuinely
+    # reachable far-side poses, making the search settle for a near, wrong-side
+    # view.  It is applied as a final gate over the best-ranked feasible
+    # candidates (at most ``max_reach_checks`` numerical solves), so the search
+    # commits to the best pose that is both correctly framed *and* reachable.
+    # ``None`` keeps the legacy sphere for callers/tests without a kinematic
+    # model.
+    reachable: Callable[[Transform], bool] | None = None,
+    max_reach_checks: int = 24,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
@@ -1260,40 +1308,111 @@ def search_survey_pose(
         # board-relative 3-D grid, giving real pitch/roll variation rather than a
         # top-down pose with image roll only.
         center_base = base_T_board.apply(target_board.mean(axis=0))
-        best: SurveyCandidate | None = None
-        best_key: tuple | None = None
+        # Collect every framed, gripper-clear candidate with its ranking key so
+        # the real reachability gate can be applied to the best ones in order
+        # (rather than committing to a single geometric best that may be
+        # unreachable).  A monotone counter keeps the sort deterministic on ties.
+        feasible: list[tuple[tuple, int, SurveyCandidate]] = []
+        order_counter = 0
         evaluated = 0
+        # Directional obliquity is opt-in (a cross-rail tilt band was supplied).
+        # The rail axis is the sector's own longer in-plane edge, taken in the
+        # *estimated* board frame, so it follows the board wherever the insignia
+        # places it -- never a fixed world axis or a hard-coded component point.
+        directional = cross_rail_tilt_band_rad is not None
+        rail_hat = cross_hat = board_x_base
+        band_lo = band_hi = band_mid = 0.0
+        if directional:
+            extent = target_board.max(axis=0) - target_board.min(axis=0)
+            if float(extent[0]) >= float(extent[1]):
+                rail_hat, cross_hat = board_x_base, board_y_base
+            else:
+                rail_hat, cross_hat = board_y_base, board_x_base
+            band_lo, band_hi = cross_rail_tilt_band_rad
+            band_mid = 0.5 * (band_lo + band_hi)
+            axis_a_hat, axis_b_hat = cross_hat, rail_hat
+
+            signs = (
+                (1.0, -1.0)
+                if cross_rail_sign == 0.0
+                else (math.copysign(1.0, cross_rail_sign),)
+            )
+
+            def _axis_a_samples(reach: float) -> Sequence[float]:
+                # Cross-rail: tilt across the rail by each in-band angle.  Signs
+                # restricted by ``cross_rail_sign`` so the camera stays on the
+                # bore-facing side.  ``reach * tan(angle)`` fixes the *angle*, not
+                # a distance, so the geometry holds as the standoff changes.
+                return [
+                    sign * reach * math.tan(float(alpha))
+                    for alpha in np.linspace(band_lo, band_hi, 5)
+                    for sign in signs
+                ]
+
+            def _axis_b_samples(reach: float) -> Sequence[float]:
+                # Along-rail: held near zero so the parts do not occlude/
+                # foreshorten one another.
+                return [
+                    reach * math.tan(beta)
+                    for beta in (
+                        -0.5 * max_along_rail_tilt_rad,
+                        0.0,
+                        0.5 * max_along_rail_tilt_rad,
+                    )
+                ]
+        else:
+            axis_a_hat, axis_b_hat = board_x_base, board_y_base
+
+            def _axis_a_samples(reach: float) -> Sequence[float]:
+                return offsets_x_m
+
+            def _axis_b_samples(reach: float) -> Sequence[float]:
+                return offsets_y_m
+
         for standoff in standoffs_m:
-            for offset_x in offsets_x_m:
-                for offset_y in offsets_y_m:
+            for a_off in _axis_a_samples(standoff):
+                for b_off in _axis_b_samples(standoff):
                     for yaw in yaws_rad:
+                        offset_vec = axis_a_hat * a_off + axis_b_hat * b_off
                         cam_origin = (
                             center_base
                             + board_normal_base * standoff
-                            + board_x_base * offset_x
-                            + board_y_base * offset_y
+                            + offset_vec
                         )
                         if cam_origin[2] < min_height_m:
                             continue
-                        # Obliquity of the reference view: angle between the
-                        # board normal and the direction from the sector centre
-                        # out to the camera.  Zero means looking straight down
-                        # the normal (fully overhead).
+                        # View direction (sector centre -> camera), decomposed in
+                        # the board frame.  ``obliquity`` is the total angle off
+                        # the normal; directional sectors bound the along-rail and
+                        # cross-rail tilt components separately.
                         to_camera = cam_origin - center_base
                         to_camera_norm = float(np.linalg.norm(to_camera))
-                        if to_camera_norm < 1e-9:
+                        normal_comp = float(np.dot(to_camera, board_normal_base))
+                        if to_camera_norm < 1e-9 or normal_comp <= 0.0:
                             continue
                         obliquity = math.acos(
-                            float(
-                                np.clip(
-                                    np.dot(to_camera / to_camera_norm,
-                                           board_normal_base),
-                                    -1.0,
-                                    1.0,
-                                )
-                            )
+                            float(np.clip(normal_comp / to_camera_norm, -1.0, 1.0))
                         )
-                        if obliquity > max_obliquity_rad:
+                        cross_tilt = 0.0
+                        if directional:
+                            along_tilt = math.atan2(
+                                abs(float(np.dot(to_camera, rail_hat))),
+                                normal_comp,
+                            )
+                            cross_tilt = math.atan2(
+                                abs(float(np.dot(to_camera, cross_hat))),
+                                normal_comp,
+                            )
+                            # Along-rail tilt occludes/foreshortens the parts;
+                            # cross-rail tilt reveals depth with the neighbours
+                            # still separated -- require it in-band, along-rail ~0.
+                            if along_tilt > max_along_rail_tilt_rad:
+                                continue
+                            if not (
+                                band_lo - 1e-6 <= cross_tilt <= band_hi + 1e-6
+                            ):
+                                continue
+                        elif obliquity > max_obliquity_rad:
                             continue
                         up_hint = (
                             math.cos(yaw) * board_y_base
@@ -1308,11 +1427,16 @@ def search_survey_pose(
                         # Checking only the camera origin can admit a pose whose
                         # camera is above the board while its real TCP is below
                         # the allowed plane; guard the TCP itself.
-                        if (
-                            float(base_T_tcp.translation[2]) < min_height_m
-                            or float(np.linalg.norm(base_T_tcp.translation))
-                            > max_reach_m
-                        ):
+                        if float(base_T_tcp.translation[2]) < min_height_m:
+                            continue
+                        # Reach: the base-origin sphere is a poor proxy (it
+                        # rejects reachable far-side poses and admits
+                        # kinematically-impossible ones).  Use it only when no
+                        # real IK model is supplied; otherwise keep a generous
+                        # absolute prune and let ``reachable`` be the authority.
+                        reach = float(np.linalg.norm(base_T_tcp.translation))
+                        reach_cap = max_reach_m if reachable is None else 1.15
+                        if reach > reach_cap:
                             continue
                         if not np.all(np.isfinite(base_T_tcp.rotation)):
                             continue
@@ -1350,13 +1474,33 @@ def search_survey_pose(
                                 )
                             )
                         evaluated += 1
-                        if not coverages or not all(
-                            c.feasible for c in coverages
-                        ):
+                        if not coverages:
                             continue
-                        min_clear = min(c.clearance for c in coverages)
+                        if require_all_cameras_frame:
+                            # Every camera must fully frame and clear the sector.
+                            if not all(c.feasible for c in coverages):
+                                continue
+                            min_clear = min(c.clearance for c in coverages)
+                        else:
+                            # Only the reference camera must frame the sector;
+                            # the splayed side cameras fall away.  This is what
+                            # lets a close top-down view exist at all -- the rig
+                            # cannot hold five NIC cards in three cameras nearer
+                            # than ~0.65 m, but the centre camera alone can look
+                            # straight down from far closer.
+                            ref_cov = next(
+                                (
+                                    c
+                                    for c in coverages
+                                    if c.camera_name == reference_camera
+                                ),
+                                None,
+                            )
+                            if ref_cov is None or not ref_cov.feasible:
+                                continue
+                            min_clear = ref_cov.clearance
                         # Reject poses that only just fit: downstream pose
-                        # estimation needs real margin on every camera.
+                        # estimation needs real margin on the framing camera(s).
                         if min_clear < min_required_clearance_px:
                             continue
                         candidate = SurveyCandidate(
@@ -1365,8 +1509,8 @@ def search_survey_pose(
                             coverages=tuple(coverages),
                             standoff_m=standoff,
                             yaw_rad=yaw,
-                            offset_x_m=float(offset_x),
-                            offset_y_m=float(offset_y),
+                            offset_x_m=float(np.dot(offset_vec, board_x_base)),
+                            offset_y_m=float(np.dot(offset_vec, board_y_base)),
                             motion_m=(
                                 float(
                                     np.linalg.norm(
@@ -1382,30 +1526,67 @@ def search_survey_pose(
                             angular_motion_rad=angular_motion,
                             coverage_target=target_board,
                         )
-                        # Lexicographic, deterministic optimisation.  Standoff
-                        # dominates: the smallest standoff that still frames the
-                        # sector puts the most pixels on each component, which is
-                        # what lets the estimator separate adjacent NIC cards /
-                        # SC ports.  Then prefer the most overhead view, then
-                        # clearance, then the shortest move.
-                        candidate_key = (
-                            -round(standoff, 4),
-                            -round(obliquity, 4),
-                            round(candidate.min_clearance_px, 6),
-                            -round(candidate.motion_m, 4),
-                            -candidate.angular_motion_rad,
+                        # Deterministic lexicographic objective.  Standoff
+                        # dominates: normally the closest framing wins (most
+                        # pixels), but ``prefer_far_standoff`` flips it to the
+                        # farthest feasible pose for tall protruding parts, whose
+                        # model match wants a distant, undistorted, less-occluded
+                        # view.  Then: directional sectors prefer the cross-rail
+                        # tilt nearest the band centre; isotropic sectors prefer
+                        # the most overhead view.  Then clearance, then motion.
+                        standoff_key = (
+                            round(standoff, 4)
+                            if prefer_far_standoff
+                            else -round(standoff, 4)
                         )
-                        if best is None or candidate_key > best_key:
-                            best = candidate
-                            best_key = candidate_key
-        return best, evaluated
+                        if directional:
+                            candidate_key = (
+                                standoff_key,
+                                -round(abs(cross_tilt - band_mid), 4),
+                                round(candidate.min_clearance_px, 6),
+                                -round(candidate.motion_m, 4),
+                                -candidate.angular_motion_rad,
+                            )
+                        else:
+                            candidate_key = (
+                                standoff_key,
+                                -round(obliquity, 4),
+                                round(candidate.min_clearance_px, 6),
+                                -round(candidate.motion_m, 4),
+                                -candidate.angular_motion_rad,
+                            )
+                        feasible.append((candidate_key, order_counter, candidate))
+                        order_counter += 1
+        framed = len(feasible)
+        if not feasible:
+            return None, evaluated, framed
+        # Best-ranked first (descending key; the counter breaks ties in the
+        # original insertion order, matching the old strict-> argmax).
+        feasible.sort(key=lambda item: item[0], reverse=True)
+        if reachable is None:
+            return feasible[0][2], evaluated, framed
+        # Apply the real reachability gate to the best candidates in order and
+        # commit to the first that the arm can actually achieve.
+        for _key, _order, candidate in feasible[:max_reach_checks]:
+            if reachable(candidate.base_T_tcp):
+                return candidate, evaluated, framed
+        return None, evaluated, framed
 
     total_evaluated = 0
+    total_framed = 0
     for target_board in coverage_targets:
-        best, evaluated = _best_for_target(target_board)
+        best, evaluated, framed = _best_for_target(target_board)
         total_evaluated += evaluated
+        total_framed += framed
         if best is not None:
             return best, "ok"
+    if reachable is not None and total_framed > 0:
+        return (
+            None,
+            f"{total_framed} pose(s) framed the target in all required cameras "
+            "but none had a reachable joint-limit-valid IK solution "
+            f"({total_evaluated} candidates evaluated)",
+        )
     return (
         None,
         "no feasible survey candidate satisfied all cameras for any coverage "

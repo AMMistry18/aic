@@ -5,18 +5,25 @@ FROM ${BASE_IMAGE}
 # the dependency environment and large model-weight layers cached.
 COPY docker/aic_model/v50_overlay/aic_model/sfp_plug_pose.py /tmp/sfp_plug_pose.py
 COPY docker/aic_model/v50_overlay/aic_model/v50_controller.py /tmp/v50_controller.py
+COPY docker/aic_model/v50_overlay/aic_model/aic_model.py /tmp/aic_model.py
 
 RUN SITE_PACKAGES="$(.pixi/envs/default/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
     cp /tmp/sfp_plug_pose.py /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py && \
     cp /tmp/sfp_plug_pose.py "$SITE_PACKAGES/aic_model/sfp_plug_pose.py" && \
     cp /tmp/v50_controller.py /ws_aic/src/aic/aic_model/aic_model/v50_controller.py && \
     cp /tmp/v50_controller.py "$SITE_PACKAGES/aic_model/v50_controller.py" && \
+    cp /tmp/aic_model.py /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
+    cp /tmp/aic_model.py "$SITE_PACKAGES/aic_model/aic_model.py" && \
     .pixi/envs/default/bin/python -m py_compile \
       /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
       "$SITE_PACKAGES/aic_model/sfp_plug_pose.py" \
       /ws_aic/src/aic/aic_model/aic_model/v50_controller.py \
-      "$SITE_PACKAGES/aic_model/v50_controller.py" && \
+      "$SITE_PACKAGES/aic_model/v50_controller.py" \
+      /ws_aic/src/aic/aic_model/aic_model/aic_model.py \
+      "$SITE_PACKAGES/aic_model/aic_model.py" && \
     grep -q 'age = max(0.0, now - estimate_stamp)' \
       /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py && \
     grep -q 'seat_overtravel_m: float = 0.005' \
-      /ws_aic/src/aic/aic_model/aic_model/v50_controller.py
+      /ws_aic/src/aic/aic_model/aic_model/v50_controller.py && \
+    grep -q 'RL_INSERT_REPORT_MISS_AS_SUCCESS' \
+      /ws_aic/src/aic/aic_model/aic_model/aic_model.py

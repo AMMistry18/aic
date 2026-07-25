@@ -837,18 +837,13 @@ def _reference_obliquity_rad(candidate, board, tcp_T_cam):
     return math.acos(float(np.clip(np.dot(to_camera, normal / np.linalg.norm(normal)), -1.0, 1.0)))
 
 
-@pytest.mark.parametrize(
-    "sector",
-    [sfp_sector_corners(), sc_sector_corners(), nic_sector_corners()],
-    ids=["sfp", "sc", "nic"],
-)
-def test_sector_survey_is_close_and_near_overhead(sector):
-    """Tall parts only separate from a close, near-normal view.
+def test_isotropic_sfp_survey_is_close_and_near_overhead():
+    """The SFP modules keep the flat, close, near-overhead framing (no band).
 
-    A raking or distant view foreshortens the along-rail spacing of the NIC
-    cards and SC ports, which is what stops the downstream estimator telling
-    adjacent parts apart.
+    NIC and SC take the directional cross-rail path instead -- covered by
+    ``test_directional_sector_survey_tilts_across_the_rail_not_along_it``.
     """
+    sector = sfp_sector_corners()
     candidate, reason, board, tcp_T_cam = _sector_survey(sector)
     assert candidate is not None, reason
     assert candidate.standoff_m <= 0.70
@@ -858,7 +853,7 @@ def test_sector_survey_is_close_and_near_overhead(sector):
 
 def test_sector_survey_takes_the_closest_standoff_not_the_roomiest():
     """Standoff dominates the objective; clearance only breaks ties."""
-    sector = nic_sector_corners()
+    sector = sfp_sector_corners()
     close, reason, _, _ = _sector_survey(sector)
     assert close is not None, reason
     farther, reason, _, _ = _sector_survey(
@@ -888,6 +883,170 @@ def test_sector_survey_rejects_a_pose_that_only_just_fits():
     # An unreachable floor fails closed instead of degrading to a tight fit.
     impossible, _, _, _ = _sector_survey(sector, min_required_clearance_px=10_000.0)
     assert impossible is None
+
+
+def test_center_only_framing_reaches_a_closer_top_down_pose():
+    """Dropping the all-camera requirement lets the top-down view get close.
+
+    The three splayed cameras cannot hold the whole NIC sector nearer than
+    ~0.65 m; the center camera alone can look straight down from far closer,
+    which is what resolves the recessed SFP cages.
+    """
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose()
+    tgt = nic_sector_corners()
+    all_cams, r1 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers,
+        coverage_targets=(tgt,), max_reach_m=0.85, min_height_m=0.02,
+    )
+    center_only, r2 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers,
+        coverage_targets=(tgt,), max_reach_m=0.85, min_height_m=0.02,
+        require_all_cameras_frame=False,
+    )
+    assert all_cams is not None, r1
+    assert center_only is not None, r2
+    # Meaningfully closer, and still essentially top-down (into the ports).
+    assert center_only.standoff_m < all_cams.standoff_m - 0.1
+    assert math.degrees(_reference_obliquity_rad(center_only, board, tcp_T_cam)) <= 20.0
+    # The reference (center) camera genuinely frames the sector.
+    ref = next(
+        c for c in center_only.coverages if c.camera_name == "center_camera"
+    )
+    assert ref.feasible
+
+
+def test_prefer_far_standoff_picks_the_high_undistorted_view():
+    """Tall protruding parts want the farthest reachable standoff, not the closest.
+
+    Up close the 145 mm cards foreshorten badly and the tool occludes an end
+    card; a high, far view sees them small and undistorted, which is what the
+    model-based estimator needs.
+    """
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose()
+    tgt = nic_sector_corners()
+    near, r1 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers,
+        coverage_targets=(tgt,), max_reach_m=0.85, min_height_m=0.02,
+        require_all_cameras_frame=False,
+    )
+    far, r2 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers,
+        coverage_targets=(tgt,), max_reach_m=0.85, min_height_m=0.02,
+        require_all_cameras_frame=False, prefer_far_standoff=True,
+    )
+    assert near is not None, r1
+    assert far is not None, r2
+    # The far preference genuinely backs the camera off, and stays reachable.
+    assert far.standoff_m > near.standoff_m + 0.1
+    assert np.linalg.norm(far.base_T_tcp.translation) <= 0.85
+    # More standoff means more framing margin on the single framing camera.
+    assert far.min_clearance_px > near.min_clearance_px
+
+
+def test_nic_sector_box_frames_the_sfp_cage_band_not_the_mount_base():
+    """The NIC box frames the cage band at the card tips.
+
+    The SFP cages sit ~0.13 m out along the board normal and the tips reach
+    ~0.17 m; the box spans that band (Z ~0.07..0.17) so the ports the estimator
+    locks onto are framed, while staying short enough that the tilted bore-view
+    pose can hold the whole band -- the full-height box clipped the tips.
+    """
+    z = nic_sector_corners()[:, 2]
+    assert z.max() >= 0.16, z.max()          # reaches the tips / cages
+    assert 0.13 >= z.min() >= 0.03           # covers the cage (~0.13), not the base
+
+
+def _reference_rail_tilts(candidate, board, tcp_T_cam):
+    """(cross-rail, along-rail) tilt of the reference camera, in degrees.
+
+    Derives the rail axis exactly as the search does: the sector box's longer
+    in-plane edge, taken in the estimated board frame.
+    """
+    target = candidate.coverage_target
+    center = board.base_T_board.apply(target.mean(axis=0))
+    to_camera = (
+        candidate.base_T_tcp.compose(tcp_T_cam["center_camera"]).translation - center
+    )
+    normal = board.base_T_board.rotation[:, 2]
+    board_x = board.base_T_board.rotation[:, 0]
+    board_y = board.base_T_board.rotation[:, 1]
+    extent = target.max(axis=0) - target.min(axis=0)
+    rail, cross = (board_x, board_y) if extent[0] >= extent[1] else (board_y, board_x)
+    n_comp = float(np.dot(to_camera, normal))
+    cross_deg = math.degrees(math.atan2(abs(float(np.dot(to_camera, cross))), n_comp))
+    along_deg = math.degrees(math.atan2(abs(float(np.dot(to_camera, rail))), n_comp))
+    return cross_deg, along_deg
+
+
+@pytest.mark.parametrize(
+    "sector", [sc_sector_corners(), nic_sector_corners()], ids=["sc", "nic"]
+)
+def test_directional_sector_survey_tilts_across_the_rail_not_along_it(sector):
+    """Thin protruding parts need a cross-rail tilt for a conditioned pose.
+
+    Straight-down (near-normal) collapses each part along the viewing axis, and
+    along-rail tilt makes the parts occlude one another; the survey must instead
+    tilt across the rail by an in-band angle while keeping the along-rail
+    component near zero.
+    """
+    band = (math.radians(28.0), math.radians(42.0))
+    candidate, reason, board, tcp_T_cam = _sector_survey(
+        sector, cross_rail_tilt_band_rad=band
+    )
+    assert candidate is not None, reason
+    cross_deg, along_deg = _reference_rail_tilts(candidate, board, tcp_T_cam)
+    assert 28.0 - 0.5 <= cross_deg <= 42.0 + 0.5, cross_deg
+    assert along_deg <= 8.0 + 0.5, along_deg
+    # It is decisively not the near-normal view the isotropic search would pick.
+    assert cross_deg >= 20.0
+
+
+def test_cross_rail_sign_keeps_the_camera_on_the_chosen_side():
+    """A forced sign puts the camera on one side of the rail (the bore side).
+
+    Recessed ports open toward one face, so the camera must sit on that side to
+    look down the bore; the default (sign 0) may pick either side.
+    """
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose()
+    tgt = nic_sector_corners()
+    board_x = board.base_T_board.rotation[:, 0]
+    center = board.base_T_board.apply(tgt.mean(axis=0))
+    band = (math.radians(12.0), math.radians(22.0))
+
+    def cross_offset(cand):
+        cam = cand.base_T_tcp.compose(tcp_T_cam["center_camera"]).translation
+        return float(np.dot(cam - center, board_x))
+
+    neg, r1 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, coverage_targets=(tgt,),
+        cross_rail_tilt_band_rad=band, cross_rail_sign=-1.0,
+        require_all_cameras_frame=False, prefer_far_standoff=True,
+        max_reach_m=0.80, min_height_m=0.02,
+    )
+    pos, r2 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, coverage_targets=(tgt,),
+        cross_rail_tilt_band_rad=band, cross_rail_sign=+1.0,
+        require_all_cameras_frame=False, prefer_far_standoff=True,
+        max_reach_m=0.80, min_height_m=0.02,
+    )
+    assert neg is not None, r1
+    assert pos is not None, r2
+    # -1 puts the camera on the board -X side, +1 on the +X side.
+    assert cross_offset(neg) < -0.1
+    assert cross_offset(pos) > 0.1
+
+
+def test_directional_band_leaves_the_isotropic_sfp_search_near_overhead():
+    """A None band (the SFP default) keeps the flat, near-overhead behaviour."""
+    candidate, reason, board, tcp_T_cam = _sector_survey(
+        sfp_sector_corners(), cross_rail_tilt_band_rad=None
+    )
+    assert candidate is not None, reason
+    cross_deg, along_deg = _reference_rail_tilts(candidate, board, tcp_T_cam)
+    assert cross_deg <= 20.0 and along_deg <= 20.0
 
 
 def test_production_rig_old_single_axis_grid_misses_case_new_grid_recovers():
@@ -1214,3 +1373,48 @@ def test_search_prefers_whole_board_then_falls_back_to_module_region():
     )
     assert module_only is not None, module_reason
     assert all(c.feasible for c in module_only.coverages)
+
+
+def test_reachability_gate_returns_the_ungated_best_when_all_reachable():
+    """With a reachable() that accepts everything, the gate is a no-op: it
+    returns the same pose the ungated search would pick."""
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    ungated, r0 = search_survey_pose(board, tcp_T_cam, cameras, grippers)
+    assert ungated is not None, r0
+    gated, r1 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, reachable=lambda pose: True
+    )
+    assert gated is not None, r1
+    assert np.allclose(gated.base_T_tcp.translation, ungated.base_T_tcp.translation)
+
+
+def test_reachability_gate_rejects_all_and_reports_framed_but_unreachable():
+    """When nothing is reachable, the search returns no pose and says so -- it
+    never publishes an unreachable pose."""
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    candidate, reason = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, reachable=lambda pose: False
+    )
+    assert candidate is None
+    assert "reachable" in reason and "framed" in reason
+
+
+def test_reachability_gate_falls_through_to_the_next_reachable_candidate():
+    """If the top-ranked pose is unreachable, the gate commits to the best
+    remaining pose the arm can actually achieve, not None."""
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    best, r0 = search_survey_pose(board, tcp_T_cam, cameras, grippers)
+    assert best is not None, r0
+    top = np.asarray(best.base_T_tcp.translation)
+    # The gate receives each candidate's base_T_tcp Transform.  Reject exactly
+    # the ungated best pose; accept everything else.
+    def reject_top(base_T_tcp):
+        return not np.allclose(base_T_tcp.translation, top)
+    gated, r1 = search_survey_pose(
+        board, tcp_T_cam, cameras, grippers, reachable=reject_top
+    )
+    assert gated is not None, r1
+    assert not np.allclose(gated.base_T_tcp.translation, top)

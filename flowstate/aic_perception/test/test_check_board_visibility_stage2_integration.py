@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import math
 from pathlib import Path
 
 
@@ -199,8 +200,13 @@ def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
 
-    # Reach guard is the real UR5e envelope, and the survey frames exactly one
-    # sector, chosen from the target mode.
+    # Reachability is decided by the real UR5e IK gate (calibrated from the live
+    # joint state), not the base-origin sphere -- which wrongly rejected the
+    # reachable far, bore-facing poses and admitted unsolvable ones.  The sphere
+    # survives only as a loose fallback at the full envelope, and the survey
+    # frames exactly one sector, chosen from the target mode.
+    assert "reachable=reachable_fn" in method_source
+    assert "UR5eArm.autocalibrate(" in method_source
     assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
     assert "self._sector_for_target(survey_target)" in method_source
@@ -279,6 +285,70 @@ def test_each_target_mode_maps_to_its_own_board_sector():
     # NIC=2, SC=3, everything else (0/1) is the staged-SFP rail.
     assert "target == 2" in selector
     assert "target == 3" in selector
+
+
+def test_only_the_recessed_port_sectors_use_the_single_camera_top_view():
+    # Execute the policy helper so the NIC/SC single-camera high top-down framing
+    # cannot silently drift onto the SFP modules (which keep the all-camera view).
+    helper = copy.deepcopy(_method("_single_camera_top_view"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    top_view = namespace["_single_camera_top_view"]
+
+    assert not top_view(0)  # UNSPECIFIED (SFP default) -> all-camera framing
+    assert not top_view(1)  # STAGED_SFP_MODULE -> all-camera framing
+    assert top_view(2)      # NIC -> single-camera high top-down
+    assert top_view(3)      # SC -> single-camera high top-down
+    assert not top_view(99)
+    # Wired into the search: these sectors drop the all-camera requirement and
+    # prefer the farthest (highest, least-distorted) reachable standoff.
+    method_source = ast.get_source_segment(
+        SOURCE_PATH.read_text(encoding="utf-8"),
+        _method("_run_sfp_geometric_stage2"),
+    )
+    assert (
+        "require_all_cameras_frame=not self._single_camera_top_view(survey_target)"
+        in method_source
+    )
+    assert (
+        "prefer_far_standoff=self._single_camera_top_view(survey_target)"
+        in method_source
+    )
+    # ...and shift the camera onto the bore-facing (-X) side with a modest tilt,
+    # trying the committed bore band before the flat fallback.
+    assert (
+        "for tilt_band in self._bore_view_tilt_bands(survey_target)"
+        in method_source
+    )
+    assert "cross_rail_tilt_band_rad=tilt_band" in method_source
+    assert (
+        "cross_rail_sign=-1.0 if self._single_camera_top_view(survey_target)"
+        in method_source
+    )
+
+
+def test_bore_view_tilt_bands_commit_to_the_side_then_fall_back_flat():
+    helper = copy.deepcopy(_method("_bore_view_tilt_bands"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {"math": math}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    bands_for = namespace["_bore_view_tilt_bands"]
+
+    assert bands_for(0) == (None,)  # SFP -> near-overhead
+    assert bands_for(1) == (None,)
+    assert bands_for(99) == (None,)
+    for target in (2, 3):  # NIC / SC -> committed bore band, then flat fallback
+        bands = bands_for(target)
+        assert len(bands) >= 2
+        for lo, hi in bands:
+            assert 0.0 <= lo < hi <= math.radians(30.0)
+        # The first tier is a real commitment to the bore-facing side (lo > 0);
+        # the last tier degrades to flat (lo == 0) so a move is never stalled.
+        assert bands[0][0] > 0.0
+        assert bands[-1][0] == 0.0
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():
