@@ -593,6 +593,8 @@ class _StubPolicy:
 class _StubTask:
     target_module_name = "sc_port_0"
     port_name = "sc_port_base"
+    cable_name = "cable_0"
+    plug_name = "sc_tip"
 
 
 def _controller_for(R_tip, port_pos, Rp, Rs):
@@ -875,7 +877,7 @@ def test_calibration_dump_solves_the_sc_transform_from_a_ground_truth_frame():
             return log
 
         def _lookup_transform(self, target, frame, timeout_sec=0.3):
-            if frame != "sc_tip":
+            if frame != "cable_0/sc_tip_link":
                 raise RuntimeError("no such frame")
             return _FakeTransform(true_pos, matrix_to_quat(R_true))
 
@@ -891,11 +893,39 @@ def test_calibration_dump_solves_the_sc_transform_from_a_ground_truth_frame():
     assert "0.04" in solved
 
 
-def test_calibration_dump_probes_the_tasks_plug_name_first():
-    # RLInsert's list is SFP-only, so an SC run must not inherit it.
-    assert "sc_tip" in sc_controller.SC_CALIB_PLUG_FRAMES
-    assert not any(f.startswith("sfp") for f in sc_controller.SC_CALIB_PLUG_FRAMES)
+def test_calibration_probes_the_frame_naming_the_sim_actually_publishes():
+    """The names must carry the cable_N/ prefix AND the _link suffix.
 
+    A bare "sc_tip" resolves nothing -- the SC Plug model.sdf declares
+    sc_tip_link, merged into the cable model, so the published frame is
+    cable_0/sc_tip_link. This mirrors DataCollectorScPlugPoseGT, which is the
+    naming known to work.
+    """
+    class _Task:
+        cable_name = "cable_0"
+        plug_name = "sc_tip"
+
+    frames = sc_controller.sc_calib_frame_candidates(_Task())
+
+    assert frames[0] == "cable_0/sc_tip_link", "task-derived name must come first"
+    assert "sc_tip_link" in frames, "bare-link fallback"
+    assert not any(f.startswith("sfp") for f in frames), "must not inherit SFP names"
+    assert all(f.endswith("_link") for f in frames), (
+        "every candidate needs the _link suffix the sim publishes"
+    )
+
+
+def test_calibration_frame_candidates_survive_a_missing_task_field():
+    class _Bare:
+        pass
+
+    frames = sc_controller.sc_calib_frame_candidates(_Bare())
+
+    assert frames, "must still fall back to the static list"
+    assert "sc_tip_link" in frames
+
+
+def test_calibration_dump_probes_the_task_frame_first():
     seen = []
 
     class _ProbePolicy(_StubPolicy):
@@ -907,13 +937,14 @@ def test_calibration_dump_probes_the_tasks_plug_name_first():
             raise RuntimeError("nothing resolves")
 
     class _Task:
-        plug_name = "sc_tip_custom"
+        cable_name = "cable_3"
+        plug_name = "sc_tip"
         target_module_name = "sc_port_0"
         port_name = "sc_port_base"
 
     assert not sc_controller.dump_sc_grasp_calibration(
         _ProbePolicy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _Task())
-    assert seen[0] == "sc_tip_custom", "task.plug_name must be tried first"
+    assert seen[0] == "cable_3/sc_tip_link", "the task's own cable must be tried first"
 
 
 def test_calibration_dump_runs_even_when_the_depth_gate_refuses(monkeypatch):

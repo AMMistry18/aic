@@ -256,16 +256,40 @@ SC_TIP_CALIBRATED = _env_bool("RL_INSERT_SC_TIP_CALIBRATED", False)
 # mattering; it stays as the way to A/B the two behaviours in sim.
 SC_PRESERVE_HANDOFF_YAW = _env_bool("RL_INSERT_SC_PRESERVE_HANDOFF_YAW", True)
 
-# Ground-truth TF frames to probe when solving SC_TIP_IN_TCP_*.  RLInsert's
-# CALIB_PLUG_FRAMES list is SFP-only ("sfp_tip,sfp_plug,plug,cable_0,..."), so
-# probing it on an SC run resolves nothing useful.  task.plug_name is tried
-# first; for SC that is "sc_tip".
+# Extra ground-truth TF frames to probe when solving SC_TIP_IN_TCP_*, appended
+# after the task-derived names built by ``sc_calib_frame_candidates``.
+#
+# Do NOT reuse RLInsert's CALIB_PLUG_FRAMES: it is SFP-only
+# ("sfp_tip,sfp_plug,plug,cable_0,sfp,gripper/sfp_tip,...") and, more subtly,
+# every name in it is missing both the ``cable_N/`` prefix and the ``_link``
+# suffix that the sim actually publishes.  The naming that demonstrably works is
+# in DataCollectorScPlugPoseGT._tip_frame_candidates and
+# DataCollectorSfpPlugPoseGT: ``{task.cable_name}/{task.plug_name}_link``, e.g.
+# ``cable_0/sc_tip_link`` -- matching ``sc_tip_link`` in the SC Plug model.sdf,
+# merged into the cable model.  Guessing "sc_tip" resolves nothing.
 SC_CALIB_PLUG_FRAMES = [
     f.strip() for f in os.environ.get(
         "RL_INSERT_SC_CALIB_PLUG_FRAMES",
-        "sc_tip,sc_plug,sc,gripper/sc_tip,gripper/sc_plug,tool/tip",
+        "cable_0/sc_tip_link,sc_tip_link",
     ).split(",") if f.strip()
 ]
+
+
+def sc_calib_frame_candidates(task) -> list[str]:
+    """Ground-truth tip frames to probe, most task-specific first.
+
+    Mirrors ``DataCollectorScPlugPoseGT._tip_frame_candidates`` so calibration
+    and plug-pose collection agree on where the truth lives.
+    """
+    cable = str(getattr(task, "cable_name", "") or "").strip()
+    plug = str(getattr(task, "plug_name", "") or "").strip()
+    candidates = []
+    if cable and plug:
+        candidates.append(f"{cable}/{plug}_link")
+    if cable:
+        candidates.append(f"{cable}/sc_tip_link")
+    candidates.extend(SC_CALIB_PLUG_FRAMES)
+    return list(dict.fromkeys(c for c in candidates if c))
 
 SC_WRENCH_LOG_PERIOD_S = _env_float("RL_INSERT_SC_WRENCH_LOG_PERIOD_S", 0.25)
 SC_PERCEPT_SAMPLES = _env_int("RL_INSERT_SC_PERCEPT_SAMPLES", 7)
@@ -576,11 +600,7 @@ def dump_sc_grasp_calibration(policy, task) -> bool:
     log.info(f"[sc-calib] current SC_TIP_IN_TCP_POS={SC_TIP_IN_TCP_POS.tolist()} "
              f"QUAT={SC_TIP_IN_TCP_QUAT.tolist()} calibrated={SC_TIP_CALIBRATED}")
 
-    frames = []
-    plug_name = str(getattr(task, "plug_name", "") or "").strip()
-    if plug_name:
-        frames.append(plug_name)
-    frames.extend(f for f in SC_CALIB_PLUG_FRAMES if f not in frames)
+    frames = sc_calib_frame_candidates(task)
 
     lookup = getattr(policy, "_lookup_transform", None)
     if lookup is None:
