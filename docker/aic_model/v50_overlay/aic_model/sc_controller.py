@@ -179,6 +179,11 @@ SC_PERCEPT_SAMPLE_DT = _env_float("RL_INSERT_SC_PERCEPT_SAMPLE_DT", 0.10)
 SC_PERCEPT_AGREE_TOL_M = _env_float("RL_INSERT_SC_PERCEPT_AGREE_TOL_M", 0.004)
 SC_MAX_PORT_REPROJ_PX = _env_float("RL_INSERT_SC_MAX_PORT_REPROJ_PX", 6.0)
 SC_MAX_SELECT_REPROJ_PX = _env_float("RL_INSERT_SC_MAX_SELECT_REPROJ_PX", 5.0)
+# Pixel radius for the pre-triangulation detection filter. Measured from the
+# projected gripper TCP, not the plug tip -- the SC tip transform is still
+# uncalibrated, so it must not be what a perception gate is centred on.
+SC_MAX_DETECT_PX_FROM_TIP = _env_float("RL_INSERT_SC_MAX_DETECT_PX_FROM_TIP", 250.0)
+SC_MAX_DETS_PER_CAM = max(1, int(_env_float("RL_INSERT_SC_MAX_DETS_PER_CAM", 8)))
 # The board slots are 41 mm apart, so a generous handoff gate still cannot
 # select the neighbouring port.
 SC_MAX_HANDOFF_SELECT_M = _env_float("RL_INSERT_SC_MAX_HANDOFF_SELECT_M", 0.030)
@@ -745,6 +750,139 @@ class ScInsertionController:
 # --------------------------------------------------------------------------
 # Perception: SC opening pose from the legacy best_sc_pose.pt keypoints.
 # --------------------------------------------------------------------------
+def _sc_detection_centroid(det):
+    kps = np.asarray(det.get("kps"), dtype=np.float64)
+    if kps.shape[0] < 4:
+        return np.array([np.nan, np.nan], dtype=np.float64)
+    return np.mean(kps[:4, :2], axis=0)
+
+
+def _project_point_px(P, X):
+    x = np.asarray(P, dtype=np.float64) @ np.array([X[0], X[1], X[2], 1.0], dtype=np.float64)
+    if x[2] <= 1e-6:
+        return None
+    return np.array([x[0] / x[2], x[1] / x[2]], dtype=np.float64)
+
+
+def _rank_sc_detections(dets):
+    return sorted(dets, key=lambda d: float(d.get("conf", 0.0)), reverse=True)[:SC_MAX_DETS_PER_CAM]
+
+
+def _round_list(values, decimals=1):
+    return np.round(np.asarray(values, dtype=np.float64), decimals).tolist()
+
+
+def _sc_detection_diag(dets):
+    diag = []
+    for i, det in enumerate(dets):
+        diag.append({
+            "i": i,
+            "conf": round(float(det.get("conf", 0.0)), 3),
+            "centroid": _round_list(_sc_detection_centroid(det), 1),
+        })
+    return diag
+
+
+def _sc_tip_projections(policy, per_cam):
+    """Project the gripper TCP into each camera as the detection-filter centre.
+
+    Deliberately the TCP and not ``sc_tip_pose_from_tcp``: the SC tip transform
+    is the uncalibrated SFP default (see UNCALIBRATED item 1), and centring a
+    perception gate on a constant we know is wrong couples this filter to that
+    error.  The TCP comes straight from TF, and it sits ~58 mm from the tip --
+    far inside a gate whose radius is hundreds of pixels, so the coarse
+    proximity test loses nothing by using it.
+    """
+    try:
+        anchor_pos, _ = policy._tcp()
+        anchor_pos = np.asarray(anchor_pos, dtype=np.float64).reshape(3)
+    except Exception:
+        return None, None
+
+    anchor_uv = {}
+    for cam, dets in per_cam.items():
+        if not dets:
+            continue
+        try:
+            P = policy._pc.build_projection_matrix(dets[0]["K"], dets[0]["T"])
+            uv = _project_point_px(P, anchor_pos)
+        except Exception:
+            return anchor_pos, None
+        if uv is None or not np.all(np.isfinite(uv)):
+            return anchor_pos, None
+        anchor_uv[cam] = uv
+    return anchor_pos, anchor_uv
+
+
+def _select_sc_detections_for_triangulation(policy, per_cam, log=None):
+    cams = [cam for cam, dets in per_cam.items() if dets]
+    if not cams:
+        return {}
+
+    candidates = {cam: list(per_cam[cam]) for cam in cams}
+    _anchor_pos, anchor_uv = _sc_tip_projections(policy, candidates)
+    use_tip_filter = anchor_uv is not None and all(cam in anchor_uv for cam in cams)
+
+    selected = {}
+    for cam in cams:
+        dets = candidates[cam]
+        if use_tip_filter:
+            uv = anchor_uv[cam]
+            survivors = [
+                det for det in dets
+                if float(np.linalg.norm(_sc_detection_centroid(det) - uv)) <= SC_MAX_DETECT_PX_FROM_TIP
+            ]
+            selected[cam] = _rank_sc_detections(survivors)
+            tip_txt = _round_list(uv, 1)
+            mode = "tcp_filter"
+        else:
+            selected[cam] = _rank_sc_detections(dets)
+            tip_txt = None
+            mode = "fallback_confidence"
+
+        if log is not None:
+            log.info(
+                f"[sc] SC_PERCEPT_CAMERA cam={cam} mode={mode} "
+                f"radius={SC_MAX_DETECT_PX_FROM_TIP:.1f}px "
+                f"before={len(dets)} after={len(selected[cam])} "
+                f"tcp_px={tip_txt} dets={_sc_detection_diag(dets)}"
+            )
+            # An emptied camera makes triangulation impossible, and the caller's
+            # "no candidates" message does not say why. Name the cause here.
+            if use_tip_filter and dets and not selected[cam]:
+                log.warn(
+                    f"[sc] SC_PERCEPT_CAMERA cam={cam} pre-filter removed all "
+                    f"{len(dets)} detection(s): none within "
+                    f"{SC_MAX_DETECT_PX_FROM_TIP:.0f}px of the TCP projection at "
+                    f"{tip_txt}. Raise RL_INSERT_SC_MAX_DETECT_PX_FROM_TIP if the "
+                    "target port is genuinely further out in this view."
+                )
+
+    return selected
+
+
+def _log_sc_best_candidate(log, candidate):
+    cam_diag = []
+    for diag in candidate.get("camera_diagnostics", []):
+        cam_diag.append({
+            "cam": diag["cam"],
+            "conf": round(float(diag["conf"]), 3),
+            "centroid": _round_list(diag["centroid"], 1),
+            "kps": _round_list(diag["kps"], 1),
+            "reproj_px": [
+                None if err is None else round(float(err), 2)
+                for err in diag["reproj_px"]
+            ],
+        })
+    log.info(
+        f"[sc] SC_PERCEPT_BEST score={candidate['score']:.2f} "
+        f"reproj={candidate['reproj_px']:.2f}px "
+        f"width={candidate['width']*1000:.2f}mm height={candidate['height']*1000:.2f}mm "
+        f"opening={candidate['opening']} "
+        f"X={_round_list(candidate['X'], 5)} cams={cam_diag}"
+    )
+
+
 def sc_multiview_candidates(policy, per_cam):
     """Triangulate the four SC keypoints across cameras.
 
@@ -752,11 +890,11 @@ def sc_multiview_candidates(policy, per_cam):
     assumes the insertion axis is world -Z, which the asset geometry confirms is
     true for SC as well (see module docstring).
     """
+    log = policy.get_logger()
+    per_cam = _select_sc_detections_for_triangulation(policy, per_cam, log=log)
     cams = [cam for cam, dets in per_cam.items() if dets]
     if len(cams) < 2:
         return []
-    for cam in cams:
-        per_cam[cam] = per_cam[cam][:5]
 
     candidates = []
     for picks in itertools.product(*[per_cam[cam] for cam in cams]):
@@ -785,11 +923,23 @@ def sc_multiview_candidates(policy, per_cam):
             continue
 
         errors = []
-        for pick in picks:
+        camera_diagnostics = []
+        for cam, pick in zip(cams, picks):
+            reproj_px = []
             for i in range(4):
                 err = policy._reproject_error_px(kp_3d[i], pick["K"], pick["T"], pick["kps"][i])
                 if err is not None:
                     errors.append(err)
+                    reproj_px.append(float(err))
+                else:
+                    reproj_px.append(None)
+            camera_diagnostics.append({
+                "cam": cam,
+                "conf": float(pick.get("conf", 0.0)),
+                "centroid": _sc_detection_centroid(pick),
+                "kps": np.asarray(pick["kps"][:4], dtype=np.float64),
+                "reproj_px": reproj_px,
+            })
         if not errors:
             continue
         reproj = float(np.mean(errors))
@@ -803,6 +953,7 @@ def sc_multiview_candidates(policy, per_cam):
             "width": width, "height": height,
             "opening": label, "opening_residual_m": residual,
             "bore_offset_m": offset,
+            "camera_diagnostics": camera_diagnostics,
         })
 
     candidates.sort(key=lambda c: c["score"])
@@ -825,7 +976,7 @@ def perceive_sc_port_pose(policy, task, obs):
             log.warn(f"[sc] {cam}: detect_sc_pose failed: {exc}")
             continue
         usable = []
-        for det in dets[:5]:
+        for det in dets:
             kps = np.asarray(det.get("kps"), dtype=np.float64)
             if kps.shape[0] < 4:
                 continue
@@ -841,12 +992,19 @@ def perceive_sc_port_pose(policy, task, obs):
         log.warn("[sc] multiview matching found no SC opening candidates")
         return None
 
+    # Diagnose the same candidate the select gate reports on. candidates[0] is
+    # best by *score* (reproj + shape residual - confidence bonus), which is not
+    # necessarily best by reproj, and logging two different candidates under the
+    # word "best" is how a log costs you a field run to interpret.
+    best_by_reproj = min(candidates, key=lambda c: c["reproj_px"])
+    _log_sc_best_candidate(log, best_by_reproj)
+
     clean = [c for c in candidates if c["reproj_px"] <= SC_MAX_SELECT_REPROJ_PX]
     if not clean:
-        best = min(candidates, key=lambda c: c["reproj_px"])
         log.warn(
             f"[sc] no candidate under {SC_MAX_SELECT_REPROJ_PX:.1f}px select gate "
-            f"(best {best['reproj_px']:.1f}px) -- rejecting frame"
+            f"(best {best_by_reproj['reproj_px']:.1f}px, {len(candidates)} candidates) "
+            "-- rejecting frame"
         )
         return None
 
