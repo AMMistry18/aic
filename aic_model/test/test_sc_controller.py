@@ -965,3 +965,30 @@ def test_calibration_dump_runs_even_when_the_depth_gate_refuses(monkeypatch):
     assert result is False, "the impossible depth must still be refused"
     assert not seated
     assert dumped["n"] == 1, "but the calibration sample must have been taken first"
+
+
+def test_calibration_dump_runs_even_when_perception_fails(monkeypatch):
+    """2026-07-25 18:46: perception found nothing and the run produced no
+    [sc-calib] block at all, so a whole grasp was wasted.
+
+    The dump depends on the TCP and a TF frame -- not on the port pose, the
+    cameras, or anything perception returns. It must not sit behind perception.
+    """
+    monkeypatch.setenv("RL_INSERT_CALIB_DUMP", "1")
+    dumped = {"n": 0}
+    monkeypatch.setattr(sc_controller, "dump_sc_grasp_calibration",
+                        lambda *_a, **_k: dumped.__setitem__("n", dumped["n"] + 1) or True)
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
+                        lambda *_: None)
+
+    class _P(_StubPolicy):
+        def get_logger(self):
+            return _RecordingLog()
+
+    result = sc_controller.run_sc_insertion(
+        _P(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+
+    assert result is False, "perception failure must still fail the run"
+    assert dumped["n"] == 1, "but the grasp sample must have been taken anyway"

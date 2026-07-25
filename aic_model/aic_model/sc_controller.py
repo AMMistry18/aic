@@ -1434,6 +1434,16 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     from .rl_insert_contract import port_frame
 
     log = policy.get_logger()
+
+    # FIRST, before perception even runs.  The grasp calibration needs only the
+    # TCP and the plug's ground-truth TF frame -- it does not depend on the port
+    # pose, the cameras, or anything perception produces.  Placing it after
+    # perception (as it was on 2026-07-25) means a perception failure costs the
+    # calibration sample too, and the 10-grasp campaign that 6c requires cannot
+    # make progress on any run where the port is not found.  Logs only.
+    if _sc_calib_dump_enabled():
+        dump_sc_grasp_calibration(policy, task)
+
     send_feedback("sc opening perception")
 
     perceived = perceive_sc_port_pose_consensus(policy, task, get_observation)
@@ -1465,13 +1475,6 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         f"delta_port_mm={(handoff_delta*1000).round(2).tolist()} "
         f"rot_err_deg={np.degrees(handoff_rot).round(2).tolist()}"
     )
-    # BEFORE both gates, deliberately.  The depth gate below refuses every run
-    # until SC_TIP_IN_TCP is calibrated, and this dump is how you calibrate it --
-    # running it after the gate would be a closed loop with no way in.  Logs
-    # only; it commands no motion, so a refused run still yields its sample.
-    if _sc_calib_dump_enabled():
-        dump_sc_grasp_calibration(policy, task)
-
     if dist > SC_HANDOFF_MAX_DIST_M:
         log.error(
             f"[sc] tip is {dist*1000:.0f}mm from the mouth -- outside the "
