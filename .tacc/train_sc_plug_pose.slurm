@@ -72,9 +72,9 @@ if sum(counts.values()) < minimum_total:
 print(f"SC dataset gate passed: {counts}")
 PY
 
-# The generic trainer validates that train and validation are nonempty before
-# it opens a GPU, then copies the best checkpoint to this SC-specific path.
-.pixi/envs/default/bin/python train_sfp_plug_pose.py \
+# The SC trainer re-checks nonempty train/val splits and 29-token pose labels
+# before it opens a GPU, then copies the best checkpoint to the SC path.
+.pixi/envs/default/bin/python train_sc_plug_pose.py \
   --data "${dataset_yaml}" \
   --model yolo11s-pose.pt \
   --epochs 120 \
@@ -87,3 +87,18 @@ PY
   --final-weights "${training_root}/best_sc_plug_pose.pt" \
   --metrics-out "${training_root}/reports/train_sc_plug_pose.json" \
   --seed 20260720
+
+# Geometric validation against simulator TF ground truth.  This, not the YOLO
+# keypoint metrics, is the number that decides whether the estimator can be
+# trusted to seat the plug: read position_error_mm.median against the 0.4 mm
+# working target and lateral_error_mm.p95 against the 0.725 mm binding
+# clearance.  Deliberately not --enforce: a first run that misses the gate is
+# information, not a reason to discard the checkpoint.
+.pixi/envs/default/bin/python validate_sc_plug_pose.py \
+  --mode dataset \
+  --weights "${training_root}/best_sc_plug_pose.pt" \
+  --data "${dataset_yaml}" \
+  --split test \
+  --device 0 \
+  --imgsz 960 \
+  --report "${training_root}/reports/validate_sc_plug_pose_test.json"

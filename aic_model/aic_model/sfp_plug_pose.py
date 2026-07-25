@@ -372,7 +372,14 @@ def fuse_multiview_keypoints(
 
 
 class SfpPlugPoseEstimator:
-    """Separate YOLO-pose detector and strict multiview pose fuser."""
+    """Separate YOLO-pose detector and strict multiview pose fuser.
+
+    The fusing maths is object-agnostic: ``local_keypoints_m`` selects which
+    rigid body is being fitted, and defaults to the SFP plug so existing
+    callers are unaffected.  ``aic_model.sc_plug_pose.ScPlugPoseEstimator``
+    reuses this class with the SC plug's keypoints rather than forking it, so
+    both plugs share one audited fail-closed path.
+    """
 
     def __init__(
         self,
@@ -388,6 +395,7 @@ class SfpPlugPoseEstimator:
         min_views: int = 2,
         device: str | None = None,
         model: Any | None = None,
+        local_keypoints_m: np.ndarray | None = None,
     ):
         if model is None:
             if weights_path is None:
@@ -401,6 +409,15 @@ class SfpPlugPoseEstimator:
                 Path(weights_path).expanduser().resolve() if weights_path is not None else None
             )
         self._model = model
+        keypoints = np.asarray(
+            SFP_PLUG_LOCAL_KEYPOINTS_M if local_keypoints_m is None else local_keypoints_m,
+            dtype=np.float64,
+        )
+        if keypoints.ndim != 2 or keypoints.shape[1] != 3 or len(keypoints) < 4:
+            raise ValueError("local_keypoints_m must be at least four Nx3 points")
+        if not np.all(np.isfinite(keypoints)):
+            raise ValueError("local_keypoints_m must be finite")
+        self.local_keypoints_m = keypoints
         self.imgsz = int(imgsz)
         self.conf_threshold = float(conf_threshold)
         self.min_keypoint_confidence = float(min_keypoint_confidence)
@@ -432,7 +449,7 @@ class SfpPlugPoseEstimator:
             return []
 
         detections: list[PlugKeypointDetection] = []
-        expected_count = len(SFP_PLUG_LOCAL_KEYPOINTS_M)
+        expected_count = len(self.local_keypoints_m)
         for view, result in zip(views, results):
             if result.boxes is None or len(result.boxes) == 0 or result.keypoints is None:
                 continue
@@ -527,6 +544,7 @@ class SfpPlugPoseEstimator:
             position, rotation, rmse, reprojection, count, kp_conf = fuse_multiview_keypoints(
                 used_views,
                 detected,
+                local_keypoints_m=self.local_keypoints_m,
                 min_keypoint_confidence=self.min_keypoint_confidence,
             )
             if reprojection > self.max_reprojection_error_px:

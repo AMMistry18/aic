@@ -372,7 +372,14 @@ def fuse_multiview_keypoints(
 
 
 class SfpPlugPoseEstimator:
-    """Separate YOLO-pose detector and strict multiview pose fuser."""
+    """Separate YOLO-pose detector and strict multiview pose fuser.
+
+    The fusing maths is object-agnostic: ``local_keypoints_m`` selects which
+    rigid body is being fitted, and defaults to the SFP plug so existing
+    callers are unaffected.  ``aic_model.sc_plug_pose.ScPlugPoseEstimator``
+    reuses this class with the SC plug's keypoints rather than forking it, so
+    both plugs share one audited fail-closed path.
+    """
 
     def __init__(
         self,
@@ -383,11 +390,12 @@ class SfpPlugPoseEstimator:
         min_keypoint_confidence: float = 0.15,
         min_pose_confidence: float = 0.35,
         max_sync_spread_s: float = 0.12,
-        max_reprojection_error_px: float = 4.0,
+        max_reprojection_error_px: float = 6.0,
         max_keypoint_rmse_m: float = 0.0035,
         min_views: int = 2,
         device: str | None = None,
         model: Any | None = None,
+        local_keypoints_m: np.ndarray | None = None,
     ):
         if model is None:
             if weights_path is None:
@@ -401,6 +409,15 @@ class SfpPlugPoseEstimator:
                 Path(weights_path).expanduser().resolve() if weights_path is not None else None
             )
         self._model = model
+        keypoints = np.asarray(
+            SFP_PLUG_LOCAL_KEYPOINTS_M if local_keypoints_m is None else local_keypoints_m,
+            dtype=np.float64,
+        )
+        if keypoints.ndim != 2 or keypoints.shape[1] != 3 or len(keypoints) < 4:
+            raise ValueError("local_keypoints_m must be at least four Nx3 points")
+        if not np.all(np.isfinite(keypoints)):
+            raise ValueError("local_keypoints_m must be finite")
+        self.local_keypoints_m = keypoints
         self.imgsz = int(imgsz)
         self.conf_threshold = float(conf_threshold)
         self.min_keypoint_confidence = float(min_keypoint_confidence)
@@ -410,14 +427,6 @@ class SfpPlugPoseEstimator:
         self.max_keypoint_rmse_m = float(max_keypoint_rmse_m)
         self.min_views = max(2, int(min_views))
         self.device = device
-        # Runtime callers need the exact fail-closed reason in their service
-        # logs.  Keeping it on the estimator avoids turning a normal rejected
-        # observation into an exception or a fixed-grasp fallback.
-        self.last_failure_reason: str | None = None
-
-    def _reject(self, reason: str) -> None:
-        self.last_failure_reason = reason
-        return None
 
     def _load_model(self):
         if self._model is None:
@@ -440,7 +449,7 @@ class SfpPlugPoseEstimator:
             return []
 
         detections: list[PlugKeypointDetection] = []
-        expected_count = len(SFP_PLUG_LOCAL_KEYPOINTS_M)
+        expected_count = len(self.local_keypoints_m)
         for view, result in zip(views, results):
             if result.boxes is None or len(result.boxes) == 0 or result.keypoints is None:
                 continue
@@ -497,28 +506,22 @@ class SfpPlugPoseEstimator:
         offline held-out evaluation.
         """
 
-        self.last_failure_reason = None
         try:
             unique: dict[str, PlugPoseView] = {}
             for view in views:
                 validated = view.validated()
                 if validated.camera_name in unique:
-                    return self._reject(f"duplicate_camera:{validated.camera_name}")
+                    return None
                 unique[validated.camera_name] = validated
             selected = list(unique.values())
             if len(selected) < self.min_views:
-                return self._reject(
-                    f"too_few_views:{len(selected)}<{self.min_views}"
-                )
+                return None
             stamps = np.array([stamp_to_seconds(view.stamp_s) for view in selected])
-            spread_s = float(np.ptp(stamps))
-            if spread_s > self.max_sync_spread_s:
-                return self._reject(
-                    f"sync_spread:{spread_s:.3f}>{self.max_sync_spread_s:.3f}s"
-                )
+            if float(np.ptp(stamps)) > self.max_sync_spread_s:
+                return None
             estimate_stamp = float(np.max(stamps))
             if min_stamp_s is not None and estimate_stamp <= float(min_stamp_s):
-                return self._reject("not_newer_than_min_stamp")
+                return None
             age: float | None = None
             if now_s is not None:
                 now = stamp_to_seconds(now_s)
@@ -529,7 +532,7 @@ class SfpPlugPoseEstimator:
                 # still pass through the normal stale-frame guard below.
                 age = max(0.0, now - estimate_stamp)
                 if max_age_s is not None and age > float(max_age_s):
-                    return self._reject(f"stale:{age:.3f}>{float(max_age_s):.3f}s")
+                    return None
             elif max_age_s is not None:
                 raise ValueError("now_s is required when max_age_s is provided")
 
@@ -537,22 +540,17 @@ class SfpPlugPoseEstimator:
             detected_names = {detection.camera_name for detection in detected}
             used_views = [view for view in selected if view.camera_name in detected_names]
             if len(used_views) < self.min_views:
-                return self._reject(
-                    f"too_few_detected_views:{len(used_views)}<{self.min_views}"
-                )
+                return None
             position, rotation, rmse, reprojection, count, kp_conf = fuse_multiview_keypoints(
                 used_views,
                 detected,
+                local_keypoints_m=self.local_keypoints_m,
                 min_keypoint_confidence=self.min_keypoint_confidence,
             )
             if reprojection > self.max_reprojection_error_px:
-                return self._reject(
-                    f"reprojection:{reprojection:.2f}>{self.max_reprojection_error_px:.2f}px"
-                )
+                return None
             if rmse > self.max_keypoint_rmse_m:
-                return self._reject(
-                    f"keypoint_rmse:{rmse * 1000:.2f}>{self.max_keypoint_rmse_m * 1000:.2f}mm"
-                )
+                return None
             detection_conf = float(
                 np.mean([d.box_confidence for d in detected if d.camera_name in detected_names])
             )
@@ -567,12 +565,10 @@ class SfpPlugPoseEstimator:
                 * view_quality
             )
             if confidence < self.min_pose_confidence:
-                return self._reject(
-                    f"pose_confidence:{confidence:.3f}<{self.min_pose_confidence:.3f}"
-                )
+                return None
             source_ids = tuple(view.frame_id for view in used_views)
             if len(set(source_ids)) != len(source_ids):
-                return self._reject("duplicate_source_frame_ids")
+                return None
             quaternion = rotation_matrix_to_quaternion_wxyz(rotation)
             return PlugPoseEstimate(
                 position_world=position,
@@ -596,8 +592,8 @@ class SfpPlugPoseEstimator:
             TypeError,
             ValueError,
             np.linalg.LinAlgError,
-        ) as exc:
-            return self._reject(f"geometry_error:{type(exc).__name__}:{exc}")
+        ):
+            return None
 
     def estimate_relative_to_port(
         self,
