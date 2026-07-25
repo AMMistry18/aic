@@ -81,6 +81,7 @@ import numpy as np
 from .rl_insert_contract import (
     SFP_TIP_IN_TCP_POS,
     SFP_TIP_IN_TCP_QUAT,
+    matrix_to_quat,
     quat_to_matrix,
 )
 from .v50_controller import (
@@ -254,6 +255,17 @@ SC_TIP_CALIBRATED = _env_bool("RL_INSERT_SC_TIP_CALIBRATED", False)
 # 7.85mm opening.  Once 6c lands this offset collapses to ~0 and the flag stops
 # mattering; it stays as the way to A/B the two behaviours in sim.
 SC_PRESERVE_HANDOFF_YAW = _env_bool("RL_INSERT_SC_PRESERVE_HANDOFF_YAW", True)
+
+# Ground-truth TF frames to probe when solving SC_TIP_IN_TCP_*.  RLInsert's
+# CALIB_PLUG_FRAMES list is SFP-only ("sfp_tip,sfp_plug,plug,cable_0,..."), so
+# probing it on an SC run resolves nothing useful.  task.plug_name is tried
+# first; for SC that is "sc_tip".
+SC_CALIB_PLUG_FRAMES = [
+    f.strip() for f in os.environ.get(
+        "RL_INSERT_SC_CALIB_PLUG_FRAMES",
+        "sc_tip,sc_plug,sc,gripper/sc_tip,gripper/sc_plug,tool/tip",
+    ).split(",") if f.strip()
+]
 
 SC_WRENCH_LOG_PERIOD_S = _env_float("RL_INSERT_SC_WRENCH_LOG_PERIOD_S", 0.25)
 SC_PERCEPT_SAMPLES = _env_int("RL_INSERT_SC_PERCEPT_SAMPLES", 7)
@@ -521,6 +533,88 @@ def classify_opening(width_m: float, height_m: float):
             best = (label, residual)
     label, residual = best
     return label, float(residual), 0.0
+
+
+def _sc_calib_dump_enabled() -> bool:
+    """Read the flag at call time, not import time.
+
+    RLInsert snapshots CALIB_DUMP into a module constant on import, which makes
+    it untestable and unsettable by anything that loads after this module.
+    """
+    return _env_bool("RL_INSERT_CALIB_DUMP", False) or _env_bool(
+        "RL_INSERT_SC_CALIB_DUMP", False)
+
+
+def dump_sc_grasp_calibration(policy, task) -> bool:
+    """Log everything needed to re-solve ``SC_TIP_IN_TCP_*``.  Logs only.
+
+    RLInsert's ``_dump_grasp_calibration`` is unreachable on the SC path -- the
+    ``plug_type == "sc"`` branch returns into ``run_sc_insertion`` well before
+    it -- and it probes SFP frames and prints SFP constant names.  So
+    ``RL_INSERT_CALIB_DUMP=1`` on an SC run produced nothing at all, which would
+    have made 6c impossible to actually perform.
+
+    Returns True if a ground-truth frame resolved.
+    """
+    log = policy.get_logger()
+    try:
+        tcp_pos, tcp_quat = policy._tcp()
+    except Exception as ex:
+        log.error(f"[sc-calib] cannot read TCP: {ex}")
+        return False
+    tcp_pos = np.asarray(tcp_pos, dtype=np.float64).reshape(3)
+    tcp_quat = np.asarray(tcp_quat, dtype=np.float64).reshape(4)
+    R_tcp = quat_to_matrix(tcp_quat)
+    tip_pos, R_tip = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+
+    log.info("[sc-calib] === SC GRASP CALIBRATION DUMP (base_link) ===")
+    log.info(f"[sc-calib] TCP pos={np.round(tcp_pos, 6).tolist()} "
+             f"quat_wxyz={np.round(tcp_quat, 6).tolist()}")
+    log.info(f"[sc-calib] ASSUMED tip (current transform) "
+             f"pos={np.round(tip_pos, 6).tolist()} "
+             f"quat_wxyz={np.round(matrix_to_quat(R_tip), 6).tolist()}")
+    log.info(f"[sc-calib] current SC_TIP_IN_TCP_POS={SC_TIP_IN_TCP_POS.tolist()} "
+             f"QUAT={SC_TIP_IN_TCP_QUAT.tolist()} calibrated={SC_TIP_CALIBRATED}")
+
+    frames = []
+    plug_name = str(getattr(task, "plug_name", "") or "").strip()
+    if plug_name:
+        frames.append(plug_name)
+    frames.extend(f for f in SC_CALIB_PLUG_FRAMES if f not in frames)
+
+    lookup = getattr(policy, "_lookup_transform", None)
+    if lookup is None:
+        log.error("[sc-calib] policy has no _lookup_transform; cannot resolve ground truth")
+        return False
+
+    found = False
+    for frame in frames:
+        try:
+            tf = lookup("base_link", frame, timeout_sec=0.3)
+        except Exception:
+            continue
+        tr, ro = tf.transform.translation, tf.transform.rotation
+        gt_pos = np.array([tr.x, tr.y, tr.z], dtype=np.float64)
+        gt_quat = np.array([ro.w, ro.x, ro.y, ro.z], dtype=np.float64)
+        q_rel = matrix_to_quat(R_tcp.T @ quat_to_matrix(gt_quat))
+        p_rel = R_tcp.T @ (gt_pos - tcp_pos)
+        found = True
+        log.info(f"[sc-calib] GROUND-TRUTH frame '{frame}' RESOLVED: "
+                 f"pos={np.round(gt_pos, 6).tolist()} "
+                 f"quat_wxyz={np.round(gt_quat, 6).tolist()}")
+        log.info(f"[sc-calib]   >>> SOLVED RL_INSERT_SC_TIP_IN_TCP_POS ="
+                 f"{np.round(p_rel, 10).tolist()}")
+        log.info(f"[sc-calib]   >>> SOLVED RL_INSERT_SC_TIP_IN_TCP_QUAT="
+                 f"{np.round(q_rel, 10).tolist()}")
+        log.info("[sc-calib]   >>> collect these over ~10 grasps; the SPREAD is the "
+                 "measurement that decides whether a fixed transform is enough "
+                 "(budget against 0.725 mm vertical clearance, not 1.2 mm lateral), "
+                 "then set both defaults in BOTH copies of sc_controller.py")
+    if not found:
+        log.warn(f"[sc-calib] no ground-truth frame resolved from {frames}. Set "
+                 "RL_INSERT_SC_CALIB_PLUG_FRAMES to the correct name.")
+    log.info("[sc-calib] === END DUMP ===")
+    return found
 
 
 def seat_frame(Rp, R_tip):
@@ -1351,6 +1445,13 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         f"delta_port_mm={(handoff_delta*1000).round(2).tolist()} "
         f"rot_err_deg={np.degrees(handoff_rot).round(2).tolist()}"
     )
+    # BEFORE both gates, deliberately.  The depth gate below refuses every run
+    # until SC_TIP_IN_TCP is calibrated, and this dump is how you calibrate it --
+    # running it after the gate would be a closed loop with no way in.  Logs
+    # only; it commands no motion, so a refused run still yields its sample.
+    if _sc_calib_dump_enabled():
+        dump_sc_grasp_calibration(policy, task)
+
     if dist > SC_HANDOFF_MAX_DIST_M:
         log.error(
             f"[sc] tip is {dist*1000:.0f}mm from the mouth -- outside the "

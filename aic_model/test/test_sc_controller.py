@@ -837,3 +837,100 @@ def test_handoff_depth_gate_is_tighter_than_the_seat_trigger(monkeypatch):
     # The gate is only useful if it fires well before a depth that would let
     # _seat skip its approach entirely.
     assert sc_controller.SC_MAX_HANDOFF_DEPTH_M < SCConfig().validated().seat_candidate_depth_m
+
+
+# ---------------------------------------------------------------------------
+# SC grasp-calibration dump (6c).
+# ---------------------------------------------------------------------------
+class _FakeTransform:
+    def __init__(self, pos, quat_wxyz):
+        class _V:
+            pass
+
+        class _Q:
+            pass
+
+        self.transform = _V()
+        self.transform.translation = _V()
+        self.transform.rotation = _Q()
+        (self.transform.translation.x, self.transform.translation.y,
+         self.transform.translation.z) = [float(v) for v in pos]
+        (self.transform.rotation.w, self.transform.rotation.x,
+         self.transform.rotation.y, self.transform.rotation.z) = [
+            float(v) for v in quat_wxyz]
+
+
+def test_calibration_dump_solves_the_sc_transform_from_a_ground_truth_frame():
+    log = _RecordingLog()
+    tcp_pos = np.array([-0.31, 0.39, 0.24])
+    tcp_quat = np.array([0.965925826, 0.0, 0.258819045, 0.0])
+    # A "true" tip 40 mm out along the TCP's own z, rotated 90 deg about it --
+    # i.e. exactly the convention offset the field logs show.
+    R_tcp = quat_to_matrix(tcp_quat)
+    true_pos = tcp_pos + R_tcp @ np.array([0.0, 0.0, 0.040])
+    R_true = R_tcp @ rotation_from_axis_angle(np.array([0.0, 0.0, np.radians(-90.0)]))
+
+    class _CalibPolicy(_StubPolicy):
+        def get_logger(self):
+            return log
+
+        def _lookup_transform(self, target, frame, timeout_sec=0.3):
+            if frame != "sc_tip":
+                raise RuntimeError("no such frame")
+            return _FakeTransform(true_pos, matrix_to_quat(R_true))
+
+    found = sc_controller.dump_sc_grasp_calibration(
+        _CalibPolicy(tcp_pos, tcp_quat), _StubTask())
+
+    assert found
+    text = "\n".join(log.info_lines)
+    assert "SOLVED RL_INSERT_SC_TIP_IN_TCP_POS" in text
+    assert "SOLVED RL_INSERT_SC_TIP_IN_TCP_QUAT" in text
+    # the solved position must be the true offset expressed in the TCP frame
+    solved = [ln for ln in log.info_lines if "SOLVED RL_INSERT_SC_TIP_IN_TCP_POS" in ln][0]
+    assert "0.04" in solved
+
+
+def test_calibration_dump_probes_the_tasks_plug_name_first():
+    # RLInsert's list is SFP-only, so an SC run must not inherit it.
+    assert "sc_tip" in sc_controller.SC_CALIB_PLUG_FRAMES
+    assert not any(f.startswith("sfp") for f in sc_controller.SC_CALIB_PLUG_FRAMES)
+
+    seen = []
+
+    class _ProbePolicy(_StubPolicy):
+        def get_logger(self):
+            return _RecordingLog()
+
+        def _lookup_transform(self, target, frame, timeout_sec=0.3):
+            seen.append(frame)
+            raise RuntimeError("nothing resolves")
+
+    class _Task:
+        plug_name = "sc_tip_custom"
+        target_module_name = "sc_port_0"
+        port_name = "sc_port_base"
+
+    assert not sc_controller.dump_sc_grasp_calibration(
+        _ProbePolicy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _Task())
+    assert seen[0] == "sc_tip_custom", "task.plug_name must be tried first"
+
+
+def test_calibration_dump_runs_even_when_the_depth_gate_refuses(monkeypatch):
+    """The chicken-and-egg guard.
+
+    The depth gate refuses every run until SC_TIP_IN_TCP is calibrated, and this
+    dump is how it gets calibrated. If the dump ever moves below the gate there
+    is no way in at all.
+    """
+    monkeypatch.setenv("RL_INSERT_CALIB_DUMP", "1")
+    log = _RecordingLog()
+    dumped = {"n": 0}
+    monkeypatch.setattr(sc_controller, "dump_sc_grasp_calibration",
+                        lambda *_a, **_k: dumped.__setitem__("n", dumped["n"] + 1) or True)
+
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.00699, log)
+
+    assert result is False, "the impossible depth must still be refused"
+    assert not seated
+    assert dumped["n"] == 1, "but the calibration sample must have been taken first"
