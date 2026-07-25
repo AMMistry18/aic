@@ -235,6 +235,41 @@ def test_wrist_camera_keep_out_rejects_a_pose_the_workcell_planner_refused():
     assert gated.reachable(open_pose)
 
 
+def test_link_segments_track_the_configuration_not_the_wrist():
+    """The upper arm and forearm move independently of wrist_3.
+
+    This is why the gripper's fixed image-space mask cannot represent them, and
+    why a survey pose can be top-down, collision-free and fully framed while the
+    robot's own arm lies across the picture -- observed on a field run at
+    obliquity 0.0 deg.  Rotating only the wrist must leave these segments put;
+    rotating the elbow must move them.
+    """
+    arm = UR5eArm(base=Transform(np.eye(3), np.zeros(3)))
+    base_config = [0.3, -1.2, 1.4, -1.6, -1.57, 0.2]
+
+    segments = arm.link_segments(base_config)
+    assert len(segments) == 2
+    for start, end, radius in segments:
+        assert 0.03 < radius < 0.08  # UR5e collision tubes
+        assert np.linalg.norm(end - start) > 0.3  # real link lengths
+
+    # Wrist-only change: the arm links must not move at all.
+    wrist_only = list(base_config)
+    wrist_only[5] += 1.0
+    for (a0, b0, _r), (a1, b1, _r2) in zip(segments, arm.link_segments(wrist_only)):
+        assert np.allclose(a0, a1, atol=1e-9)
+        assert np.allclose(b0, b1, atol=1e-9)
+
+    # Elbow change: they must move, which is exactly what no static mask can see.
+    elbow = list(base_config)
+    elbow[2] += 0.6
+    moved = max(
+        float(np.linalg.norm(b1 - b0))
+        for (_a0, b0, _r), (_a1, b1, _r2) in zip(segments, arm.link_segments(elbow))
+    )
+    assert moved > 0.05
+
+
 def test_unreachable_pose_is_rejected():
     arm = UR5eArm()
     far = Transform(np.eye(3), np.array([2.0, 0.0, 0.5]))

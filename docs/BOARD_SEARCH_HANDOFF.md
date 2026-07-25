@@ -210,28 +210,221 @@ board orientation leave a near-empty intersection of reachable / collision-clear
 to chase it. This is exactly what the graceful `done=false` path plus the
 still-outstanding BT `result.done` gate exist for.
 
-**Bore commitment (SC only).** `_bore_view_tilt_bands` returns a committed
-`(12 deg, 22 deg)` cross-rail band then a flat `(0, 22 deg)` fallback for the SC
-sector, whose ports are recessed sideways; `cross_rail_sign=-1` keeps the camera
-on the board -X (mouth) side, which is board-relative and tracks the insignia. The
-0.80 m NIC reach cap is removed; reach is decided by the IK gate, with the 0.85 m
-sphere surviving only as a loose fallback. The published log line reports
-`bore_band=` so a run shows which tier won (`none` for NIC).
+## SC destination ports -- full reference (2026-07-25)
 
-Tests: `test/test_arm_ik.py` (FK/IK round-trip, calibration, limits, rejection),
-reachability-gate plumbing in `test/test_board_stage2.py`, and updated source
-guards in `test/test_check_board_visibility_stage2_integration.py`. **Not yet
-hardware-validated** -- on the next run watch for the log
-`arm IK reachability gate active: base=Rz180 tool=NNNmm axial=1.00` (confirms
-autocalibrate found the base convention and the gate is live), and on any
-failure the `arm IK calibration failed (...)` candidate list or the
-`framed ... but none ... reachable` reason.
+SC was rebuilt from scratch this session after being reported "completely
+broken". Everything below is measured from the workcell model or from field
+runs; where something is inferred rather than measured it says so.
+
+### Intrinsics -- the five SC adapters
+
+Authoritative source: upstream `aic_description/urdf/task_board.urdf.xacro`
+(branch `phase_1`). **Our copy was stale and defined only two ports**; it has
+been synced. Note the sync also **moved `sc_port_1` from board Y +0.0705 to
++0.0295** -- downstream SC perception code that assumed the old layout must be
+rechecked.
+
+| port | rail | board X | board Y | board Z |
+|---|---|---|---|---|
+| `sc_port_0/1/2` | SC_RAIL_0 | `-0.075 + t` | **+0.0295** | 0.0165 |
+| `sc_port_3/4` | SC_RAIL_1 | `-0.075 + t` | **+0.0705** | 0.0165 |
+
+* rail translation `t` in **-0.060 .. +0.055** (`task_board_limits.sc_rail`), so
+  the cluster spans board X **-0.135 .. -0.020**, i.e. 115 x 41 mm over the two
+  rows, with the five entrances coplanar at **board Z 0.0301**.
+* adapter body: **9.3 (X) x 25.8 (Y) x 27.4 (Z) mm**, spanning board Z
+  0.0028..0.0302.
+* **bore axis (0.001, 0.000, -0.9999) in board frame -- 0.00 deg off the board
+  normal.** The ports open *straight up*; the bore runs 15.64 mm *down* from the
+  entrance. The pre-existing code assumed they were recessed *sideways* and
+  tilted the camera 12-22 deg across the rail onto the board -X face. That is
+  almost certainly why the sector never worked.
+* receptacle opening **7.6 x 22.4 mm**, derived from the adapter's own collision
+  primitives (side walls at local |x| 12.05 mm x 1.69 mm thick; plates at local
+  z +/-4.2 mm). Limiting geometric cone `atan(3.8/15.64)` = **13.7 deg** across
+  the narrow axis (35.6 deg across the wide one).
+* the adapters are **blue**: the shipped texture is 88.1% saturated blue
+  (mean BGR 211/137/27, hue ~102). A colour mask is viable as a *diagnostic* but
+  the SC **plug** housings are blue too (`housing blue` geoms in
+  `aic_assets/models/SC Plug/model.sdf`), so any blob count needs board-region
+  and size gating. Not implemented -- IVM does the detection.
+
+Relative to NIC, SC should be the easier sector: **149 mm lower** on the board
+(entrances at Z 0.0301 vs 0.1793), a **13.7 deg** cone vs 7.5, and the worst
+port only 61 mm off the cluster centre vs 81. Reach and the wrist-camera
+keep-out are not binding here.
+
+### How the survey pose is chosen today
+
+`_survey_view_settings(3)` in `check_board_visibility_skill.py`:
+
+| setting | value | why |
+|---|---|---|
+| `cross_rail_tilt_band_rad` | `None` | bores open along the normal; any tilt occludes them |
+| `cross_rail_sign` | `0.0` | no side commitment |
+| `require_all_cameras_frame` | **`True`** | IVM needs all three cameras framing the sector (confirmed by the user) |
+| `prefer_far_standoff` | `False` | cone is met from 0.27 m, so take the pixels |
+| `max_obliquity_rad` | `8 deg` | keep the view down the bores |
+| `min_required_clearance_px` | `25` | gripper keep-out margin |
+| `max_angular_motion_rad` | `90 deg` | inherited from the NIC recipe |
+| `yaws_rad` | 24 values, 15 deg | roll rotates the sector clear of the gripper silhouette |
+| `standoffs_m` | `0.50 .. 0.80` | nearest-first inside the band |
+
+`sc_sector_corners()` is centred on the five **entrances**, not the adapter
+bodies -- the search aims the optical axis at the box centroid, and the old box
+(X -0.14..-0.01, Y -0.02..0.10, Z 0.01..0.05) predated the 3-port row and swept
+in ~47 mm of empty board on the -Y side, pulling the aim point 10 mm off.
+
+Typical output: standoff 0.58-0.62 m, obliquity <8 deg, TCP at base z ~0.38 m,
+gripper clearance +38..+71 px in all three cameras, all five ports inside the
+cone. Offline that is 96/96 scenarios (board yaw 0-315 deg x tilt 0-10 deg x
++/-50 mm placement x two Stage-1 exit poses).
+
+### The arm can stand in its own cameras -- and does
+
+The gripper keep-out is a **fixed image-space silhouette**. That is correct only
+for geometry rigidly attached to wrist_3. The **upper arm and forearm are
+upstream of the wrist**, so where they land in the image depends entirely on the
+joint configuration, and no static mask can represent them.
+
+Measured on the deployed build: at board yaw **70 deg** -- the orientation
+reported as still failing -- the published pose puts the **upper arm in the
+centre camera** (and clipping the left), while every existing check passes:
+obliquity 0.0 deg, collision-free, gripper-clear, fully framed. At yaw 90 and
+250 deg arm links land in **all three** cameras.
+
+Fix: `UR5eArm.link_segments()` returns the upper arm and forearm as base-frame
+capsules (60 mm / 50 mm tubes), and `_arm_clear_of_own_cameras()` rejects any
+pose whose IK solution projects a link into any camera. Cost: 1 of 8
+orientations (yaw 90 loses its pose); yaw 70/140/250 move to a clean pose.
+**Approximate by construction** -- it checks the IK branch nearest the current
+joints, and Move Robot may pick another.
+
+### What was tried and reverted -- do not repeat
+
+**Closer standoff with reference-camera-only framing (0.40-0.45 m).** Motivated
+by resolution: at 0.6 m the bore spans only 15-17 px (NIC's cage gets 20-25 px)
+and IVM resolved 2 of 5 ports. All-camera framing is what pins the standoff at
+~0.6 m -- it cannot be met closer regardless of the floor -- so the requirement
+was dropped and the band lowered. **This broke the run.** With only the
+reference camera checked, the tool sat *on top of* the ports in both side
+cameras (gripper clearance **-13 to -32 px**) while the centre camera reported a
+healthy +58 px; and the 0.45 m pose put the TCP at base z 0.24 m, reachable only
+through a contorted configuration.
+
+The flawed check behind it: all five entrances were verified to **project inside
+the image bounds** in all three cameras, and that was taken as proof coverage
+was not lost. **In-frame is not unoccluded.** Any future attempt to relax
+all-camera framing must test gripper clearance per camera, not projection.
+
+**Clearance-bucketed ranking.** An attempt to stop the objective trading a 90 deg
+wrist roll for a few px of extra clearance. It did not change the outcome
+(standoff dominates the objective, and at the nearest framing standoff only
+rolled poses clear the gripper) and it perturbed NIC/SFP ranking, so it was
+reverted.
+
+### Open issues
+
+1. **The transit path.** Move Robot is reported taking a violent route to the
+   pose. The skill publishes a Cartesian pose only; Move Robot owns the joint
+   path and configuration choice. Related: an earlier run reached a NIC pose
+   through a ~360 deg joint-6 swing -- the planner picked the co-terminal branch
+   (`226.2 deg` vs `-133.8 deg`). Capping `max_angular_motion_rad` is the lever
+   on our side; measured cost: 90 -> 60/45 deg takes SC from 7/8 to 5/8
+   orientations. Not applied -- it is a guess at a problem one layer down.
+2. **Does the detector actually want a top-down view?** The whole SC view is
+   built on "look down the bore so it shows its black depth". The user reports
+   70 deg still failing *while looking straight down with full port depth*. If
+   that survives the arm-in-view fix, the premise is wrong: `best_sc_pose.pt`
+   labels an 8.8 x 6.0 mm rectangle at the **mouth**, not the bore (see the SC
+   size-gate commit), and a head-on view of a symmetric rectangle is the worst
+   conditioning for 6-DoF pose -- which would argue for deliberate obliquity.
+   Resolve with the `SFP Stage 2 published survey pose ...` line from a run
+   known to work; that gives exact standoff and obliquity for a good pose.
+3. **Resolution is marginal regardless.** ~17 px on the bore at 0.62 m, and the
+   SC recess is shallower than NIC's relative to its width (depth/width 2.1 vs
+   3.8), so it is a weaker dark-hole cue at equal pixel count.
+4. **BT `done` gate still missing.** SC can legitimately return `done=false`
+   (no arm-clear pose at some orientations); without the gate that becomes the
+   `norm(quat)==0` crash.
+
+### Downstream `filter_estimates_sc` (Flowstate code node, not in the build)
+
+Rewritten this session; **not yet deployed**. Working copy:
+`filter_estimates_sc_NODE.py` in the session scratchpad.
+
+Defects found in the original:
+
+* **fixed world axes** (`ALONG_RAIL_AXIS_ROOT=[1,0,0]`,
+  `BETWEEN_RAIL_AXIS_ROOT=[0,1,0]`). Board yaw inflates the within-rail spread by
+  `along_extent * sin(yaw)`; with a 115 mm rail against a 12 mm spread gate it
+  fails at **~6 deg of board yaw**. Measured: passes at 0-5 deg, fails at 10 deg
+  and every yaw beyond.
+* **silent mislabel on a flipped board** -- `by_rail[:3]` assumes the 3-port rail
+  has the lower +Y; a 180 deg rotation inverts that with no error raised.
+* `DUPLICATE_RADIUS_M` (18 mm) equalled `MIN_ALONG_RAIL_SEPARATION_M`, so two
+  genuinely adjacent ports merged and the 5-port fit could never be satisfied.
+* the 18 mm along-rail floor is too tight for 9.3 mm-wide adapters.
+* no coplanarity check.
+
+The rewrite takes its axes from the **detections' own orientations** (averaged
+rotation matrices, re-orthonormalised by SVD), searches all three board axes for
+the one giving a clean 3/2 split at 41 mm, and assigns rail identity by **port
+count** so no rotation can swap the rails. Verified 20/20 board orientations,
+plus ghost detection, missing port (refuses rather than mislabels),
+no-orientation fallback, and 4 mm noise. PCA of the point cloud was tried first
+for the axes and rejected -- a single false positive skews it, and it fails when
+the ports bunch along the rail.
+
+Numbering knobs (Phase 1 board): `PORT_LABELS_BY_RAIL = ((0,1,2),(3,4))` and
+`ALONG_RAIL_SIGN`. The along-rail *direction* cannot be derived from the pattern
+-- five ports in two rows are symmetric end-for-end -- so if a run lands on the
+port at the wrong END of the correct rail, flip `ALONG_RAIL_SIGN` and nothing
+else.
+
+
+## Tests and log lines
+
+Tests: `test/test_arm_ik.py` (closed-form FK/IK round-trip, DH-chain identity,
+autocalibrate, wrist-camera keep-out against the planner's own reported
+collision configs, `link_segments` tracking the elbow rather than the wrist),
+reachability-gate plumbing and the full-ranking regression in
+`test/test_board_stage2.py`, and per-sector view settings in
+`test/test_check_board_visibility_stage2_integration.py`. 256 passing.
+
+Log lines that tell you what is actually live:
+
+```
+arm IK reachability gate active: base=Rz180 tool=197.1mm axial=1.00
+    wrist-camera keep-out 140mm over 3 probes; arm-in-view rejection over 3 cameras
+SFP Stage 2 published survey pose ... standoff=0.580m ... obliquity=<deg>
+```
+
+* `obliquity` is measured on the **reference camera's optical axis**, not the
+  TCP +Z. The wrist cameras are pitched **15 deg** off the tool axis, so a
+  TCP-based reading is ~15 deg high and does not correspond to the limit the
+  search enforces. An earlier version of this log line had that bug and reported
+  13.1 deg for a pose that was actually inside an 8 deg cap.
+* on failure, the reason string carries the framed/evaluated counts, or
+  `arm IK calibration failed (...)` with every candidate base convention.
 
 ## Latest deployment
 
-The insignia-driven implementation was built and installed **in place** as the
-existing `check_board_visibility_skill_v4` asset (not a new skill) into Flowstate
-solution `9b9e6784-583b-4d03-905e-98735b9aaa40_BRANCH` ("Work on this",
+**Current deploy target (2026-07-25):** solution
+`dc50ce22-2362-4345-85b3-89945912e761_BRANCH`, org `tar-2@xfa-prod-aic-us` --
+this is the default in `C:\tmp\ws_aic_phase1\install_skill.sh` and supersedes
+the `9b9e6784-...` solution named below. Override per-install with
+`AIC_SOLUTION=<id> bash install_skill.sh`; note the variable persists in the
+shell, so pass it explicitly rather than relying on the script default.
+
+The **SC/NIC work described above is written and unit-tested but NOT yet
+hardware-validated**: the arm-in-view rejection in particular has never run on
+the robot. Judge a run on whether the three camera views are clear of the arm.
+
+Historical -- the insignia-driven implementation was built and installed **in
+place** as the existing `check_board_visibility_skill_v4` asset (not a new
+skill) into Flowstate solution
+`9b9e6784-583b-4d03-905e-98735b9aaa40_BRANCH` ("Work on this",
 org `tar-2@xfa-prod-aic-us`) on 2026-07-23 as:
 
 ```text

@@ -316,9 +316,8 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
     assert nic["max_angular_motion_rad"] >= math.radians(89.0)
     assert len(nic["yaws_rad"]) >= 20
 
-    sc = settings(3)  # sideways-recessed: keeps the bore tilt, single camera
-    assert sc["cross_rail_sign"] == -1.0
-    assert sc["require_all_cameras_frame"] is False
+    # SC gets its own straight-down recipe; pinned by
+    # test_sc_view_reads_five_adapters_from_inside_the_ivm_standoff_band.
 
     for sfp_target in (0, 1, 99):  # SFP modules keep the close all-camera view
         sfp = settings(sfp_target)
@@ -331,35 +330,77 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
         _method("_run_sfp_geometric_stage2"),
     )
     assert "**self._survey_view_settings(survey_target)" in method_source
-    assert (
-        "for tilt_band in self._bore_view_tilt_bands(survey_target)"
-        in method_source
+    assert "cross_rail_tilt_band_rad=None" in method_source
+
+
+def test_no_sector_asks_for_a_cross_rail_tilt_any_more():
+    """Every recessed port on this board opens along the board normal.
+
+    NIC's SFP cages and SC's adapters both have bore axes within 1 deg of the
+    board normal (measured from the workcell model), so tilting the camera
+    across the rail reads them edge-on and the near wall occludes the bore.  The
+    committed-band/flat-fallback ladder that used to serve SC is therefore gone,
+    and the search is always called with no tilt band.
+    """
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    assert "_bore_view_tilt_bands" not in source
+    method_source = ast.get_source_segment(
+        source, _method("_run_sfp_geometric_stage2")
     )
-    assert "cross_rail_tilt_band_rad=tilt_band" in method_source
-
-
-def test_bore_view_tilt_bands_commit_to_the_side_then_fall_back_flat():
-    helper = copy.deepcopy(_method("_bore_view_tilt_bands"))
+    assert "cross_rail_tilt_band_rad=None" in method_source
+    # ...and no sector re-introduces a side commitment through cross_rail_sign.
+    helper = copy.deepcopy(_method("_survey_view_settings"))
     helper.decorator_list = []
     module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
     namespace: dict[str, object] = {"math": math}
     exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
-    bands_for = namespace["_bore_view_tilt_bands"]
+    settings = namespace["_survey_view_settings"]
+    for target in (0, 1, 2, 3, 99):
+        assert settings(target)["cross_rail_sign"] == 0.0
 
-    assert bands_for(0) == (None,)  # SFP -> near-overhead
-    assert bands_for(1) == (None,)
-    assert bands_for(99) == (None,)
-    # NIC's bores open straight *up*, so tilting across the rail occludes them --
-    # it must stay out of this list however the SC recipe evolves.
-    assert bands_for(2) == (None,)
-    bands = bands_for(3)  # SC -> committed bore band, then flat fallback
-    assert len(bands) >= 2
-    for lo, hi in bands:
-        assert 0.0 <= lo < hi <= math.radians(30.0)
-    # The first tier is a real commitment to the bore-facing side (lo > 0);
-    # the last tier degrades to flat (lo == 0) so a move is never stalled.
-    assert bands[0][0] > 0.0
-    assert bands[-1][0] == 0.0
+
+def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
+    """SC is pixel-limited, not geometry-limited, and needs its own band.
+
+    The five adapters open straight up behind a 15.64 mm bore with a
+    7.6 x 22.4 mm aperture -- a 13.7 deg cone, satisfied from 0.27 m, so nothing
+    forces the standoff outward.  What limits it is resolution: at the 0.6 m
+    that suits the NIC cards the bore spans only ~15 px and the first field run
+    resolved 2 of 5 ports.  Two things follow, and both are load-bearing:
+
+    All three cameras must frame the sector and stay gripper-clear.  Relaxing
+    that to the reference camera alone, to chase a closer view, is a regression
+    that has already been made once: the tool then sat on top of the ports in
+    both side cameras (-13 to -32 px of gripper clearance) while the centre
+    camera read +58 px, and the resulting 0.45 m pose drove the TCP to base
+    z 0.24 m, reachable only through a contorted arm configuration.
+
+    Resolution at the far end of this band is genuinely marginal -- ~17 px on
+    the bore, and IVM resolved 2 of 5 ports on the field run -- but that has to
+    be fixed without un-guarding the side cameras.
+    """
+    helper = copy.deepcopy(_method("_survey_view_settings"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {"math": math}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    sc = namespace["_survey_view_settings"](3)
+
+    # Side cameras stay guarded: relaxing this put the tool over the ports.
+    assert sc["require_all_cameras_frame"] is True
+    assert sc["prefer_far_standoff"] is False  # cone is met; take the pixels
+    assert sc["max_obliquity_rad"] <= math.radians(13.7)  # inside the bore cone
+    standoffs = sc["standoffs_m"]
+    assert min(standoffs) >= 0.50, "closer drives the TCP down onto the board"
+
+    # The tool must clear the tallest thing standing on the board (the NIC card
+    # tips), not merely the board plane -- the plane guard sits below them.
+    source = SOURCE_PATH.read_text(encoding="utf-8")
+    assert "BOARD_TALLEST_COMPONENT_Z" in source
+    method_source = ast.get_source_segment(
+        source, _method("_run_sfp_geometric_stage2")
+    )
+    assert "BOARD_TALLEST_COMPONENT_Z + TOOL_COMPONENT_CLEARANCE_M" in method_source
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():

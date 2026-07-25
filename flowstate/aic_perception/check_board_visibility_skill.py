@@ -27,6 +27,16 @@ import numpy as np
 from intrinsic.skills.python import skill_interface
 
 
+# Tallest structure standing on the task board: the NIC card tips / SFP cage
+# entrances, at board Z 0.1793 (measured from the workcell model).  Survey poses
+# are checked against this rather than against the board plane -- a pose that
+# clears the plate can still be inside the cards.
+BOARD_TALLEST_COMPONENT_Z = 0.1793
+# Margin the tool keeps above that.  Move Robot does its own collision checking,
+# but a pose it has to refuse fails the task outright, so poses that cut it fine
+# are never published in the first place.
+TOOL_COMPONENT_CLEARANCE_M = 0.06
+
 FLAGS = flags.FLAGS
 flags.DEFINE_integer("port", 8003, "Port to listen on.", allow_override=True)
 flags.DEFINE_string(
@@ -2533,6 +2543,47 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         return sfp_sector_corners()  # 0 UNSPECIFIED / 1 STAGED_SFP_MODULE
 
     @staticmethod
+    def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
+        """True when no arm link stands in any wrist camera's view.
+
+        A survey pose can be perfectly top-down, collision-free and fully
+        framed, and still be useless because the robot's own upper arm or
+        forearm lies across the picture -- which is exactly what a field run
+        produced (obliquity 0.0 deg, yet the view was blocked by the arm).  The
+        gripper keep-out cannot catch this: it is a fixed image-space silhouette,
+        correct only for what is rigidly attached to wrist_3, while these links
+        move independently of the wrist.
+
+        Approximate by construction: the configuration checked is the branch
+        nearest the current joints, and Move Robot may choose another.  That is
+        still far better than assuming the arm is never in frame.
+        """
+        from aic_perception.board_stage2 import project_points
+
+        for start, end, radius in arm.link_segments(joints):
+            samples = np.array(
+                [start + (end - start) * t for t in np.linspace(0.0, 1.0, 25)]
+            )
+            for name, camera in cameras.items():
+                camera_pose = base_T_tcp.compose(tcp_T_cam[name])
+                local = camera_pose.inverse().apply(samples)
+                pixels, in_front = project_points(local, camera)
+                for pixel, ahead, point in zip(pixels, in_front, local):
+                    if not ahead or not np.all(np.isfinite(pixel)):
+                        continue
+                    # Grow the segment by its own radius at that depth, so a
+                    # tube grazing the frame edge still counts as intruding.
+                    margin = radius * float(camera.K[0, 0]) / max(
+                        float(point[2]), 1e-6
+                    )
+                    if (
+                        -margin <= pixel[0] <= camera.width + margin
+                        and -margin <= pixel[1] <= camera.height + margin
+                    ):
+                        return False
+        return True
+
+    @staticmethod
     def _survey_view_settings(survey_target: int) -> dict:
         """Per-sector view geometry passed to ``search_survey_pose``.
 
@@ -2574,9 +2625,25 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         joint path, so the wider cap only widens which *poses* are offered, not
         how the arm gets there.
 
-        **SC (3)** ports are recessed sideways, so they keep the cross-rail bore
-        tilt onto the board -X face and single-camera framing.  **SFP (0/1)** pick
-        modules read fine from the standard close all-camera near-overhead view.
+        **SC (3)** is the same kind of target as NIC and gets the same recipe,
+        with two differences that make it much easier.  Its five adapters (three
+        on board Y +0.0295, two on Y +0.0705) also open **straight up** -- the
+        older "recessed sideways, tilt onto the -X face" reading was wrong, and
+        that cross-rail tilt is the likeliest reason this sector never worked.
+        But the SC bore is 15.64 mm deep behind a 7.6 x 22.4 mm aperture, giving
+        a ``atan(3.8/15.64) = 13.7 deg`` limiting cone (vs NIC's 7.5), and it
+        sits 149 mm lower on the board, so neither reach nor the wrist-camera
+        keep-out binds.  With the cone satisfied from 0.27 m the standoff is not
+        forced outward, so it is chosen **nearest-first** -- what limits it is
+        pixels on a 7.6 mm bore, not geometry.  The 0.5-1.0 m band that suits
+        the NIC cards and SFP modules is too far for a feature this small: at
+        0.6 m the bore spans ~15 px and IVM resolved 2 of 5 ports on the first
+        field run.  The band is therefore 0.40-0.62 m, and the all-camera
+        framing requirement is dropped (see below) because it was what held the
+        standoff out at 0.6 m in the first place.
+
+        **SFP (0/1)** pick modules read fine from the standard close all-camera
+        near-overhead view.
         """
         target = int(survey_target)
         if target == 2:  # NIC_SFP_DESTINATION
@@ -2593,36 +2660,40 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
         if target == 3:  # SC_DESTINATION_PORT
             return dict(
-                cross_rail_sign=-1.0,
-                require_all_cameras_frame=False,
-                prefer_far_standoff=True,
+                cross_rail_sign=0.0,
+                # All three cameras must frame the sector AND stay gripper-clear.
+                # Dropping this to chase a closer, higher-resolution view was
+                # tried and reverted: with only the reference camera checked, the
+                # tool sat *on top of* the ports in both side cameras (gripper
+                # clearance -13 to -32 px at every board yaw) while the centre
+                # camera reported a healthy +58 px, and the 0.45 m pose put the
+                # TCP at base z 0.24 m, which the arm could only reach through a
+                # contorted configuration.  "All five ports project inside the
+                # image" is NOT the same as "all five are unoccluded" -- that
+                # was the flawed check behind the regression.
+                require_all_cameras_frame=True,
+                prefer_far_standoff=False,
+                max_obliquity_rad=math.radians(8.0),
+                min_required_clearance_px=25.0,
+                max_angular_motion_rad=math.radians(90.0),
+                yaws_rad=tuple(
+                    math.radians(deg) for deg in range(-180, 180, 15)
+                ),
+                # Nearest-first inside the band the IVM reads at.  The bore is
+                # only ~17 px across at the far end, which is the open problem
+                # (IVM resolved 2 of 5 on the field run) -- but it must be solved
+                # without un-guarding the side cameras or driving the tool down
+                # to the board.
+                standoffs_m=(
+                    0.50, 0.55, 0.58, 0.60, 0.62,
+                    0.65, 0.68, 0.70, 0.73, 0.76, 0.80,
+                ),
             )
         return dict(
             cross_rail_sign=0.0,
             require_all_cameras_frame=True,
             prefer_far_standoff=False,
         )
-
-    @staticmethod
-    def _bore_view_tilt_bands(survey_target: int):
-        """Cross-rail tilt bands (priority order) for shifting onto the bore side.
-
-        The SC ports are recessed *sideways*, so they must be read from the
-        bore-facing side: a **committed** tilt band ((12 deg, 22 deg)) is tried
-        first, falling back to the flat band ((0, 22 deg)) only if no reachable
-        pose satisfies it, rather than stalling the downstream move.
-
-        NIC is **not** in this list, despite also being a recessed port.  Its SFP
-        bores open straight up, not sideways, so a cross-rail tilt is exactly
-        wrong -- see :meth:`_survey_view_settings`.  ``(None,)`` for NIC and the
-        SFP sectors, which stay near-overhead.
-        """
-        if int(survey_target) == 3:  # SC_DESTINATION_PORT
-            return (
-                (math.radians(12.0), math.radians(22.0)),
-                (0.0, math.radians(22.0)),
-            )
-        return (None,)
 
     @staticmethod
     def _stage2_not_done(result, reason: str) -> None:
@@ -3054,17 +3125,31 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         ),
                     )
                     seed = np.asarray(measured_joints, dtype=float)
-                    reachable_fn = (
-                        lambda pose, _arm=arm, _seed=seed: _arm.reachable(
-                            pose, _seed
+                    # Reachable AND the arm is not standing in its own cameras.
+                    # Both are needed: a pose can solve, clear the forearm-vs-
+                    # camera keep-out, sit perfectly top-down, and still show
+                    # nothing but upper arm in the picture.
+                    def reachable_fn(
+                        pose,
+                        _arm=arm,
+                        _seed=seed,
+                        _extrinsics=tcp_T_cam,
+                        _cameras=camera_models,
+                    ):
+                        joints = _arm.solve(pose, _seed)
+                        if joints is None:
+                            return False
+                        return self._arm_clear_of_own_cameras(
+                            pose, joints, _arm, _extrinsics, _cameras
                         )
-                    )
                     logging.info(
                         "arm IK reachability gate active: %s wrist-camera "
-                        "keep-out %.0fmm over %d probes",
+                        "keep-out %.0fmm over %d probes; arm-in-view rejection "
+                        "over %d cameras",
                         cal_desc,
                         arm.min_self_clearance_m * 1000.0,
                         len(arm.flange_T_probes),
+                        len(camera_models),
                     )
                 else:
                     logging.info(
@@ -3081,15 +3166,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 ik_error,
             )
 
-        candidate = None
-        chosen_band = None
-        search_reason = "no coverage bands were tried"
-        # Try the committed bore band first, then the flat fallback (only for the
-        # recessed-port sectors; a single-element (None,) for the rest).  The
-        # first band that yields a reachable, correctly-framed pose wins.
-        for tilt_band in self._bore_view_tilt_bands(survey_target):
-          chosen_band = tilt_band
-          candidate, search_reason = search_survey_pose(
+        # Every recessed-port sector on this board -- NIC cages and SC adapters
+        # alike -- opens along the board normal, so nothing wants a cross-rail
+        # tilt any more and the old committed-band/flat-fallback ladder is gone.
+        candidate, search_reason = search_survey_pose(
             board_pose,
             tcp_T_cam,
             camera_models,
@@ -3102,11 +3182,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             # is the real UR5e envelope (base_link origin); min-motion then picks
             # the closest reachable pose that frames the sector in all cameras.
             coverage_targets=(self._sector_for_target(survey_target),),
-            # Framing, tilt and standoff preference are per-sector: what the NIC
-            # port bores need (straight down, far, all cameras) is the opposite of
-            # what the sideways-recessed SC ports need.  See
-            # ``_survey_view_settings`` for the port geometry that decides it.
-            cross_rail_tilt_band_rad=tilt_band,
+            # Framing, obliquity and standoff preference are per-sector; see
+            # ``_survey_view_settings`` for the port geometry that decides each.
+            cross_rail_tilt_band_rad=None,
             **self._survey_view_settings(survey_target),
             # Reachability is now decided by the UR5e IK gate (``reachable``),
             # not this base-origin sphere -- the sphere wrongly rejected the
@@ -3117,9 +3195,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             reachable=reachable_fn,
             max_reach_m=0.85,
             min_height_m=0.02,
-          )
-          if candidate is not None:
-            break
+        )
         if candidate is None:
             self._stage2_not_done(
                 result, f"no safe all-camera survey pose: {search_reason}"
@@ -3148,13 +3224,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result, "computed survey TCP lies outside the workspace guard"
             )
             return
+        # Clearance is measured over the tallest thing standing on the board,
+        # not over the board plane.  The NIC card tips reach board Z 0.1793, so
+        # the old 0.12 m plane guard sat 59 mm *below* them and never protected
+        # them at all -- it would happily pass a pose that puts the tool into the
+        # cards.  That matters most for the SC sector, whose ports sit low and
+        # whose survey pose is deliberately close.  Move Robot has its own
+        # collision checking, but a pose it must refuse is a hard task failure,
+        # so keep it out of the published set.
         target_clearance = float(
             np.dot(target.translation - board_origin, board_normal)
         )
-        if target_clearance < 0.12:
+        if target_clearance < BOARD_TALLEST_COMPONENT_Z + TOOL_COMPONENT_CLEARANCE_M:
             self._stage2_not_done(
                 result,
-                "computed SFP survey pose is too close to the board plane",
+                "computed survey pose does not clear the board's tallest "
+                f"components ({target_clearance:.3f} m over the board plane; "
+                f"need {BOARD_TALLEST_COMPONENT_Z + TOOL_COMPONENT_CLEARANCE_M:.3f} m)",
             )
             return
 
@@ -3185,7 +3271,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         logging.info(
             "SFP Stage 2 published survey pose source=%s reprojection=%.2fpx "
             "target=(%.4f,%.4f,%.4f)m standoff=%.3fm yaw=%+.3frad "
-            "min_clearance=%.1fpx move=%.3fm bore_band=%s",
+            "min_clearance=%.1fpx move=%.3fm obliquity=%.1fdeg",
             source_camera,
             board_pose.reprojection_error_px,
             target.translation[0],
@@ -3195,14 +3281,33 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             candidate.yaw_rad,
             candidate.min_clearance_px,
             distance_m,
-            # Which tier won: the committed bore tilt or the flat fallback.  At
-            # board yaws near 0 the arm often cannot reach any bore-tilted pose,
-            # so this says whether the published view actually looks *into* the
-            # SFP cages or merely straight down at them.
-            "none"
-            if chosen_band is None
-            else "%.0f-%.0fdeg"
-            % (math.degrees(chosen_band[0]), math.degrees(chosen_band[1])),
+            # How far off the board normal the published view ended up.  Every
+            # recessed port on this board is read down its own axis, so this is
+            # the number that says whether the bores will show their depth.
+            # Measured on the reference camera's optical axis, NOT the TCP +Z:
+            # the wrist cameras are pitched 15 deg off the tool axis, so the TCP
+            # axis reads ~15 deg high and does not correspond to the obliquity
+            # limit the search actually enforces.
+            math.degrees(
+                math.acos(
+                    max(
+                        -1.0,
+                        min(
+                            1.0,
+                            abs(
+                                float(
+                                    np.dot(
+                                        target.compose(
+                                            tcp_T_cam["center_camera"]
+                                        ).rotation[:, 2],
+                                        board_normal,
+                                    )
+                                )
+                            ),
+                        ),
+                    )
+                )
+            ),
         )
         result.done = True
         result.success = True

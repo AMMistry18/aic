@@ -410,6 +410,24 @@ class UR5eArm:
                         solutions.append(joints)
         return solutions
 
+    def link_segments(
+        self, joints: Sequence[float]
+    ) -> tuple[tuple[np.ndarray, np.ndarray, float], ...]:
+        """Upper-arm and forearm as (start, end, radius) in the base_link frame.
+
+        These are the links that can end up standing in the wrist cameras' own
+        view.  The gripper is handled separately by a fixed image-space mask --
+        valid because it is rigidly attached to wrist_3 -- but these two are
+        upstream of the wrist, so where they land in the image depends entirely
+        on the joint configuration and no static mask can represent them.
+        Radii are the UR5e collision tubes (~60 mm and ~50 mm diameter).
+        """
+        _axes, points, _flange = self._chain(joints)
+        return (
+            (self.base.apply(points[1]), self.base.apply(points[2]), 0.060),
+            (self.base.apply(points[2]), self.base.apply(points[3]), 0.050),
+        )
+
     def self_clearance(self, joints: Sequence[float]) -> float:
         """Distance from the nearest flange probe to the forearm centreline.
 

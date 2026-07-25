@@ -289,11 +289,32 @@ def sfp_sector_corners() -> np.ndarray:
 
 
 def sc_sector_corners() -> np.ndarray:
-    """SC optical ports (Zone 2): sc_port_0/1 at board-X -0.075 +/- 0.055.
+    """SC optical ports (Zone 2): the five adapter bores themselves.
+
+    The board carries **five** SC adapters in two rows (``task_board.urdf.xacro``):
+    ``sc_port_0/1/2`` on SC_RAIL_0 at board Y +0.0295 and ``sc_port_3/4`` on
+    SC_RAIL_1 at board Y +0.0705, each at board X ``-0.075 + t`` for a rail
+    translation ``t`` in -0.060..+0.055, so the cluster spans X -0.135..-0.020.
+
+    Like the NIC cages, each adapter is a recess that opens **straight up** --
+    bore axis ``(0, 0, -1)`` in board frame, 0.00 deg off the board normal, with
+    the entrance at board Z 0.0301 and the bore running 15.64 mm down.  The
+    receptacle opening, taken from the adapter's own collision primitives (side
+    walls at local |x| 12.05 mm x 1.69 mm thick, plates at local z +/-4.2 mm), is
+    **7.6 x 22.4 mm**, so the limiting cone is ``atan(3.8/15.64) = 13.7 deg``
+    across the narrow axis (35.6 deg across the wide one).  That is roughly twice
+    as forgiving as the NIC cage band (7.5 deg), and the ports sit 149 mm lower
+    on the board, which is why this sector is far easier to reach than NIC.
+
+    The box is centred on the five **entrances** rather than the adapter bodies,
+    for the same reason as ``nic_sector_corners``: the search aims the optical
+    axis at this box's centroid.  The previous box (X -0.14..-0.01,
+    Y -0.02..0.10, Z 0.01..0.05) predated the 3-port row and swept in ~47 mm of
+    empty board on the -Y side, pulling the aim point 10 mm off the cluster.
 
     The ``SC_DESTINATION_PORT`` survey target.
     """
-    return _sector_box_corners((-0.14, -0.01), (-0.02, 0.10), (0.01, 0.05))
+    return _sector_box_corners((-0.152, -0.003), (0.005, 0.095), (0.020, 0.035))
 
 
 def nic_sector_corners() -> np.ndarray:
@@ -1543,6 +1564,7 @@ def search_survey_pose(
                         # view.  Then: directional sectors prefer the cross-rail
                         # tilt nearest the band centre; isotropic sectors prefer
                         # the most overhead view.  Then clearance, then motion.
+                        #
                         standoff_key = (
                             round(standoff, 4)
                             if prefer_far_standoff
