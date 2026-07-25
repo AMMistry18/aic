@@ -350,8 +350,11 @@ reverted.
 
 ### Downstream `filter_estimates_sc` (Flowstate code node, not in the build)
 
-Rewritten this session; **not yet deployed**. Working copy:
-`filter_estimates_sc_NODE.py` in the session scratchpad.
+Rewritten this session; **not yet deployed**. Paste-ready copy checked in at
+`docs/reference/filter_estimates_sc_node.py`, with its offline harness at
+`docs/reference/filter_estimates_sc_node_test.py` (synthetic detections at
+arbitrary board yaw/tilt; run it directly with python, it needs only numpy).
+Neither is part of the skill build.
 
 Defects found in the original:
 
