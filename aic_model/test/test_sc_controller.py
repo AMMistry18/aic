@@ -363,3 +363,139 @@ def test_sc_prefilter_does_not_warn_when_a_camera_survives(monkeypatch):
     _select_sc_detections_for_triangulation(_PinholePolicy(), per_cam, log=log)
 
     assert log.warn_lines == []
+
+
+# --- the size gate, against the label convention the shipped weights use ------
+#
+# best_sc_pose.pt does not outline the port.  It labels a rectangle centred on
+# the mouth measuring 8.8 x 6.0 mm -- about a quarter of the 25.78 mm adapter,
+# confirmed by running the weights over testing/check_sc_previews.  The gate
+# must be sized against THAT, not against the port's physical dimensions.
+
+_LABEL_WIDTH_M = 0.0088
+_LABEL_HEIGHT_M = 0.0060
+_STEREO_BASELINE_M = 0.030
+_PORT_DEPTH_M = 0.150
+
+
+class _StereoCore:
+    """Two real cameras and a real DLT triangulation.
+
+    _FakeProjectionCore collapses every point onto one pixel and _PinholeCore is
+    monocular; neither can exercise a gate that acts on triangulated *size*.
+    """
+
+    @staticmethod
+    def build_projection_matrix(K, T_cam_from_world):
+        return K @ T_cam_from_world[:3, :4]
+
+    @staticmethod
+    def triangulate(pts_2d, Ps):
+        rows = []
+        for (u, v), P in zip(pts_2d, Ps):
+            rows.append(u * P[2] - P[0])
+            rows.append(v * P[2] - P[1])
+        _, _, Vt = np.linalg.svd(np.asarray(rows, dtype=np.float64))
+        X = Vt[-1]
+        return X[:3] / X[3]
+
+
+def _stereo_policy(log=None):
+    # The reprojection and orientation steps are taken from RLInsert itself
+    # rather than reimplemented, so this exercises the shipped geometry.
+    # Imported lazily: a failure here must not break collection of this file.
+    from aic_model.RLInsert import RLInsert
+
+    class _StereoPolicy:
+        _reproject_error_px = RLInsert._reproject_error_px
+        _estimate_sfp_port_orientation = RLInsert._estimate_sfp_port_orientation
+
+        def __init__(self):
+            self._pc = _StereoCore()
+            self._log = log if log is not None else _RecordingLog()
+
+        def get_logger(self):
+            return self._log
+
+        def _tcp(self):
+            # On the port's optical axis, so the pre-filter keeps both cameras.
+            return (
+                np.array([0.0, 0.0, _PORT_DEPTH_M], dtype=np.float64),
+                np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64),
+            )
+
+    return _StereoPolicy()
+
+
+def _stereo_views(width_m, height_m):
+    """Per-camera detections of one centred rectangle, in LOCAL_SC_PORT_KPS order."""
+    K = np.array([[_FX, 0.0, _CX], [0.0, _FX, _CY], [0.0, 0.0, 1.0]], dtype=np.float64)
+    corners = np.array(
+        [
+            [+width_m / 2.0, +height_m / 2.0, _PORT_DEPTH_M],
+            [-width_m / 2.0, +height_m / 2.0, _PORT_DEPTH_M],
+            [-width_m / 2.0, -height_m / 2.0, _PORT_DEPTH_M],
+            [+width_m / 2.0, -height_m / 2.0, _PORT_DEPTH_M],
+        ],
+        dtype=np.float64,
+    )
+
+    per_cam = {}
+    for name, shift in (("cam_a", 0.0), ("cam_b", -_STEREO_BASELINE_M)):
+        T = np.eye(4, dtype=np.float64)
+        T[0, 3] = shift
+        P = _StereoCore.build_projection_matrix(K, T)
+        kps = []
+        for corner in corners:
+            x = P @ np.array([*corner, 1.0], dtype=np.float64)
+            kps.append([x[0] / x[2], x[1] / x[2]])
+        per_cam[name] = [
+            {"kps": np.array(kps, dtype=np.float64), "conf": 0.9, "K": K, "T": T, "P": P}
+        ]
+    return per_cam
+
+
+def test_size_gate_admits_the_shipped_label_rectangle():
+    candidates = sc_controller.sc_multiview_candidates(
+        _stereo_policy(), _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M)
+    )
+
+    assert candidates, "the model's own 8.8x6.0mm label must not be rejected"
+    assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+    assert candidates[0]["height"] == pytest.approx(_LABEL_HEIGHT_M, abs=1e-5)
+
+
+def test_size_gate_survives_a_realistic_underestimate_of_the_short_axis():
+    # The 2026-07-25 field run lost every frame here.  A 6.0 mm axis measured
+    # 20% short is 4.8 mm, which the old 5 mm floor discarded outright; the
+    # floor has to leave room for triangulation noise, not just the nominal.
+    candidates = sc_controller.sc_multiview_candidates(
+        _stereo_policy(), _stereo_views(_LABEL_WIDTH_M * 0.8, _LABEL_HEIGHT_M * 0.8)
+    )
+
+    assert candidates, "a 20% short measurement must still yield a candidate"
+
+
+def test_size_gate_still_rejects_something_far_too_small():
+    # Loosening the floor must not turn the gate off altogether.
+    candidates = sc_controller.sc_multiview_candidates(
+        _stereo_policy(), _stereo_views(0.0008, 0.0005)
+    )
+
+    assert candidates == []
+
+
+def test_rejected_combinations_name_the_gate_and_the_measurement():
+    # "no candidates" alone cost a field run to diagnose; the log must say which
+    # gate fired and what it measured.
+    log = _RecordingLog()
+
+    candidates = sc_controller.sc_multiview_candidates(
+        _stereo_policy(log), _stereo_views(0.0008, 0.0005)
+    )
+
+    assert candidates == []
+    line = "\n".join(log.warn_lines)
+    assert "SC_PERCEPT_REJECT" in line
+    assert "'size'" in line
+    assert "0.8x0.5mm" in line, "the measured rectangle must appear, not just the reason"

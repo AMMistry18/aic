@@ -188,9 +188,20 @@ SC_MAX_DETS_PER_CAM = max(1, int(_env_float("RL_INSERT_SC_MAX_DETS_PER_CAM", 8))
 # select the neighbouring port.
 SC_MAX_HANDOFF_SELECT_M = _env_float("RL_INSERT_SC_MAX_HANDOFF_SELECT_M", 0.030)
 SC_HANDOFF_MAX_DIST_M = _env_float("RL_INSERT_SC_HANDOFF_MAX_DIST_M", 0.120)
-# Dimensional gate on the triangulated rectangle, wide enough to admit either
-# keypoint-convention hypothesis and reject anything that is not an SC opening.
-SC_MIN_OPENING_M = _env_float("RL_INSERT_SC_MIN_OPENING_M", 0.005)
+# Dimensional gate on the triangulated rectangle.  The floor is deliberately NOT
+# the port's physical size.  The shipped best_sc_pose.pt does not outline the
+# port at all: it labels a small rectangle centred on the mouth, 8.8 x 6.0 mm,
+# about a quarter of the 25.78 mm adapter.  Measured by running the weights over
+# testing/check_sc_previews -- the predicted quad spans 0.25-0.26 of the visible
+# adapter in every frame, and its diagonals are equal to within 3%, so it is a
+# centred rectangle and not the outer face, a single bore, or a diamond.
+# The old 0.005 floor left barely 1 mm of margin on the 6.0 mm short axis, and
+# ordinary triangulation noise then rejected every genuine candidate: the
+# 2026-07-25 field run discarded all 7 frames without ever forming a candidate.
+# Keep this well clear of 6 mm.  If the model is ever retrained onto the 25.78 mm
+# convention this can rise again, but it must be derived from the *matched*
+# hypothesis rather than re-guessed.
+SC_MIN_OPENING_M = _env_float("RL_INSERT_SC_MIN_OPENING_M", 0.002)
 SC_MAX_OPENING_M = _env_float("RL_INSERT_SC_MAX_OPENING_M", 0.030)
 
 
@@ -883,6 +894,25 @@ def _log_sc_best_candidate(log, candidate):
     )
 
 
+def _log_sc_rejections(log, rejects, limit=8):
+    """Report the combinations that never became candidates, and why.
+
+    Without this, a perception failure says only "no candidates" and the cause
+    has to be inferred from the source -- which cost a field run on 2026-07-25.
+    Every ``continue`` in ``sc_multiview_candidates`` records here instead.
+    """
+    counts = {}
+    for reason, _ in rejects:
+        counts[reason] = counts.get(reason, 0) + 1
+    detail = [f"{reason}({info})" for reason, info in rejects[:limit] if info]
+    log.warn(
+        f"[sc] SC_PERCEPT_REJECT {len(rejects)} combination(s) discarded "
+        f"counts={counts} "
+        f"size_gate=[{SC_MIN_OPENING_M * 1000:.1f}, {SC_MAX_OPENING_M * 1000:.1f}]mm "
+        f"sample={detail}"
+    )
+
+
 def sc_multiview_candidates(policy, per_cam):
     """Triangulate the four SC keypoints across cameras.
 
@@ -897,6 +927,7 @@ def sc_multiview_candidates(policy, per_cam):
         return []
 
     candidates = []
+    rejects = []
     for picks in itertools.product(*[per_cam[cam] for cam in cams]):
         kp_3d = []
         try:
@@ -904,22 +935,26 @@ def sc_multiview_candidates(policy, per_cam):
                 pts_2d = [tuple(pick["kps"][i]) for pick in picks]
                 Ps = [pick["P"] for pick in picks]
                 kp_3d.append(policy._pc.triangulate(pts_2d, Ps))
-        except Exception:
+        except Exception as exc:
+            rejects.append(("triangulate_error", f"{type(exc).__name__}"))
             continue
         kp_3d = np.array(kp_3d, dtype=np.float64)
         X = kp_3d.mean(axis=0)
         if X[2] < -0.05 or X[2] > 0.25:
+            rejects.append(("depth", f"z={X[2] * 1000:.0f}mm"))
             continue
 
         q_wxyz, yaw = policy._estimate_sfp_port_orientation(kp_3d)
         if q_wxyz is None:
+            rejects.append(("degenerate_axis", "in-plane axis vertical or zero"))
             continue
 
         width = float(np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)))
         height = float(np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5)))
-        if not (SC_MIN_OPENING_M <= width <= SC_MAX_OPENING_M):
-            continue
-        if not (SC_MIN_OPENING_M <= height <= SC_MAX_OPENING_M):
+        if not (SC_MIN_OPENING_M <= width <= SC_MAX_OPENING_M) or not (
+            SC_MIN_OPENING_M <= height <= SC_MAX_OPENING_M
+        ):
+            rejects.append(("size", f"{width * 1000:.1f}x{height * 1000:.1f}mm"))
             continue
 
         errors = []
@@ -941,6 +976,7 @@ def sc_multiview_candidates(policy, per_cam):
                 "reproj_px": reproj_px,
             })
         if not errors:
+            rejects.append(("no_reproj", "every keypoint failed to reproject"))
             continue
         reproj = float(np.mean(errors))
         label, residual, offset = classify_opening(width, height)
@@ -955,6 +991,11 @@ def sc_multiview_candidates(policy, per_cam):
             "bore_offset_m": offset,
             "camera_diagnostics": camera_diagnostics,
         })
+
+    # Log whenever anything was discarded, not only on total failure: a run that
+    # produces one candidate out of eight is also worth knowing about.
+    if rejects:
+        _log_sc_rejections(log, rejects)
 
     candidates.sort(key=lambda c: c["score"])
     return candidates
