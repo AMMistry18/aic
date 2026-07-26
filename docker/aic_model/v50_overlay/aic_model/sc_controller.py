@@ -710,8 +710,8 @@ def _probe_tf_frames_for_tip(policy, log, lookup, tcp_pos, R_tcp, assumed_tip) -
         return False
 
     solved.sort(key=lambda s: s["tcp_dist"])
-    log.warn("[sc-calib] === ALL FRAMES BY DISTANCE FROM TCP (nearest 20) ===")
-    for s in solved[:20]:
+    log.warn(f"[sc-calib] === ALL FRAMES BY DISTANCE FROM TCP ({len(solved)} total) ===")
+    for s in solved:
         log.warn(f"[sc-calib]   {s['tcp_dist'] * 1000:8.1f}mm  {s['frame']}  "
                  f"pos={np.round(s['pos'], 4).tolist()} stamp={s['stamp']:.3f}")
 
