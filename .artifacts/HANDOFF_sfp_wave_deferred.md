@@ -84,9 +84,41 @@ the SAME depth with the higher press, the cause is geometric (alignment or
 believed-depth error), not force budget — go to Wave 3 rather than raising
 force further.
 
-## Wave 3 (approved, not yet implemented)
+## Wave 3 — DONE (37a02a2), unvalidated in sim
 
-- One bounded lift + re-perceive + re-seat retry on STALLED (never on
-  HARD_FAILURE). Lift must be high enough to re-run YOLO pose for BOTH plug and
-  port (user: time budget is not the constraint). Tests pinning no-recovery
-  behavior (test_v50_controller.py:400-426) must be consciously updated.
+Built after diag-6: full insertion otherwise solved, 1 wedge in 5 runs, and a
+wedge was terminal because `run()` was single-shot.
+
+**Outcome semantics changed — read this before touching the seat path.**
+`WEDGED` = stuck short of the seat (excursion check, or no advance while still
+in the bore). `STALLED` = at seat depth, event never arrived. Only `WEDGED`
+retries; backing out of a `STALLED` would discard an insertion that may already
+be physically complete. `HARD_FAILURE` (wrong-port event, sustained over-force)
+never retries.
+
+Order on a wedge: **rescue first, retract only if there is no rescue.** One
+rescue per retract. The rescue is measured against the *original* port
+perception so its 8 mm excursion cap bounds total drift across all retries.
+
+Retract is two-phase on purpose: straight out along the port axis holding the
+*measured* rotation (correcting a cocked plug in place cams it into the cage),
+then back to the run-start pose. It drives `set_pose_target` directly because
+`next_persistent_depth` clamps to at least the current depth — **the seat
+setpoint physically cannot retract.** Clearing the mouth but stopping short of
+the start pose still counts as success.
+
+Retries are unbounded by count; the action deadline is the only terminator and
+every cycle consults it.
+
+**Budget raised 45 -> 150 s** (overlay `RLInsert.ACTION_TIME_BUDGET_S` + both
+Dockerfiles). Justification: engine per-task `time_limit` is 180 s in every
+shipped config, and the scorer's 60 s is where the duration bonus reaches zero,
+**not** a cutoff (`ScoringTier2.cc:945` feeds only
+`GetTaskDurationScore`). So a retry costs ~3 remaining duration points and can
+convert a 38-50 point partial into 75. **If the Flowstate macro's pre-insert
+phase is long, lower this** — a run that never returns scores nothing.
+
+Not done, deliberately: no lateral jitter between attempts. A retry re-perceives
+and re-aligns, so it is not a bit-identical repeat, but if retries are observed
+reproducing the *same* wedge, adding a small per-attempt offset is the next
+lever.
