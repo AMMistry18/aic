@@ -4,13 +4,18 @@
 built, tested and pushed. What remains is data collection, training, and an
 honest accuracy measurement — all of which need a GPU that can render.
 
-> **This work is on the branch `sc-plug-pose`, not `main`.**
+> **This work is on `main`** (commit `d860470`), so a plain clone has it:
 > ```bash
-> git clone -b sc-plug-pose https://github.com/AMMistry18/aic.git
+> git clone https://github.com/AMMistry18/aic.git
 > ```
-> A plain `git clone` gets `main` and none of this will be there. The branch is
-> separate because `aic_model/aic_model/sc_controller.py` is being edited in
-> parallel on the seating path and must not be disturbed.
+> It is also on the branch `sc-plug-pose` at the same commit; the two are
+> identical, use either.
+>
+> **What is deliberately NOT here:** the in-progress `sc_controller.py` seating
+> work. That was being edited in parallel and was excluded from the commit, so
+> `sc_controller.py` on `main` is the pre-existing version that still uses the
+> hardcoded `SC_TIP_IN_TCP_*` constant. Nothing in this handoff depends on that
+> work, and §7 explains why the wiring is left unapplied.
 
 ---
 
@@ -73,13 +78,13 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .pixi/envs/default/bin/python -m pytest \
   aic_model/test/test_v50_controller.py aic_model/test/test_sc_plug_pose_trials.py -q
 ```
 
-Expect a **different total on a fresh clone of this branch**, and that is fine.
-That 97 was measured in a working tree that also held the colleague's
-in-progress `sc_controller.py` changes, which are deliberately *not* on this
-branch. Of it, 15 (`test_sc_plug_pose.py`) and 4
-(`test_sc_plug_pose_trials.py`) are this work and must pass; the
-`test_sc_controller.py` / `test_v50_controller.py` counts float with whatever
-state `sc_controller.py` is in. What matters is that nothing **fails**.
+A **fresh clone gives 92**, and that is the expected number. The 97 was measured
+in a working tree that also held the colleague's in-progress `sc_controller.py`
+changes, which are deliberately not committed. Of the 92, 15
+(`test_sc_plug_pose.py`) and 4 (`test_sc_plug_pose_trials.py`) are this work and
+must pass; the `test_sc_controller.py` / `test_v50_controller.py` counts float
+with whatever state `sc_controller.py` is in. What matters is that nothing
+**fails**.
 
 Never run the whole test dir — five other files have pre-existing collection
 errors (the installed `aic_model` in `.pixi` predates the plug-pose modules).
@@ -95,7 +100,7 @@ needs UT VPN; the two can't be held at once).
 
 ```bash
 cd $WORK
-git clone -b sc-plug-pose https://github.com/AMMistry18/aic.git aic-sc
+git clone https://github.com/AMMistry18/aic.git aic-sc
 cd aic-sc
 ```
 
