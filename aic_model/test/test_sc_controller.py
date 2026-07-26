@@ -871,6 +871,9 @@ def test_run_sc_insertion_hands_the_controller_a_preserved_twist_frame(monkeypat
     monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
                         lambda *_: (port_pos, FIELD_PORT_QUAT, 4.35))
     monkeypatch.setattr(sc_controller, "ScInsertionController", _CapturingController)
+    # Stub the vision priming: without a transform installed the geometry runs
+    # on the fixed-grasp constant, which is exactly what this fixture encodes.
+    monkeypatch.setattr(sc_controller, "prime_sc_plug_pose", lambda *_: True)
 
     assert sc_controller.run_sc_insertion(
         _RunPolicy(tcp_pos, tcp_quat), _StubTask(),
@@ -885,8 +888,13 @@ def test_run_sc_insertion_hands_the_controller_a_preserved_twist_frame(monkeypat
 # ---------------------------------------------------------------------------
 # Handoff depth sign guard.
 # ---------------------------------------------------------------------------
-def _run_sc_with_handoff_depth(monkeypatch, depth_m, log):
-    """Drive run_sc_insertion with the tip placed at a chosen depth."""
+def _run_sc_with_handoff_depth(monkeypatch, depth_m, log, prime=None):
+    """Drive run_sc_insertion with the tip placed at a chosen depth.
+
+    ``prime`` replaces the vision priming; the default stubs it to succeed
+    WITHOUT installing a measured transform, so the handoff geometry runs on
+    the fixed-grasp constant exactly as these fixtures were built for.
+    """
     Rp, R_tip = _field_frames()
     port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
     R_tcp = R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T
@@ -918,6 +926,8 @@ def _run_sc_with_handoff_depth(monkeypatch, depth_m, log):
     monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
                         lambda *_: (port_pos, FIELD_PORT_QUAT, 4.35))
     monkeypatch.setattr(sc_controller, "ScInsertionController", _NeverReached)
+    monkeypatch.setattr(sc_controller, "prime_sc_plug_pose",
+                        prime if prime is not None else (lambda *_: True))
     result = sc_controller.run_sc_insertion(
         _RunPolicy(tcp_pos, tcp_quat), _StubTask(),
         lambda: object(), None, lambda *_: None,
@@ -966,6 +976,194 @@ def test_handoff_depth_gate_is_tighter_than_the_seat_trigger(monkeypatch):
     # The gate is only useful if it fires well before a depth that would let
     # _seat skip its approach entirely.
     assert sc_controller.SC_MAX_HANDOFF_DEPTH_M < SCConfig().validated().seat_candidate_depth_m
+
+
+# ---------------------------------------------------------------------------
+# Measured plug pose (prime_sc_plug_pose) wiring.
+# ---------------------------------------------------------------------------
+def test_run_sc_insertion_refuses_when_plug_pose_priming_fails(monkeypatch):
+    """No measured tip, no insertion: the run must stop before perception."""
+    log = _RecordingLog()
+
+    class _RunPolicy(_StubPolicy):
+        def get_logger(self):
+            return log
+
+    def _never(*_a, **_k):
+        raise AssertionError("perception must not run after a priming failure")
+
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus", _never)
+    monkeypatch.setattr(sc_controller, "prime_sc_plug_pose", lambda *_: False)
+
+    result = sc_controller.run_sc_insertion(
+        _RunPolicy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+
+    assert result is False
+    assert any("no fixed-grasp fallback" in line for line in log.error_lines)
+
+
+def _priming_that_moves_the_tip_to(port_pos, Rp, depth_m):
+    """A prime stub that installs a MEASURED transform placing the tip at
+    ``depth_m`` along the insertion axis, with the constant's orientation."""
+
+    def _prime(policy, *_a):
+        tcp_pos, tcp_quat = policy._tcp()
+        want_tip = port_pos + Rp[:, 2] * depth_m + Rp[:, 0] * 0.0035
+        _, R_tip = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+        policy._sc_grasp_transform = sc_controller.solve_tip_in_tcp(
+            tcp_pos, tcp_quat, want_tip, R_tip
+        )
+        return True
+
+    return _prime
+
+
+def test_handoff_blames_the_measurement_not_the_constant_when_primed(monkeypatch):
+    """Primed runs must attribute an impossible depth to macro/measurement --
+    telling the operator to re-solve SC_TIP_IN_TCP would send them down a road
+    that no longer exists."""
+    Rp, _ = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    log = _RecordingLog()
+
+    # Constant says 6.99 mm OUTSIDE (would pass); measurement says INSIDE.
+    result, seated = _run_sc_with_handoff_depth(
+        monkeypatch, -0.00699, log,
+        prime=_priming_that_moves_the_tip_to(port_pos, Rp, +0.00699),
+    )
+
+    assert result is False
+    assert not seated
+    line = "\n".join(log.error_lines)
+    assert "INSIDE the port" in line
+    assert "MEASURED" in line
+    assert "SC_TIP_IN_TCP_POS" not in line, "must not blame the retired constant"
+
+
+def test_handoff_trusts_the_measured_tip_over_a_lying_constant(monkeypatch):
+    """The 2026-07-25 phantom: the CONSTANT computed the tip +6.99 mm inside the
+    port.  With the measured transform saying the plug is really outside the
+    mouth, the run must proceed -- this is the exact failure the model fixes."""
+    Rp, _ = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+
+    result, seated = _run_sc_with_handoff_depth(
+        monkeypatch, +0.00699, _RecordingLog(),
+        prime=_priming_that_moves_the_tip_to(port_pos, Rp, -0.00699),
+    )
+
+    assert result is True
+    assert seated
+
+
+def test_sc_tip_helpers_round_trip_through_the_measured_transform():
+    tcp_pos = np.array([0.1, -0.2, 0.3], dtype=np.float64)
+    Rp, R_tip = _field_frames()
+    tcp_quat = matrix_to_quat(R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T)
+    policy = _StubPolicy(tcp_pos, tcp_quat)
+
+    measured_tip = tcp_pos + np.array([0.010, 0.020, -0.058], dtype=np.float64)
+    policy._sc_grasp_transform = sc_controller.solve_tip_in_tcp(
+        tcp_pos, tcp_quat, measured_tip, R_tip
+    )
+
+    tip_pos, tip_rot = sc_controller.sc_tip_from_tcp(policy, tcp_pos, tcp_quat)
+    assert np.allclose(tip_pos, measured_tip, atol=1e-12)
+    assert np.allclose(tip_rot, R_tip, atol=1e-12)
+    const_tip, _ = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    assert not np.allclose(tip_pos, const_tip, atol=1e-4), \
+        "the measured transform must actually differ from the constant here"
+
+    # The inverse must consume the SAME transform, or every commanded pose
+    # would be offset by the constant-vs-measured disagreement.
+    back_tcp_pos, back_R_tcp = sc_controller.sc_tcp_pose_for_tip(policy, tip_pos, tip_rot)
+    assert np.allclose(back_tcp_pos, tcp_pos, atol=1e-12)
+    assert np.allclose(back_R_tcp, quat_to_matrix(tcp_quat), atol=1e-12)
+
+    # Without a transform both helpers must reproduce the constant behaviour.
+    bare = _StubPolicy(tcp_pos, tcp_quat)
+    tip_bare, _ = sc_controller.sc_tip_from_tcp(bare, tcp_pos, tcp_quat)
+    assert np.allclose(tip_bare, const_tip, atol=1e-12)
+
+
+def test_prime_sc_plug_pose_fails_closed_when_no_estimate(monkeypatch):
+    import aic_model.v50_controller as v50_controller_mod
+
+    log = _RecordingLog()
+
+    class _Clock:
+        def now(self):
+            class _Now:
+                nanoseconds = int(2.0e9)
+
+            return _Now()
+
+    class _PrimeNode(_FakeNode):
+        def get_clock(self):
+            return _Clock()
+
+    class _PrimePolicy(_StubPolicy):
+        def __init__(self):
+            super().__init__(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+            self._parent_node = _PrimeNode()
+            # a run that primed before must not inherit last run's grasp
+            self._sc_grasp_transform = ("stale", "stale")
+
+        def get_logger(self):
+            return log
+
+        def _enforce_action_deadline(self, _move_robot):
+            pass
+
+    class _View:
+        def __init__(self, name):
+            self.camera_name = name
+            self.stamp_s = 1.9
+
+    class _RefusingEstimator:
+        min_keypoint_confidence = 0.35
+        last_failure_reason = "insufficient_detected_views:0<2"
+
+        def detect_views(self, _views):
+            return []
+
+        def estimate_multiview(self, *_a, **_k):
+            return None
+
+    policy = _PrimePolicy()
+    policy._sc_plug_estimator = _RefusingEstimator()
+    monkeypatch.setattr(v50_controller_mod, "_observation_stamp_s", lambda _o: 1.9)
+    monkeypatch.setattr(v50_controller_mod, "_plug_views_from_observation",
+                        lambda _p, _o: [_View("left_camera"), _View("right_camera")])
+
+    result = sc_controller.prime_sc_plug_pose(policy, lambda: object(), None)
+
+    assert result is False
+    assert policy._sc_grasp_transform is None, \
+        "a failed prime must clear any stale transform, never keep it"
+    line = "\n".join(log.error_lines)
+    assert "PLUG_POSE_REJECT" in line
+    assert "insufficient_detected_views" in line
+    assert "no_fixed_grasp_fallback=true" in line
+
+
+def test_configure_sc_plug_pose_refuses_without_weights(monkeypatch):
+    import aic_model.sc_plug_pose as sc_plug_pose_mod
+
+    log = _RecordingLog()
+
+    class _Policy(_StubPolicy):
+        def get_logger(self):
+            return log
+
+    monkeypatch.setattr(sc_plug_pose_mod, "default_sc_plug_pose_weights", lambda: None)
+    policy = _Policy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0]))
+
+    assert sc_controller.configure_sc_plug_pose(policy) is False
+    assert getattr(policy, "_sc_plug_estimator", None) is None
+    assert any("AIC_SC_PLUG_POSE_WEIGHTS" in line for line in log.error_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1105,6 +1303,7 @@ def test_calibration_dump_runs_even_when_perception_fails(monkeypatch):
     dumped = {"n": 0}
     monkeypatch.setattr(sc_controller, "dump_sc_grasp_calibration",
                         lambda *_a, **_k: dumped.__setitem__("n", dumped["n"] + 1) or True)
+    monkeypatch.setattr(sc_controller, "prime_sc_plug_pose", lambda *_: True)
     monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
                         lambda *_: None)
 

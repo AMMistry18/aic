@@ -478,7 +478,15 @@ class SfpPlugPoseEstimator:
                 parsed.append(None)
                 continue
             boxes_conf = np.asarray(result.boxes.conf.cpu().numpy(), dtype=np.float64)
-            boxes_xyxy = np.asarray(result.boxes.xyxy.cpu().numpy(), dtype=np.float64)
+            # ``xyxy`` feeds only the optional crop-refine pass; tolerate result
+            # stubs that expose ``conf`` alone so the default path (and every
+            # existing SFP test contract) never depends on it.
+            raw_xyxy = getattr(result.boxes, "xyxy", None)
+            boxes_xyxy = (
+                np.asarray(raw_xyxy.cpu().numpy(), dtype=np.float64)
+                if raw_xyxy is not None
+                else None
+            )
             keypoints = np.asarray(result.keypoints.xy.cpu().numpy(), dtype=np.float64)
             raw_kp_conf = getattr(result.keypoints, "conf", None)
             if raw_kp_conf is None:
@@ -502,7 +510,7 @@ class SfpPlugPoseEstimator:
                     keypoints[best].copy(),
                     kp_conf[best].copy(),
                     float(boxes_conf[best]),
-                    boxes_xyxy[best].copy(),
+                    boxes_xyxy[best].copy() if boxes_xyxy is not None else None,
                 )
             )
         return parsed
@@ -532,6 +540,8 @@ class SfpPlugPoseEstimator:
             if item is None:
                 continue
             box = item[3]
+            if box is None or not np.all(np.isfinite(box)):
+                continue
             image = view.image_bgr
             height, width = image.shape[:2]
             centre_x = 0.5 * (float(box[0]) + float(box[2]))
@@ -563,7 +573,12 @@ class SfpPlugPoseEstimator:
             keypoints, kp_conf, box_conf, box = item
             offset_xy = np.array([x0, y0], dtype=np.float64)
             offset_box = np.array([x0, y0, x0, y0], dtype=np.float64)
-            out[index] = (keypoints + offset_xy, kp_conf, box_conf, box + offset_box)
+            out[index] = (
+                keypoints + offset_xy,
+                kp_conf,
+                box_conf,
+                box + offset_box if box is not None else None,
+            )
         return out
 
     def _predict(self, views: Sequence[PlugPoseView]) -> list[PlugKeypointDetection]:

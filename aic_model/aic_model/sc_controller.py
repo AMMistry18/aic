@@ -7,9 +7,13 @@ alignment law -- but every axial constant is re-derived for SC, because SC seats
 at 15.64 mm against SFP's 45.8 mm and a naive constant copy would command the
 plug straight through the back of the port on the first stall.
 
-It is deliberately *fixed-grasp*: unlike v50 there is no SC plug-pose model, so
-the tip is located from the TCP through a static transform rather than from
-vision.  See "UNCALIBRATED" below.
+The tip is located from vision, exactly as v50 does for SFP: every run starts
+by measuring ``sc_tip_link`` with :class:`~aic_model.sc_plug_pose.ScPlugPoseEstimator`
+(``prime_sc_plug_pose``), converting it to a per-grasp TCP->tip transform, and
+refusing to insert when that measurement cannot be obtained.  The historic
+fixed-grasp constant survives only for calibration diagnostics and for unit
+tests that exercise geometry without a camera; the control path never falls
+back to it once a run has started (see item 1 below).
 
 Ground truth, all derived from the shipped assets (not measured, not guessed):
 
@@ -54,12 +58,14 @@ Ground truth, all derived from the shipped assets (not measured, not guessed):
     here, but vertical is the binding axis and it is tighter than once recorded.
     Budget grasp repeatability against 0.725 mm, not 1.2 mm.
 
-TWO THINGS ARE UNCALIBRATED AND WILL NOT WORK UNTIL RESOLVED:
+CALIBRATION NOTES:
 
-1. ``SC_TIP_IN_TCP_*`` defaults to the SFP grasp transform.  It is almost
-   certainly wrong -- it is the same gripper and cable but the other connector.
-   Re-solve it with ``RL_INSERT_CALIB_DUMP=1`` exactly as the SFP transform was
-   solved, then set ``RL_INSERT_SC_TIP_IN_TCP_POS`` / ``_QUAT``.
+1. RESOLVED for the control path: the tip transform is measured per run by
+   ``prime_sc_plug_pose`` from the trained SC plug-pose model, so the
+   ``SC_TIP_IN_TCP_*`` constants (still the SFP grasp transform by default, and
+   still almost certainly wrong for SC) no longer steer the robot.  They remain
+   for ``RL_INSERT_CALIB_DUMP=1`` diagnostics and for camera-less unit tests;
+   ``run_sc_insertion`` aborts before any motion if the measurement fails.
 2. The keypoint convention of the legacy ``best_sc_pose.pt`` model is not
    recorded anywhere in this repo, and ``sc_plug_pose_geometry`` states its
    keypoints are "unrelated" to it.  Rather than guess, this module *measures*
@@ -94,6 +100,8 @@ from .v50_controller import (
     axis_angle,
     clamp_vector_norm,
     rotation_from_axis_angle,
+    solve_tip_in_tcp,
+    tip_from_tcp_transform,
 )
 
 
@@ -549,6 +557,54 @@ def tcp_pose_for_sc_tip(tip_pos, tip_rotation):
     return tcp_pos, R_tcp
 
 
+def sc_grasp_transform(policy):
+    """Per-run measured ``(tip_in_tcp_pos, R_tcp_from_tip)``, or ``None``.
+
+    Populated by ``prime_sc_plug_pose`` from the SC plug-pose model, exactly as
+    ``prime_v50_plug_pose`` populates ``_v50_grasp_transform`` for SFP.
+    """
+
+    return getattr(policy, "_sc_grasp_transform", None)
+
+
+def sc_tip_from_tcp(policy, tcp_pos, tcp_quat):
+    """Tip pose through the measured per-grasp transform once it exists.
+
+    Mirrors ``v50_tip_from_tcp``: before priming (unit tests, or the calib-dump
+    diagnostics) the fixed-grasp constant keeps geometry helpers total, but
+    ``run_sc_insertion`` refuses to start control until ``prime_sc_plug_pose``
+    has succeeded, so no field motion is ever driven by the constant.
+    """
+
+    transform = sc_grasp_transform(policy)
+    if transform is None:
+        return sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    return tip_from_tcp_transform(tcp_pos, tcp_quat, *transform)
+
+
+def sc_tcp_pose_for_tip(policy, tip_pos, tip_rotation):
+    """Inverse of ``sc_tip_from_tcp`` -- must use the same transform source.
+
+    Returns ``(tcp_pos, R_tcp)`` with a rotation MATRIX like
+    ``tcp_pose_for_sc_tip`` does.  Deliberately not v50's
+    ``tcp_for_tip_transform``, which returns a quaternion -- handing that to
+    ``_tcp_target``'s ``matrix_to_quat`` would silently corrupt every
+    commanded pose on the primed path.
+    """
+
+    transform = sc_grasp_transform(policy)
+    if transform is None:
+        return tcp_pose_for_sc_tip(tip_pos, tip_rotation)
+    tip_in_tcp_pos, R_tcp_from_tip = transform
+    R_tip = np.asarray(tip_rotation, dtype=np.float64).reshape(3, 3)
+    R_tcp = R_tip @ np.asarray(R_tcp_from_tip, dtype=np.float64).reshape(3, 3).T
+    tcp_pos = (
+        np.asarray(tip_pos, dtype=np.float64).reshape(3)
+        - R_tcp @ np.asarray(tip_in_tcp_pos, dtype=np.float64).reshape(3)
+    )
+    return tcp_pos, R_tcp
+
+
 def next_sc_depth(
     current_depth: float,
     commanded_depth: float,
@@ -892,8 +948,11 @@ class ScInsertionController:
 
     # ------------------------------------------------------------- geometry
     def _tip_pose(self):
+        # Pure kinematics through the per-grasp transform prime_sc_plug_pose
+        # measured -- total and non-failing, so the align/seat hot loops never
+        # see a vision dropout mid-motion.  The estimator is NOT re-run here.
         tcp_pos, tcp_quat = self.policy._tcp()
-        return sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+        return sc_tip_from_tcp(self.policy, tcp_pos, tcp_quat)
 
     def _tcp_target(self, tip_pos, tip_rotation):
         # geometry_msgs is imported lazily so the pure geometry in this module
@@ -902,7 +961,7 @@ class ScInsertionController:
 
         from .rl_insert_contract import matrix_to_quat
 
-        tcp_pos, R_tcp = tcp_pose_for_sc_tip(tip_pos, tip_rotation)
+        tcp_pos, R_tcp = sc_tcp_pose_for_tip(self.policy, tip_pos, tip_rotation)
         q_tcp = matrix_to_quat(R_tcp)
         return Pose(
             position=Point(x=float(tcp_pos[0]), y=float(tcp_pos[1]), z=float(tcp_pos[2])),
@@ -1221,11 +1280,13 @@ class ScInsertionController:
             self.policy.sleep_for(self.config.command_dt_sim_s)
 
     def run(self) -> bool:
-        if not SC_TIP_CALIBRATED:
+        if sc_grasp_transform(self.policy) is None:
+            # Reachable only outside the field flow: run_sc_insertion aborts
+            # before constructing this controller when priming fails.
             self.log.warn(
-                "[sc] SC_TIP_IN_TCP is the UNCALIBRATED SFP default -- re-solve it "
-                "with RL_INSERT_CALIB_DUMP=1 and set RL_INSERT_SC_TIP_IN_TCP_POS/_QUAT "
-                "plus RL_INSERT_SC_TIP_CALIBRATED=1 before trusting this run"
+                "[sc] no measured grasp transform -- geometry is running on the "
+                "fixed-grasp SC_TIP_IN_TCP default, which is only acceptable in "
+                "camera-less tests; field runs must prime_sc_plug_pose first"
             )
         self.send_feedback("sc align to perceived opening")
         if not self._align():
@@ -1278,12 +1339,10 @@ def _sc_detection_diag(dets):
 def _sc_tip_projections(policy, per_cam):
     """Project the gripper TCP into each camera as the detection-filter centre.
 
-    Deliberately the TCP and not ``sc_tip_pose_from_tcp``: the SC tip transform
-    is the uncalibrated SFP default (see UNCALIBRATED item 1), and centring a
-    perception gate on a constant we know is wrong couples this filter to that
-    error.  The TCP comes straight from TF, and it sits ~58 mm from the tip --
-    far inside a gate whose radius is hundreds of pixels, so the coarse
-    proximity test loses nothing by using it.
+    Deliberately the TCP and not the tip: the TCP comes straight from TF with
+    no model in the loop, and it sits ~58 mm from the tip -- far inside a gate
+    whose radius is hundreds of pixels, so the coarse proximity test gains
+    nothing from the measured tip and stays valid even before priming.
     """
     try:
         anchor_pos, _ = policy._tcp()
@@ -1629,7 +1688,10 @@ def perceive_sc_port_pose(policy, task, obs):
 
     try:
         tcp_pos, tcp_quat = policy._tcp()
-        tip_pos, _ = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+        # Measured per-grasp tip once primed (the field flow primes before
+        # perception); pre-prime the constant only degrades this RANKING gate,
+        # it never fabricates a pose.
+        tip_pos, _ = sc_tip_from_tcp(policy, tcp_pos, tcp_quat)
     except Exception:
         chosen = clean[0]
     else:
@@ -1721,6 +1783,169 @@ def perceive_sc_port_pose_consensus(policy, task, get_observation):
 
 
 # --------------------------------------------------------------------------
+# SC plug-pose: measure the grasped tip instead of assuming it.
+# --------------------------------------------------------------------------
+def configure_sc_plug_pose(policy) -> bool:
+    """Load the SC plug-pose model once per process; ``False`` if unavailable.
+
+    Deliberately lazy (called from ``run_sc_insertion``) rather than hooked into
+    lifecycle configure like ``configure_v50``: the mainline ``RLInsert`` has no
+    such hook, and a missing SC checkpoint must fail the SC run closed without
+    ever touching the SFP path.  Never raises for an absent model.
+    """
+
+    if getattr(policy, "_sc_plug_estimator", None) is not None:
+        return True
+    log = policy.get_logger()
+    from .sc_plug_pose import ScPlugPoseEstimator, default_sc_plug_pose_weights
+
+    weights = default_sc_plug_pose_weights()
+    if weights is None:
+        log.error(
+            "[sc] SC plug-pose weights not found (set AIC_SC_PLUG_POSE_WEIGHTS); "
+            "no fixed-grasp fallback is allowed -- refusing to insert"
+        )
+        return False
+    try:
+        estimator = ScPlugPoseEstimator(
+            str(weights),
+            # imgsz=960 is not optional: the model trains at 960 and the
+            # cameras deliver 1152x1024; Ultralytics' 640 default is leak #1
+            # in docs/SC_PERCEPTION_ACCURACY_PLAYBOOK.md.
+            imgsz=_env_int("RL_INSERT_SC_PLUG_IMGSZ", 960),
+            conf_threshold=_env_float("RL_INSERT_SC_PLUG_CONF", 0.25),
+            # Crop-refine is what reaches the measured 0.27 mm median; without
+            # it the estimator sits at ~0.46 mm against the 0.4 mm working
+            # target (docs/SC_PLUG_POSE_RESULTS.md).  Per-instance, so the SFP
+            # estimator's default-off behaviour is untouched.
+            crop_refine=_env_bool("RL_INSERT_SC_PLUG_CROP_REFINE", True),
+        )
+        # Pay the YOLO first-inference cost now, not inside the run.  A
+        # no-detection result on black pixels is expected; an exception is not.
+        from .sfp_plug_pose import PlugPoseView
+
+        estimator.detect_views([
+            PlugPoseView(
+                camera_name="sc_warmup",
+                image_bgr=np.zeros((640, 640, 3), dtype=np.uint8),
+                K=np.array(
+                    [[500.0, 0.0, 320.0], [0.0, 500.0, 320.0], [0.0, 0.0, 1.0]],
+                    dtype=np.float64,
+                ),
+                T_world_from_camera=np.eye(4),
+                stamp_s=0.0,
+                frame_id="sc-warmup",
+            )
+        ])
+    except Exception as exc:
+        log.error(
+            f"[sc] SC plug-pose estimator failed to initialise: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+    policy._sc_plug_estimator = estimator
+    log.info(
+        f"[sc] plug-pose estimator ready: weights={weights} "
+        f"imgsz={estimator.imgsz} crop_refine={estimator.crop_refine} "
+        f"crop_pad_scale={estimator.crop_pad_scale}"
+    )
+    return True
+
+
+def prime_sc_plug_pose(policy, get_observation, move_robot) -> bool:
+    """Measure ``sc_tip_link`` and cache the per-grasp TCP->tip transform.
+
+    Resets and re-solves ``policy._sc_grasp_transform`` unconditionally: the
+    grasp is new every run, so a transform left over from a previous run is
+    exactly the stale assumption this exists to remove.  Fail-closed: any
+    missing precondition returns ``False`` and the caller must not insert.
+    """
+
+    log = policy.get_logger()
+    policy._sc_grasp_transform = None
+    if not configure_sc_plug_pose(policy):
+        return False
+    from .sfp_plug_pose import stamp_to_seconds
+    from .v50_controller import _observation_stamp_s, _plug_views_from_observation
+
+    deadline = time.monotonic() + 2.0
+    observation = None
+    while time.monotonic() < deadline:
+        policy._enforce_action_deadline(move_robot)
+        candidate = get_observation()
+        if candidate is not None and _observation_stamp_s(candidate) is not None:
+            observation = candidate
+            break
+        time.sleep(0.02)
+    if observation is None:
+        log.error("[sc] no timestamped observation for plug-pose priming")
+        return False
+    views = _plug_views_from_observation(policy, observation)
+    if len(views) < 2:
+        log.error(f"[sc] only {len(views)} camera views usable for plug-pose priming")
+        return False
+    estimator = policy._sc_plug_estimator
+    # Image age must be measured in the image headers' clock domain (ROS
+    # simulation time), never against time.monotonic().
+    now_s = stamp_to_seconds(policy._parent_node.get_clock().now())
+    try:
+        detections = estimator.detect_views(views)
+    except Exception as exc:
+        log.error(
+            f"[sc] PLUG_POSE_REJECT reason=detector_error:{type(exc).__name__}:{exc}"
+        )
+        return False
+    by_camera = {d.camera_name: d for d in detections}
+    for view in views:
+        detection = by_camera.get(view.camera_name)
+        if detection is None:
+            log.info(
+                f"[sc] PLUG_POSE_INPUT camera={view.camera_name} "
+                f"stamp={view.stamp_s:.3f} detection=none"
+            )
+            continue
+        kp_conf = np.asarray(detection.keypoint_confidences, dtype=np.float64)
+        usable = int(np.count_nonzero(kp_conf >= estimator.min_keypoint_confidence))
+        log.info(
+            f"[sc] PLUG_POSE_INPUT camera={view.camera_name} "
+            f"stamp={view.stamp_s:.3f} box_conf={detection.box_confidence:.3f} "
+            f"usable_kp={usable}/{len(kp_conf)}"
+        )
+    estimate = estimator.estimate_multiview(
+        views,
+        now_s=now_s,
+        max_age_s=_env_float("RL_INSERT_SC_PLUG_MAX_AGE_S", 0.35),
+        detections=detections,
+    )
+    if estimate is None:
+        log.error(
+            "[sc] PLUG_POSE_REJECT reason="
+            f"{getattr(estimator, 'last_failure_reason', None) or 'unknown'} "
+            "no_fixed_grasp_fallback=true"
+        )
+        return False
+    tcp_pos, tcp_quat = policy._tcp()
+    policy._sc_grasp_transform = solve_tip_in_tcp(
+        tcp_pos,
+        tcp_quat,
+        estimate.position_world,
+        estimate.rotation_world_from_plug,
+    )
+    # Log the measured-vs-constant disagreement: this is the number the calib
+    # dump could never produce, and it is the direct measurement of the +7 mm
+    # phantom depth the fixed-grasp default caused in the field.
+    const_tip, _ = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    delta_mm = (np.asarray(estimate.position_world) - const_tip) * 1000.0
+    log.info(
+        f"[sc] plug-pose primed: confidence={estimate.confidence:.3f} "
+        f"views={estimate.view_count} reproj={estimate.reprojection_error_px:.2f}px "
+        f"tip={np.round(estimate.position_world, 5).tolist()} "
+        f"measured_minus_fixed_grasp_mm={np.round(delta_mm, 2).tolist()}"
+    )
+    return True
+
+
+# --------------------------------------------------------------------------
 # Skill entry point.
 # --------------------------------------------------------------------------
 def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -> bool:
@@ -1737,6 +1962,18 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     # make progress on any run where the port is not found.  Logs only.
     if _sc_calib_dump_enabled():
         dump_sc_grasp_calibration(policy, task)
+
+    # Measure the grasped plug BEFORE port perception, mirroring v50: the port
+    # tie-break ranks candidates by distance to the tip, so even candidate
+    # selection should use measured plug geometry.  The robot is stationary
+    # here, so the transform stays valid through the perception dwell.
+    send_feedback("sc plug-pose priming")
+    if not prime_sc_plug_pose(policy, get_observation, move_robot):
+        log.error(
+            "[sc] plug-pose priming failed -- refusing to insert without a "
+            "measured tip (no fixed-grasp fallback)"
+        )
+        return False
 
     send_feedback("sc opening perception")
 
@@ -1760,7 +1997,7 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
 
     Rp = port_frame(port_quat)
     tcp_pos, tcp_quat = policy._tcp()
-    tip_pos, R_tip = sc_tip_pose_from_tcp(tcp_pos, tcp_quat)
+    tip_pos, R_tip = sc_tip_from_tcp(policy, tcp_pos, tcp_quat)
     dist = float(np.linalg.norm(tip_pos - port_pos))
     handoff_delta = Rp.T @ (tip_pos - port_pos)
     handoff_rot = axis_angle(Rp.T @ R_tip)
@@ -1789,13 +2026,23 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     # Fail loudly instead, and name the cause: this is the uncalibrated tip
     # transform (6c), not perception, which agreed 6/6 at 4.50 px.
     if handoff_delta[2] > SC_MAX_HANDOFF_DEPTH_M:
+        if sc_grasp_transform(policy) is None:
+            cause = (
+                f"SC_TIP_IN_TCP_POS is "
+                f"{'CALIBRATED' if SC_TIP_CALIBRATED else 'the UNCALIBRATED SFP default'}"
+                "; re-solve it with RL_INSERT_CALIB_DUMP=1 over ~10 grasps."
+            )
+        else:
+            cause = (
+                "the tip is the per-grasp MEASURED plug pose, so either the "
+                "upstream macro parked inside the port envelope or the "
+                "measurement itself is wrong -- read the PLUG_POSE_INPUT lines."
+            )
         log.error(
             f"[sc] handoff depth is {handoff_delta[2]*1000:+.2f}mm -- the plug tip "
             "is computed to be INSIDE the port before any motion, which is "
             f"impossible (gate {SC_MAX_HANDOFF_DEPTH_M*1000:.1f}mm). "
-            f"SC_TIP_IN_TCP_POS is {'CALIBRATED' if SC_TIP_CALIBRATED else 'the UNCALIBRATED SFP default'}"
-            "; re-solve it with RL_INSERT_CALIB_DUMP=1 over ~10 grasps. Refusing "
-            "to seat against a tip position this wrong."
+            f"{cause} Refusing to seat against a tip position this wrong."
         )
         return False
 
@@ -1829,11 +2076,16 @@ __all__ = [
     "SC_PRESERVE_HANDOFF_YAW",
     "ScInsertionController",
     "classify_opening",
+    "configure_sc_plug_pose",
     "next_sc_depth",
     "perceive_sc_port_pose",
     "perceive_sc_port_pose_consensus",
+    "prime_sc_plug_pose",
     "run_sc_insertion",
+    "sc_grasp_transform",
     "sc_multiview_candidates",
+    "sc_tcp_pose_for_tip",
+    "sc_tip_from_tcp",
     "sc_tip_pose_from_tcp",
     "seat_frame",
     "tcp_pose_for_sc_tip",

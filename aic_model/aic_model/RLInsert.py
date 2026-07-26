@@ -1096,8 +1096,9 @@ class RLInsert(Policy):
             log.info(f"[board_search] whole board in view: {ok}")
 
         # SC branches to its own scripted controller: different bore depth,
-        # different force ladder, and a fixed grasp (there is no SC plug-pose
-        # model). Everything below this point is SFP-specific.
+        # different force ladder, and its own per-run measured grasp transform
+        # (prime_sc_plug_pose inside run_sc_insertion). Everything below this
+        # point is SFP-specific.
         if plug_type == "sc":
             from .sc_controller import run_sc_insertion
             return run_sc_insertion(self, task, get_observation, move_robot, send_feedback)
