@@ -41,8 +41,8 @@ HARD_FAILURE = "hard_failure"
 # To activate the correction, set FORCE_GAIN ~0.00015 (m/N) and MOMENT_GAIN
 # ~0.02 (rad/N·m) after verifying sign/frame from SEAT_WRENCH logs; these are
 # starting points to bench-tune.
-# Activate P3 after reviewing SEAT_SLOPE/SEAT_WRENCH logs: set
-# MOUTH_SPEED_SCALE~0.5 and STALL_GRACE_S~3.0 (starting points, bench-tune).
+# P3's MOUTH_SPEED_SCALE=0.5 and STALL_GRACE_S=3.0 are now the bench-tuned
+# defaults below; re-check SEAT_SLOPE/SEAT_WRENCH logs if retuning further.
 SEAT_ALIGN_OBSERVE_FORCE_GAIN = 0.00015
 SEAT_ALIGN_OBSERVE_MOMENT_GAIN = 0.02
 SEAT_WRENCH_LOG_PERIOD_S = 0.2
@@ -97,11 +97,11 @@ class V50Config:
     # ->1 = heavily smoothed. Named "release" for the env var it already ships with.
     seat_align_release_decay: float = 0.7
     seat_mouth_zone_m: float = 0.006
-    seat_mouth_speed_scale: float = 0.25
-    seat_stall_grace_s: float = 1.5
+    seat_mouth_speed_scale: float = 0.5
+    seat_stall_grace_s: float = 3.0
     seat_overtravel_m: float = 0.005
     seat_candidate_depth_m: float = 0.0445
-    insertion_event_timeout_wall_s: float = 6.0
+    insertion_event_timeout_wall_s: float = 10.0
     plug_max_age_s: float = 0.35
 
     @classmethod
@@ -138,12 +138,12 @@ class V50Config:
             ),
             seat_mouth_zone_m=_env_float("RL_INSERT_V50_SEAT_MOUTH_ZONE_M", 0.006),
             seat_mouth_speed_scale=_env_float(
-                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.25
+                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.5
             ),
-            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 1.5),
+            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 3.0),
             seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.005),
             insertion_event_timeout_wall_s=_env_float(
-                "RL_INSERT_V50_EVENT_TIMEOUT_S", 6.0
+                "RL_INSERT_V50_EVENT_TIMEOUT_S", 10.0
             ),
             plug_max_age_s=_env_float("RL_INSERT_V50_PLUG_MAX_AGE_S", 0.35),
         ).validated()
@@ -525,14 +525,39 @@ def prime_v50_plug_pose(policy, get_observation, move_robot) -> bool:
     from .sfp_plug_pose import stamp_to_seconds
 
     now_s = stamp_to_seconds(policy._parent_node.get_clock().now())
+    try:
+        detections = policy._v50_plug_estimator.detect_views(views)
+    except Exception as exc:
+        policy.get_logger().error(
+            f"[v50] PLUG_POSE_REJECT reason=detector_error:{type(exc).__name__}:{exc}"
+        )
+        return False
+    by_camera = {d.camera_name: d for d in detections}
+    for view in views:
+        detection = by_camera.get(view.camera_name)
+        if detection is None:
+            policy.get_logger().info(
+                f"[v50] PLUG_POSE_INPUT camera={view.camera_name} stamp={view.stamp_s:.3f} "
+                "detection=none"
+            )
+            continue
+        kp_conf = np.asarray(detection.keypoint_confidences, dtype=np.float64)
+        kp_xy = np.asarray(detection.keypoints_px, dtype=np.float64)
+        usable = int(np.count_nonzero(kp_conf >= policy._v50_plug_estimator.min_keypoint_confidence))
+        policy.get_logger().info(
+            f"[v50] PLUG_POSE_INPUT camera={view.camera_name} stamp={view.stamp_s:.3f} "
+            f"box_conf={detection.box_confidence:.3f} usable_kp={usable}/{len(kp_conf)} "
+            f"kp_conf={np.round(kp_conf, 3).tolist()} kp_xy={np.round(kp_xy, 1).tolist()}"
+        )
     estimate = policy._v50_plug_estimator.estimate_multiview(
-        views,
-        now_s=now_s,
-        max_age_s=policy._v50_config.plug_max_age_s,
+        views, now_s=now_s, max_age_s=policy._v50_config.plug_max_age_s,
+        detections=detections,
     )
     if estimate is None:
         policy.get_logger().error(
-            "[v50] direct plug priming failed; no fixed-grasp control fallback"
+            "[v50] PLUG_POSE_REJECT reason="
+            f"{getattr(policy._v50_plug_estimator, 'last_failure_reason', None) or 'unknown'} "
+            "no_fixed_grasp_fallback=true"
         )
         return False
     tcp_pos, tcp_quat = policy._tcp()

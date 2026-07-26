@@ -204,11 +204,14 @@ class PerceptionCore:
     def detect_nic(self, bgr: np.ndarray, conf_thresh: float = 0.3) -> list[dict]:
         """
         Run YOLO-pose on the image. Returns list of:
-            {kps: np.ndarray[8,2], bbox: (x1,y1,x2,y2), conf: float, cls: int}
+            {kps: np.ndarray[8,2], bbox: (x1,y1,x2,y2), conf: float, cls: int, kp_conf: np.ndarray[8]}
         Sorted by confidence descending.
         """
         model = self._load_yolo()
-        r = model(bgr, verbose=False, conf=conf_thresh)[0]
+        # The NIC pose model shares the same training recipe as the SC pose
+        # model (train_sc.py notes it matches the NIC recipe); match imgsz=960
+        # here too, per docs/SC_PERCEPTION_ACCURACY_PLAYBOOK.md Tier-0.
+        r = model(bgr, imgsz=960, verbose=False, conf=conf_thresh)[0]
         out = []
         if r.boxes is None or len(r.boxes) == 0:
             return out
@@ -216,12 +219,15 @@ class PerceptionCore:
         confs = r.boxes.conf.cpu().numpy()
         classes = r.boxes.cls.cpu().numpy().astype(int)
         kps_all = r.keypoints.xy.cpu().numpy()  # (N, 8, 2)
+        kp_confs_all = r.keypoints.conf.cpu().numpy() if r.keypoints.conf is not None else None
         for i in range(len(boxes)):
+            kp_conf = np.asarray(kp_confs_all[i], dtype=np.float32) if kp_confs_all is not None else np.ones(8, dtype=np.float32)
             out.append({
                 "kps": kps_all[i],
                 "bbox": tuple(boxes[i].tolist()),
                 "conf": float(confs[i]),
                 "cls": int(classes[i]),
+                "kp_conf": kp_conf,
             })
         out.sort(key=lambda d: -d["conf"])
         return out

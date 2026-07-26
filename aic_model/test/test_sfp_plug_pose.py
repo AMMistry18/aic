@@ -250,3 +250,36 @@ def test_estimator_fails_closed_on_model_runtime_error():
     estimator = SfpPlugPoseEstimator(model=BrokenModel())
 
     assert estimator.estimate_multiview(views) is None
+
+
+def test_last_failure_reason_reports_insufficient_views():
+    views, detections, _, _ = _synthetic_views_and_detections()
+    estimator = SfpPlugPoseEstimator(model=_FakeYolo(detections[:1]))
+
+    assert estimator.estimate_multiview(views[:1]) is None
+    assert estimator.last_failure_reason == f"insufficient_views:1<{estimator.min_views}"
+
+
+def test_last_failure_reason_reports_detector_exception():
+    class BrokenModel:
+        def __call__(self, _images, **_kwargs):
+            raise RuntimeError("inference backend unavailable")
+
+    views, _, _, _ = _synthetic_views_and_detections()
+    estimator = SfpPlugPoseEstimator(model=BrokenModel())
+
+    assert estimator.estimate_multiview(views) is None
+    assert estimator.last_failure_reason == "exception:RuntimeError:inference backend unavailable"
+
+
+def test_last_failure_reason_clears_on_success():
+    views, detections, _, _ = _synthetic_views_and_detections()
+    estimator = SfpPlugPoseEstimator(model=_FakeYolo(detections), min_pose_confidence=0.1)
+
+    # Prime a failure so a later success is proven to clear it, not merely
+    # start unset.
+    estimator.estimate_multiview(views[:1])
+    assert estimator.last_failure_reason is not None
+
+    assert estimator.estimate_multiview(views) is not None
+    assert estimator.last_failure_reason is None

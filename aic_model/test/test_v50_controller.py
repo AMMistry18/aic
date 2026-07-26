@@ -37,9 +37,9 @@ def test_v50_config_bounds_force_and_seating():
     assert np.isclose(config.seat_align_moment_gain, 0.004)
     assert np.isclose(config.seat_align_max_lat_m, 0.0004)
     assert np.isclose(config.seat_align_max_tilt_rad, 0.0087)
-    assert np.isclose(config.seat_mouth_speed_scale, 0.25)
+    assert np.isclose(config.seat_mouth_speed_scale, 0.5)
     assert np.isclose(config.seat_align_release_decay, 0.7)
-    assert np.isclose(config.seat_stall_grace_s, 1.5)
+    assert np.isclose(config.seat_stall_grace_s, 3.0)
 
     with pytest.raises(ValueError, match="hard abort"):
         V50Config(force_abort_n=19.0).validated()
@@ -185,10 +185,24 @@ def test_priming_uses_direct_fresh_plug_pose_before_port_selection():
     )
 
     class Estimator:
-        def estimate_multiview(self, views, *, now_s, max_age_s):
+        min_keypoint_confidence = 0.5
+
+        def detect_views(self, views):
+            return [
+                SimpleNamespace(
+                    camera_name=view.camera_name,
+                    box_confidence=0.9,
+                    keypoint_confidences=np.array([0.9, 0.9, 0.9, 0.9]),
+                    keypoints_px=np.zeros((4, 2)),
+                )
+                for view in views
+            ]
+
+        def estimate_multiview(self, views, *, now_s, max_age_s, detections):
             assert len(views) == 2
             assert np.isclose(now_s, 1.05)
             assert np.isclose(max_age_s, 0.35)
+            assert len(detections) == 2
             return world_estimate
 
     parent = SimpleNamespace(

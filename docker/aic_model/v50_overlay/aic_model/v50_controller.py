@@ -41,8 +41,8 @@ HARD_FAILURE = "hard_failure"
 # To activate the correction, set FORCE_GAIN ~0.00015 (m/N) and MOMENT_GAIN
 # ~0.02 (rad/N·m) after verifying sign/frame from SEAT_WRENCH logs; these are
 # starting points to bench-tune.
-# Activate P3 after reviewing SEAT_SLOPE/SEAT_WRENCH logs: set
-# MOUTH_SPEED_SCALE~0.5 and STALL_GRACE_S~3.0 (starting points, bench-tune).
+# P3's MOUTH_SPEED_SCALE=0.5 and STALL_GRACE_S=3.0 are now the bench-tuned
+# defaults below; re-check SEAT_SLOPE/SEAT_WRENCH logs if retuning further.
 SEAT_ALIGN_OBSERVE_FORCE_GAIN = 0.00015
 SEAT_ALIGN_OBSERVE_MOMENT_GAIN = 0.02
 SEAT_WRENCH_LOG_PERIOD_S = 0.2
@@ -97,11 +97,11 @@ class V50Config:
     # ->1 = heavily smoothed. Named "release" for the env var it already ships with.
     seat_align_release_decay: float = 0.7
     seat_mouth_zone_m: float = 0.006
-    seat_mouth_speed_scale: float = 0.25
-    seat_stall_grace_s: float = 1.5
+    seat_mouth_speed_scale: float = 0.5
+    seat_stall_grace_s: float = 3.0
     seat_overtravel_m: float = 0.005
     seat_candidate_depth_m: float = 0.0445
-    insertion_event_timeout_wall_s: float = 6.0
+    insertion_event_timeout_wall_s: float = 10.0
     plug_max_age_s: float = 0.35
 
     @classmethod
@@ -138,12 +138,12 @@ class V50Config:
             ),
             seat_mouth_zone_m=_env_float("RL_INSERT_V50_SEAT_MOUTH_ZONE_M", 0.006),
             seat_mouth_speed_scale=_env_float(
-                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.25
+                "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.5
             ),
-            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 1.5),
+            seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 3.0),
             seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.005),
             insertion_event_timeout_wall_s=_env_float(
-                "RL_INSERT_V50_EVENT_TIMEOUT_S", 6.0
+                "RL_INSERT_V50_EVENT_TIMEOUT_S", 10.0
             ),
             plug_max_age_s=_env_float("RL_INSERT_V50_PLUG_MAX_AGE_S", 0.35),
         ).validated()
@@ -556,7 +556,7 @@ def prime_v50_plug_pose(policy, get_observation, move_robot) -> bool:
     if estimate is None:
         policy.get_logger().error(
             "[v50] PLUG_POSE_REJECT reason="
-            f"{policy._v50_plug_estimator.last_failure_reason or 'unknown'} "
+            f"{getattr(policy._v50_plug_estimator, 'last_failure_reason', None) or 'unknown'} "
             "no_fixed_grasp_fallback=true"
         )
         return False

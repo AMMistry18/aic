@@ -49,6 +49,10 @@ from .rl_insert_contract import (
     sfp_tip_pose_from_tcp,
     tcp_pose_for_sfp_tip,
 )
+# Weighted DLT triangulation, reused as-is for the confidence-weighted port
+# corners below -- it is pure numpy/ROS-free, already audited for the SFP
+# plug-pose path, and must not be forked.
+from .sfp_plug_pose import triangulate_dlt
 
 # ----------------------------- configuration -------------------------------
 MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_flowstate_v1.ts")
@@ -87,6 +91,16 @@ MAX_HANDOFF_SELECT_M = float(os.environ.get("RL_INSERT_MAX_HANDOFF_SELECT_M", "0
 # the consensus 25px gate then rejects every frame. Gate candidates on reproj
 # BEFORE the nearest-tip pick; the true port runs well under 1px.
 MAX_SELECT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_SELECT_REPROJ_PX", "5.0"))
+
+# Confidence-weighted port triangulation (2026-07-25): detect_nic's per-keypoint
+# confidence lets a per-corner DLT drop an occluded/unreliable camera-corner
+# pair instead of triangulating through it, and the known port rectangle is
+# then fit rigidly to whichever corners survive rather than averaged/measured
+# with the flat midpoint math. Kill switch below restores the exact prior
+# behavior when unset.
+PORT_KP_CONF_MIN = float(os.environ.get("RL_INSERT_PORT_KP_CONF_MIN", "0.2"))
+PORT_RIGID_FIT_ENABLE = os.environ.get(
+    "RL_INSERT_SFP_PORT_RIGID_FIT", "1").strip().lower() in ("1", "true", "yes")
 
 # raw: original Contract-A behavior; zero: isolate pose/action contract;
 # baseline: subtract the six-axis wrench observed before the handoff.
@@ -350,6 +364,37 @@ def _normalize(v, eps=1e-9):
     return None if n < eps else v / n
 
 
+def _weighted_kabsch_fit(local_pts, world_pts, weights):
+    """Weighted Kabsch/SVD rigid fit mapping local_pts onto world_pts.
+
+    Same algorithm as sfp_plug_pose.fit_rigid_transform, but that helper
+    floors at >= 4 paired points (tuned for the 8-keypoint plug fit); the SFP
+    port rectangle only ever has 3-4 corners, so this floors at 3 instead of
+    forking the plug's stricter gate. Returns (rotation, translation) such
+    that rotation @ local + translation ~= world.
+    """
+    source = np.asarray(local_pts, dtype=np.float64).reshape(-1, 3)
+    target = np.asarray(world_pts, dtype=np.float64).reshape(-1, 3)
+    if source.shape != target.shape or len(source) < 3:
+        raise ValueError("port rigid fit needs at least three paired 3D points")
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if len(w) != len(source) or np.any(~np.isfinite(w)) or np.any(w <= 0.0):
+        raise ValueError("port rigid-fit weights must be finite, positive, and match point count")
+    w = w / np.sum(w)
+    source_center = np.sum(source * w[:, None], axis=0)
+    target_center = np.sum(target * w[:, None], axis=0)
+    source_zero = source - source_center
+    target_zero = target - target_center
+    covariance = (source_zero * w[:, None]).T @ target_zero
+    u, _, vh = np.linalg.svd(covariance)
+    rotation = vh.T @ u.T
+    if np.linalg.det(rotation) < 0.0:
+        vh[-1] *= -1.0
+        rotation = vh.T @ u.T
+    translation = target_center - rotation @ source_center
+    return rotation, translation
+
+
 def _ros_image_to_cv2(img_msg):
     arr = np.frombuffer(img_msg.data, dtype=np.uint8)
     if img_msg.encoding == "mono8":
@@ -597,6 +642,21 @@ class RLInsert(Policy):
         yaw = float(np.arctan2(R_tip[1, 0], R_tip[0, 0]))
         return _rotmat_to_quat_wxyz(R_tip), yaw
 
+    def _log_port_pose_input(self, cam, nics):
+        """Per-camera port detection line, style-matched to v50's plug-pose
+        PLUG_POSE_INPUT log: one compact line per camera per sampled frame,
+        using the top (highest box-confidence) detection.
+        """
+        if not nics:
+            return
+        top = nics[0]
+        kp_conf = top.get("kp_conf")
+        kp_conf = np.ones(8, dtype=np.float64) if kp_conf is None else np.asarray(kp_conf, dtype=np.float64)
+        self.get_logger().info(
+            f"[v50] PORT_POSE_INPUT camera={cam} box_conf={top['conf']:.3f} "
+            f"kp_conf_mean={float(np.mean(kp_conf)):.3f} kp_conf_min={float(np.min(kp_conf)):.3f}"
+        )
+
     def _make_sfp_multiview_candidates(self, per_cam):
         cams = [c for c, cand in per_cam.items() if cand]
         if len(cams) < 2:
@@ -606,41 +666,127 @@ class RLInsert(Policy):
 
         candidates = []
         for picks in itertools.product(*[per_cam[c] for c in cams]):
-            kp_3d = []
+            if not PORT_RIGID_FIT_ENABLE:
+                kp_3d = []
+                try:
+                    for i in range(4):
+                        pts_2d = [tuple(p["kps"][i]) for p in picks]
+                        Ps = [p["P"] for p in picks]
+                        kp_3d.append(self._pc.triangulate(pts_2d, Ps))
+                except Exception:
+                    continue
+                kp_3d = np.array(kp_3d, dtype=np.float64)
+                X = kp_3d.mean(axis=0)
+                if X[2] < -0.05 or X[2] > 0.25:
+                    continue
+
+                q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+                if q_wxyz is None:
+                    continue
+
+                width = np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5))
+                height = np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5))
+                if not (0.006 <= width <= 0.030 and 0.004 <= height <= 0.025):
+                    continue
+
+                errors = []
+                for p in picks:
+                    for i in range(4):
+                        err = self._reproject_error_px(kp_3d[i], p["K"], p["T"], p["kps"][i])
+                        if err is not None:
+                            errors.append(err)
+                if not errors:
+                    continue
+                reproj = float(np.mean(errors))
+                shape_penalty = abs(width - 0.0137) * 250.0 + abs(height - 0.0086) * 250.0
+                score = reproj + shape_penalty - 0.02 * float(np.mean([p.get("conf", 0.0) for p in picks]))
+                candidates.append({
+                    "X": X, "kp_3d": kp_3d, "q_wxyz": q_wxyz, "yaw": yaw,
+                    "score": float(score), "reproj_px": reproj,
+                    "width": float(width), "height": float(height), "port_slot": None,
+                })
+                continue
+
+            # Confidence-weighted per-corner DLT: a view's corner contributes
+            # only when its keypoint confidence clears PORT_KP_CONF_MIN, and a
+            # corner still needs >= 2 surviving views to triangulate at all --
+            # fewer than that is a failed/missing corner, same as today.
+            tri_idx, tri_pts, tri_weight = [], [], []
+            for i in range(4):
+                pts_2d, Ps, weights = [], [], []
+                for p in picks:
+                    kp_conf = p.get("kp_conf")
+                    conf = 1.0 if kp_conf is None else float(kp_conf[i])
+                    if conf < PORT_KP_CONF_MIN:
+                        continue
+                    pts_2d.append(tuple(p["kps"][i]))
+                    Ps.append(p["P"])
+                    weights.append(conf)
+                if len(pts_2d) < 2:
+                    continue
+                try:
+                    tri_pts.append(triangulate_dlt(pts_2d, Ps, weights))
+                except Exception:
+                    continue
+                tri_idx.append(i)
+                tri_weight.append(float(np.sum(weights)))
+
+            # < 3 usable corners is a failed candidate exactly like today (one
+            # missing corner used to abort the whole 4-corner triangulation).
+            if len(tri_idx) < 3:
+                continue
+            raw_pts = np.array(tri_pts, dtype=np.float64)
+            X_raw = raw_pts.mean(axis=0)
+            if X_raw[2] < -0.05 or X_raw[2] > 0.25:
+                continue
+
+            # Rigid rectangle fit (weighted Kabsch/SVD, weights = summed view
+            # confidence per corner): recovers the true port center/in-plane
+            # orientation even with a corner missing, unlike the raw
+            # mean/midpoint math above which only works with all 4 present.
             try:
-                for i in range(4):
-                    pts_2d = [tuple(p["kps"][i]) for p in picks]
-                    Ps = [p["P"] for p in picks]
-                    kp_3d.append(self._pc.triangulate(pts_2d, Ps))
+                R_fit, t_fit = _weighted_kabsch_fit(
+                    LOCAL_SFP_PORT_KPS[tri_idx], raw_pts, tri_weight)
             except Exception:
                 continue
-            kp_3d = np.array(kp_3d, dtype=np.float64)
-            X = kp_3d.mean(axis=0)
-            if X[2] < -0.05 or X[2] > 0.25:
-                continue
-
-            q_wxyz, yaw = self._estimate_sfp_port_orientation(kp_3d)
+            # _estimate_sfp_port_orientation orthonormalizes against world -Z
+            # the same way regardless of input; feeding it the idealized
+            # fitted rectangle (not the raw corners) is what makes the
+            # reported orientation the FITTED one, per the insertion-axis
+            # convention that function already enforces.
+            fitted_kp_3d = (R_fit @ LOCAL_SFP_PORT_KPS.T).T + t_fit
+            q_wxyz, yaw = self._estimate_sfp_port_orientation(fitted_kp_3d)
             if q_wxyz is None:
                 continue
+            X = t_fit
 
-            width = np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5))
-            height = np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5))
-            if not (0.006 <= width <= 0.030 and 0.004 <= height <= 0.025):
-                continue
+            # Shape gate stays on the RAW corners exactly as today; the
+            # diagonal-midpoint formula needs all 4, so it is skipped (not
+            # relaxed) when only 3 triangulated -- the reprojection gate below
+            # still screens those candidates.
+            width, height, shape_penalty = float("nan"), float("nan"), 0.0
+            if len(tri_idx) == 4:
+                width = np.linalg.norm(((raw_pts[0] + raw_pts[3]) * 0.5) - ((raw_pts[1] + raw_pts[2]) * 0.5))
+                height = np.linalg.norm(((raw_pts[0] + raw_pts[1]) * 0.5) - ((raw_pts[2] + raw_pts[3]) * 0.5))
+                if not (0.006 <= width <= 0.030 and 0.004 <= height <= 0.025):
+                    continue
+                shape_penalty = abs(width - 0.0137) * 250.0 + abs(height - 0.0086) * 250.0
 
+            # Reprojection gate measures the RAW triangulated corners against
+            # every view, same formula as today -- the 25px / 5px consensus
+            # gates downstream keep reading this field with unchanged meaning.
             errors = []
             for p in picks:
-                for i in range(4):
-                    err = self._reproject_error_px(kp_3d[i], p["K"], p["T"], p["kps"][i])
+                for pos, i in enumerate(tri_idx):
+                    err = self._reproject_error_px(raw_pts[pos], p["K"], p["T"], p["kps"][i])
                     if err is not None:
                         errors.append(err)
             if not errors:
                 continue
             reproj = float(np.mean(errors))
-            shape_penalty = abs(width - 0.0137) * 250.0 + abs(height - 0.0086) * 250.0
             score = reproj + shape_penalty - 0.02 * float(np.mean([p.get("conf", 0.0) for p in picks]))
             candidates.append({
-                "X": X, "kp_3d": kp_3d, "q_wxyz": q_wxyz, "yaw": yaw,
+                "X": X, "kp_3d": raw_pts, "q_wxyz": q_wxyz, "yaw": yaw,
                 "score": float(score), "reproj_px": reproj,
                 "width": float(width), "height": float(height), "port_slot": None,
             })
@@ -790,6 +936,7 @@ class RLInsert(Policy):
             if len(views) == 1:
                 cam, (bgr, K, T) = next(iter(views.items()))
                 nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
+                self._log_port_pose_input(cam, nics)
                 best = None
                 for det in nics[:5]:
                     for slot in (0, 1):
@@ -818,6 +965,7 @@ class RLInsert(Policy):
         per_slot_cam = {0: {}, 1: {}}
         for cam, (bgr, K, T) in views.items():
             nics = self._pc.detect_nic(bgr, conf_thresh=0.2)
+            self._log_port_pose_input(cam, nics)
             if not nics:
                 self.get_logger().warn(f"{cam}: no NIC")
                 continue
@@ -828,8 +976,16 @@ class RLInsert(Policy):
                     kps = np.asarray(det["kps"])[kp_slice]
                     if kps.shape != (4, 2):
                         continue
+                    # kp_conf may be absent on old weights -- ones fallback
+                    # keeps the confidence-weighted fit a no-op degrade.
+                    kp_conf_full = det.get("kp_conf")
+                    kp_conf_full = (
+                        np.ones(8, dtype=np.float64) if kp_conf_full is None
+                        else np.asarray(kp_conf_full, dtype=np.float64)
+                    )
                     dets.append({
-                        "kps": kps, "conf": det["conf"], "K": K, "T": T,
+                        "kps": kps, "conf": det["conf"], "kp_conf": kp_conf_full[kp_slice],
+                        "K": K, "T": T,
                         "P": self._pc.build_projection_matrix(K, T),
                     })
                 if dets:

@@ -427,6 +427,10 @@ class SfpPlugPoseEstimator:
         self.max_keypoint_rmse_m = float(max_keypoint_rmse_m)
         self.min_views = max(2, int(min_views))
         self.device = device
+        # Machine-greppable gate name plus measured-vs-threshold value for the
+        # most recent `estimate_multiview`/`estimate_relative_to_port` failure,
+        # so callers can log why a pose was rejected without re-deriving it.
+        self.last_failure_reason: str | None = None
 
     def _load_model(self):
         if self._model is None:
@@ -506,21 +510,31 @@ class SfpPlugPoseEstimator:
         offline held-out evaluation.
         """
 
+        self.last_failure_reason = None
         try:
             unique: dict[str, PlugPoseView] = {}
             for view in views:
                 validated = view.validated()
                 if validated.camera_name in unique:
+                    self.last_failure_reason = f"duplicate_camera:{validated.camera_name}"
                     return None
                 unique[validated.camera_name] = validated
             selected = list(unique.values())
             if len(selected) < self.min_views:
+                self.last_failure_reason = f"insufficient_views:{len(selected)}<{self.min_views}"
                 return None
             stamps = np.array([stamp_to_seconds(view.stamp_s) for view in selected])
-            if float(np.ptp(stamps)) > self.max_sync_spread_s:
+            spread = float(np.ptp(stamps))
+            if spread > self.max_sync_spread_s:
+                self.last_failure_reason = (
+                    f"stale_stamp_spread:{spread:.3f}s>{self.max_sync_spread_s:.3f}s"
+                )
                 return None
             estimate_stamp = float(np.max(stamps))
             if min_stamp_s is not None and estimate_stamp <= float(min_stamp_s):
+                self.last_failure_reason = (
+                    f"stamp_not_newer:{estimate_stamp:.3f}<={float(min_stamp_s):.3f}"
+                )
                 return None
             age: float | None = None
             if now_s is not None:
@@ -532,6 +546,7 @@ class SfpPlugPoseEstimator:
                 # still pass through the normal stale-frame guard below.
                 age = max(0.0, now - estimate_stamp)
                 if max_age_s is not None and age > float(max_age_s):
+                    self.last_failure_reason = f"image_age:{age:.3f}s>{float(max_age_s):.3f}s"
                     return None
             elif max_age_s is not None:
                 raise ValueError("now_s is required when max_age_s is provided")
@@ -540,6 +555,9 @@ class SfpPlugPoseEstimator:
             detected_names = {detection.camera_name for detection in detected}
             used_views = [view for view in selected if view.camera_name in detected_names]
             if len(used_views) < self.min_views:
+                self.last_failure_reason = (
+                    f"insufficient_detected_views:{len(used_views)}<{self.min_views}"
+                )
                 return None
             position, rotation, rmse, reprojection, count, kp_conf = fuse_multiview_keypoints(
                 used_views,
@@ -548,8 +566,14 @@ class SfpPlugPoseEstimator:
                 min_keypoint_confidence=self.min_keypoint_confidence,
             )
             if reprojection > self.max_reprojection_error_px:
+                self.last_failure_reason = (
+                    f"reprojection:{reprojection:.2f}px>{self.max_reprojection_error_px:.2f}px"
+                )
                 return None
             if rmse > self.max_keypoint_rmse_m:
+                self.last_failure_reason = (
+                    f"shape_rmse:{rmse * 1e3:.2f}mm>{self.max_keypoint_rmse_m * 1e3:.2f}mm"
+                )
                 return None
             detection_conf = float(
                 np.mean([d.box_confidence for d in detected if d.camera_name in detected_names])
@@ -565,11 +589,16 @@ class SfpPlugPoseEstimator:
                 * view_quality
             )
             if confidence < self.min_pose_confidence:
+                self.last_failure_reason = (
+                    f"low_confidence:{confidence:.3f}<{self.min_pose_confidence:.3f}"
+                )
                 return None
             source_ids = tuple(view.frame_id for view in used_views)
             if len(set(source_ids)) != len(source_ids):
+                self.last_failure_reason = "duplicate_frame_id"
                 return None
             quaternion = rotation_matrix_to_quaternion_wxyz(rotation)
+            self.last_failure_reason = None
             return PlugPoseEstimate(
                 position_world=position,
                 rotation_world_from_plug=rotation,
@@ -592,7 +621,8 @@ class SfpPlugPoseEstimator:
             TypeError,
             ValueError,
             np.linalg.LinAlgError,
-        ):
+        ) as exc:
+            self.last_failure_reason = f"exception:{type(exc).__name__}:{exc}"
             return None
 
     def estimate_relative_to_port(
@@ -613,12 +643,17 @@ class SfpPlugPoseEstimator:
             max_age_s=max_age_s,
             min_stamp_s=min_stamp_s,
         )
-        if world_pose is None or world_pose.age_s is None:
+        if world_pose is None:
+            # last_failure_reason was already set by the nested estimate_multiview call.
+            return None
+        if world_pose.age_s is None:
+            self.last_failure_reason = "missing_relative_age"
             return None
         try:
             port_position = np.asarray(port_position_world, dtype=np.float64).reshape(3)
             port_rotation = np.asarray(port_rotation_world, dtype=np.float64).reshape(3, 3)
             if not np.all(np.isfinite(port_position)):
+                self.last_failure_reason = "non_finite_port_position"
                 return None
             port_transform = np.eye(4, dtype=np.float64)
             port_transform[:3, :3] = port_rotation
@@ -626,6 +661,7 @@ class SfpPlugPoseEstimator:
             validate_transform(port_transform, name="world_from_port")
             rotation_port_from_plug = port_rotation.T @ world_pose.rotation_world_from_plug
             translation_port = port_rotation.T @ (world_pose.position_world - port_position)
+            self.last_failure_reason = None
             return RelativePlugPoseEstimate(
                 translation_port=translation_port,
                 rotation_port_from_plug=rotation_port_from_plug,
@@ -639,7 +675,8 @@ class SfpPlugPoseEstimator:
                 keypoint_rmse_m=world_pose.keypoint_rmse_m,
                 world_pose=world_pose,
             )
-        except (TypeError, ValueError, np.linalg.LinAlgError):
+        except (TypeError, ValueError, np.linalg.LinAlgError) as exc:
+            self.last_failure_reason = f"exception:{type(exc).__name__}:{exc}"
             return None
 
 
