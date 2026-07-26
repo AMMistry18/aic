@@ -94,6 +94,9 @@ PY
 # working target and lateral_error_mm.p95 against the 0.725 mm binding
 # clearance.  Deliberately not --enforce: a first run that misses the gate is
 # information, not a reason to discard the checkpoint.
+# Crop-refine mirrors how the estimator runs in the controller; without it this
+# reports the ~0.45 mm uncropped number and looks like a regression.
+AIC_PLUG_POSE_CROP_REFINE=1 \
 .pixi/envs/default/bin/python validate_sc_plug_pose.py \
   --mode dataset \
   --weights "${training_root}/best_sc_plug_pose.pt" \
