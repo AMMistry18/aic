@@ -147,6 +147,15 @@ docker save --output "$DIR/aic_model.tar" flowstate:aic_model
    registry. This was tested; there is no design-time/runtime split between them.
 6. Build context: run everything from the repo root. `.dockerignore` only excludes `.pixi`,
    but buildx only transfers `COPY`-referenced paths (~127 MB), so context size is a non-issue.
+7. **`asset install` restarts the pod on its own** (observed on `satya`: install at 01:00:02,
+   pod back up and `Using policy: RLInsert` by 01:00:37). No manual restart needed.
+8. **Always timestamp-check logs before attributing behaviour to a build.** `inctl logs`
+   returns whatever is in the buffer, which routinely predates the install you just did.
+   Convert the ROS epoch and compare against the install time:
+   `date -d @1785044146` vs the `Finished installing` line. This bit us once — a depth trace
+   from the *previous* build was read as evidence that a new change worked. The fix is
+   mechanical: confirm `log_ts > install_ts` before drawing any conclusion, and remember the
+   pod needs an actual insertion attempt after the restart before there is anything to judge.
 
 ## `Copy of satya` — known broken, do not chase
 
