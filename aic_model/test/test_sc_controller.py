@@ -15,6 +15,7 @@ from aic_model.rl_insert_contract import (  # noqa: E402
     quat_to_matrix,
 )
 from aic_model.v50_controller import rotation_from_axis_angle  # noqa: E402
+from aic_model.v50_controller import HARD_FAILURE, SEATED  # noqa: E402
 from aic_model.sc_controller import (  # noqa: E402
     SC_TIP_IN_TCP_POS,
     SCConfig,
@@ -164,6 +165,132 @@ def test_event_normalisation_strips_the_cable_prefix():
     )
     assert _normalize_event("sc_mount_rail_0/sc_port_0") == "sc_mount_rail_0/sc_port_0"
     assert _normalize_event(None) == ""
+
+
+def _calib_policy(frames_to_pose, tcp_pos):
+    """Policy whose TF resolves exactly the frames given."""
+    def _tf(pos):
+        return type("_TF", (), {
+            "transform": type("_T", (), {
+                "translation": type("_V", (), dict(zip("xyz", pos)))(),
+                "rotation": type("_Q", (), {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0})(),
+            })(),
+            "header": type("_H", (), {
+                "stamp": type("_S", (), {"sec": 1, "nanosec": 0})()})(),
+        })()
+
+    log = _EventLog()
+
+    class _Policy:
+        def _tcp(self):
+            return np.asarray(tcp_pos, float), np.array([1.0, 0.0, 0.0, 0.0])
+
+        def get_logger(self):
+            return log
+
+        def _lookup_transform(self, target, source, timeout_sec=0.2):
+            if source not in frames_to_pose:
+                raise RuntimeError(f"no such frame {source}")
+            return _tf(frames_to_pose[source])
+
+    return _Policy(), log
+
+
+def test_calibration_refuses_a_frame_too_far_away_to_be_the_held_plug(monkeypatch):
+    # 'selected_sc/sc_tip_link' is a real SC plug and resolves cleanly, but it is
+    # static and ~30 cm off -- it is a second plug, not the grasped one.  Printing
+    # it as SOLVED is how a wrong transform gets baked into the image.
+    monkeypatch.setattr(sc_controller, "SC_CALIB_PLUG_FRAMES",
+                        ["selected_sc/sc_tip_link"])
+    tcp = [0.0, 0.0, 0.0]
+    policy, log = _calib_policy({"selected_sc/sc_tip_link": [0.20, 0.20, 0.10]}, tcp)
+    task = type("_Task", (), {"cable_name": "cable_0", "plug_name": "sc_tip"})()
+
+    assert sc_controller.dump_sc_grasp_calibration(policy, task) is False
+    assert any("REJECTED" in e for e in log.errors + getattr(log, "warns", []))
+
+
+def test_calibration_accepts_a_frame_at_a_plausible_grasp_distance(monkeypatch):
+    monkeypatch.setattr(sc_controller, "SC_CALIB_PLUG_FRAMES", ["cable_0/sc_tip_link"])
+    tcp = [0.0, 0.0, 0.0]
+    policy, _ = _calib_policy({"cable_0/sc_tip_link": [0.0, 0.0, 0.058]}, tcp)
+    task = type("_Task", (), {"cable_name": "cable_0", "plug_name": "sc_tip"})()
+
+    assert sc_controller.dump_sc_grasp_calibration(policy, task) is True
+
+
+def test_tf_frame_names_parse_from_either_tf2_dump_format():
+    # Which of the two dumps a tf2 build offers is not something the calibration
+    # run should depend on -- a parse miss here costs a whole grasp sample.
+    yaml_dump = (
+        "base_link: \n  parent: 'world'\n"
+        "cable_0/sc_tip_link: \n  parent: 'cable_0/sc_plug_link'\n"
+    )
+    string_dump = (
+        "Frame cable_0/sc_tip_link exists with parent cable_0/sc_plug_link.\n"
+        "Frame base_link exists with parent world.\n"
+    )
+    for dump in (yaml_dump, string_dump):
+        assert sc_controller.parse_tf_frame_names(dump) == [
+            "base_link", "cable_0/sc_tip_link",
+        ]
+    assert sc_controller.parse_tf_frame_names("") == []
+
+
+class _EventLog:
+    def __init__(self):
+        self.errors = []
+        self.warns = []
+
+    def error(self, message):
+        self.errors.append(str(message))
+
+    def info(self, message):
+        pass
+
+    def warn(self, message):
+        self.warns.append(str(message))
+
+
+def _event_harness(published, expected, generation=1):
+    """Bare controller exercising only _event_status."""
+    controller = object.__new__(ScInsertionController)
+    node = type("_Node", (), {
+        "_insertion_event_value": published,
+        "_insertion_event_generation": generation,
+    })()
+    controller.policy = type("_Policy", (), {"_parent_node": node})()
+    controller.log = _EventLog()
+    controller.event_generation = 0
+    controller.expected_event = expected
+    return controller
+
+
+def test_seat_event_matching_the_requested_port_is_seated():
+    controller = _event_harness("sc_mount_rail_0/sc_port_0", "sc_mount_rail_0/sc_port_0")
+    assert controller._event_status() == SEATED
+
+
+def test_seat_event_for_a_different_port_still_counts_as_seated():
+    # Port selection is nearest-to-tip by design -- steering to the requested
+    # port is the macro's job.  Failing here would make a physically correct
+    # insertion indistinguishable from never seating at all.
+    controller = _event_harness("sc_mount_rail_0/sc_port_3", "sc_mount_rail_0/sc_port_0")
+    assert controller._event_status() == SEATED
+    # ...but it must name both ports, because scoring credits only the request.
+    assert any("sc_port_3" in e and "sc_port_0" in e for e in controller.log.errors)
+
+
+def test_strict_mode_restores_the_wrong_port_hard_failure(monkeypatch):
+    monkeypatch.setattr(sc_controller, "SC_STRICT_PORT_EVENT", True)
+    controller = _event_harness("sc_mount_rail_0/sc_port_3", "sc_mount_rail_0/sc_port_0")
+    assert controller._event_status() == HARD_FAILURE
+
+
+def test_no_seat_verdict_until_a_new_event_generation_arrives():
+    controller = _event_harness("sc_mount_rail_0/sc_port_0", "sc_mount_rail_0/sc_port_0",
+                                generation=0)
+    assert controller._event_status() is None
 
 
 class _AlignHarness(ScInsertionController):

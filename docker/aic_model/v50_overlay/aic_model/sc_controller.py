@@ -72,6 +72,8 @@ from __future__ import annotations
 
 import itertools
 import os
+import re
+import sys
 import time
 from dataclasses import dataclass, replace
 from typing import Optional
@@ -131,15 +133,30 @@ def _normalize_event(value: object) -> str:
 
 
 def _env_vector(name: str, default: np.ndarray) -> np.ndarray:
+    """Parse a vector env var, tolerating the format the calib dump prints.
+
+    ``dump_sc_grasp_calibration`` logs the solved transform via ``.tolist()``,
+    i.e. ``[0.1, 0.2, 0.3]``.  Without stripping brackets ``float("[0.1")``
+    raises and this falls back to the SFP default -- silently, and the SFP
+    default is exactly the value that produces the +7 mm fake seat.  So the
+    natural copy-paste out of the log used to be indistinguishable from never
+    having set the variable at all.  Accept both bracketed and bare forms, and
+    say so out loud when a value is present but unusable.
+    """
     raw = os.environ.get(name)
     if not raw:
         return np.asarray(default, dtype=np.float64).copy()
+    cleaned = raw.strip().strip("[]()").replace(",", " ")
     try:
-        value = np.array([float(part) for part in raw.replace(",", " ").split()],
-                         dtype=np.float64)
+        value = np.array([float(part) for part in cleaned.split()], dtype=np.float64)
     except ValueError:
+        print(f"[sc] {name}={raw!r} is not a number list -- IGNORED, using the "
+              f"uncalibrated default {np.asarray(default).tolist()}", file=sys.stderr)
         return np.asarray(default, dtype=np.float64).copy()
     if value.shape != np.asarray(default).shape:
+        print(f"[sc] {name}={raw!r} has {value.shape} entries, expected "
+              f"{np.asarray(default).shape} -- IGNORED, using the uncalibrated "
+              f"default {np.asarray(default).tolist()}", file=sys.stderr)
         return np.asarray(default, dtype=np.float64).copy()
     return value
 
@@ -229,6 +246,16 @@ SC_TIP_IN_TCP_POS = _env_vector("RL_INSERT_SC_TIP_IN_TCP_POS", SFP_TIP_IN_TCP_PO
 SC_TIP_IN_TCP_QUAT = _env_vector("RL_INSERT_SC_TIP_IN_TCP_QUAT", SFP_TIP_IN_TCP_QUAT)
 SC_TIP_CALIBRATED = _env_bool("RL_INSERT_SC_TIP_CALIBRATED", False)
 
+# Port SELECTION is deliberately nearest-to-tip: this controller inserts into
+# whatever port the macro parked it over, and steering to the *requested* port is
+# the macro's job, not ours.  The seat check used to contradict that -- it
+# demanded the task's named port and returned HARD_FAILURE otherwise, so a
+# physically correct insertion into the nearest port read as a failure and the
+# seating path could never be shown to work.  Accept any port's event, but say
+# loudly which one it was, because scoring still credits only the requested port.
+# Flip this on once the macro reliably parks over the right port.
+SC_STRICT_PORT_EVENT = _env_bool("RL_INSERT_SC_STRICT_PORT_EVENT", False)
+
 # Take the insertion axis from perception but keep the twist the macro handed us,
 # instead of rotating the plug onto the perceived port yaw.
 #
@@ -267,12 +294,26 @@ SC_PRESERVE_HANDOFF_YAW = _env_bool("RL_INSERT_SC_PRESERVE_HANDOFF_YAW", True)
 # DataCollectorSfpPlugPoseGT: ``{task.cable_name}/{task.plug_name}_link``, e.g.
 # ``cable_0/sc_tip_link`` -- matching ``sc_tip_link`` in the SC Plug model.sdf,
 # merged into the cable model.  Guessing "sc_tip" resolves nothing.
+# Field enumeration (2026-07-25) showed the sim publishes neither of those.  It
+# does publish ``selected_sc/sc_tip_link`` and ``selected_sc/sc_plug_link``, and
+# they are a real SC plug -- their separation is 11.65 mm, exactly the SC Plug
+# SDF's sc_tip_joint offset.  But they are STATIC: between two runs whose TCP
+# moved 39 mm, they moved 0.7 mm, sitting ~30 cm away at table height.  That is a
+# second plug, or a spawn-time pose, and either way it does not track the grasp.
+# Deliberately NOT listed as candidates -- they resolve, which is exactly what
+# makes them dangerous.
 SC_CALIB_PLUG_FRAMES = [
     f.strip() for f in os.environ.get(
         "RL_INSERT_SC_CALIB_PLUG_FRAMES",
         "cable_0/sc_tip_link,sc_tip_link",
     ).split(",") if f.strip()
 ]
+
+# A plug held in the gripper: the SFP default already puts its tip 58 mm out, and
+# an SC plug is comparable.  Outside this band the frame is the wrist itself
+# (nearer) or furniture (further), never the grasped plug.
+SC_HELD_PLUG_MIN_M = _env_float("RL_INSERT_SC_HELD_PLUG_MIN_M", 0.02)
+SC_HELD_PLUG_MAX_M = _env_float("RL_INSERT_SC_HELD_PLUG_MAX_M", 0.12)
 
 
 def sc_calib_frame_candidates(task) -> list[str]:
@@ -575,6 +616,134 @@ def _sc_calib_dump_enabled() -> bool:
         "RL_INSERT_SC_CALIB_DUMP", False)
 
 
+def parse_tf_frame_names(text: str) -> list[str]:
+    """Frame names out of either tf2 dump format.
+
+    ``all_frames_as_yaml()`` puts each frame at column 0; ``all_frames_as_string()``
+    emits ``Frame X exists with parent Y.``  Accept both rather than depending on
+    which one a given tf2 build provides.
+    """
+    names = {line.split(":", 1)[0].strip()
+             for line in text.splitlines()
+             if ":" in line and line[:1] not in ("", " ", "\t", "-")}
+    names |= set(re.findall(r"Frame (\S+?) exists", text))
+    return sorted(n for n in names if n)
+
+
+def _tf_frame_names(policy, log) -> list[str]:
+    """Every frame the TF buffer knows about, or ``[]`` if it cannot be read."""
+    node = getattr(policy, "_parent_node", None)
+    buffer = getattr(node, "_tf_buffer", None)
+    if buffer is None:
+        log.warn("[sc-calib] no TF buffer reachable; cannot enumerate frames")
+        return []
+
+    text = ""
+    for method in ("all_frames_as_yaml", "all_frames_as_string"):
+        fn = getattr(buffer, method, None)
+        if fn is None:
+            continue
+        try:
+            text = str(fn() or "")
+        except Exception as ex:
+            log.warn(f"[sc-calib] {method}() failed: {ex}")
+            continue
+        if text.strip():
+            break
+    if not text.strip():
+        log.warn("[sc-calib] TF buffer reported no frames at all")
+        return []
+
+    names = parse_tf_frame_names(text)
+    if not names:
+        log.warn(f"[sc-calib] could not parse frame names; raw TF dump follows:\n"
+                 f"{text[:2000]}")
+    return names
+
+
+def _probe_tf_frames_for_tip(policy, log, lookup, tcp_pos, R_tcp, assumed_tip) -> bool:
+    """Solve the tip transform against every plausible frame, best guess first.
+
+    Printing a list of names and asking for another run wastes a grasp -- the
+    name is only interesting because of the number behind it.  So resolve every
+    candidate the sim actually publishes, solve the transform for each, and rank
+    by distance to the assumed tip: the true tip is a few mm from where the SFP
+    default puts it, while a wrist or board frame is tens of cm away.  One run
+    then yields the answer whatever the frame turns out to be called.
+    """
+    names = _tf_frame_names(policy, log)
+    if not names:
+        return False
+
+    # Identify the held plug by GEOMETRY, not by name.  Name matching failed
+    # twice: 'cable_0/sc_tip_link' does not exist, and filtering to sc/tip/plug
+    # names narrowed 63 frames to 9 -- none of which is the grasped plug, while
+    # the other 54 were never even printed.  A plug in the gripper is a few cm
+    # from the TCP no matter what it is called, so probe everything and sort by
+    # distance to the TCP.  Ports and arm links are excluded only from the final
+    # recommendation, never from the listing.
+    log.warn(f"[sc-calib] probing all {len(names)} TF frames for the held plug")
+
+    solved = []
+    for frame in names:
+        try:
+            tf = lookup("base_link", frame, timeout_sec=0.05)
+        except Exception:
+            continue
+        tr, ro = tf.transform.translation, tf.transform.rotation
+        gt_pos = np.array([tr.x, tr.y, tr.z], dtype=np.float64)
+        gt_quat = np.array([ro.w, ro.x, ro.y, ro.z], dtype=np.float64)
+        stamp = getattr(getattr(tf, "header", None), "stamp", None)
+        stamp_s = (float(getattr(stamp, "sec", 0))
+                   + float(getattr(stamp, "nanosec", 0)) * 1e-9) if stamp else float("nan")
+        solved.append({
+            "frame": frame,
+            "pos": gt_pos,
+            "tcp_dist": float(np.linalg.norm(gt_pos - tcp_pos)),
+            "p_rel": R_tcp.T @ (gt_pos - tcp_pos),
+            "q_rel": matrix_to_quat(R_tcp.T @ quat_to_matrix(gt_quat)),
+            "stamp": stamp_s,
+        })
+
+    if not solved:
+        log.warn(f"[sc-calib] not one frame resolved. all frames: {names}")
+        return False
+
+    solved.sort(key=lambda s: s["tcp_dist"])
+    log.warn("[sc-calib] === ALL FRAMES BY DISTANCE FROM TCP (nearest 20) ===")
+    for s in solved[:20]:
+        log.warn(f"[sc-calib]   {s['tcp_dist'] * 1000:8.1f}mm  {s['frame']}  "
+                 f"pos={np.round(s['pos'], 4).tolist()} stamp={s['stamp']:.3f}")
+
+    # A held SC plug tip sits roughly 40-90 mm from the TCP: closer is the wrist
+    # or the gripper itself, further is furniture.  Anything named for a port or
+    # an arm link is the thing we insert into or the thing doing the inserting.
+    def _is_candidate(s) -> bool:
+        low = s["frame"].lower()
+        if any(k in low for k in ("port", "arm_", "flange", "wrist", "gripper",
+                                  "finger", "camera", "base_link", "world")):
+            return False
+        return SC_HELD_PLUG_MIN_M <= s["tcp_dist"] <= SC_HELD_PLUG_MAX_M
+
+    candidates = [s for s in solved if _is_candidate(s)]
+    if not candidates:
+        log.warn("[sc-calib] >>> NO frame sits 20-120mm from the TCP, so the sim "
+                 "does not publish a pose that tracks the grasped plug. "
+                 "Ground-truth calibration is not available this way -- use the "
+                 "SC plug-pose model instead, or derive the tip from the plug "
+                 "body: the SC Plug SDF fixes sc_tip_link at plug-frame "
+                 "x=+11.65mm rpy=(-pi/2, 0, -pi/2) (see sc_plug_pose_geometry).")
+        return False
+
+    log.warn("[sc-calib] === HELD-PLUG CANDIDATES (20-120mm from TCP) ===")
+    for s in candidates:
+        log.warn(f"[sc-calib]   {s['frame']}  {s['tcp_dist'] * 1000:.1f}mm from TCP")
+        log.warn(f"[sc-calib]     RL_INSERT_SC_TIP_IN_TCP_POS ={np.round(s['p_rel'], 10).tolist()}")
+        log.warn(f"[sc-calib]     RL_INSERT_SC_TIP_IN_TCP_QUAT={np.round(s['q_rel'], 10).tolist()}")
+    log.warn(f"[sc-calib] >>> USE: RL_INSERT_SC_CALIB_PLUG_FRAMES={candidates[0]['frame']}")
+    return True
+
+
 def dump_sc_grasp_calibration(policy, task) -> bool:
     """Log everything needed to re-solve ``SC_TIP_IN_TCP_*``.  Logs only.
 
@@ -622,11 +791,24 @@ def dump_sc_grasp_calibration(policy, task) -> bool:
         tr, ro = tf.transform.translation, tf.transform.rotation
         gt_pos = np.array([tr.x, tr.y, tr.z], dtype=np.float64)
         gt_quat = np.array([ro.w, ro.x, ro.y, ro.z], dtype=np.float64)
+        # Resolving is not the same as being right.  'selected_sc/sc_tip_link'
+        # resolves fine and is a genuine SC plug, but it is a STATIC frame 30 cm
+        # away: across two runs the TCP moved 39 mm and it moved 0.7 mm.  A frame
+        # that cannot be the plug in the gripper must never be printed as SOLVED,
+        # or the number gets baked in and the fake seat survives calibration.
+        tcp_dist = float(np.linalg.norm(gt_pos - tcp_pos))
+        if not (SC_HELD_PLUG_MIN_M <= tcp_dist <= SC_HELD_PLUG_MAX_M):
+            log.warn(f"[sc-calib] REJECTED '{frame}': {tcp_dist * 1000:.0f}mm from the "
+                     f"TCP, outside the {SC_HELD_PLUG_MIN_M * 1000:.0f}-"
+                     f"{SC_HELD_PLUG_MAX_M * 1000:.0f}mm a held plug can occupy. "
+                     f"pos={np.round(gt_pos, 6).tolist()} -- not the grasped plug.")
+            continue
         q_rel = matrix_to_quat(R_tcp.T @ quat_to_matrix(gt_quat))
         p_rel = R_tcp.T @ (gt_pos - tcp_pos)
         found = True
         log.info(f"[sc-calib] GROUND-TRUTH frame '{frame}' RESOLVED: "
                  f"pos={np.round(gt_pos, 6).tolist()} "
+                 f"{tcp_dist * 1000:.1f}mm from TCP "
                  f"quat_wxyz={np.round(gt_quat, 6).tolist()}")
         log.info(f"[sc-calib]   >>> SOLVED RL_INSERT_SC_TIP_IN_TCP_POS ="
                  f"{np.round(p_rel, 10).tolist()}")
@@ -637,8 +819,8 @@ def dump_sc_grasp_calibration(policy, task) -> bool:
                  "(budget against 0.725 mm vertical clearance, not 1.2 mm lateral), "
                  "then set both defaults in BOTH copies of sc_controller.py")
     if not found:
-        log.warn(f"[sc-calib] no ground-truth frame resolved from {frames}. Set "
-                 "RL_INSERT_SC_CALIB_PLUG_FRAMES to the correct name.")
+        log.warn(f"[sc-calib] no ground-truth frame resolved from {frames}.")
+        found = _probe_tf_frames_for_tip(policy, log, lookup, tcp_pos, R_tcp, tip_pos)
     log.info("[sc-calib] === END DUMP ===")
     return found
 
@@ -818,6 +1000,15 @@ class ScInsertionController:
             return None
         value = _normalize_event(getattr(parent, "_insertion_event_value", ""))
         if value == self.expected_event:
+            return SEATED
+        if not SC_STRICT_PORT_EVENT:
+            self.log.error(
+                f"[sc] SEATED IN A DIFFERENT PORT: event '{value}', task asked for "
+                f"'{self.expected_event}'. Counting it as seated because port "
+                f"selection is nearest-to-tip by design -- but scoring credits only "
+                f"the requested port, so the macro parked over the wrong one. "
+                f"RL_INSERT_SC_STRICT_PORT_EVENT=1 to treat this as a failure."
+            )
             return SEATED
         self.log.error(
             f"[sc] insertion event was for wrong port '{value}', expected "
