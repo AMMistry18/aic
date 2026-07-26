@@ -25,12 +25,21 @@ from .DataCollectorPose2 import (
     ros_image_to_cv2,
     tf_to_4x4,
 )
-from .perception_core import PerceptionCore
 
 OUTPUT_DIR = os.path.expanduser(
     os.environ.get("AIC_SC_POSE_OUTPUT_DIR", "~/aic_perception_data/pose_sc_gt_raw")
 )
 CAMERA_NAMES = ["left_camera", "center_camera", "right_camera"]
+
+# Every SC slot that may exist on the board.  This loop used to be hardcoded to
+# (0, 1), which matched the qualification xacro.  task_board.urdf.xacro now
+# declares sc_port_0..4 (3 on rail 0, 2 on rail 1), and an image containing five
+# SC ports with only two of them labelled does not merely lose data -- it teaches
+# the detector that the other three are background.  That is the same class of
+# silent poisoning as the pseudo-label path removed below, so keep this range at
+# or above the number of slots the board can carry.  Slots that are not present
+# in a given trial simply fail their TF lookup and are skipped.
+SC_SLOTS = tuple(range(int(os.environ.get("AIC_SC_POSE_SLOTS", "5"))))
 
 VIEWPOINTS_PER_TRIAL = 18
 VAL_EVERY_N_RUNS = 5
@@ -90,7 +99,8 @@ class DataCollectorScPoseGT(Policy):
         self._trial_counter = 0
         self._run_counter = self._load_run_counter()
         self._split = "val" if (self._run_counter % VAL_EVERY_N_RUNS == 0) else "train"
-        self._fallback_detector = PerceptionCore()
+        # No fallback detector by design -- see _capture_frame.  This collector
+        # emits projected-TF labels or nothing.
 
         for sub in [
             "images/train",
@@ -167,13 +177,28 @@ class DataCollectorScPoseGT(Policy):
         return img, K, stamp
 
     def _candidate_sc_frames(self, slot_idx: int) -> list[str]:
+        """Frames that are the port MOUTH, and nothing else.
+
+        Every entry here must be the entrance plane, because the caller takes the
+        first one that resolves and labels against it.  This list used to end
+        with ``sc_port_base_link`` and ``sc_port_link``:
+
+          * ``sc_port_base_link`` is the SEAT -- 15.64 mm deeper than the mouth
+            (see the module-level ground truth in sc_controller.py).
+          * ``sc_port_link`` is the port origin, another 2 mm off.
+
+        If the entrance frames were not being published during a collection run,
+        the loop fell through to those silently and every label in the run was
+        systematically 15.64 mm too deep, with nothing in the output to say so
+        beyond a ``tf_frame`` string nobody reads.  A dataset that is wrong by
+        more than the entire insertion depth is worse than no dataset: it trains
+        a model to aim at the back wall.  Fail the frame instead.
+        """
         base = f"task_board/sc_port_{slot_idx}"
         return [
             f"{base}/sc_port_base/sc_port_base_link_entrance",
             f"{base}/sc_port_base_link_entrance",
-            f"{base}/sc_port_base/sc_port_base_link",
             f"{base}/sc_port_link_entrance",
-            f"{base}/sc_port_link",
         ]
 
     def _capture_frame(self, obs, viewpoint_idx: int, vp_xyz):
@@ -195,6 +220,11 @@ class DataCollectorScPoseGT(Policy):
             "kpt_visibility_drop": 0,
             "bbox_drop": 0,
             "format_drop": 0,
+            # Camera had an image but no entrance-frame GT for either slot, so it
+            # produced no label.  If this is nonzero for a whole run the entrance
+            # frames are not being published and the run is worthless -- check it
+            # before training on the output.
+            "no_gt_label": 0,
         }
 
         for cam in CAMERA_NAMES:
@@ -208,7 +238,7 @@ class DataCollectorScPoseGT(Policy):
 
             label_lines = []
             cam_meta_labels = []
-            for slot in (0, 1):
+            for slot in SC_SLOTS:
                 tf_port = None
                 frame_used = None
                 for frame in self._candidate_sc_frames(slot):
@@ -254,37 +284,23 @@ class DataCollectorScPoseGT(Policy):
                 )
 
             if not label_lines:
-                # Fallback for environments where SC GT TF frames are unavailable.
-                # Use the current SC color detector output as pseudo-labels.
-                for det in self._fallback_detector.detect_sc(img)[:2]:
-                    corners = np.asarray(det.get("corners", []), dtype=np.float32)
-                    if corners.shape != (4, 2):
-                        continue
-                    x, y, bw, bh = det["bbox"]
-                    bbox = (float(x), float(y), float(x + bw), float(y + bh))
-                    flags = np.array([2, 2, 2, 2], dtype=np.int32)
-                    kps_clamped = clamp_keypoints_to_image(corners, flags, w, h)
-                    line = format_sc_pose_label(
-                        bbox=bbox,
-                        kps_clamped=kps_clamped,
-                        flags=flags,
-                        img_w=w,
-                        img_h=h,
-                        class_id=0,
-                    )
-                    if line is None:
-                        continue
-                    label_lines.append(line)
-                    cam_meta_labels.append(
-                        {
-                            "slot": -1,
-                            "tf_frame": "fallback_color_filter",
-                            "visible_keypoints": 4,
-                            "bbox_px": [float(v) for v in bbox],
-                        }
-                    )
-
-            if not label_lines:
+                # There used to be an HSV blue-blob fallback here that wrote
+                # pseudo-labels from the colour detector whenever TF ground truth
+                # was unavailable.  It is deliberately gone.
+                #
+                # Those corners are not a projected rectangle at all -- they are
+                # whatever the blob's minimum-area box happened to be -- so any
+                # frame produced that way followed a DIFFERENT convention from
+                # the projected 8.8 x 6.0 mm labels, inside the same dataset,
+                # tagged only by a "fallback_color_filter" string in the
+                # per-sample JSON.  Two conventions mixed silently in one
+                # training set is unrecoverable after the fact: you cannot tell
+                # from the weights which frames poisoned them.
+                #
+                # If TF is unavailable the correct outcome is fewer frames, not
+                # worse ones.  A run that collects nothing is a loud, fixable
+                # problem; a run that collects garbage is a silent one.
+                debug_counts["no_gt_label"] += 1
                 continue
 
             img_name = f"{frame_id}_{cam}.png"
@@ -323,10 +339,24 @@ class DataCollectorScPoseGT(Policy):
             self.get_logger().warn(
                 "SC GT frame produced no saved labels | "
                 f"tf_miss={debug_counts['tf_miss']} "
+                f"no_gt_label={debug_counts['no_gt_label']} "
                 f"vis_drop={debug_counts['kpt_visibility_drop']} "
                 f"bbox_drop={debug_counts['bbox_drop']} "
                 f"fmt_drop={debug_counts['format_drop']} "
                 f"cam_missing={debug_counts['camera_missing']}"
+            )
+        # A frame that saw cameras but never resolved an entrance frame is the
+        # signature of TF not publishing the mouth at all.  Say so once per
+        # frame at error level: this used to be papered over by pseudo-labels,
+        # so the failure mode has no history of being noticed.
+        # Absent slots miss TF by design now that SC_SLOTS covers the whole board,
+        # so key this on EVERY camera failing rather than on any tf_miss at all.
+        if debug_counts["no_gt_label"] >= len(CAMERA_NAMES):
+            self.get_logger().error(
+                f"SC GT: all {debug_counts['no_gt_label']} camera(s) had images but no "
+                "entrance-frame TF, so they were skipped rather than pseudo-labelled. "
+                "Check that sc_port_base_link_entrance is being published -- until it "
+                "is, this run collects nothing usable."
             )
         return saved, labeled
 

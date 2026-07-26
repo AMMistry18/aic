@@ -18,7 +18,6 @@ from aic_model.v50_controller import rotation_from_axis_angle  # noqa: E402
 from aic_model.sc_controller import (  # noqa: E402
     SC_TIP_IN_TCP_POS,
     SCConfig,
-    SC_BORE_PITCH_M,
     SC_INSERT_DEPTH_M,
     SC_OPENING_HEIGHT_M,
     SC_OPENING_WIDTH_M,
@@ -88,17 +87,60 @@ def test_persistent_depth_holds_at_the_force_cap():
     assert np.isclose(held, 0.008)
 
 
-def test_opening_classification_distinguishes_duplex_from_single_bore():
-    label, residual, offset = classify_opening(SC_OPENING_WIDTH_M, SC_OPENING_HEIGHT_M)
-    assert label == "duplex"
+def test_opening_classification_names_the_two_real_label_conventions():
+    # The hypotheses must be what the COLLECTORS project, not SDF geometry: the
+    # model outlines neither the duplex opening nor a bore.
+    label, residual, _ = classify_opening(0.0088, 0.0060)
+    assert label == "gt_label", "DataCollectorScPoseGT's 8.8x6.0 rectangle"
     assert residual < 1e-9
-    assert offset == 0.0
 
-    label, _, offset = classify_opening(0.0097, SC_OPENING_HEIGHT_M)
-    assert label == "single_bore"
-    # A single-bore detection is half a duplex pitch off the point the duplex
-    # plug actually enters.
-    assert np.isclose(offset, SC_BORE_PITCH_M / 2.0)
+    label, residual, _ = classify_opening(0.02578, 0.00927)
+    assert label == "outer_face", "DataCollectorPoseSC's 25.78x9.27 outer face"
+    assert residual < 1e-9
+
+
+def test_field_measured_opening_classifies_as_the_shipped_label_convention():
+    # 2026-07-25 run: 7.09 x 4.06 mm triangulated. Undersized against the label
+    # because the outer cameras detect the target weakly, but unambiguously the
+    # gt_label convention rather than the 25.78 mm face.
+    label, residual, _ = classify_opening(0.00709, 0.00406)
+    assert label == "gt_label"
+    assert residual < sc_controller.SC_OPENING_RESIDUAL_WARN_M, (
+        "known triangulation shrinkage must not trip the 'unknown convention' warning"
+    )
+
+
+def test_no_bore_offset_is_ever_reported():
+    # Both collectors project from sc_port_base_link_entrance -- the duplex
+    # centre -- so a detection is never half a bore off. The old code returned
+    # half a pitch here and logged a warning telling the operator to correct by
+    # 6.35 mm, which would have pushed the plug off-centre by exactly that.
+    for w, h in ((0.0088, 0.0060), (0.02578, 0.00927), (0.00709, 0.00406),
+                 (0.00971, 0.00785)):
+        assert classify_opening(w, h)[2] == 0.0
+
+
+def test_pnp_rectangle_matches_the_convention_the_weights_emit():
+    # PnP scales the pose by the ratio of this rectangle to the observed one, so
+    # the old 22.41 mm duplex entry would have placed the port ~2.5x too far.
+    spans = sc_controller.LOCAL_SC_PORT_KPS.max(axis=0) - sc_controller.LOCAL_SC_PORT_KPS.min(axis=0)
+    assert np.isclose(spans[0], 0.0088)
+    assert np.isclose(spans[1], 0.0060)
+    assert np.allclose(sc_controller.LOCAL_SC_PORT_KPS.mean(axis=0), 0.0), (
+        "must stay centred on the entrance, which is what both collectors project from"
+    )
+
+
+def test_clear_opening_height_is_the_binding_value_not_the_roomiest():
+    # The channel height varies along its depth: +4.050 under the full-depth
+    # _mid* rails, but +3.800 through the 10.8 mm-deep cube_collider_box.001
+    # lip, which the plug must pass. Budgeting against the roomier 8.10 mm
+    # overstates vertical clearance by 17%.
+    assert np.isclose(SC_OPENING_HEIGHT_M, 0.00785)
+    vertical_clearance = (SC_OPENING_HEIGHT_M - sc_controller.SC_PLUG_HEIGHT_M) / 2.0
+    assert np.isclose(vertical_clearance, 0.000725)
+    lateral_clearance = (SC_OPENING_WIDTH_M - sc_controller.SC_PLUG_WIDTH_M) / 2.0
+    assert vertical_clearance < lateral_clearance, "vertical is the binding axis"
 
 
 def test_tip_transform_round_trips():
@@ -302,12 +344,16 @@ class _RecordingLog:
     def __init__(self):
         self.info_lines = []
         self.warn_lines = []
+        self.error_lines = []
 
     def info(self, message):
         self.info_lines.append(str(message))
 
     def warn(self, message):
         self.warn_lines.append(str(message))
+
+    def error(self, message):
+        self.error_lines.append(str(message))
 
 
 def _project(point):
@@ -547,6 +593,8 @@ class _StubPolicy:
 class _StubTask:
     target_module_name = "sc_port_0"
     port_name = "sc_port_base"
+    cable_name = "cable_0"
+    plug_name = "sc_tip"
 
 
 def _controller_for(R_tip, port_pos, Rp, Rs):
@@ -705,3 +753,326 @@ def test_run_sc_insertion_hands_the_controller_a_preserved_twist_frame(monkeypat
     assert np.allclose(seen["Rp"], Rp), "perception frame must still be passed through"
     assert not np.allclose(seen["Rs"], seen["Rp"]), "a seat frame must actually be built"
     assert np.allclose(seen["Rs"], sc_controller.seat_frame(Rp, R_tip))
+
+
+# ---------------------------------------------------------------------------
+# Handoff depth sign guard.
+# ---------------------------------------------------------------------------
+def _run_sc_with_handoff_depth(monkeypatch, depth_m, log):
+    """Drive run_sc_insertion with the tip placed at a chosen depth."""
+    Rp, R_tip = _field_frames()
+    port_pos = np.array([-0.32466, 0.12952, 0.03032], dtype=np.float64)
+    R_tcp = R_tip @ quat_to_matrix(sc_controller.SC_TIP_IN_TCP_QUAT).T
+    tcp_quat = matrix_to_quat(R_tcp)
+    # want (Rp.T @ (tip - port))[2] == depth_m, with a little lateral offset
+    want_tip = port_pos + Rp[:, 2] * depth_m + Rp[:, 0] * 0.0035
+    tip_at_origin, _ = sc_tip_pose_from_tcp(np.zeros(3), tcp_quat)
+    tcp_pos = want_tip - tip_at_origin
+
+    class _RunPolicy(_StubPolicy):
+        _wrench_baseline = None
+
+        def get_logger(self):
+            return log
+
+        def _wrench_vector(self, _obs):
+            return np.zeros(6, dtype=np.float64)
+
+    ran = {"seated": False}
+
+    class _NeverReached:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def run(self):
+            ran["seated"] = True
+            return True
+
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
+                        lambda *_: (port_pos, FIELD_PORT_QUAT, 4.35))
+    monkeypatch.setattr(sc_controller, "ScInsertionController", _NeverReached)
+    result = sc_controller.run_sc_insertion(
+        _RunPolicy(tcp_pos, tcp_quat), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+    return result, ran["seated"]
+
+
+def test_handoff_refuses_a_tip_computed_inside_the_port(monkeypatch):
+    """The 2026-07-25 failure: +6.99 mm before any motion, then a fake seat.
+
+    A positive handoff depth is physically impossible -- the plug is outside the
+    port until it is pushed in.  Left unchecked it exceeds seat_candidate_depth_m,
+    so _seat skips the whole approach and waits for an event that cannot arrive,
+    which RL_INSERT_REPORT_MISS_AS_SUCCESS reports as success.
+    """
+    log = _RecordingLog()
+
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.00699, log)
+
+    assert result is False
+    assert not seated, "must refuse before constructing the controller"
+    line = "\n".join(log.error_lines)
+    assert "INSIDE the port" in line
+    assert "+6.99mm" in line, "the impossible measurement must be in the log"
+    assert "SC_TIP_IN_TCP_POS" in line, "must name the cause, not just the symptom"
+
+
+def test_handoff_accepts_a_plug_sitting_outside_the_mouth(monkeypatch):
+    # Where the plug actually is at handoff: outside, approaching along -insert.
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, -0.00699, _RecordingLog())
+
+    assert result is True
+    assert seated
+
+
+def test_handoff_tolerates_a_plug_right_at_the_mouth(monkeypatch):
+    # Zero is the physical truth and perception noise straddles it; the gate is
+    # tolerance for that, not a licence to start partly inserted.
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.0005, _RecordingLog())
+
+    assert result is True
+    assert seated
+
+
+def test_handoff_depth_gate_is_tighter_than_the_seat_trigger(monkeypatch):
+    # The gate is only useful if it fires well before a depth that would let
+    # _seat skip its approach entirely.
+    assert sc_controller.SC_MAX_HANDOFF_DEPTH_M < SCConfig().validated().seat_candidate_depth_m
+
+
+# ---------------------------------------------------------------------------
+# SC grasp-calibration dump (6c).
+# ---------------------------------------------------------------------------
+class _FakeTransform:
+    def __init__(self, pos, quat_wxyz):
+        class _V:
+            pass
+
+        class _Q:
+            pass
+
+        self.transform = _V()
+        self.transform.translation = _V()
+        self.transform.rotation = _Q()
+        (self.transform.translation.x, self.transform.translation.y,
+         self.transform.translation.z) = [float(v) for v in pos]
+        (self.transform.rotation.w, self.transform.rotation.x,
+         self.transform.rotation.y, self.transform.rotation.z) = [
+            float(v) for v in quat_wxyz]
+
+
+def test_calibration_dump_solves_the_sc_transform_from_a_ground_truth_frame():
+    log = _RecordingLog()
+    tcp_pos = np.array([-0.31, 0.39, 0.24])
+    tcp_quat = np.array([0.965925826, 0.0, 0.258819045, 0.0])
+    # A "true" tip 40 mm out along the TCP's own z, rotated 90 deg about it --
+    # i.e. exactly the convention offset the field logs show.
+    R_tcp = quat_to_matrix(tcp_quat)
+    true_pos = tcp_pos + R_tcp @ np.array([0.0, 0.0, 0.040])
+    R_true = R_tcp @ rotation_from_axis_angle(np.array([0.0, 0.0, np.radians(-90.0)]))
+
+    class _CalibPolicy(_StubPolicy):
+        def get_logger(self):
+            return log
+
+        def _lookup_transform(self, target, frame, timeout_sec=0.3):
+            if frame != "cable_0/sc_tip_link":
+                raise RuntimeError("no such frame")
+            return _FakeTransform(true_pos, matrix_to_quat(R_true))
+
+    found = sc_controller.dump_sc_grasp_calibration(
+        _CalibPolicy(tcp_pos, tcp_quat), _StubTask())
+
+    assert found
+    text = "\n".join(log.info_lines)
+    assert "SOLVED RL_INSERT_SC_TIP_IN_TCP_POS" in text
+    assert "SOLVED RL_INSERT_SC_TIP_IN_TCP_QUAT" in text
+    # the solved position must be the true offset expressed in the TCP frame
+    solved = [ln for ln in log.info_lines if "SOLVED RL_INSERT_SC_TIP_IN_TCP_POS" in ln][0]
+    assert "0.04" in solved
+
+
+def test_calibration_probes_the_frame_naming_the_sim_actually_publishes():
+    """The names must carry the cable_N/ prefix AND the _link suffix.
+
+    A bare "sc_tip" resolves nothing -- the SC Plug model.sdf declares
+    sc_tip_link, merged into the cable model, so the published frame is
+    cable_0/sc_tip_link. This mirrors DataCollectorScPlugPoseGT, which is the
+    naming known to work.
+    """
+    class _Task:
+        cable_name = "cable_0"
+        plug_name = "sc_tip"
+
+    frames = sc_controller.sc_calib_frame_candidates(_Task())
+
+    assert frames[0] == "cable_0/sc_tip_link", "task-derived name must come first"
+    assert "sc_tip_link" in frames, "bare-link fallback"
+    assert not any(f.startswith("sfp") for f in frames), "must not inherit SFP names"
+    assert all(f.endswith("_link") for f in frames), (
+        "every candidate needs the _link suffix the sim publishes"
+    )
+
+
+def test_calibration_frame_candidates_survive_a_missing_task_field():
+    class _Bare:
+        pass
+
+    frames = sc_controller.sc_calib_frame_candidates(_Bare())
+
+    assert frames, "must still fall back to the static list"
+    assert "sc_tip_link" in frames
+
+
+def test_calibration_dump_probes_the_task_frame_first():
+    seen = []
+
+    class _ProbePolicy(_StubPolicy):
+        def get_logger(self):
+            return _RecordingLog()
+
+        def _lookup_transform(self, target, frame, timeout_sec=0.3):
+            seen.append(frame)
+            raise RuntimeError("nothing resolves")
+
+    class _Task:
+        cable_name = "cable_3"
+        plug_name = "sc_tip"
+        target_module_name = "sc_port_0"
+        port_name = "sc_port_base"
+
+    assert not sc_controller.dump_sc_grasp_calibration(
+        _ProbePolicy(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _Task())
+    assert seen[0] == "cable_3/sc_tip_link", "the task's own cable must be tried first"
+
+
+def test_calibration_dump_runs_even_when_the_depth_gate_refuses(monkeypatch):
+    """The chicken-and-egg guard.
+
+    The depth gate refuses every run until SC_TIP_IN_TCP is calibrated, and this
+    dump is how it gets calibrated. If the dump ever moves below the gate there
+    is no way in at all.
+    """
+    monkeypatch.setenv("RL_INSERT_CALIB_DUMP", "1")
+    log = _RecordingLog()
+    dumped = {"n": 0}
+    monkeypatch.setattr(sc_controller, "dump_sc_grasp_calibration",
+                        lambda *_a, **_k: dumped.__setitem__("n", dumped["n"] + 1) or True)
+
+    result, seated = _run_sc_with_handoff_depth(monkeypatch, +0.00699, log)
+
+    assert result is False, "the impossible depth must still be refused"
+    assert not seated
+    assert dumped["n"] == 1, "but the calibration sample must have been taken first"
+
+
+def test_calibration_dump_runs_even_when_perception_fails(monkeypatch):
+    """2026-07-25 18:46: perception found nothing and the run produced no
+    [sc-calib] block at all, so a whole grasp was wasted.
+
+    The dump depends on the TCP and a TF frame -- not on the port pose, the
+    cameras, or anything perception returns. It must not sit behind perception.
+    """
+    monkeypatch.setenv("RL_INSERT_CALIB_DUMP", "1")
+    dumped = {"n": 0}
+    monkeypatch.setattr(sc_controller, "dump_sc_grasp_calibration",
+                        lambda *_a, **_k: dumped.__setitem__("n", dumped["n"] + 1) or True)
+    monkeypatch.setattr(sc_controller, "perceive_sc_port_pose_consensus",
+                        lambda *_: None)
+
+    class _P(_StubPolicy):
+        def get_logger(self):
+            return _RecordingLog()
+
+    result = sc_controller.run_sc_insertion(
+        _P(np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])), _StubTask(),
+        lambda: object(), None, lambda *_: None,
+    )
+
+    assert result is False, "perception failure must still fail the run"
+    assert dumped["n"] == 1, "but the grasp sample must have been taken anyway"
+
+
+# ---------------------------------------------------------------------------
+# Keypoint corner-order (roll) resolution.
+# ---------------------------------------------------------------------------
+def _roll_one_camera(per_cam, cam, roll):
+    """Relabel one camera's corners, as a weak detection does in the field."""
+    out = dict(per_cam)
+    det = dict(out[cam][0])
+    det["kps"] = np.roll(np.asarray(det["kps"], dtype=np.float64), -roll, axis=0)
+    out[cam] = [det]
+    return out
+
+
+@pytest.mark.parametrize("roll", [1, 2, 3])
+def test_a_relabelled_camera_still_triangulates(roll):
+    """The 2026-07-25 18:46 failure, reproduced for every cyclic relabelling.
+
+    Index-to-index matching pairs corner 0 with corner 2 and reprojects at
+    ~11.5 px against a 5.0 px gate. Searching the relabellings recovers the
+    true rectangle.
+    """
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", roll)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert candidates, f"a camera labelled from corner {roll} must still resolve"
+    best = candidates[0]
+    assert best["reproj_px"] < 1.0, "the recovered correspondence must reproject cleanly"
+    assert best["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+    assert best["height"] == pytest.approx(_LABEL_HEIGHT_M, abs=1e-5)
+
+
+def test_index_to_index_matching_really_does_fail_without_the_search(monkeypatch):
+    # Pin that the parametrised test above is testing something real: with the
+    # search off, a relabelled camera is exactly the field failure.
+    monkeypatch.setattr(sc_controller, "SC_KEYPOINT_ROLL_SEARCH", False)
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", 2)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert not candidates or candidates[0]["reproj_px"] > 5.0, (
+        "without the search a 180-degree relabelling must blow the select gate"
+    )
+
+
+def test_correct_correspondence_is_left_alone():
+    # No relabelling needed: the search must not disturb a clean detection.
+    clean = _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), clean)
+
+    assert candidates
+    assert candidates[0]["reproj_px"] < 1e-6
+    assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+
+
+def test_width_is_normalised_to_the_long_axis():
+    # The label is 8.8 wide x 6.0 tall. A reference camera that starts a quarter
+    # turn round would otherwise transpose them, and both classify_opening and
+    # the candidate score read width/height.
+    views = _roll_one_camera(
+        _roll_one_camera(_stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_a", 1),
+        "cam_b", 1)
+
+    candidates = sc_controller.sc_multiview_candidates(_stereo_policy(), views)
+
+    assert candidates
+    assert candidates[0]["width"] > candidates[0]["height"]
+    assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
+
+
+def test_roll_usage_is_reported():
+    log = _RecordingLog()
+    views = _roll_one_camera(
+        _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M), "cam_b", 2)
+
+    sc_controller.sc_multiview_candidates(_stereo_policy(log), views)
+
+    assert any("SC_KEYPOINT_ROLL" in line for line in log.info_lines), (
+        "an unstable detector corner order must be visible in the logs"
+    )
