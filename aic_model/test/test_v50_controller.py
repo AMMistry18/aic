@@ -30,13 +30,13 @@ import patch_v49_plug_relative_v50 as overlay  # noqa: E402
 
 def test_v50_config_bounds_force_and_seating():
     config = V50Config().validated()
-    assert np.isclose(config.force_lead_m, 0.016)
+    assert np.isclose(config.force_lead_m, 0.020)
     assert config.target_axial_force_n < config.seat_force_cap_n < 18.0
     assert 0.0 <= config.seat_overtravel_m <= 0.008
-    assert np.isclose(config.seat_align_force_gain, 0.00003)
-    assert np.isclose(config.seat_align_moment_gain, 0.004)
-    assert np.isclose(config.seat_align_max_lat_m, 0.0004)
-    assert np.isclose(config.seat_align_max_tilt_rad, 0.0087)
+    assert np.isclose(config.seat_align_force_gain, 0.0001)
+    assert np.isclose(config.seat_align_moment_gain, 0.01)
+    assert np.isclose(config.seat_align_max_lat_m, 0.0007)
+    assert np.isclose(config.seat_align_max_tilt_rad, 0.0122)
     assert np.isclose(config.seat_mouth_speed_scale, 0.5)
     assert np.isclose(config.seat_align_release_decay, 0.7)
     assert np.isclose(config.seat_stall_grace_s, 3.0)
@@ -47,6 +47,11 @@ def test_v50_config_bounds_force_and_seating():
         V50Config(seat_overtravel_m=0.009).validated()
     with pytest.raises(ValueError, match="release decay"):
         V50Config(seat_align_release_decay=1.5).validated()
+    # The correction may not exceed the port clearance it is steering inside of.
+    with pytest.raises(ValueError, match="port clearance"):
+        V50Config(seat_align_max_lat_m=0.0015).validated()
+    with pytest.raises(ValueError, match="slew"):
+        V50Config(seat_align_max_step_m=0.0).validated()
 
 
 def test_event_normalization_strips_the_cable_instance_prefix():
@@ -113,12 +118,39 @@ def test_persistent_depth_accumulates_force_lead_while_stalled():
         )
 
     # v49 repeatedly requested only current+~1mm.  v50 retains an absolute
-    # setpoint until it reaches the bounded 8N / 500N/m = 16mm lead.
-    assert np.isclose(command_depth - current_depth, 0.016)
+    # setpoint until it reaches the bounded 10N / 500N/m = 20mm lead.
+    assert np.isclose(command_depth - current_depth, 0.020)
     held = next_persistent_depth(
-        current_depth, command_depth, 1.0, force_n=10.0, config=config
+        current_depth, command_depth, 1.0, force_n=12.0, config=config
     )
     assert np.isclose(held, command_depth)
+
+
+def test_persistent_depth_freezes_on_axial_force_not_lateral_bind():
+    # Diag-5's 36 mm stalls: ~6.3 N axial with 4.7 N of lateral bind, an 7.9 N
+    # norm.  Gating the freeze on the norm stops the advance on scrape the plug
+    # could still push through, so the axial component decides.
+    config = V50Config().validated()
+    current_depth = 0.036
+    binding_norm = float(np.linalg.norm([4.7, 0.0, 6.3]))
+    assert binding_norm > config.contact_force_n
+
+    advanced = next_persistent_depth(
+        current_depth, current_depth, 0.1, binding_norm, config, axial_force_n=-6.3
+    )
+    assert advanced > current_depth
+
+    # Axial force at the cap still freezes it, sign-independently.
+    frozen = next_persistent_depth(
+        current_depth, current_depth, 0.1, binding_norm, config, axial_force_n=-12.5
+    )
+    assert np.isclose(frozen, current_depth)
+
+    # With no axial reading supplied the norm keeps its old meaning.
+    legacy = next_persistent_depth(
+        current_depth, current_depth, 0.1, 12.5, config
+    )
+    assert np.isclose(legacy, current_depth)
 
 
 def test_persistent_depth_allows_bounded_overtravel_near_insert_depth():
@@ -323,6 +355,51 @@ class _AlignHarness(PlugRelativeV50Controller):
         return self._f, self._m
 
 
+def test_seat_target_pose_presses_past_the_seat_frame_during_event_dwell():
+    # The detection pad's near face is about 1 mm past INSERT_DEPTH_M and the
+    # TouchPlugin needs 1 s of unbroken contact, so holding the tip at exactly
+    # INSERT_DEPTH_M commands a setpoint behind a plug that has reached the pad.
+    config = V50Config().validated()
+    harness = _AlignHarness(f_plug=[0.0, 0.0, -7.0], m_plug=[0.0, 0.0, 0.0], config=config)
+    harness.port_pos = np.zeros(3, dtype=np.float64)
+    harness.Rp = np.eye(3, dtype=np.float64)
+
+    acc_lat = np.array([0.0003, -0.0002], dtype=np.float64)
+    acc_tilt = np.array([0.001, 0.0], dtype=np.float64)
+    dwell_depth = INSERT_DEPTH_M + config.seat_overtravel_m
+    tip, rotation = harness._seat_target_pose(dwell_depth, acc_lat, acc_tilt)
+
+    assert tip[2] > INSERT_DEPTH_M
+    assert np.isclose(tip[2], dwell_depth)
+    # The corrections that got the plug in are carried, not dropped at the door.
+    assert np.isclose(tip[0], acc_lat[0])
+    assert np.isclose(tip[1], acc_lat[1])
+    assert not np.allclose(rotation, harness.Rp)
+
+
+def test_seat_alignment_respects_the_per_sample_slew_limit():
+    config = V50Config().validated()
+    harness = _AlignHarness(
+        f_plug=[60.0, -40.0, -12.0], m_plug=[0.0, -8.0, 0.0], config=config
+    )
+    acc_lat = np.zeros(2, dtype=np.float64)
+    acc_tilt = np.zeros(2, dtype=np.float64)
+
+    for _ in range(60):
+        prev_lat, prev_tilt = acc_lat, acc_tilt
+        acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
+            None, 0.0, 12.0, acc_lat, acc_tilt
+        )
+        assert (
+            np.linalg.norm(acc_lat - prev_lat)
+            <= config.seat_align_max_step_m + 1e-12
+        )
+        assert (
+            np.linalg.norm(acc_tilt - prev_tilt)
+            <= config.seat_align_max_tilt_step_rad + 1e-12
+        )
+
+
 def test_seat_alignment_settles_at_the_proportional_target_not_the_clamp():
     config = V50Config().validated()
     f_plug = [3.2, -3.0, -7.0]
@@ -341,8 +418,11 @@ def test_seat_alignment_settles_at_the_proportional_target_not_the_clamp():
     assert np.isclose(np.linalg.norm(acc_lat), expected_lat)
     assert np.isclose(np.linalg.norm(acc_tilt), expected_tilt)
     # The whole point: sustained contact must not pin the correction at the clamp.
-    assert np.linalg.norm(acc_lat) < 0.5 * config.seat_align_max_lat_m
-    assert np.linalg.norm(acc_tilt) < 0.5 * config.seat_align_max_tilt_rad
+    # The margin is thinner than it was at the 3e-5 gain -- 4.4 N of bind now
+    # earns ~0.44 mm of the 0.7 mm cap, which is the authority diag-5's 36 mm
+    # stalls needed -- but settling below the cap is what must stay true.
+    assert np.linalg.norm(acc_lat) < 0.8 * config.seat_align_max_lat_m
+    assert np.linalg.norm(acc_tilt) < 0.8 * config.seat_align_max_tilt_rad
 
 
 def test_light_chamfer_contact_never_saturates_the_correction():
@@ -361,8 +441,8 @@ def test_light_chamfer_contact_never_saturates_the_correction():
         acc_lat, acc_tilt, _sample = harness._seat_alignment_sample(
             None, 0.0, 3.6, acc_lat, acc_tilt
         )
-        assert np.linalg.norm(acc_lat) < 0.25 * config.seat_align_max_lat_m
-        assert np.linalg.norm(acc_tilt) < 0.25 * config.seat_align_max_tilt_rad
+        assert np.linalg.norm(acc_lat) < 0.4 * config.seat_align_max_lat_m
+        assert np.linalg.norm(acc_tilt) < 0.4 * config.seat_align_max_tilt_rad
 
 
 def test_seat_alignment_still_clamps_under_extreme_wrench():
@@ -502,3 +582,16 @@ def test_release_dockerfile_disables_bias_and_pins_safety():
     assert "RL_INSERT_FORCE_ABORT_N=18.0" in dockerfile
     assert "RL_INSERT_ACTION_TIME_BUDGET_S=45" in dockerfile
     assert "best_sfp_plug_pose.pt" in dockerfile
+
+    # Baked ENV wins over source defaults, and Flowstate takes no runtime knobs,
+    # so a seat-force retune in V50Config is a no-op in the image unless these
+    # pins move with it.  Both release Dockerfiles must agree with the source.
+    config = V50Config().validated()
+    for name in ("Dockerfile", "Dockerfile.plug_relative_v50"):
+        text = (REPO_ROOT / "docker" / "aic_model" / name).read_text(encoding="utf-8")
+        assert (
+            f"RL_INSERT_V50_TARGET_FORCE_N={config.target_axial_force_n}" in text
+        ), f"{name} pins a stale target force"
+        assert (
+            f"RL_INSERT_V50_SEAT_FORCE_CAP_N={config.seat_force_cap_n}" in text
+        ), f"{name} pins a stale seat force cap"

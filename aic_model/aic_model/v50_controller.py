@@ -38,9 +38,11 @@ LOCAL_SFP_PORT_KPS = np.array(
 SEATED = "seated"
 STALLED = "stalled"
 HARD_FAILURE = "hard_failure"
-# To activate the correction, set FORCE_GAIN ~0.00015 (m/N) and MOMENT_GAIN
-# ~0.02 (rad/N·m) after verifying sign/frame from SEAT_WRENCH logs; these are
-# starting points to bench-tune.
+# Correction gains below ship at 1e-4 / 0.01 -- deliberately short of the
+# observe constants (0.00015 / 0.02).  Diag-5's ~36 mm stalls carried 4-5 N of
+# lateral bind while the correction sat near 0.1 mm, which is the authority the
+# raise buys; the 0.4 mm era exists because a drastic correction can worsen a
+# bind, so seat_align_max_step_m bounds the per-sample slew.
 # P3's MOUTH_SPEED_SCALE=0.5 and STALL_GRACE_S=3.0 are now the bench-tuned
 # defaults below; re-check SEAT_SLOPE/SEAT_WRENCH logs if retuning further.
 SEAT_ALIGN_OBSERVE_FORCE_GAIN = 0.00015
@@ -80,8 +82,8 @@ class V50Config:
     free_speed_m_s: float = 0.015
     contact_speed_m_s: float = 0.006
     contact_force_n: float = 3.0
-    target_axial_force_n: float = 8.0
-    seat_force_cap_n: float = 10.0
+    target_axial_force_n: float = 10.0
+    seat_force_cap_n: float = 12.0
     force_abort_n: float = 18.0
     force_abort_wall_s: float = 0.25
     axial_stiffness_n_m: float = 500.0
@@ -89,17 +91,26 @@ class V50Config:
     lateral_safety_m: float = 0.006
     rotation_safety_rad: float = np.deg2rad(15.0)
     seat_align_enable: bool = True
-    seat_align_force_gain: float = 0.00003
-    seat_align_moment_gain: float = 0.004
-    seat_align_max_lat_m: float = 0.0004
-    seat_align_max_tilt_rad: float = 0.0087
+    seat_align_force_gain: float = 0.0001
+    seat_align_moment_gain: float = 0.01
+    seat_align_max_lat_m: float = 0.0007
+    seat_align_max_tilt_rad: float = 0.0122
+    # Per-sample slew limit on the correction, independent of the low pass. The
+    # 0.4 mm cap era exists because a drastic correction can worsen a bind; this
+    # bounds how fast the target can be chased even when the wrench is extreme,
+    # so raising the gain buys authority without buying a lurch.
+    seat_align_max_step_m: float = 0.00015
+    seat_align_max_tilt_step_rad: float = 0.0026
     # Low-pass coefficient on the seat alignment correction: 0 = raw proportional,
     # ->1 = heavily smoothed. Named "release" for the env var it already ships with.
     seat_align_release_decay: float = 0.7
     seat_mouth_zone_m: float = 0.006
     seat_mouth_speed_scale: float = 0.5
     seat_stall_grace_s: float = 3.0
-    seat_overtravel_m: float = 0.005
+    # Diag-5: three ~36 mm (believed) stalls all pressed exactly the setpoint
+    # cap's spring budget (~7.4 N at 5 mm overtravel) and could not advance;
+    # 8 mm is the validated ceiling and buys ~20% more press.
+    seat_overtravel_m: float = 0.008
     seat_candidate_depth_m: float = 0.0445
     insertion_event_timeout_wall_s: float = 10.0
     plug_max_age_s: float = 0.35
@@ -114,24 +125,30 @@ class V50Config:
             free_speed_m_s=_env_float("RL_INSERT_V50_FREE_SPEED_M_S", 0.015),
             contact_speed_m_s=_env_float("RL_INSERT_V50_CONTACT_SPEED_M_S", 0.006),
             contact_force_n=_env_float("RL_INSERT_V50_CONTACT_FORCE_N", 3.0),
-            target_axial_force_n=_env_float("RL_INSERT_V50_TARGET_FORCE_N", 8.0),
-            seat_force_cap_n=_env_float("RL_INSERT_V50_SEAT_FORCE_CAP_N", 10.0),
+            target_axial_force_n=_env_float("RL_INSERT_V50_TARGET_FORCE_N", 10.0),
+            seat_force_cap_n=_env_float("RL_INSERT_V50_SEAT_FORCE_CAP_N", 12.0),
             force_abort_n=_env_float("RL_INSERT_FORCE_ABORT_N", 18.0),
             force_abort_wall_s=_env_float("RL_INSERT_V50_FORCE_ABORT_DWELL_S", 0.25),
             axial_stiffness_n_m=_env_float("RL_INSERT_V50_AXIAL_STIFFNESS_N_M", 500.0),
             max_axial_lead_m=_env_float("RL_INSERT_V50_MAX_AXIAL_LEAD_M", 0.020),
             seat_align_enable=_env_bool("RL_INSERT_V50_SEAT_ALIGN_ENABLE", True),
             seat_align_force_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.00003
+                "RL_INSERT_V50_SEAT_ALIGN_FORCE_GAIN", 0.0001
             ),
             seat_align_moment_gain=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.004
+                "RL_INSERT_V50_SEAT_ALIGN_MOMENT_GAIN", 0.01
             ),
             seat_align_max_lat_m=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0004
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_LAT_M", 0.0007
             ),
             seat_align_max_tilt_rad=_env_float(
-                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_RAD", 0.0087
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_RAD", 0.0122
+            ),
+            seat_align_max_step_m=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_STEP_M", 0.00015
+            ),
+            seat_align_max_tilt_step_rad=_env_float(
+                "RL_INSERT_V50_SEAT_ALIGN_MAX_TILT_STEP_RAD", 0.0026
             ),
             seat_align_release_decay=_env_float(
                 "RL_INSERT_V50_SEAT_ALIGN_RELEASE_DECAY", 0.7
@@ -141,7 +158,7 @@ class V50Config:
                 "RL_INSERT_V50_SEAT_MOUTH_SPEED_SCALE", 0.5
             ),
             seat_stall_grace_s=_env_float("RL_INSERT_V50_SEAT_STALL_GRACE_S", 3.0),
-            seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.005),
+            seat_overtravel_m=_env_float("RL_INSERT_V50_SEAT_OVERTRAVEL_M", 0.008),
             insertion_event_timeout_wall_s=_env_float(
                 "RL_INSERT_V50_EVENT_TIMEOUT_S", 10.0
             ),
@@ -159,6 +176,13 @@ class V50Config:
             raise ValueError("v50 seat overtravel must stay within 0-8 mm")
         if self.seat_align_max_lat_m < 0.0 or self.seat_align_max_tilt_rad < 0.0:
             raise ValueError("v50 seat alignment correction caps must be non-negative")
+        if self.seat_align_max_lat_m > 0.001 or self.seat_align_max_tilt_rad > 0.0175:
+            raise ValueError(
+                "v50 seat alignment caps must stay within the port clearance "
+                "(<=1 mm lateral, <=1 deg tilt)"
+            )
+        if self.seat_align_max_step_m <= 0.0 or self.seat_align_max_tilt_step_rad <= 0.0:
+            raise ValueError("v50 seat alignment slew limits must be positive")
         if not 0.0 <= self.seat_align_release_decay <= 1.0:
             raise ValueError("v50 seat alignment release decay must be within 0-1")
         if (
@@ -333,17 +357,28 @@ def next_persistent_depth(
     elapsed_wall_s: float,
     force_n: float,
     config: V50Config,
+    axial_force_n: Optional[float] = None,
 ) -> float:
-    """Advance an absolute seat setpoint while retaining bounded axial lead."""
+    """Advance an absolute seat setpoint while retaining bounded axial lead.
+
+    The freeze and contact-slowdown decisions read the plug-frame AXIAL force
+    when it is available, not the three-axis norm. Diag-5's ~36 mm stalls carried
+    4.3-4.8 N of lateral bind against 6-7 N axial, so a norm-gated cap freezes
+    the setpoint on scrape and cable drag that the plug could still push through.
+    The >=18 N hard abort stays on the norm -- that one is a safety limit.
+    """
 
     current_depth = float(current_depth)
     commanded_depth = max(float(commanded_depth), current_depth)
-    if np.isfinite(force_n) and force_n >= config.seat_force_cap_n:
+    gate_force = force_n
+    if axial_force_n is not None and np.isfinite(axial_force_n):
+        gate_force = abs(float(axial_force_n))
+    if np.isfinite(gate_force) and gate_force >= config.seat_force_cap_n:
         candidate = commanded_depth
     else:
         speed = (
             config.contact_speed_m_s
-            if np.isfinite(force_n) and force_n >= config.contact_force_n
+            if np.isfinite(gate_force) and gate_force >= config.contact_force_n
             else config.free_speed_m_s
         )
         candidate = commanded_depth + speed * max(0.0, float(elapsed_wall_s))
@@ -698,15 +733,24 @@ class PlugRelativeV50Controller:
             target_lat = np.zeros(2, dtype=np.float64)
             target_tilt = np.zeros(2, dtype=np.float64)
         decay = self.config.seat_align_release_decay
+        prev_lat = np.asarray(acc_lat, dtype=np.float64).reshape(2)
+        prev_tilt = np.asarray(acc_tilt, dtype=np.float64).reshape(2)
         acc_lat = clamp_vector_norm(
-            decay * np.asarray(acc_lat, dtype=np.float64).reshape(2)
-            + (1.0 - decay) * target_lat,
+            decay * prev_lat + (1.0 - decay) * target_lat,
             self.config.seat_align_max_lat_m,
         )
         acc_tilt = clamp_vector_norm(
-            decay * np.asarray(acc_tilt, dtype=np.float64).reshape(2)
-            + (1.0 - decay) * target_tilt,
+            decay * prev_tilt + (1.0 - decay) * target_tilt,
             self.config.seat_align_max_tilt_rad,
+        )
+        # Slew limit on top of the low pass: the gains are large enough that an
+        # extreme wrench would otherwise step a fifth of a millimetre in one
+        # sample, which is the lurch the small-cap era was protecting against.
+        acc_lat = prev_lat + clamp_vector_norm(
+            acc_lat - prev_lat, self.config.seat_align_max_step_m
+        )
+        acc_tilt = prev_tilt + clamp_vector_norm(
+            acc_tilt - prev_tilt, self.config.seat_align_max_tilt_step_rad
         )
         return acc_lat, acc_tilt, (depth, f_plug, m_plug, d_lat_would, d_tilt_would)
 
@@ -726,6 +770,21 @@ class PlugRelativeV50Controller:
             f"tilt_applied_deg={np.degrees(np.linalg.norm(acc_tilt)):.3f}"
             f"{suffix}"
         )
+
+    def _seat_target_pose(self, depth, acc_lat, acc_tilt):
+        """Tip pose at ``depth`` along the port axis, plus the seat corrections."""
+        target_tip = self.port_pos + self.Rp[:, 2] * depth
+        target_rotation = self.Rp
+        if self.config.seat_align_enable and (
+            np.any(acc_lat != 0.0) or np.any(acc_tilt != 0.0)
+        ):
+            target_tip = (
+                target_tip + self.Rp[:, 0] * acc_lat[0] + self.Rp[:, 1] * acc_lat[1]
+            )
+            target_rotation = self.Rp @ rotation_from_axis_angle(
+                np.array([acc_tilt[0], acc_tilt[1], 0.0], dtype=np.float64)
+            )
+        return target_tip, target_rotation
 
     def _hold_tip(self, tip_pos, tip_rotation) -> None:
         self.policy.set_pose_target(
@@ -871,7 +930,18 @@ class PlugRelativeV50Controller:
         self.log.error("[v50] plug-relative alignment exceeded wall-time budget")
         return False
 
-    def _wait_for_insertion_event(self, fixed_tip) -> str:
+    def _wait_for_insertion_event(self, fixed_tip, fixed_rotation=None) -> str:
+        """Hold the plug against the back pad until the sim publishes the event.
+
+        The detection pad's near face sits about 1 mm PAST INSERT_DEPTH_M, and
+        the TouchPlugin needs a full second of unbroken contact. Holding the tip
+        at exactly INSERT_DEPTH_M therefore commands a setpoint behind the plug
+        once it reaches the pad, so the impedance loop pulls it off the very
+        surface it has to press. The caller now hands in the overtravel depth
+        and the seat corrections that got the plug in, so the press stays
+        positive for the whole dwell.
+        """
+        rotation = self.Rp if fixed_rotation is None else fixed_rotation
         deadline = time.monotonic() + self.config.insertion_event_timeout_wall_s
         hard_force_since = None
         while time.monotonic() < deadline:
@@ -883,7 +953,7 @@ class PlugRelativeV50Controller:
             force = self._force_magnitude(observation)
             tip_pos, _ = self._tip_pose()
             if np.isfinite(force) and force > self.config.force_abort_n:
-                self._hold_tip(tip_pos, self.Rp)
+                self._hold_tip(tip_pos, rotation)
                 hard_force_since = hard_force_since or time.monotonic()
                 if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
@@ -894,7 +964,7 @@ class PlugRelativeV50Controller:
                 hard_force_since = None
                 self.policy.set_pose_target(
                     self.move_robot,
-                    self.policy._tcp_target_for_tip(fixed_tip, self.Rp),
+                    self.policy._tcp_target_for_tip(fixed_tip, rotation),
                     stiffness=self.STIFFNESS,
                     damping=self.DAMPING,
                 )
@@ -994,8 +1064,10 @@ class PlugRelativeV50Controller:
                 return STALLED
 
             if depth >= self.config.seat_candidate_depth_m:
-                fixed_tip = self.port_pos + self.Rp[:, 2] * INSERT_DEPTH_M
-                return self._wait_for_insertion_event(fixed_tip)
+                fixed_tip, fixed_rotation = self._seat_target_pose(
+                    INSERT_DEPTH_M + self.config.seat_overtravel_m, acc_lat, acc_tilt
+                )
+                return self._wait_for_insertion_event(fixed_tip, fixed_rotation)
 
             stalled_now = progress.stalled(depth, now)
             if stall_grace_deadline is not None and not stalled_now:
@@ -1058,21 +1130,12 @@ class PlugRelativeV50Controller:
                 now - last_command_time,
                 force,
                 depth_config,
+                axial_force,
             )
             last_command_time = now
-            target_tip = self.port_pos + self.Rp[:, 2] * command_depth
-            target_rotation = self.Rp
-            if self.config.seat_align_enable and (
-                np.any(acc_lat != 0.0) or np.any(acc_tilt != 0.0)
-            ):
-                target_tip = (
-                    target_tip
-                    + self.Rp[:, 0] * acc_lat[0]
-                    + self.Rp[:, 1] * acc_lat[1]
-                )
-                target_rotation = self.Rp @ rotation_from_axis_angle(
-                    np.array([acc_tilt[0], acc_tilt[1], 0.0], dtype=np.float64)
-                )
+            target_tip, target_rotation = self._seat_target_pose(
+                command_depth, acc_lat, acc_tilt
+            )
             self.policy.set_pose_target(
                 self.move_robot,
                 self.policy._tcp_target_for_tip(target_tip, target_rotation),
