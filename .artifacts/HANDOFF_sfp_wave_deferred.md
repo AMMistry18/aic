@@ -50,15 +50,39 @@ requested port and will account for it. The controller keeps nearest-to-tip
 selection. If macro-side handling changes, revisit `_select_sfp_candidate`
 (RLInsert.py) which ignores the requested slot today.
 
-## Wave 2 (approved, not yet implemented)
+## Wave 2 — DONE (58aff8c), unvalidated in sim
 
-- Event-dwell hold at `INSERT_DEPTH_M + seat_overtravel_m` and carry
-  `acc_lat/acc_tilt` corrections into `fixed_tip` (pad sits ~1 mm past 45.8 mm).
-- Axial-force gating for the 10 N freeze (norm-based today; axial already
-  computed and logged).
-- Seat-align authority raise: cap 0.4 -> ~0.7 mm (NOT 1.0 — the 0.4 cap exists
-  because aggressive correction previously hurt), keep low-pass, add per-tick
-  rate limit.
+Motivated by `diagnositics sfp 5` (2026-07-26, 9 goals): 4 full insertions
+(events fired, all named `sfp_port_1` — macro's problem, not the policy's),
+3 stalls at ~36 mm believed depth, 2 mouth stalls at ~1.8 mm from a Flowstate
+scene bug (port spawned inside a port — **discount these, not a policy issue**).
+
+The ~36 mm stalls decoded cleanly: axial 6.3-7.2 N with 4.3-4.8 N lateral bind,
+nudge_applied pinned near 0.1 mm. 7.4 N is exactly `5 mm overtravel x 500 N/m`,
+i.e. the setpoint ceiling's entire spring budget — the plug was pressing as hard
+as the config allowed and could not advance. Not an obstruction; a budget.
+
+Shipped: dwell holds `INSERT_DEPTH_M + overtravel` with corrections carried
+(the old fixed 45.8 mm hold sat BEHIND a plug at the pad, so the impedance loop
+pulled it off); target force 8->10 N, cap 10->12 N, overtravel 5->8 mm;
+freeze/contact gated on plug-frame axial force (18 N norm abort untouched);
+seat-align gains 3e-5/0.004 -> 1e-4/0.01 with caps 0.7 mm / 0.7 deg plus new
+per-sample slew limiters (`seat_align_max_step_m`, `_tilt_step_rad`).
+
+**Trap found while doing this:** both release Dockerfiles baked
+`RL_INSERT_V50_TARGET_FORCE_N=8.0` / `SEAT_FORCE_CAP_N=10.0` as ENV. Baked ENV
+beats source defaults and Flowstate takes no runtime knobs, so the retune would
+have been a silent no-op in the image. Pins moved; a test now asserts the
+Dockerfile ENV matches `V50Config`. **Any future seat-force change must move
+both.**
+
+Unverified predictions to check on the next field run: a plug that reaches the
+pad now presses ~3.5 N through the dwell instead of retreating; press at a 36 mm
+stall rises ~7.0 -> ~8.6 N; SEAT_WRENCH `nudge_applied_mm` should reach
+~0.3-0.45 mm under 4-5 N lateral instead of ~0.1 mm. If deep stalls persist at
+the SAME depth with the higher press, the cause is geometric (alignment or
+believed-depth error), not force budget — go to Wave 3 rather than raising
+force further.
 
 ## Wave 3 (approved, not yet implemented)
 
