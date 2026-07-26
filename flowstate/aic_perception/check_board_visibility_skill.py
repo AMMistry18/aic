@@ -2625,22 +2625,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         joint path, so the wider cap only widens which *poses* are offered, not
         how the arm gets there.
 
-        **SC (3)** is the same kind of target as NIC and gets the same recipe,
-        with two differences that make it much easier.  Its five adapters (three
-        on board Y +0.0295, two on Y +0.0705) also open **straight up** -- the
-        older "recessed sideways, tilt onto the -X face" reading was wrong, and
-        that cross-rail tilt is the likeliest reason this sector never worked.
-        But the SC bore is 15.64 mm deep behind a 7.6 x 22.4 mm aperture, giving
-        a ``atan(3.8/15.64) = 13.7 deg`` limiting cone (vs NIC's 7.5), and it
-        sits 149 mm lower on the board, so neither reach nor the wrist-camera
-        keep-out binds.  With the cone satisfied from 0.27 m the standoff is not
-        forced outward, so it is chosen **nearest-first** -- what limits it is
-        pixels on a 7.6 mm bore, not geometry.  The 0.5-1.0 m band that suits
-        the NIC cards and SFP modules is too far for a feature this small: at
-        0.6 m the bore spans ~15 px and IVM resolved 2 of 5 ports on the first
-        field run.  The band is therefore 0.40-0.62 m, and the all-camera
-        framing requirement is dropped (see below) because it was what held the
-        standoff out at 0.6 m in the first place.
+        **SC (3)** also opens along the board normal.  Hardware showed the
+        previous rail-derived offset approached the wrong side of each adapter:
+        one camera saw the mouths from their short end and failed.  The mouth's
+        transformed long face runs along board Y (22.4 mm); to stand off that
+        long face, the camera is displaced along its board-X normal, explicitly
+        supplied rather than inferred from the cluster bounding box.  That is
+        the narrow 7.6 mm bore dimension, so the angle is limited to 10-13 deg and
+        the along-long-face component remains below 2 deg.  The reference view
+        is deliberately no longer allowed to settle near overhead. All three
+        cameras must still frame the entire sector and remain gripper-clear.
+        For each mouth, at least two cameras must also see through the physical
+        bore and retain at least 3.0 px of mouth-to-back-centre displacement.
+        The 96-case IK/camera sweep selects 0.62 m in every scenario.
 
         **SFP (0/1)** pick modules read fine from the standard close all-camera
         near-overhead view.
@@ -2648,6 +2645,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         target = int(survey_target)
         if target == 2:  # NIC_SFP_DESTINATION
             return dict(
+                cross_rail_tilt_band_rad=None,
                 cross_rail_sign=0.0,
                 require_all_cameras_frame=True,
                 prefer_far_standoff=True,
@@ -2660,6 +2658,17 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
         if target == 3:  # SC_DESTINATION_PORT
             return dict(
+                # Approach the adapter from its long face.  The face runs along
+                # board Y, so its outward in-plane normal is board X.  Do not
+                # infer this from the SC cluster extent: the three/two-port rail
+                # is longer along X and caused the exact axis swap seen in the
+                # failed camera image.
+                cross_rail_tilt_band_rad=(
+                    math.radians(10.0),
+                    math.radians(13.0),
+                ),
+                directional_tilt_axis_board=(1.0, 0.0, 0.0),
+                max_along_rail_tilt_rad=math.radians(2.0),
                 cross_rail_sign=0.0,
                 # All three cameras must frame the sector AND stay gripper-clear.
                 # Dropping this to chase a closer, higher-resolution view was
@@ -2673,23 +2682,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 # was the flawed check behind the regression.
                 require_all_cameras_frame=True,
                 prefer_far_standoff=False,
-                max_obliquity_rad=math.radians(8.0),
                 min_required_clearance_px=25.0,
-                max_angular_motion_rad=math.radians(90.0),
+                # The fixed J1..J6 position window configured directly on Move
+                # Robot owns winding safety.  A 90-degree Cartesian
+                # reorientation cap suppresses camera-clear wrist rolls after
+                # some Stage-1 exits, so SC searches the full finite roll family.
+                max_angular_motion_rad=math.pi,
                 yaws_rad=tuple(
                     math.radians(deg) for deg in range(-180, 180, 15)
                 ),
-                # Nearest-first inside the band the IVM reads at.  The bore is
-                # only ~17 px across at the far end, which is the open problem
-                # (IVM resolved 2 of 5 on the field run) -- but it must be solved
-                # without un-guarding the side cameras or driving the tool down
-                # to the board.
-                standoffs_m=(
-                    0.50, 0.55, 0.58, 0.60, 0.62,
-                    0.65, 0.68, 0.70, 0.73, 0.76, 0.80,
-                ),
+                # The stronger-view 96-case sweep selects this distance in
+                # every scenario. Do not reintroduce closer, weak-angle poses.
+                standoffs_m=(0.62,),
             )
         return dict(
+            cross_rail_tilt_band_rad=None,
             cross_rail_sign=0.0,
             require_all_cameras_frame=True,
             prefer_far_standoff=False,
@@ -2858,9 +2865,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             GripperExclusion,
             estimate_board_pose_from_insignia,
             quaternion_from_matrix,
+            rectangular_bore_depth_cue_px,
+            rectangular_bore_visibility_margin,
+            sc_bore_sample_points,
             search_survey_pose,
         )
-        from aic_perception.arm_ik import UR5eArm
+        from aic_perception.arm_ik import (
+            SC_MOVE_ROBOT_JOINT_LIMITS,
+            SC_MOVE_ROBOT_JOINT_LIMITS_DEG,
+            UR5eArm,
+        )
 
         expected = tuple(sorted(self.config.camera_frames))
         missing_frames = sorted(set(expected) - set(snapshot.frames))
@@ -3096,7 +3110,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # from the live, static (joint-state, TCP) sample; if the recovered
         # offset is implausible (an unexpected base-frame convention) we fall
         # back to the sphere rather than trusting a bad model.
-        reachable_fn = None
+        joint_motion_fn = None
+        joint_motion_preference_fn = None
+        ik_arm = None
+        ik_seed = None
+        ik_joint_limits = None
+        preferred_j6_target = None
+        # SC's stronger 10-13 degree view still has a camera-clear branch in all
+        # 96 swept scenarios under a 220-degree per-joint cap. At 215 degrees
+        # one rolled-exit case is lost. Keep the previous 225-degree
+        # budget for the other sectors, whose reach policies were not retuned.
+        joint_motion_limit_rad = math.radians(
+            220.0 if int(survey_target) == 3 else 225.0
+        )
         try:
             measured_joints = [
                 self.robot_motion.current_joint(index) for index in range(6)
@@ -3125,31 +3151,106 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         ),
                     )
                     seed = np.asarray(measured_joints, dtype=float)
-                    # Reachable AND the arm is not standing in its own cameras.
-                    # Both are needed: a pose can solve, clear the forearm-vs-
-                    # camera keep-out, sit perfectly top-down, and still show
-                    # nothing but upper arm in the picture.
-                    def reachable_fn(
+                    ik_arm = arm
+                    ik_seed = seed
+                    if int(survey_target) == 3:
+                        ik_joint_limits = SC_MOVE_ROBOT_JOINT_LIMITS
+                        if np.any(
+                            seed < ik_joint_limits[:, 0] - 1e-9
+                        ) or np.any(seed > ik_joint_limits[:, 1] + 1e-9):
+                            self._stage2_not_done(
+                                result,
+                                "live arm joints are outside the configured "
+                                "SC Move Robot position limits: "
+                                f"current_deg={np.round(np.degrees(seed), 1).tolist()} "
+                                f"min_deg={SC_MOVE_ROBOT_JOINT_LIMITS_DEG[:, 0].tolist()} "
+                                f"max_deg={SC_MOVE_ROBOT_JOINT_LIMITS_DEG[:, 1].tolist()}",
+                            )
+                            return
+                        # Ask for the half-turn wrist orientation from the live
+                        # Stage-1 exit.  If an exact +/-180 deg target lies
+                        # outside Move Robot's fixed J6 window, use the closest
+                        # legal endpoint instead; never weaken the window to
+                        # manufacture a co-terminal branch.
+                        j6_low, j6_high = ik_joint_limits[5]
+                        requested_flips = (
+                            seed[5] + math.pi,
+                            seed[5] - math.pi,
+                        )
+                        clipped_flips = tuple(
+                            float(np.clip(value, j6_low, j6_high))
+                            for value in requested_flips
+                        )
+                        preferred_j6_target = min(
+                            clipped_flips,
+                            key=lambda clipped: min(
+                                abs(clipped - requested)
+                                for requested in requested_flips
+                            ),
+                        )
+
+                        def joint_motion_preference_fn(
+                            delta,
+                            _seed=seed,
+                            _preferred=preferred_j6_target,
+                        ):
+                            return abs(
+                                float(_seed[5] + delta[5] - _preferred)
+                            )
+                    # Try every exact shoulder/elbow/wrist branch.  Choosing the
+                    # nearest branch *before* the arm-in-view test falsely
+                    # rejects a pose whenever that one branch blocks a camera,
+                    # even if another finite branch leaves all three clear.
+                    def select_clear_ik_solution(
                         pose,
                         _arm=arm,
                         _seed=seed,
+                        _joint_limits=ik_joint_limits,
                         _extrinsics=tcp_T_cam,
                         _cameras=camera_models,
                     ):
-                        joints = _arm.solve(pose, _seed)
-                        if joints is None:
-                            return False
-                        return self._arm_clear_of_own_cameras(
-                            pose, joints, _arm, _extrinsics, _cameras
+                        clear = [
+                            joints
+                            for joints in _arm.solve_ranked(
+                                pose,
+                                _seed,
+                                joint_limits=_joint_limits,
+                            )
+                            if self._arm_clear_of_own_cameras(
+                                pose, joints, _arm, _extrinsics, _cameras
+                            )
+                        ]
+                        if not clear:
+                            return None
+                        return min(
+                            clear,
+                            key=lambda joints: (
+                                float(np.abs(joints - _seed).max()),
+                                (
+                                    abs(float(joints[5] - preferred_j6_target))
+                                    if preferred_j6_target is not None
+                                    else 0.0
+                                ),
+                                float(np.abs(joints - _seed).sum()),
+                            ),
                         )
+
+                    # Return physical (unwrapped) joint travel only when the
+                    # target has an arm-clear branch.  The survey selector uses
+                    # this vector both as the reachability gate and to prefer
+                    # the least-contorted roll among camera-equivalent poses.
+                    def joint_motion_fn(pose):
+                        joints = select_clear_ik_solution(pose)
+                        return None if joints is None else joints - seed
                     logging.info(
-                        "arm IK reachability gate active: %s wrist-camera "
+                        "arm IK joint-motion gate active: %s wrist-camera "
                         "keep-out %.0fmm over %d probes; arm-in-view rejection "
-                        "over %d cameras",
+                        "over %d cameras; max predicted joint move %ddeg",
                         cal_desc,
                         arm.min_self_clearance_m * 1000.0,
                         len(arm.flange_T_probes),
                         len(camera_models),
+                        round(math.degrees(joint_motion_limit_rad)),
                     )
                 else:
                     logging.info(
@@ -3166,9 +3267,77 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 ik_error,
             )
 
-        # Every recessed-port sector on this board -- NIC cages and SC adapters
-        # alike -- opens along the board normal, so nothing wants a cross-rail
-        # tilt any more and the old committed-band/flat-fallback ladder is gone.
+        # NIC keeps its measured straight-down bore view. SC approaches from
+        # the long adapter face with a mandatory 10-13 degree offset along that
+        # face's board-X normal.
+        #
+        # SC needs one additional constraint.  The three camera origins are
+        # separated by ~115 mm, and wrist roll rotates that baseline relative to
+        # the adapter's rectangular 7.6 x 22.4 mm mouth.  A pose can therefore
+        # frame every mouth in every image while a side camera looks across the
+        # narrow dimension and a wall hides the bore depth.  That is exactly the
+        # split seen in hardware: the axis-aligned case found all five, while a
+        # diagonal-board case selected the first IK-clear pose even though both
+        # side-camera rays lay outside the narrow-axis cone.  Filter those poses
+        # geometrically, and within the fixed standoff maximize the worst
+        # projected mouth-to-back-centre pixel displacement before minimizing
+        # joint motion. All three cameras still pass the independent framing and
+        # gripper gates, while two physically open depth views per mouth are
+        # sufficient for the fused IVM. Requiring all three was the hidden
+        # constraint that forced hardware back to a visibly head-on 7-8 degrees.
+        view_quality_fn = None
+        min_view_quality = -math.inf
+        view_quality_motion_tolerance = 0.0
+        if int(survey_target) == 3:  # SC_DESTINATION_PORT
+            # SC must not publish a Cartesian target unless the internal IK gate
+            # finds an arm-clear configuration inside the same fixed absolute
+            # joint window configured on Move Robot.  The output remains the
+            # existing x/y/z/quaternion interface; the mirrored window is what
+            # prevents both planners from disagreeing about joint winding.
+            if joint_motion_fn is None:
+                self._stage2_not_done(
+                    result,
+                    "SC survey requires live finite IK inside the configured "
+                    "Move Robot joint window",
+                )
+                return
+
+            sc_view_samples = sc_bore_sample_points()
+
+            def _sc_view_quality(pose):
+                bore_margin = rectangular_bore_visibility_margin(
+                    sc_view_samples,
+                    board_pose.base_T_board,
+                    pose,
+                    tcp_T_cam,
+                    half_width_x_m=0.0038,
+                    half_width_y_m=0.0112,
+                    depth_m=0.01564,
+                    camera_names=expected,
+                    required_camera_count=2,
+                )
+                if bore_margin < 0.0:
+                    return -math.inf
+                return rectangular_bore_depth_cue_px(
+                    sc_view_samples,
+                    board_pose.base_T_board,
+                    pose,
+                    tcp_T_cam,
+                    camera_models,
+                    depth_m=0.01564,
+                    camera_names=expected,
+                    required_camera_count=2,
+                )
+
+            view_quality_fn = _sc_view_quality
+            # Both recent failures contain four real ports in an exact 40 mm
+            # lattice while the camera view remains visibly head-on. The prior
+            # all-three-camera bore gate made every >=10 degree pose impossible.
+            # Requiring two open, strongly oblique views instead yields 96/96:
+            # selected cues are 3.34-4.45 px. A minimum angle of 11 degrees
+            # loses 2/96, so 10-13 is the strongest fully reachable band.
+            min_view_quality = 3.0
+            view_quality_motion_tolerance = 0.1
         candidate, search_reason = search_survey_pose(
             board_pose,
             tcp_T_cam,
@@ -3184,15 +3353,27 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             coverage_targets=(self._sector_for_target(survey_target),),
             # Framing, obliquity and standoff preference are per-sector; see
             # ``_survey_view_settings`` for the port geometry that decides each.
-            cross_rail_tilt_band_rad=None,
             **self._survey_view_settings(survey_target),
-            # Reachability is now decided by the UR5e IK gate (``reachable``),
-            # not this base-origin sphere -- the sphere wrongly rejected the
-            # reachable far, bore-facing poses and admitted unsolvable ones.  The
-            # sphere only survives as a loose fallback when IK is unavailable, so
-            # keep the full envelope here.  Standoff is still bounded into the
-            # 0.5-1 m band by ``standoffs_m``/``prefer_far_standoff``.
-            reachable=reachable_fn,
+            view_quality=view_quality_fn,
+            min_view_quality=min_view_quality,
+            view_quality_motion_tolerance=view_quality_motion_tolerance,
+            # Reachability is now decided by the live-seeded UR5e IK motion
+            # gate, not this base-origin sphere.  In addition to filtering
+            # impossible/arm-occluded poses it ranks camera-equivalent rolls by
+            # their physical joint travel inside the mirrored Move Robot
+            # position window and refuses any candidate over the configured
+            # motion cap.
+            # The base-origin sphere wrongly rejected reachable far,
+            # bore-facing poses and admitted unsolvable ones; it survives only
+            # as a loose fallback when IK is unavailable.  Standoff is still
+            # bounded by each sector's configured search band.
+            joint_motion=joint_motion_fn,
+            max_joint_motion_rad=joint_motion_limit_rad,
+            joint_motion_preference=joint_motion_preference_fn,
+            # Let the requested J6 half-turn influence the selected roll only
+            # inside a bounded motion plateau.  It may buy at most 30 degrees
+            # of additional worst-joint travel, never the old violent route.
+            joint_preference_motion_tolerance_rad=math.radians(30.0),
             max_reach_m=0.85,
             min_height_m=0.02,
         )
@@ -3201,6 +3382,24 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 result, f"no safe all-camera survey pose: {search_reason}"
             )
             return
+        if int(survey_target) == 3:  # SC_DESTINATION_PORT
+            selected_bore_margin = rectangular_bore_visibility_margin(
+                sc_view_samples,
+                board_pose.base_T_board,
+                candidate.base_T_tcp,
+                tcp_T_cam,
+                half_width_x_m=0.0038,
+                half_width_y_m=0.0112,
+                depth_m=0.01564,
+                camera_names=expected,
+                required_camera_count=2,
+            )
+            logging.info(
+                "SC survey image geometry required_depth_cameras=2 "
+                "bore_margin_2cam=%+.3f depth_cue_2cam=%.3fpx",
+                selected_bore_margin,
+                candidate.view_quality,
+            )
         # The board-frame region this pose frames in all cameras (whole board or
         # the module region); the post-move confirm re-checks exactly this.
         coverage_target = candidate.coverage_target
@@ -3244,10 +3443,55 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
             return
 
-        # Publish the board-relative survey pose for a downstream Move Robot
-        # skill.  Wire result.survey_pose as the Cartesian motion target's
-        # target_frame_offset with moving_frame = gripper TCP and
-        # target_frame = base_link (root).
+        predicted_joints = None
+        if ik_arm is not None and ik_seed is not None:
+            predicted_joints = select_clear_ik_solution(target)
+        if int(survey_target) == 3 and predicted_joints is None:
+            self._stage2_not_done(
+                result,
+                "selected SC Cartesian pose has no arm-clear IK branch inside "
+                "the configured Move Robot joint window",
+            )
+            return
+        if predicted_joints is not None:
+            predicted_delta = predicted_joints - ik_seed
+            logging.info(
+                "survey IK motion current_deg=%s target_deg=%s "
+                "delta_deg=%s max=%.1fdeg total=%.1fdeg "
+                "preferred_j6_deg=%s j6_error=%.1fdeg "
+                "flowstate_min_deg=%s flowstate_max_deg=%s",
+                np.round(np.degrees(ik_seed), 1).tolist(),
+                np.round(np.degrees(predicted_joints), 1).tolist(),
+                np.round(np.degrees(predicted_delta), 1).tolist(),
+                math.degrees(float(np.abs(predicted_delta).max())),
+                math.degrees(float(np.abs(predicted_delta).sum())),
+                (
+                    round(math.degrees(preferred_j6_target), 1)
+                    if preferred_j6_target is not None
+                    else None
+                ),
+                (
+                    math.degrees(
+                        abs(float(predicted_joints[5] - preferred_j6_target))
+                    )
+                    if preferred_j6_target is not None
+                    else 0.0
+                ),
+                (
+                    SC_MOVE_ROBOT_JOINT_LIMITS_DEG[:, 0].tolist()
+                    if ik_joint_limits is not None
+                    else None
+                ),
+                (
+                    SC_MOVE_ROBOT_JOINT_LIMITS_DEG[:, 1].tolist()
+                    if ik_joint_limits is not None
+                    else None
+                ),
+            )
+
+        # Preserve the deployed interface: Flowstate reads the seven scalar
+        # fields in result.target, a Python code node packs them into a
+        # Cartesian TCP pose, and Move Robot plans that constrained pose.
         quaternion = quaternion_from_matrix(target.rotation)
         result.target_valid = True
         result.target_frame = self.config.base_frame
@@ -3271,7 +3515,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         logging.info(
             "SFP Stage 2 published survey pose source=%s reprojection=%.2fpx "
             "target=(%.4f,%.4f,%.4f)m standoff=%.3fm yaw=%+.3frad "
-            "min_clearance=%.1fpx move=%.3fm obliquity=%.1fdeg",
+            "min_clearance=%.1fpx view_quality=%+.3f move=%.3fm "
+            "obliquity=%.1fdeg cross_tilt=%.1fdeg along_tilt=%.1fdeg "
+            "joint_max=%.1fdeg joint_total=%.1fdeg",
             source_camera,
             board_pose.reprojection_error_px,
             target.translation[0],
@@ -3280,6 +3526,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             candidate.standoff_m,
             candidate.yaw_rad,
             candidate.min_clearance_px,
+            candidate.view_quality,
             distance_m,
             # How far off the board normal the published view ended up.  Every
             # recessed port on this board is read down its own axis, so this is
@@ -3308,6 +3555,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                 )
             ),
+            math.degrees(candidate.cross_rail_tilt_rad),
+            math.degrees(candidate.along_rail_tilt_rad),
+            math.degrees(candidate.max_joint_motion_rad),
+            math.degrees(candidate.total_joint_motion_rad),
         )
         result.done = True
         result.success = True
@@ -3316,9 +3567,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         result.last_action = "sfp_survey_pose_published"
         result.elapsed_seconds = max(0.0, time.monotonic() - started_at)
         result.message = (
-            "geometric Stage 2 published a board-relative survey pose framing "
-            "the SFP/SC modules (whole board when reachable) in all three "
-            "cameras; hand result.survey_pose to Move Robot"
+            "geometric Stage 2 published a safe board-relative Cartesian "
+            "target framing the SFP/SC modules in all three cameras; pack "
+            "result.target x/y/z/qx/qy/qz/qw for Move Robot"
         )
 
     @staticmethod

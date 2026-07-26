@@ -1,153 +1,194 @@
-"""Does the SC filter survive a rotated / tilted board?
+"""Offline harness for the paste-ready Flowstate ``filter_estimates_sc`` node.
 
-Builds synthetic IVM detections for the five SC ports at a known board pose,
-then runs both the original fixed-world-axis filter and the board-frame fix.
+Run from the repository root:
+
+    python docs/reference/filter_estimates_sc_node_test.py
+
+The node itself ends with a Flowstate-cell ``return``, so this harness executes
+only its pure helper prefix and supplies minimal pose-estimate stand-ins.
 """
 from __future__ import annotations
 
 import math
-import sys
 from dataclasses import dataclass
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
-sys.path.insert(
-    0,
-    r"C:/Users/anshu/AppData/Local/Temp/claude/c--Users-anshu-College-aic/"
-    r"343bcc0d-7ca5-451e-93b3-195b12814928/scratchpad",
-)
-import filter_estimates_sc_fixed as fixed  # noqa: E402
+
+SOURCE = Path(__file__).with_name("filter_estimates_sc_node.py")
+HELPERS = SOURCE.read_text(encoding="utf-8").split(
+    "# ---------------------------------------------------------------------------\n"
+    "# Node body\n"
+    "# ---------------------------------------------------------------------------",
+    1,
+)[0]
+namespace: dict[str, object] = {}
+exec(compile(HELPERS, str(SOURCE), "exec"), namespace)
+fixed = SimpleNamespace(**namespace)
 
 
-# --- minimal stand-ins for the Flowstate protos -----------------------------
 @dataclass
 class _V:
-    x: float
-    y: float
-    z: float
+  x: float
+  y: float
+  z: float
 
 
 @dataclass
 class _Q:
-    x: float
-    y: float
-    z: float
-    w: float
+  x: float
+  y: float
+  z: float
+  w: float
 
 
 @dataclass
 class _Pose:
-    position: _V
-    orientation: _Q
+  position: _V
+  orientation: _Q
 
 
 @dataclass
 class _Est:
-    root_t_target: _Pose
-    score: float
+  root_t_target: _Pose
+  score: float
 
 
-def quat_from_matrix(R):
-    t = np.trace(R)
-    if t > 0:
-        s = math.sqrt(t + 1.0) * 2
-        w, x, y, z = 0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s
-    else:
-        i = int(np.argmax(np.diag(R)))
-        if i == 0:
-            s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
-            w, x, y, z = (R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s
-        elif i == 1:
-            s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
-            w, x, y, z = (R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s
-        else:
-            s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
-            w, x, y, z = (R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s
-    return _Q(x, y, z, w)
-
-
-def Rz(a):
-    c, s = math.cos(a), math.sin(a)
-    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
-
-
-def Rx(a):
-    c, s = math.cos(a), math.sin(a)
-    return np.array([[1.0, 0, 0], [0, c, -s], [0, s, c]])
-
-
-# Board-frame port entrances: 3 on Y +0.0295, 2 on Y +0.0705, Z 0.0301.
-# Index order along +X, matching the node's PORT_LABELS_BY_RAIL assumption.
 PORTS_BOARD = np.array([
-    [-0.120, 0.0295, 0.0301],   # sc_port_0
-    [-0.075, 0.0295, 0.0301],   # sc_port_1
-    [-0.030, 0.0295, 0.0301],   # sc_port_2
-    [-0.100, 0.0705, 0.0301],   # sc_port_3
-    [-0.045, 0.0705, 0.0301],   # sc_port_4
+    [-0.120, 0.0295, 0.0301],
+    [-0.075, 0.0295, 0.0301],
+    [-0.030, 0.0295, 0.0301],
+    [-0.100, 0.0705, 0.0301],
+    [-0.045, 0.0705, 0.0301],
 ])
 
 
-def make_detections(yaw_deg, tilt_deg=0.0, noise_m=0.0, seed=0):
-    rng = np.random.default_rng(seed)
-    R = Rx(math.radians(tilt_deg)) @ Rz(math.radians(yaw_deg))
-    origin = np.array([-0.3445, 0.2602, 0.0])
-    ests = []
-    for p in PORTS_BOARD:
-        xyz = R @ p + origin + rng.normal(0, noise_m, 3)
-        ests.append(_Est(_Pose(_V(*xyz), quat_from_matrix(R)), 0.9))
-    return ests, R
+def rotation(yaw_deg, tilt_deg):
+  yaw = math.radians(yaw_deg)
+  tilt = math.radians(tilt_deg)
+  cz, sz = math.cos(yaw), math.sin(yaw)
+  cx, sx = math.cos(tilt), math.sin(tilt)
+  rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+  rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+  return rx @ rz
 
 
-# --- the ORIGINAL node's geometry, extracted verbatim -----------------------
-ALONG_ORIG = np.array([1.0, 0.0, 0.0])
-BETWEEN_ORIG = np.array([0.0, 1.0, 0.0])
+def quaternion_from_matrix(matrix):
+  matrix = np.asarray(matrix, dtype=float)
+  w = math.sqrt(max(0.0, 1.0 + np.trace(matrix))) / 2.0
+  x = math.copysign(
+      math.sqrt(max(0.0, 1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2])) / 2.0,
+      matrix[2, 1] - matrix[1, 2],
+  )
+  y = math.copysign(
+      math.sqrt(max(0.0, 1.0 - matrix[0, 0] + matrix[1, 1] - matrix[2, 2])) / 2.0,
+      matrix[0, 2] - matrix[2, 0],
+  )
+  z = math.copysign(
+      math.sqrt(max(0.0, 1.0 - matrix[0, 0] - matrix[1, 1] + matrix[2, 2])) / 2.0,
+      matrix[1, 0] - matrix[0, 1],
+  )
+  return _Q(x, y, z, w)
 
 
-def original_layout_ok(ests):
-    """Reproduces the original's gates: fixed world axes, 3/2 split by +Y."""
-    pos = [np.array([e.root_t_target.position.x, e.root_t_target.position.y,
-                     e.root_t_target.position.z]) for e in ests]
-    between = np.array([p @ BETWEEN_ORIG for p in pos])
-    order = np.argsort(between)
-    r0, r1 = between[order[:3]], between[order[3:]]
-    spread0, spread1 = float(np.ptp(r0)), float(np.ptp(r1))
-    sep = float(r1.mean() - r0.mean())
-    if spread0 > 0.012 or spread1 > 0.012:
-        return False, f"within-rail spread {spread0*1000:.0f}/{spread1*1000:.0f}mm > 12mm"
-    if abs(sep - 0.041) > 0.015:
-        return False, f"rail separation {sep*1000:.0f}mm outside 41+/-15mm"
-    return True, f"ok (sep {sep*1000:.0f}mm, spreads {spread0*1000:.0f}/{spread1*1000:.0f}mm)"
+def estimate(xyz, matrix, score=0.9):
+  return _Est(_Pose(_V(*xyz), quaternion_from_matrix(matrix)), score)
 
 
-def fixed_labels_ok(ests, R):
-    """Run the fix and check every port gets its correct index."""
-    try:
-        _best, labeled, _layout, along, _between, _cand, _fo = fixed.select_target(
-            ests, "sc_port_0"
-        )
-    except RuntimeError as exc:
-        return False, str(exc)[:70]
-    # labeled is [(label, estimate)]; recover which synthetic port each is.
-    got = {}
-    for label, est in labeled:
-        p = np.array([est.root_t_target.position.x, est.root_t_target.position.y,
-                      est.root_t_target.position.z])
-        idx = int(np.argmin([np.linalg.norm(p - (R @ q + np.array([-0.3445, 0.2602, 0.0])))
-                             for q in PORTS_BOARD]))
-        got[label] = idx
-    correct = all(got.get(i) == i for i in range(5))
-    return correct, f"label->port {dict(sorted(got.items()))}"
+def detections(yaw_deg, tilt_deg=0.0, noise_m=0.0, seed=0):
+  rng = np.random.default_rng(seed)
+  matrix = rotation(yaw_deg, tilt_deg)
+  origin = np.array([-0.3445, 0.2602, 0.0])
+  return [
+      estimate(matrix @ point + origin + rng.normal(0.0, noise_m, 3), matrix)
+      for point in PORTS_BOARD
+  ]
+
+
+def confident_labels(estimates):
+  confident = [
+      item for item in estimates if float(item.score) >= fixed.MIN_SCORE
+  ]
+  labeled, ignored, _axes_from_orientation = fixed.positional_labels(
+      fixed.deduplicate(confident)
+  )
+  return labeled, ignored
+
+
+def assert_orientation_sweep():
+  for tilt in (0.0, 8.0):
+    for yaw in (0, 5, 10, 20, 45, 90, 140, 180, 250, 315):
+      estimates = detections(yaw, tilt, noise_m=0.0015, seed=1)
+      labeled, ignored = confident_labels(estimates)
+      assert not ignored
+      assert {
+          label: estimates.index(item) for label, item in labeled
+      } == {
+          0: 0,
+          1: 1,
+          2: 2,
+          3: 3,
+          4: 4,
+      }
+
+
+def assert_non_alignment_never_rejects():
+  estimates = detections(70, 8)
+  # Destroy the nominal equal spacing, within-row alignment and 41 mm row
+  # separation while preserving only positional order.
+  distorted_board = np.array([
+      [-0.150, 0.020, 0.020],
+      [-0.082, 0.026, 0.038],
+      [-0.018, 0.015, 0.028],
+      [-0.130, 0.055, 0.012],
+      [-0.030, 0.064, 0.045],
+  ])
+  matrix = rotation(70, 8)
+  origin = np.array([-0.3445, 0.2602, 0.0])
+  for estimate_item, point in zip(estimates, distorted_board):
+    xyz = matrix @ point + origin
+    estimate_item.root_t_target.position = _V(*xyz)
+  labeled, ignored = confident_labels(estimates)
+  assert not ignored
+  assert {
+      label: estimates.index(item) for label, item in labeled
+  } == {
+      0: 0,
+      1: 1,
+      2: 2,
+      3: 3,
+      4: 4,
+  }
+
+
+def assert_missing_slot_only_blocks_that_slot():
+  estimates = detections(45, 8)
+  estimates.pop(2)  # positional sc_port_2 is absent
+  labeled, ignored = confident_labels(estimates)
+  assert not ignored
+  available = {label for label, _item in labeled}
+  assert available == {0, 1, 3, 4}
+
+
+def assert_background_scores_are_rejected():
+  real = detections(0, 0)
+  identity = np.eye(3)
+  false = [
+      estimate([0.2993, -0.0949, 1.1817], identity, 0.367),
+      estimate([0.2991, -0.0448, 1.1848], identity, 0.363),
+      estimate([0.1681, -0.1571, 1.0000], identity, 0.327),
+  ]
+  labeled, ignored = confident_labels(real + false)
+  assert not ignored
+  assert len(labeled) == 5
+  assert all(item in real for _label, item in labeled)
 
 
 if __name__ == "__main__":
-    print(f"{'board yaw':>10} {'tilt':>5} | {'ORIGINAL':<46} | FIXED")
-    print("-" * 110)
-    for tilt in (0.0, 8.0):
-        for yaw in (0.0, 5.0, 10.0, 20.0, 45.0, 90.0, 140.0, 180.0, 250.0, 315.0):
-            ests, R = make_detections(yaw, tilt, noise_m=0.0015, seed=1)
-            ok_o, why_o = original_layout_ok(ests)
-            ok_f, why_f = fixed_labels_ok(ests, R)
-            print(
-                f"{yaw:9.0f} {tilt:5.0f} | {'PASS' if ok_o else 'FAIL':4} {why_o:<41} | "
-                f"{'PASS' if ok_f else 'FAIL':4} {why_f}"
-            )
+  assert_orientation_sweep()
+  assert_non_alignment_never_rejects()
+  assert_missing_slot_only_blocks_that_slot()
+  assert_background_scores_are_rejected()
+  print("filter_estimates_sc reference harness: PASS")

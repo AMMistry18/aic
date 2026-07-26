@@ -31,7 +31,10 @@ from aic_perception.board_stage2 import (
     nic_sector_corners,
     project_points,
     quaternion_from_matrix,
+    rectangular_bore_depth_cue_px,
+    rectangular_bore_visibility_margin,
     sampled_cartesian_path_is_safe,
+    sc_bore_sample_points,
     sc_sector_corners,
     search_survey_pose,
     sfp_envelope_center,
@@ -444,6 +447,37 @@ def test_evaluate_camera_coverage_rejects_gripper_intrusion():
     )
     assert not cov.feasible
     assert "envelope_intersects_gripper" in cov.reasons
+
+
+def test_required_boundary_clearance_short_circuits_gripper_rasterization():
+    """A camera that misses the hard frame margin cannot be rescued."""
+
+    class GripperMustNotRun:
+        mask = None
+
+        @staticmethod
+        def clearance_to(_points):
+            raise AssertionError("gripper clearance ran after boundary failure")
+
+    camera = make_camera()
+    envelope = sfp_envelope_corners()
+    center = sfp_envelope_center()
+    base_T_cam = Transform(
+        np.array([[1.0, 0, 0], [0, -1.0, 0], [0, 0, -1.0]]),
+        center + np.array([0.0, 0.0, 0.08]),
+    )
+    cov = evaluate_camera_coverage(
+        envelope,
+        None,
+        base_T_cam.inverse(),
+        camera,
+        GripperMustNotRun(),
+        required_clearance_px=25.0,
+    )
+
+    assert not cov.feasible
+    assert "envelope_outside_image" in cov.reasons
+    assert math.isinf(cov.gripper_clearance_px)
 
 
 def test_gripper_exclusion_clearance_sign():
@@ -958,6 +992,73 @@ def test_nic_sector_box_frames_the_sfp_cage_band_not_the_mount_base():
     assert 0.13 >= z.min() >= 0.03           # covers the cage (~0.13), not the base
 
 
+def test_rectangular_bore_margin_distinguishes_sc_narrow_and_wide_axes():
+    """The same obliquity can expose depth along SC-Y and hide it along SC-X."""
+
+    board = Transform(np.eye(3), np.zeros(3))
+    point = np.array([[0.0, 0.0, 0.0]])
+    angle = math.radians(15.0)
+    narrow = Transform(
+        np.eye(3), np.array([math.tan(angle), 0.0, 1.0])
+    )
+    wide = Transform(
+        np.eye(3), np.array([0.0, math.tan(angle), 1.0])
+    )
+    kwargs = dict(
+        bore_points_board=point,
+        base_T_board=board,
+        tcp_T_cam={"camera": Transform(np.eye(3), np.zeros(3))},
+        half_width_x_m=0.0038,
+        half_width_y_m=0.0112,
+        depth_m=0.01564,
+    )
+    assert rectangular_bore_visibility_margin(
+        base_T_tcp=narrow, **kwargs
+    ) < 0.0
+    assert rectangular_bore_visibility_margin(
+        base_T_tcp=wide, **kwargs
+    ) > 0.0
+
+    samples = sc_bore_sample_points()
+    assert samples.shape == (6, 3)
+    assert set(samples[:, 1]) == {0.0295, 0.0705}
+    assert samples[:, 0].min() == pytest.approx(-0.135)
+    assert samples[:, 0].max() == pytest.approx(-0.020)
+
+
+def test_search_rejects_framed_pose_below_target_specific_view_floor():
+    """A framed near pose must lose to a farther pose with usable image formation."""
+
+    camera = make_camera()
+    cameras = {"center_camera": camera}
+    extrinsics = {"center_camera": Transform(np.eye(3), np.zeros(3))}
+    grippers = {"center_camera": GripperExclusion(None)}
+    board = BoardPoseEstimate(
+        Transform(np.eye(3), np.zeros(3)),
+        0.3,
+        math.inf,
+        0.0,
+        "center_camera",
+    )
+    candidate, reason = search_survey_pose(
+        board,
+        extrinsics,
+        cameras,
+        grippers,
+        coverage_targets=(sc_sector_corners(),),
+        standoffs_m=(0.40, 0.60),
+        offsets_x_m=(0.0,),
+        offsets_y_m=(0.0,),
+        yaws_rad=(0.0,),
+        min_required_clearance_px=0.0,
+        view_quality=lambda pose: float(pose.translation[2]),
+        min_view_quality=0.50,
+    )
+    assert candidate is not None, reason
+    assert candidate.standoff_m == pytest.approx(0.60)
+    assert candidate.view_quality >= 0.50
+
+
 def _reference_rail_tilts(candidate, board, tcp_T_cam):
     """(cross-rail, along-rail) tilt of the reference camera, in degrees.
 
@@ -1039,6 +1140,139 @@ def test_cross_rail_sign_keeps_the_camera_on_the_chosen_side():
     assert cross_offset(pos) > 0.1
 
 
+def test_rectangular_bore_depth_cue_measures_projected_dark_interior():
+    """An oblique open bore exposes a displaced back plane; head-on does not."""
+
+    camera = make_camera()
+    cameras = {"center_camera": camera}
+    tcp_T_cam = {"center_camera": Transform(np.eye(3), np.zeros(3))}
+    board = Transform(np.eye(3), np.zeros(3))
+    mouth = np.array([[0.0, 0.0, 0.0]])
+
+    def look_at(origin):
+        origin = np.asarray(origin, dtype=float)
+        optical_z = -origin / np.linalg.norm(origin)
+        camera_y_hint = np.array([0.0, 1.0, 0.0])
+        camera_x = np.cross(camera_y_hint, optical_z)
+        camera_x /= np.linalg.norm(camera_x)
+        camera_y = np.cross(optical_z, camera_x)
+        return Transform(
+            np.column_stack((camera_x, camera_y, optical_z)),
+            origin,
+        )
+
+    head_on = rectangular_bore_depth_cue_px(
+        mouth,
+        board,
+        look_at([0.0, 0.0, 1.0]),
+        tcp_T_cam,
+        cameras,
+        depth_m=0.01564,
+    )
+    oblique = rectangular_bore_depth_cue_px(
+        mouth,
+        board,
+        look_at([0.20, 0.0, 1.0]),
+        tcp_T_cam,
+        cameras,
+        depth_m=0.01564,
+    )
+
+    assert head_on == pytest.approx(0.0, abs=1e-9)
+    assert oblique > 1.0
+
+
+def test_fused_bore_cue_can_require_two_of_three_fully_framed_cameras():
+    camera_names = ("center_camera", "left_camera", "right_camera")
+    cameras = {name: make_camera(name) for name in camera_names}
+    tcp_T_cam = {
+        "center_camera": Transform(np.eye(3), np.zeros(3)),
+        "left_camera": Transform(np.eye(3), np.array([-0.20, 0.0, 0.0])),
+        "right_camera": Transform(np.eye(3), np.array([0.20, 0.0, 0.0])),
+    }
+    # Camera +Z points toward the board. The centre ray is head-on while both
+    # separated side cameras expose a displaced back plane.
+    base_T_tcp = Transform(
+        np.diag([-1.0, 1.0, -1.0]),
+        np.array([0.0, 0.0, 1.0]),
+    )
+    mouth = np.array([[0.0, 0.0, 0.0]])
+
+    strict = rectangular_bore_depth_cue_px(
+        mouth,
+        Transform(np.eye(3), np.zeros(3)),
+        base_T_tcp,
+        tcp_T_cam,
+        cameras,
+        depth_m=0.01564,
+    )
+    fused = rectangular_bore_depth_cue_px(
+        mouth,
+        Transform(np.eye(3), np.zeros(3)),
+        base_T_tcp,
+        tcp_T_cam,
+        cameras,
+        depth_m=0.01564,
+        required_camera_count=2,
+    )
+
+    assert strict == pytest.approx(0.0, abs=1e-9)
+    assert fused > 1.0
+
+
+@pytest.mark.parametrize(
+    "yaw_deg,tilt_deg", [(0.0, 0.0), (90.0, 0.0), (45.0, 10.0)]
+)
+def test_aim_offset_rotates_with_board_without_moving_coverage_target(
+    yaw_deg, tilt_deg
+):
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose(yaw_deg=yaw_deg, tilt_deg=tilt_deg)
+    target = sc_sector_corners()
+    aim_offset = np.array([0.012, -0.008, 0.0])
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        coverage_targets=(target,),
+        cross_rail_tilt_band_rad=(math.radians(6.0), math.radians(10.0)),
+        directional_tilt_axis_board=(1.0, 0.0, 0.0),
+        max_along_rail_tilt_rad=math.radians(2.0),
+        cross_rail_sign=1.0,
+        require_all_cameras_frame=False,
+        min_required_clearance_px=0.0,
+        aim_offset_board_m=aim_offset,
+        standoffs_m=(0.65,),
+        yaws_rad=(0.0, math.pi / 2.0),
+    )
+    assert candidate is not None, reason
+    np.testing.assert_allclose(candidate.coverage_target, target)
+
+    aimed_point = board.base_T_board.apply(target.mean(axis=0) + aim_offset)
+    base_T_camera = candidate.base_T_tcp.compose(tcp_T_cam["center_camera"])
+    line_of_sight = aimed_point - base_T_camera.translation
+    line_of_sight /= np.linalg.norm(line_of_sight)
+    np.testing.assert_allclose(
+        line_of_sight,
+        base_T_camera.rotation[:, 2],
+        atol=1e-7,
+    )
+
+
+def test_search_rejects_out_of_plane_aim_offset():
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    candidate, reason = search_survey_pose(
+        _board_pose(),
+        tcp_T_cam,
+        cameras,
+        grippers,
+        aim_offset_board_m=(0.0, 0.0, 0.001),
+    )
+    assert candidate is None
+    assert reason == "aim offset must be a finite board-plane xyz vector"
+
+
 def test_directional_band_leaves_the_isotropic_sfp_search_near_overhead():
     """A None band (the SFP default) keeps the flat, near-overhead behaviour."""
     candidate, reason, board, tcp_T_cam = _sector_survey(
@@ -1047,6 +1281,131 @@ def test_directional_band_leaves_the_isotropic_sfp_search_near_overhead():
     assert candidate is not None, reason
     cross_deg, along_deg = _reference_rail_tilts(candidate, board, tcp_T_cam)
     assert cross_deg <= 20.0 and along_deg <= 20.0
+
+
+def test_sc_long_face_view_uses_explicit_short_axis_normal():
+    """The production SC recipe approaches the long face on the correct axis.
+
+    The mouth's long face is board Y; standing off that face means displacement
+    along board X, not the rail-derived board-Y direction. Keep the narrow-axis
+    angle to 10-13 degrees, board-Y tilt <=2 degrees, and all-camera framing.
+    At least two cameras per mouth must retain a positive physical back-plane
+    margin and a strong visible black-depth displacement.
+    """
+
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose(yaw_deg=45.0)
+    samples = sc_bore_sample_points()
+
+    def quality(base_T_tcp):
+        margin = rectangular_bore_visibility_margin(
+            samples,
+            board.base_T_board,
+            base_T_tcp,
+            tcp_T_cam,
+            half_width_x_m=0.0038,
+            half_width_y_m=0.0112,
+            depth_m=0.01564,
+            camera_names=tuple(cameras),
+            required_camera_count=2,
+        )
+        if margin < 0.0:
+            return -math.inf
+        return rectangular_bore_depth_cue_px(
+            samples,
+            board.base_T_board,
+            base_T_tcp,
+            tcp_T_cam,
+            cameras,
+            depth_m=0.01564,
+            camera_names=tuple(cameras),
+            required_camera_count=2,
+        )
+
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        coverage_targets=(sc_sector_corners(),),
+        cross_rail_tilt_band_rad=(math.radians(10.0), math.radians(13.0)),
+        directional_tilt_axis_board=(1.0, 0.0, 0.0),
+        max_along_rail_tilt_rad=math.radians(2.0),
+        cross_rail_sign=0.0,
+        require_all_cameras_frame=True,
+        prefer_far_standoff=False,
+        min_required_clearance_px=25.0,
+        max_angular_motion_rad=math.pi,
+        yaws_rad=tuple(math.radians(deg) for deg in range(-180, 180, 15)),
+        standoffs_m=(0.62,),
+        view_quality=quality,
+        min_view_quality=3.0,
+        view_quality_motion_tolerance=0.1,
+        max_reach_m=0.85,
+        min_height_m=0.02,
+    )
+
+    assert candidate is not None, reason
+    center = board.base_T_board.apply(candidate.coverage_target.mean(axis=0))
+    camera = candidate.base_T_tcp.compose(tcp_T_cam["center_camera"]).translation
+    to_camera = camera - center
+    normal = board.base_T_board.rotation[:, 2]
+    board_x = board.base_T_board.rotation[:, 0]
+    board_y = board.base_T_board.rotation[:, 1]
+    normal_component = float(np.dot(to_camera, normal))
+    cross_deg = math.degrees(
+        math.atan2(abs(float(np.dot(to_camera, board_x))), normal_component)
+    )
+    along_deg = math.degrees(
+        math.atan2(abs(float(np.dot(to_camera, board_y))), normal_component)
+    )
+    assert 10.0 - 0.1 <= cross_deg <= 13.0 + 0.1
+    assert along_deg <= 2.0 + 0.1
+    assert math.degrees(candidate.cross_rail_tilt_rad) == pytest.approx(
+        cross_deg, abs=0.1
+    )
+    assert math.degrees(candidate.along_rail_tilt_rad) == pytest.approx(
+        along_deg, abs=0.1
+    )
+    assert candidate.view_quality >= 3.0
+    assert all(coverage.feasible for coverage in candidate.coverages)
+
+
+@pytest.mark.parametrize("yaw_deg,tilt_deg", [(0.0, 0.0), (90.0, 0.0), (45.0, 10.0)])
+def test_explicit_tilt_axis_rotates_with_the_estimated_board(yaw_deg, tilt_deg):
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board = _board_pose(yaw_deg=yaw_deg, tilt_deg=tilt_deg)
+    target = sc_sector_corners()
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        coverage_targets=(target,),
+        cross_rail_tilt_band_rad=(math.radians(4.0), math.radians(8.0)),
+        directional_tilt_axis_board=(1.0, 0.0, 0.0),
+        max_along_rail_tilt_rad=math.radians(2.0),
+        cross_rail_sign=1.0,
+        require_all_cameras_frame=False,
+        min_required_clearance_px=0.0,
+        standoffs_m=(0.70,),
+        yaws_rad=(0.0, math.pi / 2.0),
+    )
+    assert candidate is not None, reason
+
+    center = board.base_T_board.apply(target.mean(axis=0))
+    camera = candidate.base_T_tcp.compose(tcp_T_cam["center_camera"]).translation
+    offset = camera - center
+    normal = board.base_T_board.rotation[:, 2]
+    board_x = board.base_T_board.rotation[:, 0]
+    board_y = board.base_T_board.rotation[:, 1]
+    in_plane = offset - float(np.dot(offset, normal)) * normal
+    in_plane /= np.linalg.norm(in_plane)
+
+    # The desired local +X direction follows board yaw and tilt into the base
+    # frame; it is never interpreted as fixed world X.
+    assert float(np.dot(in_plane, board_x)) > math.cos(math.radians(15.0))
+    assert abs(float(np.dot(in_plane, board_y))) < math.sin(math.radians(15.0))
 
 
 def test_production_rig_old_single_axis_grid_misses_case_new_grid_recovers():
@@ -1453,3 +1812,165 @@ def test_reachability_gate_scans_every_framed_candidate_not_a_shortlist():
     )
     assert gated is not None, reason
     assert np.allclose(gated.base_T_tcp.translation, last)
+
+
+def test_joint_motion_gate_prefers_the_simplest_equivalent_roll():
+    """Camera-equivalent rolls are ranked by physical joint travel.
+
+    Standoff and obliquity remain dominant, but clearance must not make the
+    selector choose a roll whose IK branch swings a joint much farther.
+    """
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    seen = []
+
+    def motion(base_T_tcp):
+        seen.append(base_T_tcp)
+        # Deliberately make the first geometrically ranked roll expensive.
+        return np.array([1.4 if len(seen) == 1 else 0.2])
+
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        standoffs_m=(0.70,),
+        offsets_x_m=(0.0,),
+        offsets_y_m=(0.0,),
+        yaws_rad=(0.0, math.pi / 2.0),
+        joint_motion=motion,
+        max_joint_motion_rad=2.0,
+    )
+    assert candidate is not None, reason
+    assert len(seen) == 2
+    assert np.allclose(candidate.base_T_tcp.rotation, seen[1].rotation)
+    assert candidate.max_joint_motion_rad == pytest.approx(0.2)
+    assert candidate.total_joint_motion_rad == pytest.approx(0.2)
+
+
+def test_joint_motion_gate_rejects_a_contorted_target():
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        joint_motion=lambda pose: np.array([0.1, 2.1]),
+        max_joint_motion_rad=2.0,
+    )
+    assert candidate is None
+    assert "joint-motion-valid" in reason
+
+
+def test_sc_view_quality_outranks_joint_motion_at_one_standoff():
+    """Do not discard SC bore quality after merely passing its hard floor.
+
+    The failing hardware run selected a +0.054 worst-port margin and lost the
+    two diagonal end mouths.  At a fixed standoff, a roll with a healthier
+    worst-camera bore view must beat a slightly shorter IK branch.
+    """
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    qualities = {}
+
+    def view_quality(base_T_tcp):
+        key = base_T_tcp.rotation.tobytes()
+        if key not in qualities:
+            qualities[key] = 0.10 if not qualities else 0.40
+        return qualities[key]
+
+    def joint_motion(base_T_tcp):
+        # Deliberately make the higher-quality view move farther; vision still
+        # wins while both remain under the safety cap.
+        quality = qualities[base_T_tcp.rotation.tobytes()]
+        return np.array([0.1 if quality < 0.2 else 0.5])
+
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        standoffs_m=(0.70,),
+        offsets_x_m=(0.0,),
+        offsets_y_m=(0.0,),
+        yaws_rad=(0.0, math.pi / 2.0),
+        view_quality=view_quality,
+        min_view_quality=0.05,
+        joint_motion=joint_motion,
+        max_joint_motion_rad=1.0,
+    )
+    assert candidate is not None, reason
+    assert candidate.view_quality == pytest.approx(0.40)
+    assert candidate.max_joint_motion_rad == pytest.approx(0.5)
+
+
+def test_view_quality_plateau_prefers_much_shorter_joint_motion():
+    """Near-equal SC bore views should not buy a needlessly large arm move."""
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+    qualities = {}
+
+    def view_quality(base_T_tcp):
+        key = base_T_tcp.rotation.tobytes()
+        if key not in qualities:
+            qualities[key] = 0.40 if not qualities else 0.39
+        return qualities[key]
+
+    def joint_motion(base_T_tcp):
+        quality = qualities[base_T_tcp.rotation.tobytes()]
+        return np.array([0.8 if quality > 0.395 else 0.1])
+
+    candidate, reason = search_survey_pose(
+        board,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        standoffs_m=(0.70,),
+        offsets_x_m=(0.0,),
+        offsets_y_m=(0.0,),
+        yaws_rad=(0.0, math.pi / 2.0),
+        view_quality=view_quality,
+        min_view_quality=0.05,
+        view_quality_motion_tolerance=0.02,
+        joint_motion=joint_motion,
+        max_joint_motion_rad=1.0,
+    )
+
+    assert candidate is not None, reason
+    assert candidate.view_quality == pytest.approx(0.39)
+    assert candidate.max_joint_motion_rad == pytest.approx(0.1)
+
+
+def test_joint_preference_may_only_buy_bounded_extra_worst_joint_motion():
+    cameras, tcp_T_cam, grippers = _three_camera_rig()
+    board = _board_pose(yaw_deg=20.0, tilt_deg=7.0)
+
+    def run(tolerance):
+        seen = []
+
+        def motion(base_T_tcp):
+            seen.append(base_T_tcp)
+            return np.array([0.2 if len(seen) == 1 else 0.4])
+
+        candidate, reason = search_survey_pose(
+            board,
+            tcp_T_cam,
+            cameras,
+            grippers,
+            standoffs_m=(0.70,),
+            offsets_x_m=(0.0,),
+            offsets_y_m=(0.0,),
+            yaws_rad=(0.0, math.pi / 2.0),
+            joint_motion=motion,
+            max_joint_motion_rad=1.0,
+            joint_motion_preference=lambda delta: (
+                1.0 if delta[0] < 0.3 else 0.0
+            ),
+            joint_preference_motion_tolerance_rad=tolerance,
+        )
+        assert candidate is not None, reason
+        return candidate
+
+    assert run(0.3).max_joint_motion_rad == pytest.approx(0.4)
+    assert run(0.1).max_joint_motion_rad == pytest.approx(0.2)

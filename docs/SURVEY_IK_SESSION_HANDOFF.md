@@ -1,8 +1,8 @@
 # NIC/SC Survey-Pose + Reachability — Full Session Handoff
 
 **Written:** 2026-07-25, for a fresh session picking up mid-problem.
-**Updated:** 2026-07-25 (same day, second pass) — **RESOLVED in code, not yet
-deployed / not yet hardware-validated.** Two rounds this session:
+**Updated:** 2026-07-25 (same day, third pass) — **RESOLVED in code, not yet
+deployed / not yet hardware-validated.** Three rounds this session:
 
 1. **Reachability shortlist bug** (original write-up, §8): the gate only
    checked the top 24 ranked candidates while `prefer_far_standoff` ranks the
@@ -18,6 +18,14 @@ deployed / not yet hardware-validated.** Two rounds this session:
    Measured result over 96 scenarios: **90/96 poses found, 80/90 resolving all
    10 ports** — the remaining 6 are a genuine geometric conflict at specific
    board yaws (§9.4), not a bug.
+3. **SC view + Cartesian-only Move Robot handoff:** SC now uses an explicit
+   10-13 deg board-X approach normal to the adapter's board-Y long face. All
+   three cameras fully frame the sector; at least two cameras per mouth pass
+   rectangular-bore and projected-depth-cue gates. All-branch arm-in-view
+   rejection and an internal IK gate mirror fixed J1..J6
+   position limits configured directly on Move Robot. The deployed
+   `result.target` seven-scalar -> Python Cartesian pose interface is unchanged.
+   The exact-window SC sweep is **96/96**; see §9.3.
 
 The BT `done` guard (§8 Failure A) is **still outstanding** and is not skill
 code — it is the single most important remaining step before a real run, since
@@ -281,7 +289,7 @@ bash install_skill.sh
 
 ```bash
 cd c:/Users/anshu/College/aic/aic/flowstate/aic_perception
-python -m pytest test/ -q                      # full suite (~2 min); last green = 248 passed
+python -m pytest test/ -q                      # full suite (~2 min); last green = 279 passed
 python -m pytest test/test_arm_ik.py -q         # FK/IK/autocalibrate unit tests (fast)
 python -m pytest test/test_check_board_visibility_stage2_integration.py -q   # source guards (fast)
 ```
@@ -450,12 +458,56 @@ regression.
 
 ### 9.3 The ~360 deg joint-6 swing at yaw 250
 
-Not a skill bug. The skill publishes a **Cartesian** `survey_pose`; Move Robot's
-own planner chooses the joint configuration and path to reach it, including
-which branch of joint 6 (`-133.8 deg` vs its co-terminal `226.2 deg`) to use. If
-that swing recurs on a future run it is a Move Robot / motion-planning question,
-not something `search_survey_pose` controls — it has no visibility into joint
-angles at all, only Cartesian poses.
+The skill publishes a **Cartesian** `survey_pose`; Move Robot's planner chooses
+the actual joint configuration and path, including which branch of joint 6
+(`-133.8 deg` vs its co-terminal `226.2 deg`) to use. A later SC run confirmed
+the same class of failure at larger scale: a 0.374 m Cartesian displacement
+became 1193 trajectory points and 29.44 s, while normal moves in the same log
+were 91-111 points and about 3 s.
+
+The skill previously had one avoidable blind spot: `solve(seed)` measured
+`wrap_pi(q - seed)`, so configurations separated by a full revolution had zero
+cost, and `search_survey_pose` discarded the chosen IK solution after its
+boolean reachability test. Current mitigation:
+
+1. lift every analytic IK solution to the closest co-terminal value inside the
+   real joint limits before comparing it with the live seed;
+2. return physical joint deltas to the survey search;
+3. among equal camera-quality candidates, minimize worst-joint travel and then
+   total joint travel;
+4. enumerate every finite forearm-clear IK branch, express it inside the same
+   fixed absolute J1..J6 position window configured directly on Move Robot,
+   reject branches that put the upper arm/forearm in any wrist camera, and use
+   the lowest-motion clear branch under the 220 deg SC internal cap;
+5. log current, target and delta joint vectors for the selected pose;
+6. keep the deployed output unchanged:
+   `result.target.{x,y,z,qx,qy,qz,qw}` -> existing Python Cartesian pose packer
+   -> Move Robot;
+7. configure these constant J1..J6 position bounds directly on Move Robot:
+
+   ```
+   min deg = [-53.6, -187.0, -122.4, -127.7, -116.1, -71.5]
+   max deg = [170.1,  -28.9,   94.1,   43.8,  114.8, 180.8]
+   ```
+
+The skill mirrors exactly those limits in its analytic gate and returns
+`done=false` if the live start or every arm-clear target branch falls outside
+them. No joint target or limit message is exposed by the skill. Each configured
+interval is narrower than 253 deg, so Move Robot cannot place two co-terminal
+representations of one joint inside the same window and cannot plan a complete
+360 deg winding. Joint speed/acceleration caps remain useful backstops but do
+not replace these absolute position bounds.
+
+The matching SC 96-case production sweep (yaw x tilt x placement x two rolled
+Stage-1 exits) is now **96/96** with the explicit long-face approach, two-camera
+3.0 px depth-cue floor and soft J6 half-turn preference: standoff 0.62 m,
+selected depth cue 3.343..4.451 px, bore margin +0.0135..+0.1572, all-camera
+clearance 37.8..74.0 px, and worst-joint motion 27.6..219.5 deg. The
+J6 preference may buy at most 30 deg additional worst-joint motion and never
+weakens the fixed position window. A 215 deg cap loses 1/96 under this stronger
+view policy, so 220 deg is the lowest tested production cap that preserves all
+scenarios.
+`test/sc_sweep_runner.py` is the reproducible harness.
 
 ### 9.4 Result — measured over 96 scenarios (board yaw 0-315 deg x tilt 0-10 deg
 x +/-50 mm placement x two Stage-1 exit poses), full production settings

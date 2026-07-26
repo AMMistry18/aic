@@ -6,12 +6,15 @@ import numpy as np
 import pytest
 
 from aic_perception.arm_ik import (
-    UR5eArm,
     JOINT_LIMITS,
+    SC_MOVE_ROBOT_JOINT_LIMITS,
+    SC_MOVE_ROBOT_JOINT_LIMITS_DEG,
+    UR5eArm,
     _DH_A,
     _DH_ALPHA,
     _DH_D,
     _dh_matrix,
+    lift_into_joint_limits,
 )
 from aic_perception.board_stage2 import Transform
 
@@ -109,6 +112,94 @@ def test_solve_picks_the_branch_nearest_the_seed():
     target = arm.fk(q_true)
     assert len(arm.solve_all(target)) > 1
     assert np.allclose(arm.solve(target, seed=q_true), q_true, atol=1e-9)
+
+
+def test_solve_preserves_the_nearest_in_limit_coterminal_branch():
+    """A +226 deg live joint must not be reported as a -134 deg target.
+
+    Those angles produce the same Cartesian pose, but commanding one from the
+    other is a physical full revolution.  This is the wraparound that produced
+    the observed violent Move Robot transit.
+    """
+    arm = UR5eArm()
+    q_true = np.array([0.4, -1.3, 1.5, -1.7, -1.5, math.radians(226.0)])
+    target = arm.fk(q_true)
+    solved = arm.solve(target, seed=q_true)
+    assert solved is not None
+    assert np.allclose(solved, q_true, atol=1e-9)
+    assert abs(solved[5] - q_true[5]) < 1e-9
+
+
+def test_solve_ranked_exposes_every_forearm_clear_finite_branch():
+    arm = UR5eArm()
+    seed = np.array([0.4, -1.3, 1.5, -1.7, -1.5, math.radians(226.0)])
+    target = arm.fk(seed)
+
+    ranked = arm.solve_ranked(target, seed)
+
+    assert len(ranked) > 1
+    assert np.allclose(ranked[0], arm.solve(target, seed))
+    assert all(np.all(q >= JOINT_LIMITS[:, 0] - 1e-9) for q in ranked)
+    assert all(np.all(q <= JOINT_LIMITS[:, 1] + 1e-9) for q in ranked)
+    # At least the matching wrist branch must retain the +226-degree finite
+    # representation rather than collapse to its -134-degree principal angle.
+    assert ranked[0][5] == pytest.approx(seed[5])
+
+
+def test_sc_move_robot_limits_are_j1_through_j6_and_exclude_full_turns():
+    assert SC_MOVE_ROBOT_JOINT_LIMITS_DEG.tolist() == [
+        [-53.6, 170.1],
+        [-187.0, -28.9],
+        [-122.4, 94.1],
+        [-127.7, 43.8],
+        [-116.1, 114.8],
+        [-71.5, 180.8],
+    ]
+    assert np.allclose(
+        SC_MOVE_ROBOT_JOINT_LIMITS,
+        np.radians(SC_MOVE_ROBOT_JOINT_LIMITS_DEG),
+    )
+    assert np.all(SC_MOVE_ROBOT_JOINT_LIMITS[:, 0] >= JOINT_LIMITS[:, 0])
+    assert np.all(SC_MOVE_ROBOT_JOINT_LIMITS[:, 1] <= JOINT_LIMITS[:, 1])
+    assert np.all(
+        SC_MOVE_ROBOT_JOINT_LIMITS[:, 1]
+        - SC_MOVE_ROBOT_JOINT_LIMITS[:, 0]
+        < 2.0 * math.pi
+    )
+
+
+def test_flowstate_joint_window_maps_coterminal_wrist_values():
+    # Values observed in the 96-case sweep.  The Flowstate window represents
+    # them as the identical physical poses at -102.1 and -18.2 degrees.
+    raw = np.radians([20.0, -80.0, 70.0, -100.0, 257.9, 341.8])
+    mapped = lift_into_joint_limits(
+        raw,
+        SC_MOVE_ROBOT_JOINT_LIMITS,
+        reference=np.radians([-9.15, -77.59, -95.39, -97.02, 90.01, 170.84]),
+    )
+    assert mapped is not None
+    assert np.degrees(mapped[4]) == pytest.approx(-102.1)
+    assert np.degrees(mapped[5]) == pytest.approx(-18.2)
+    assert np.all(mapped >= SC_MOVE_ROBOT_JOINT_LIMITS[:, 0])
+    assert np.all(mapped <= SC_MOVE_ROBOT_JOINT_LIMITS[:, 1])
+
+
+def test_solve_ranked_can_mirror_the_flowstate_joint_window():
+    arm = UR5eArm()
+    seed = np.radians([-9.15, -77.59, -95.39, -97.02, 90.01, 170.84])
+    target_joints = np.radians([20.0, -80.0, 70.0, -100.0, -102.1, -18.2])
+    target = arm.fk(target_joints)
+
+    ranked = arm.solve_ranked(
+        target,
+        seed,
+        joint_limits=SC_MOVE_ROBOT_JOINT_LIMITS,
+    )
+
+    assert ranked
+    assert all(np.all(q >= SC_MOVE_ROBOT_JOINT_LIMITS[:, 0]) for q in ranked)
+    assert all(np.all(q <= SC_MOVE_ROBOT_JOINT_LIMITS[:, 1]) for q in ranked)
+    assert any(np.allclose(q, target_joints, atol=1e-9) for q in ranked)
 
 
 def test_calibration_recovers_tool_offset_and_is_exact_at_the_sample():
