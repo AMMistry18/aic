@@ -68,6 +68,27 @@ JOINT_LIMITS: np.ndarray = np.array(
     dtype=float,
 )
 
+# Absolute J1..J6 bounds configured on the downstream Flowstate Move Robot
+# segment.  The skill still publishes only a Cartesian TCP target; mirroring
+# the same bounds here makes its analytic IK gate reject windings that the real
+# planner is forbidden to use.  These cover every endpoint in the 96-case SC
+# sweep and both modeled Stage-1 exits while every interval remains well below
+# one full revolution.
+SC_MOVE_ROBOT_JOINT_LIMITS_DEG: np.ndarray = np.array(
+    [
+        [-53.6, 170.1],
+        [-187.0, -28.9],
+        [-122.4, 94.1],
+        [-127.7, 43.8],
+        [-116.1, 114.8],
+        [-71.5, 180.8],
+    ],
+    dtype=float,
+)
+SC_MOVE_ROBOT_JOINT_LIMITS: np.ndarray = np.radians(
+    SC_MOVE_ROBOT_JOINT_LIMITS_DEG
+)
+
 # Denavit-Hartenberg parameters of the same chain, in the classical UR form
 #     T_i = Rz(theta_i) . Tz(d_i) . Tx(a_i) . Rx(alpha_i)
 # The MJCF chain above *is* this chain: ``fk_flange`` and the DH product agree to
@@ -167,9 +188,81 @@ def _wrap_pi(angle: float) -> float:
     return -((-angle + math.pi) % (2.0 * math.pi) - math.pi)
 
 
-def _wrap_pi_array(angles: np.ndarray) -> np.ndarray:
-    """Signed shortest angular difference, elementwise."""
-    return -((-angles + math.pi) % (2.0 * math.pi) - math.pi)
+def _lift_near_reference(
+    joints: np.ndarray, reference: np.ndarray
+) -> np.ndarray:
+    """Choose the in-limit co-terminal representation nearest ``reference``.
+
+    ``solve_all`` deliberately returns principal angles, but the real UR joints
+    (except the elbow) span +/-2pi.  Treating ``-134 deg`` and ``+226 deg`` as
+    interchangeable when measuring motion hides a complete revolution from the
+    survey-pose selector.  Lift each principal angle by an integer multiple of
+    2pi, staying inside the physical limits, so the returned target and its
+    delta describe actual joint travel rather than circular pose equivalence.
+    """
+    principal = np.asarray(joints, dtype=float)
+    reference = np.asarray(reference, dtype=float)
+    lifted = principal.copy()
+    for index, angle in enumerate(principal):
+        lower, upper = JOINT_LIMITS[index]
+        k_min = math.ceil((lower - angle - 1e-12) / _TWO_PI)
+        k_max = math.floor((upper - angle + 1e-12) / _TWO_PI)
+        choices = [angle + k * _TWO_PI for k in range(k_min, k_max + 1)]
+        lifted[index] = min(
+            choices,
+            key=lambda value: (abs(value - reference[index]), abs(value)),
+        )
+    return lifted
+
+
+def lift_into_joint_limits(
+    joints: Sequence[float],
+    joint_limits: np.ndarray,
+    reference: Sequence[float] | None = None,
+) -> np.ndarray | None:
+    """Represent one IK solution inside an absolute joint-position window.
+
+    A Cartesian TCP pose does not encode whether (for example) wrist joint 6 is
+    ``-18 deg`` or the co-terminal ``+342 deg``.  Move Robot receives fixed
+    position limits directly in Flowstate, so the analytic gate must express
+    every solution inside that exact same window.  ``None`` means at least one
+    joint has no co-terminal representation in the window.
+    """
+
+    principal = np.asarray(joints, dtype=float)
+    limits = np.asarray(joint_limits, dtype=float)
+    if principal.shape != (6,) or limits.shape != (6, 2):
+        raise ValueError("expected six joints and a (6, 2) joint-limit array")
+    if not np.all(np.isfinite(principal)) or not np.all(np.isfinite(limits)):
+        raise ValueError("joint values and limits must be finite")
+    if np.any(limits[:, 0] > limits[:, 1]):
+        raise ValueError("joint-limit lower bounds must not exceed upper bounds")
+    if np.any(limits[:, 0] < JOINT_LIMITS[:, 0] - 1e-9) or np.any(
+        limits[:, 1] > JOINT_LIMITS[:, 1] + 1e-9
+    ):
+        raise ValueError("joint window exceeds the modeled physical limits")
+
+    preferred = (
+        np.asarray(reference, dtype=float)
+        if reference is not None
+        else np.zeros(6, dtype=float)
+    )
+    if preferred.shape != (6,) or not np.all(np.isfinite(preferred)):
+        raise ValueError("reference must contain six finite joint values")
+
+    lifted = principal.copy()
+    for index, angle in enumerate(principal):
+        lower, upper = limits[index]
+        k_min = math.ceil((lower - angle - 1e-12) / _TWO_PI)
+        k_max = math.floor((upper - angle + 1e-12) / _TWO_PI)
+        if k_min > k_max:
+            return None
+        choices = [angle + k * _TWO_PI for k in range(k_min, k_max + 1)]
+        lifted[index] = min(
+            choices,
+            key=lambda value: (abs(value - preferred[index]), abs(value)),
+        )
+    return lifted
 
 
 def _rot_z(theta: float) -> np.ndarray:
@@ -462,20 +555,60 @@ class UR5eArm:
         joint travel is returned, which is the configuration the controller
         would realistically adopt.
         """
+        ranked = self.solve_ranked(base_T_tcp, seed)
+        if not ranked:
+            return None
+        return ranked[0]
+
+    def solve_ranked(
+        self,
+        base_T_tcp: Transform,
+        seed: Sequence[float] | None = None,
+        *,
+        joint_limits: np.ndarray | None = None,
+    ) -> list[np.ndarray]:
+        """All forearm-clear IK branches in permitted finite coordinates.
+
+        ``solve`` historically chose one branch before the caller could apply
+        its image-space arm-occlusion test.  If that nearest branch put the
+        upper arm in a wrist camera, the whole pose was rejected even when a
+        different exact shoulder/elbow/wrist branch left every image clear.
+        This method exposes the complete filtered set and orders it by travel.
+        When ``joint_limits`` is supplied, each branch is represented inside
+        that absolute window instead of merely choosing the physical-limit
+        winding nearest the seed.  This mirrors a downstream Cartesian Move
+        Robot segment that has the same fixed position limits.
+        """
+
         solutions = [
             q
             for q in self.solve_all(base_T_tcp)
             if self.self_clearance(q) >= self.min_self_clearance_m
         ]
-        if not solutions:
-            return None
         if seed is None:
-            return solutions[0]
-        reference = np.asarray(seed, dtype=float)
-        return min(
-            solutions,
-            key=lambda q: float(np.abs(_wrap_pi_array(q - reference)).sum()),
+            reference = np.zeros(6, dtype=float)
+        else:
+            reference = np.asarray(seed, dtype=float)
+        if joint_limits is None:
+            lifted = [_lift_near_reference(q, reference) for q in solutions]
+        else:
+            lifted = [
+                mapped
+                for q in solutions
+                if (
+                    mapped := lift_into_joint_limits(
+                        q, joint_limits, reference=reference
+                    )
+                )
+                is not None
+            ]
+        lifted.sort(
+            key=lambda q: (
+                float(np.abs(q - reference).max()),
+                float(np.abs(q - reference).sum()),
+            )
         )
+        return lifted
 
     def reachable(
         self, base_T_tcp: Transform, seed: Sequence[float] | None = None

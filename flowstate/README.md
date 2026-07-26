@@ -120,45 +120,57 @@ inctl asset install \
 
 Recommended serial process wiring.
 
-For `STAGED_SFP_MODULE` (perception-only; Move Robot executes the survey move):
+For geometric survey targets (perception-only; Move Robot executes the move):
 
 ```text
 Move Robot (fixed pre-position that frames the board)
 Switch To AIC Controller        (only if Stage 1 must move to expose the insignia)
-Check Board Visibility          (STAGED_SFP_MODULE) -> result.survey_pose
+Check Board Visibility          -> result.target.{x,y,z,qx,qy,qz,qw}
 Switch To Default Controller
-Require result.success == true && result.done == true
+Require result.success && result.done && result.target_valid
+Python code node: pack the seven scalar fields into the existing TCP Cartesian pose
 Move Robot: Cartesian target
     moving frame  = gripper TCP
     target frame  = base_link (root)
-    target frame offset = result.survey_pose      (bind the skill output)
+    target frame offset = Python code-node output
 IVM NIC estimate -> filter estimates -> remaining process
 ```
 
-For `NIC_SFP_DESTINATION` / `SC_DESTINATION_PORT` (legacy in-skill motion, unchanged):
+For `SC_DESTINATION_PORT`, configure the Move Robot segment's absolute J1..J6
+position limits as constants; they are not skill outputs:
 
 ```text
-Move Robot (fixed survey pose)
-Switch To AIC Controller
-Check Board Visibility (the loop and motion happen inside this skill)
-Switch To Default Controller
-Require result.success == true && result.done == true
-IVM NIC estimate -> filter estimates -> remaining process
+min deg = [-53.6, -187.0, -122.4, -127.7, -116.1, -71.5]
+max deg = [170.1,  -28.9,   94.1,   43.8,  114.8, 180.8]
+
+min rad = [-0.9355, -3.2638, -2.1363, -2.2288, -2.0263, -1.2479]
+max rad = [ 2.9688, -0.5044,  1.6424,  0.7645,  2.0036,  3.1556]
 ```
 
-`result.survey_pose` is a native `intrinsic_proto.Pose` in `base_link`; it is the
-desired TCP pose. It is only populated for the SFP target. For SFP the skill does
-not command the survey motion itself.
+The skill mirrors those limits internally when selecting a Cartesian target,
+but preserves the deployed seven-scalar output interface.
+
+SC survey poses use a mandatory 10-13 degree board-X displacement normal to the
+adapters' board-Y long face (at most 2 degrees along that face/port rows), at a
+0.62 m standoff. The axis is explicit rather than inferred from the cluster box
+and rotates into the base frame with the estimated board orientation. All three
+cameras must fully frame the sector and remain gripper-clear; for every mouth,
+at least two cameras must also retain a positive rectangular-bore margin and at
+least 3.0 px of projected mouth-to-back-centre depth cue. SC also prefers the
+best legal J6 half-turn from the live start, but only inside a 30-degree
+worst-motion plateau. Arm-in-view, fixed joint-window, and 220-degree SC motion
+gates remain authoritative.
 
 Do not run Move Robot, another Insert Cable policy, or any other motion session
 in parallel with this skill. Always switch back to the default controller before
 using Flowstate Move Robot again. Route both the successful and unsuccessful
 board-search result through `Switch To Default Controller`; validate the returned
 `success` and `done` fields only after that cleanup node. Expected sensor/search
-failures are returned as `success=false` so the serial cleanup step still runs.
+failures are returned without a valid/done target so the serial cleanup step
+still runs.
 Cancellation still aborts execution and requires the process's cancellation
 cleanup path to switch back to the default controller. `target`, `dx/dy/dz`, and
 `target_valid` remain
-as diagnostics for the last attempted internal move; they are no longer wired
-to another skill. Use `moves_executed`, `travel_m`, `force_abort`, `seen`, and
+as the deployed Cartesian handoff and diagnostics. Use `moves_executed`,
+`travel_m`, `force_abort`, `seen`, and
 `done` for process diagnostics.

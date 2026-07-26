@@ -27,7 +27,7 @@ A transform ``a_T_b`` maps a point expressed in ``b`` into ``a`` via
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import math
 from typing import Callable, Mapping, Sequence
 
@@ -315,6 +315,165 @@ def sc_sector_corners() -> np.ndarray:
     The ``SC_DESTINATION_PORT`` survey target.
     """
     return _sector_box_corners((-0.152, -0.003), (0.005, 0.095), (0.020, 0.035))
+
+
+def sc_bore_sample_points() -> np.ndarray:
+    """Board-frame SC mouth centres covering every allowed rail placement.
+
+    Each adapter translates independently along board X in -0.135..-0.020 m,
+    on one of the two fixed rows at board Y +0.0295 / +0.0705 m.  Sampling both
+    ends and the midpoint of both rows is conservative for the view-direction
+    constraint: if these six extrema can see down the bore, any five-port rail
+    realization between them can too.
+    """
+
+    return np.array(
+        [
+            (x, y, 0.0301)
+            for x in (-0.135, -0.0775, -0.020)
+            for y in (0.0295, 0.0705)
+        ],
+        dtype=float,
+    )
+
+
+def rectangular_bore_visibility_margin(
+    bore_points_board: np.ndarray,
+    base_T_board: "Transform",
+    base_T_tcp: "Transform",
+    tcp_T_cam: Mapping[str, "Transform"],
+    *,
+    half_width_x_m: float,
+    half_width_y_m: float,
+    depth_m: float,
+    camera_names: Sequence[str] | None = None,
+    required_camera_count: int | None = None,
+) -> float:
+    """Worst normalized line-of-sight margin through rectangular bores.
+
+    The bores open along board +Z and extend ``depth_m`` into the board.  For a
+    camera ray from a mouth centre, the back-plane displacement is
+    ``depth * (dx/dz, dy/dz)``. A non-negative result means that displacement
+    fits inside both aperture half-widths for every sampled mouth in at least
+    ``required_camera_count`` cameras. By default every named camera is
+    required, preserving the original strict behavior.
+
+    This is deliberately based on camera *origins*, not optical axes.  The
+    three wrist cameras are spatially separated, so a sector can be framed in
+    every image while a side camera still looks across the SC adapter's narrow
+    7.6 mm mouth and cannot see its depth.
+    """
+
+    points = np.asarray(bore_points_board, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or not len(points):
+        return -math.inf
+    if (
+        not math.isfinite(half_width_x_m)
+        or not math.isfinite(half_width_y_m)
+        or not math.isfinite(depth_m)
+        or half_width_x_m <= 0.0
+        or half_width_y_m <= 0.0
+        or depth_m <= 0.0
+    ):
+        return -math.inf
+
+    required = tuple(camera_names) if camera_names is not None else tuple(tcp_T_cam)
+    camera_count = (
+        len(required)
+        if required_camera_count is None
+        else int(required_camera_count)
+    )
+    if (
+        not required
+        or any(name not in tcp_T_cam for name in required)
+        or camera_count < 1
+        or camera_count > len(required)
+    ):
+        return -math.inf
+
+    board_T_base = base_T_board.inverse()
+    margins = []
+    x_limit = half_width_x_m / depth_m
+    y_limit = half_width_y_m / depth_m
+    for name in required:
+        camera_board = board_T_base.apply(
+            base_T_tcp.compose(tcp_T_cam[name]).translation
+        )
+        rays = camera_board - points
+        if np.any(rays[:, 2] <= 0.0) or not np.all(np.isfinite(rays)):
+            return -math.inf
+        x_ratio = np.abs(rays[:, 0] / rays[:, 2]) / x_limit
+        y_ratio = np.abs(rays[:, 1] / rays[:, 2]) / y_limit
+        margins.append(1.0 - np.maximum(x_ratio, y_ratio))
+    ranked = np.sort(np.asarray(margins, dtype=float), axis=0)[::-1]
+    return float(np.min(ranked[camera_count - 1]))
+
+
+def rectangular_bore_depth_cue_px(
+    bore_points_board: np.ndarray,
+    base_T_board: "Transform",
+    base_T_tcp: "Transform",
+    tcp_T_cam: Mapping[str, "Transform"],
+    cameras: Mapping[str, "CameraModel"],
+    *,
+    depth_m: float,
+    camera_names: Sequence[str] | None = None,
+    required_camera_count: int | None = None,
+) -> float:
+    """Worst projected mouth-to-back-center displacement, in pixels.
+
+    A bore can be physically open yet look like a nearly symmetric flat rim to
+    a pose model. Projecting the front mouth centre and corresponding bore
+    back-centre measures the perspective/depth cue visible in the SC images:
+    zero is head-on, while a few pixels exposes a displaced dark interior. The
+    minimum spans every conservative mouth sample and the kth-best camera
+    requested by ``required_camera_count``. By default every named camera is
+    required. Fused perception can instead require two strong views while all
+    three retain independent framing and gripper-clearance gates.
+    """
+
+    points = np.asarray(bore_points_board, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 3 or not len(points):
+        return -math.inf
+    if not math.isfinite(depth_m) or depth_m <= 0.0:
+        return -math.inf
+    required = tuple(camera_names) if camera_names is not None else tuple(cameras)
+    camera_count = (
+        len(required)
+        if required_camera_count is None
+        else int(required_camera_count)
+    )
+    if (
+        not required
+        or any(name not in tcp_T_cam or name not in cameras for name in required)
+        or camera_count < 1
+        or camera_count > len(required)
+    ):
+        return -math.inf
+
+    back = points.copy()
+    back[:, 2] -= depth_m
+    base_front = base_T_board.apply(points)
+    base_back = base_T_board.apply(back)
+    cues = []
+    for name in required:
+        camera_T_base = base_T_tcp.compose(tcp_T_cam[name]).inverse()
+        front_px, front_ok = project_points(
+            camera_T_base.apply(base_front), cameras[name]
+        )
+        back_px, back_ok = project_points(
+            camera_T_base.apply(base_back), cameras[name]
+        )
+        if (
+            not np.all(front_ok)
+            or not np.all(back_ok)
+            or not np.all(np.isfinite(front_px))
+            or not np.all(np.isfinite(back_px))
+        ):
+            return -math.inf
+        cues.append(np.linalg.norm(back_px - front_px, axis=1))
+    ranked = np.sort(np.asarray(cues, dtype=float), axis=0)[::-1]
+    return float(np.min(ranked[camera_count - 1]))
 
 
 def nic_sector_corners() -> np.ndarray:
@@ -976,6 +1135,7 @@ def evaluate_camera_coverage(
     gripper: GripperExclusion,
     *,
     edge_margin_px: float = 12.0,
+    required_clearance_px: float = 0.0,
     min_pixel_scale: float = 0.05,
     module_envelopes_board: Sequence[np.ndarray] | None = None,
     min_module_pixel_scale: float = 0.012,
@@ -1005,6 +1165,25 @@ def evaluate_camera_coverage(
     boundary_margin = boundary - edge_margin_px
     if boundary_margin < 0.0:
         reasons.append("envelope_outside_image")
+    if (
+        required_clearance_px > 0.0
+        and boundary_margin < required_clearance_px
+    ):
+        if boundary_margin >= 0.0:
+            reasons.append("insufficient_boundary_clearance")
+        # The signed image-boundary clearance is already below the caller's
+        # hard floor.  Gripper-mask clearance cannot rescue this camera, and is
+        # the expensive part of the deterministic survey grid, so fail before
+        # rasterizing the projected hull against the full-resolution mask.
+        return CameraCoverage(
+            camera.name,
+            False,
+            boundary_margin,
+            math.inf,
+            0.0,
+            0.0,
+            tuple(reasons),
+        )
 
     if gripper.mask is not None and gripper.mask.shape != (camera.height, camera.width):
         gripper_clearance = -math.inf
@@ -1066,8 +1245,19 @@ class SurveyCandidate:
     offset_x_m: float = 0.0
     offset_y_m: float = 0.0
     min_module_pixel_scale: float = 0.0
+    # Optional target-specific image-formation margin.  Recessed ports use this
+    # to distinguish "mouth is in frame" from "the camera can see down it".
+    view_quality: float = math.inf
+    # Reference-camera view direction resolved in the sector's rail basis.
+    # These are diagnostics and regression-test hooks for directional views.
+    cross_rail_tilt_rad: float = 0.0
+    along_rail_tilt_rad: float = 0.0
     motion_m: float = math.inf
     angular_motion_rad: float = math.inf
+    # Analytic-IK estimate from the live joint state.  These are physical,
+    # unwrapped joint deltas, not modulo-2pi pose differences.
+    max_joint_motion_rad: float = math.inf
+    total_joint_motion_rad: float = math.inf
     # The board-frame corner set this pose was found to frame in all cameras
     # (whole board or the module region); the post-move confirm re-checks it.
     coverage_target: np.ndarray | None = field(
@@ -1210,6 +1400,11 @@ def search_survey_pose(
     # foreshorten and self-occlude tall components (NIC cards, SC ports).
     offsets_x_m: Sequence[float] = (-0.06, -0.03, 0.0, 0.03, 0.06),
     offsets_y_m: Sequence[float] = (-0.06, -0.03, 0.0, 0.03, 0.06),
+    # Board-frame shift of the point the reference camera looks at. Coverage is
+    # still evaluated against the unchanged target envelope. SC can therefore
+    # bias the view toward the extreme three-port-rail mouth without pretending
+    # the other four ports no longer need to be framed.
+    aim_offset_board_m: Sequence[float] = (0.0, 0.0, 0.0),
     coverage_targets: Sequence[np.ndarray] | None = None,
     module_envelopes_board: Sequence[np.ndarray] | None = None,
     current_base_T_tcp: Transform | None = None,
@@ -1240,11 +1435,15 @@ def search_survey_pose(
     # ``max_obliquity_rad`` behaviour used for the SFP and full-board targets.
     cross_rail_tilt_band_rad: tuple[float, float] | None = None,
     max_along_rail_tilt_rad: float = math.radians(8.0),
+    # Optional explicit board-frame in-plane axis along which the camera is
+    # displaced to create the directional view.  When omitted, the legacy
+    # sector-box heuristic uses the axis across the sector's longest extent.
+    # SC supplies its mouth geometry explicitly because the cluster's long rail
+    # is not the same thing as the side of one rectangular adapter that the
+    # detector must see.
+    directional_tilt_axis_board: Sequence[float] | None = None,
     # Restrict the cross-rail tilt to one side of the board: -1 keeps the camera
-    # on the sector's -cross (board -X for a Y-rail) side, +1 the +cross side, 0
-    # searches both.  Recessed ports open toward one face (the SFP cage mouths
-    # protrude toward board -X), so the camera must sit on that side to look down
-    # the bore; the opposite side sees the closed backs.
+    # on the sector's -cross side, +1 the +cross side, 0 searches both.
     cross_rail_sign: float = 0.0,
     # When False only the reference camera must fully frame the sector; the
     # splayed side cameras are not required to.  The three wrist cameras cannot
@@ -1259,6 +1458,18 @@ def search_survey_pose(
     # model-based estimator needs, and matches the working reference pose that
     # sits high and sees the cards small.
     prefer_far_standoff: bool = False,
+    # Optional target-specific image-formation constraint.  Framing and gripper
+    # clearance are necessary but not sufficient for recessed ports: a camera
+    # can hold the mouth in-frame while a bore wall hides its depth.  The
+    # callback returns a scalar margin and candidates below the floor are
+    # rejected before IK ranking.  ``None`` leaves existing targets unchanged.
+    view_quality: Callable[[Transform], float] | None = None,
+    min_view_quality: float = -math.inf,
+    # When live-seeded joint ranking is active, candidates at the chosen
+    # standoff whose view score is within this much of the best score form one
+    # perception-equivalent plateau.  Motion is minimized inside that plateau.
+    # Zero preserves strict best-view-first behavior.
+    view_quality_motion_tolerance: float = 0.0,
     # Real reachability.  When supplied, ``reachable(base_T_tcp) -> bool`` is the
     # authority on whether the arm can actually achieve a candidate TCP pose
     # (joint-limit-valid IK solution), replacing the crude base-origin
@@ -1274,6 +1485,25 @@ def search_survey_pose(
     # available.  ``None`` keeps the legacy sphere for callers/tests without a
     # kinematic model.
     reachable: Callable[[Transform], bool] | None = None,
+    # Optional live-seeded analytic IK result.  Return the physical joint delta
+    # vector for this candidate, or None when no collision/view-clear
+    # configuration exists.  Unlike ``reachable``, this lets the selector rank
+    # equally useful camera poses by the arm motion they require and reject
+    # contorted targets before handing a Cartesian pose to Move Robot.
+    joint_motion: Callable[[Transform], Sequence[float] | None] | None = None,
+    max_joint_motion_rad: float = math.radians(170.0),
+    # Optional secondary joint-space constraint/ranking.  The callback receives
+    # the physical unwrapped joint delta selected for a Cartesian candidate and
+    # returns a non-negative error (lower is better).  SC uses it to keep wrist
+    # joint 6 near the requested half-turn orientation, which puts the arm/tool
+    # on the non-occluding side, while the existing absolute joint window and
+    # max-motion gate remain authoritative.
+    joint_motion_preference: Callable[[np.ndarray], float] | None = None,
+    max_joint_preference_error: float = math.inf,
+    # A preference may buy at most this much additional worst-joint travel over
+    # the minimum-motion candidate in the same perception plateau.  This makes
+    # the preference effective without resurrecting a violent arm route.
+    joint_preference_motion_tolerance_rad: float = 0.0,
 ) -> tuple[SurveyCandidate | None, str]:
     """Deterministically search for one board-relative TCP survey pose.
 
@@ -1288,8 +1518,9 @@ def search_survey_pose(
     wins; among those the pose with the *smallest standoff* is returned -- the
     closest view puts the most pixels on each component, which is what lets the
     downstream estimator separate adjacent NIC cards and SC ports -- and ties are
-    broken towards the most overhead view, then clearance, then the shortest
-    move.  The chosen board-frame target is attached as
+    broken first by any target-specific image-formation quality, then by
+    live-seeded joint motion when supplied, overhead view, clearance, and
+    Cartesian motion.  The chosen board-frame target is attached as
     ``candidate.coverage_target``.  The distant-scale and per-module detail gates
     are intentionally not applied here.  Returns ``(None, reason)`` when no
     candidate is feasible or reachable for any target.
@@ -1302,6 +1533,25 @@ def search_survey_pose(
         or max_angular_motion_rad < 0.0
     ):
         return None, "maximum angular motion must be finite and non-negative"
+    if math.isnan(min_view_quality):
+        return None, "minimum view quality must not be NaN"
+    if (
+        not math.isfinite(view_quality_motion_tolerance)
+        or view_quality_motion_tolerance < 0.0
+    ):
+        return None, "view-quality motion tolerance must be finite and non-negative"
+    if (
+        not math.isfinite(max_joint_motion_rad)
+        or max_joint_motion_rad < 0.0
+    ):
+        return None, "maximum joint motion must be finite and non-negative"
+    if math.isnan(max_joint_preference_error) or max_joint_preference_error < 0.0:
+        return None, "maximum joint preference error must be non-negative"
+    if (
+        not math.isfinite(joint_preference_motion_tolerance_rad)
+        or joint_preference_motion_tolerance_rad < 0.0
+    ):
+        return None, "joint preference motion tolerance must be finite and non-negative"
     required = set(cameras)
     missing_extrinsics = sorted(required.difference(tcp_T_cam))
     missing_grippers = sorted(required.difference(grippers))
@@ -1322,6 +1572,13 @@ def search_survey_pose(
     )
     if not coverage_targets:
         return None, "no coverage targets supplied"
+    aim_offset_board = np.asarray(aim_offset_board_m, dtype=float)
+    if (
+        aim_offset_board.shape != (3,)
+        or not np.all(np.isfinite(aim_offset_board))
+        or abs(float(aim_offset_board[2])) > 1e-9
+    ):
+        return None, "aim offset must be a finite board-plane xyz vector"
 
     base_T_board = board_pose.base_T_board
     board_normal_base = base_T_board.rotation[:, 2]
@@ -1333,11 +1590,13 @@ def search_survey_pose(
 
     def _best_for_target(
         target_board: np.ndarray,
-    ) -> tuple[SurveyCandidate | None, int]:
+    ) -> tuple[SurveyCandidate | None, int, int]:
         # Aim the reference optical axis at the target centroid and search a
         # board-relative 3-D grid, giving real pitch/roll variation rather than a
         # top-down pose with image roll only.
-        center_base = base_T_board.apply(target_board.mean(axis=0))
+        center_base = base_T_board.apply(
+            target_board.mean(axis=0) + aim_offset_board
+        )
         # Collect every framed, gripper-clear candidate with its ranking key so
         # the real reachability gate can be applied to the best ones in order
         # (rather than committing to a single geometric best that may be
@@ -1353,11 +1612,34 @@ def search_survey_pose(
         rail_hat = cross_hat = board_x_base
         band_lo = band_hi = band_mid = 0.0
         if directional:
-            extent = target_board.max(axis=0) - target_board.min(axis=0)
-            if float(extent[0]) >= float(extent[1]):
-                rail_hat, cross_hat = board_x_base, board_y_base
+            if directional_tilt_axis_board is not None:
+                axis_board = np.asarray(
+                    directional_tilt_axis_board, dtype=float
+                )
+                if (
+                    axis_board.shape != (3,)
+                    or not np.all(np.isfinite(axis_board))
+                    or abs(float(axis_board[2])) > 1e-6
+                    or float(np.linalg.norm(axis_board[:2])) < 1e-9
+                ):
+                    return None, 0, 0
+                axis_board = axis_board / np.linalg.norm(axis_board)
+                cross_hat = (
+                    board_x_base * float(axis_board[0])
+                    + board_y_base * float(axis_board[1])
+                )
+                # Positive 90 degrees in the board plane.  Only absolute
+                # along/cross tilt is measured, so the sign is immaterial here.
+                rail_hat = (
+                    -board_x_base * float(axis_board[1])
+                    + board_y_base * float(axis_board[0])
+                )
             else:
-                rail_hat, cross_hat = board_y_base, board_x_base
+                extent = target_board.max(axis=0) - target_board.min(axis=0)
+                if float(extent[0]) >= float(extent[1]):
+                    rail_hat, cross_hat = board_x_base, board_y_base
+                else:
+                    rail_hat, cross_hat = board_y_base, board_x_base
             band_lo, band_hi = cross_rail_tilt_band_rad
             band_mid = 0.5 * (band_lo + band_hi)
             axis_a_hat, axis_b_hat = cross_hat, rail_hat
@@ -1424,6 +1706,7 @@ def search_survey_pose(
                             float(np.clip(normal_comp / to_camera_norm, -1.0, 1.0))
                         )
                         cross_tilt = 0.0
+                        along_tilt = 0.0
                         if directional:
                             along_tilt = math.atan2(
                                 abs(float(np.dot(to_camera, rail_hat))),
@@ -1481,8 +1764,33 @@ def search_survey_pose(
                         if angular_motion > max_angular_motion_rad:
                             continue
 
+                        # For recessed SC mouths, reject rays that cannot reach
+                        # the black back plane before doing three full-resolution
+                        # gripper-mask clearances.  This is an equivalent
+                        # reordering of hard gates, not a relaxed search.
+                        target_view_quality = (
+                            float(view_quality(base_T_tcp))
+                            if view_quality is not None
+                            else math.inf
+                        )
+                        if (
+                            math.isnan(target_view_quality)
+                            or target_view_quality < min_view_quality
+                        ):
+                            continue
+
+                        # Check the reference camera first, then the remaining
+                        # cameras in stable input order.  In the all-camera mode
+                        # a single failure is terminal, so do not spend time
+                        # evaluating masks for cameras that cannot change the
+                        # outcome.  Accepted candidates still carry all camera
+                        # coverages exactly as before.
+                        camera_items = list(cameras.items())
+                        camera_items.sort(
+                            key=lambda item: item[0] != reference_camera
+                        )
                         coverages = []
-                        for name, camera in cameras.items():
+                        for name, camera in camera_items:
                             base_T_camera = base_T_tcp.compose(tcp_T_cam[name])
                             cam_from_board = (
                                 base_T_camera.inverse().compose(base_T_board)
@@ -1495,6 +1803,12 @@ def search_survey_pose(
                                     camera,
                                     grippers[name],
                                     edge_margin_px=edge_margin_px,
+                                    required_clearance_px=(
+                                        min_required_clearance_px
+                                        if require_all_cameras_frame
+                                        or name == reference_camera
+                                        else 0.0
+                                    ),
                                     # Only "framed and gripper-clear in every
                                     # camera" gates here; disable the distant-scale
                                     # and per-module detail checks.
@@ -1503,6 +1817,12 @@ def search_survey_pose(
                                     min_module_pixel_scale=0.0,
                                 )
                             )
+                            if require_all_cameras_frame and (
+                                not coverages[-1].feasible
+                                or coverages[-1].clearance
+                                < min_required_clearance_px
+                            ):
+                                break
                         evaluated += 1
                         if not coverages:
                             continue
@@ -1541,6 +1861,9 @@ def search_survey_pose(
                             yaw_rad=yaw,
                             offset_x_m=float(np.dot(offset_vec, board_x_base)),
                             offset_y_m=float(np.dot(offset_vec, board_y_base)),
+                            view_quality=target_view_quality,
+                            cross_rail_tilt_rad=cross_tilt,
+                            along_rail_tilt_rad=along_tilt,
                             motion_m=(
                                 float(
                                     np.linalg.norm(
@@ -1563,16 +1886,28 @@ def search_survey_pose(
                         # model match wants a distant, undistorted, less-occluded
                         # view.  Then: directional sectors prefer the cross-rail
                         # tilt nearest the band centre; isotropic sectors prefer
-                        # the most overhead view.  Then clearance, then motion.
+                        # the strongest target-specific image formation (when
+                        # supplied), then the most overhead view.  Then
+                        # clearance, then motion.  A finite view score must
+                        # remain in the objective after passing its hard floor:
+                        # SC hardware showed that a barely passing +0.054 bore
+                        # margin loses the two diagonal end ports while larger
+                        # margins preserve a dark rectangular interior.
                         #
                         standoff_key = (
                             round(standoff, 4)
                             if prefer_far_standoff
                             else -round(standoff, 4)
                         )
+                        view_quality_key = (
+                            round(target_view_quality, 4)
+                            if math.isfinite(target_view_quality)
+                            else 0.0
+                        )
                         if directional:
                             candidate_key = (
                                 standoff_key,
+                                view_quality_key,
                                 -round(abs(cross_tilt - band_mid), 4),
                                 round(candidate.min_clearance_px, 6),
                                 -round(candidate.motion_m, 4),
@@ -1581,6 +1916,7 @@ def search_survey_pose(
                         else:
                             candidate_key = (
                                 standoff_key,
+                                view_quality_key,
                                 -round(obliquity, 4),
                                 round(candidate.min_clearance_px, 6),
                                 -round(candidate.motion_m, 4),
@@ -1594,8 +1930,138 @@ def search_survey_pose(
         # Best-ranked first (descending key; the counter breaks ties in the
         # original insertion order, matching the old strict-> argmax).
         feasible.sort(key=lambda item: item[0], reverse=True)
-        if reachable is None:
+        if reachable is None and joint_motion is None:
             return feasible[0][2], evaluated, framed
+        if joint_motion is not None:
+            # Preserve the resolution priority exactly: standoff first.  At one
+            # standoff, retain the target-specific image-formation scores close
+            # enough to the best to be perception-equivalent, then minimize
+            # worst-joint and total travel.  This evaluates every roll in a
+            # standoff group because roll changes both the separated cameras'
+            # SC bore rays and the UR shoulder/wrist branch.
+            group_start = 0
+            while group_start < len(feasible):
+                primary = feasible[group_start][0][:1]
+                group_end = group_start + 1
+                while (
+                    group_end < len(feasible)
+                    and feasible[group_end][0][:1] == primary
+                ):
+                    group_end += 1
+                motion_valid = []
+                for key, order, candidate in feasible[group_start:group_end]:
+                    if reachable is not None and not reachable(candidate.base_T_tcp):
+                        continue
+                    raw_delta = joint_motion(candidate.base_T_tcp)
+                    if raw_delta is None:
+                        continue
+                    delta = np.asarray(raw_delta, dtype=float)
+                    if (
+                        delta.ndim != 1
+                        or delta.size == 0
+                        or not np.all(np.isfinite(delta))
+                    ):
+                        continue
+                    max_motion = float(np.abs(delta).max())
+                    if max_motion > max_joint_motion_rad + 1e-9:
+                        continue
+                    total_motion = float(np.abs(delta).sum())
+                    preference_error = (
+                        float(joint_motion_preference(delta))
+                        if joint_motion_preference is not None
+                        else 0.0
+                    )
+                    if (
+                        not math.isfinite(preference_error)
+                        or preference_error < 0.0
+                        or preference_error > max_joint_preference_error + 1e-9
+                    ):
+                        continue
+                    scored = replace(
+                        candidate,
+                        max_joint_motion_rad=max_motion,
+                        total_joint_motion_rad=total_motion,
+                    )
+                    motion_valid.append(
+                        (
+                            key,
+                            order,
+                            scored,
+                            max_motion,
+                            total_motion,
+                            preference_error,
+                        )
+                    )
+                if motion_valid:
+                    # Define the visual plateau only over candidates Move Robot
+                    # can actually reach inside its mirrored joint window.
+                    # Otherwise an unreachable high-quality roll can suppress
+                    # every reachable roll at this standoff.
+                    best_view_key = max(item[0][1] for item in motion_valid)
+                    accepted_view_key = (
+                        best_view_key - view_quality_motion_tolerance
+                    )
+                    view_valid = []
+                    for (
+                        key,
+                        order,
+                        scored,
+                        max_motion,
+                        total_motion,
+                        preference_error,
+                    ) in motion_valid:
+                        if key[1] < accepted_view_key - 1e-9:
+                            continue
+                        view_valid.append(
+                            (
+                                key,
+                                order,
+                                scored,
+                                max_motion,
+                                total_motion,
+                                preference_error,
+                            )
+                        )
+                    minimum_max_motion = min(
+                        item[3] for item in view_valid
+                    )
+                    motion_ranked = []
+                    for (
+                        key,
+                        order,
+                        scored,
+                        max_motion,
+                        total_motion,
+                        preference_error,
+                    ) in view_valid:
+                        if (
+                            joint_motion_preference is not None
+                            and max_motion
+                            > minimum_max_motion
+                            + joint_preference_motion_tolerance_rad
+                            + 1e-9
+                        ):
+                            continue
+                        if joint_motion_preference is not None:
+                            motion_key = (
+                                -round(preference_error, 6),
+                                -round(max_motion, 6),
+                                -round(total_motion, 6),
+                                key[1],
+                                *key[2:],
+                            )
+                        else:
+                            motion_key = (
+                                -round(max_motion, 6),
+                                -round(total_motion, 6),
+                                key[1],
+                                *key[2:],
+                            )
+                        motion_ranked.append((motion_key, order, scored))
+                    motion_ranked.sort(key=lambda item: item[0], reverse=True)
+                    return motion_ranked[0][2], evaluated, framed
+                group_start = group_end
+            return None, evaluated, framed
         # Apply the real reachability gate to the candidates in rank order and
         # commit to the first that the arm can actually achieve.
         for _key, _order, candidate in feasible:
@@ -1611,11 +2077,11 @@ def search_survey_pose(
         total_framed += framed
         if best is not None:
             return best, "ok"
-    if reachable is not None and total_framed > 0:
+    if (reachable is not None or joint_motion is not None) and total_framed > 0:
         return (
             None,
             f"{total_framed} pose(s) framed the target in all required cameras "
-            "but none had a reachable joint-limit-valid IK solution "
+            "but none had a reachable, joint-motion-valid IK solution "
             f"({total_evaluated} candidates evaluated)",
         )
     return (

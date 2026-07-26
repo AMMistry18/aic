@@ -7,6 +7,8 @@ import copy
 import math
 from pathlib import Path
 
+import pytest
+
 
 SOURCE_PATH = Path(__file__).resolve().parents[1] / "check_board_visibility_skill.py"
 PROTO_PATH = Path(__file__).resolve().parents[1] / "check_board_visibility_skill.proto"
@@ -148,7 +150,7 @@ def test_stage2_consumes_all_camera_info_and_full_camera_tcp_tf():
     assert "frames_are_approved_camera_pair" in method_source
 
 
-def test_sfp_stage2_is_perception_only_and_publishes_a_survey_pose():
+def test_sfp_stage2_is_perception_only_and_publishes_a_cartesian_target():
     method = _method("_run_sfp_geometric_stage2")
     estimate = _named_calls(method, "estimate_board_pose_from_insignia")
     search = _named_calls(method, "search_survey_pose")
@@ -163,7 +165,9 @@ def test_sfp_stage2_is_perception_only_and_publishes_a_survey_pose():
     assert len(search) == 1
     assert len(motions) == 0
     assert len(grabs) == 0
-    # Publishes a pose instead of executing/confirming a move.
+    # Publishes scalar Cartesian fields instead of executing/confirming a move.
+    assert "result.target.x" in method_source
+    assert "result.target.qw" in method_source
     assert "result.survey_pose" in method_source
     assert "sfp_survey_pose_published" in method_source
     for gone in (
@@ -177,23 +181,34 @@ def test_sfp_stage2_is_perception_only_and_publishes_a_survey_pose():
     assert estimate[0] < search[0]
 
 
-def test_sfp_survey_pose_is_the_native_intrinsic_pose_in_base_link():
+def test_sfp_target_preserves_the_deployed_scalar_cartesian_interface():
     source, _ = _source_and_class()
     method = _method("_run_sfp_geometric_stage2")
     method_source = ast.get_source_segment(source, method)
 
     assert "estimate_board_pose_from_insignia(" in method_source
-    # Published as a native intrinsic_proto.Pose (position + orientation) so it
-    # binds to Move Robot's Cartesian target_frame_offset.
+    # Flowstate exposes these seven scalar fields to the existing Python pose
+    # packer.  The extra native pose remains compatible but is not required.
+    assert "result.target.x" in method_source
+    assert "result.target.y" in method_source
+    assert "result.target.z" in method_source
+    assert "result.target.qx" in method_source
+    assert "result.target.qy" in method_source
+    assert "result.target.qz" in method_source
+    assert "result.target.qw" in method_source
     assert "result.survey_pose.position.x" in method_source
     assert "result.survey_pose.orientation.w" in method_source
     assert "result.target_frame = self.config.base_frame" in method_source
+    assert "result.survey_joint_target" not in method_source
+    assert "result.survey_joint_limits" not in method_source
 
 
 def test_result_proto_declares_intrinsic_pose_survey_pose_output():
     proto = PROTO_PATH.read_text(encoding="utf-8")
     assert 'import "intrinsic/math/proto/pose.proto";' in proto
     assert "intrinsic_proto.Pose survey_pose" in proto
+    assert "survey_joint_target" not in proto
+    assert "survey_joint_limits" not in proto
 
 
 def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
@@ -205,8 +220,13 @@ def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     # reachable far, bore-facing poses and admitted unsolvable ones.  The sphere
     # survives only as a loose fallback at the full envelope, and the survey
     # frames exactly one sector, chosen from the target mode.
-    assert "reachable=reachable_fn" in method_source
+    assert "joint_motion=joint_motion_fn" in method_source
     assert "UR5eArm.autocalibrate(" in method_source
+    assert "_arm.solve_ranked(" in method_source
+    assert "joint_limits=_joint_limits" in method_source
+    assert "select_clear_ik_solution(target)" in method_source
+    assert "220.0 if int(survey_target) == 3 else 225.0" in method_source
+    assert "max_joint_motion_rad=joint_motion_limit_rad" in method_source
     assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
     assert "self._sector_for_target(survey_target)" in method_source
@@ -304,6 +324,7 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
 
     nic = settings(2)
     assert nic["cross_rail_sign"] == 0.0, "a cross-rail tilt hides the bores"
+    assert nic["cross_rail_tilt_band_rad"] is None
     assert nic["max_obliquity_rad"] <= math.radians(3.0)
     assert nic["prefer_far_standoff"] is True  # outermost port needs the distance
     assert nic["require_all_cameras_frame"] is True
@@ -316,7 +337,7 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
     assert nic["max_angular_motion_rad"] >= math.radians(89.0)
     assert len(nic["yaws_rad"]) >= 20
 
-    # SC gets its own straight-down recipe; pinned by
+    # SC gets its own small wide-axis obliquity; pinned by
     # test_sc_view_reads_five_adapters_from_inside_the_ivm_standoff_band.
 
     for sfp_target in (0, 1, 99):  # SFP modules keep the close all-camera view
@@ -324,31 +345,26 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
         assert sfp["require_all_cameras_frame"] is True
         assert sfp["prefer_far_standoff"] is False
         assert sfp["cross_rail_sign"] == 0.0
+        assert sfp["cross_rail_tilt_band_rad"] is None
 
     method_source = ast.get_source_segment(
         SOURCE_PATH.read_text(encoding="utf-8"),
         _method("_run_sfp_geometric_stage2"),
     )
     assert "**self._survey_view_settings(survey_target)" in method_source
-    assert "cross_rail_tilt_band_rad=None" in method_source
+    assert "cross_rail_tilt_band_rad=None" not in method_source
 
 
-def test_no_sector_asks_for_a_cross_rail_tilt_any_more():
-    """Every recessed port on this board opens along the board normal.
+def test_only_sc_uses_the_explicit_long_face_approach_axis():
+    """SC must approach the long face, not infer an axis from the rail box.
 
-    NIC's SFP cages and SC's adapters both have bore axes within 1 deg of the
-    board normal (measured from the workcell model), so tilting the camera
-    across the rail reads them edge-on and the near wall occludes the bore.  The
-    committed-band/flat-fallback ladder that used to serve SC is therefore gone,
-    and the search is always called with no tilt band.
+    The mouth's 22.4 mm long face runs along board Y, so the view displacement
+    must be along its board-X normal. Because that is the narrow bore direction,
+    the angle remains 10-13 degrees. All three cameras stay fully framed while
+    at least two per mouth must retain an open, strongly displaced back plane.
     """
     source = SOURCE_PATH.read_text(encoding="utf-8")
     assert "_bore_view_tilt_bands" not in source
-    method_source = ast.get_source_segment(
-        source, _method("_run_sfp_geometric_stage2")
-    )
-    assert "cross_rail_tilt_band_rad=None" in method_source
-    # ...and no sector re-introduces a side commitment through cross_rail_sign.
     helper = copy.deepcopy(_method("_survey_view_settings"))
     helper.decorator_list = []
     module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
@@ -357,16 +373,26 @@ def test_no_sector_asks_for_a_cross_rail_tilt_any_more():
     settings = namespace["_survey_view_settings"]
     for target in (0, 1, 2, 3, 99):
         assert settings(target)["cross_rail_sign"] == 0.0
+    for target in (0, 1, 2, 99):
+        assert settings(target)["cross_rail_tilt_band_rad"] is None
+    sc = settings(3)
+    band = tuple(math.degrees(value) for value in sc["cross_rail_tilt_band_rad"])
+    assert band == pytest.approx((10.0, 13.0))
+    assert sc["directional_tilt_axis_board"] == (1.0, 0.0, 0.0)
+    assert sc["max_along_rail_tilt_rad"] <= math.radians(2.0)
+    assert sc["max_angular_motion_rad"] == pytest.approx(math.pi)
 
 
 def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     """SC is pixel-limited, not geometry-limited, and needs its own band.
 
     The five adapters open straight up behind a 15.64 mm bore with a
-    7.6 x 22.4 mm aperture -- a 13.7 deg cone, satisfied from 0.27 m, so nothing
-    forces the standoff outward.  What limits it is resolution: at the 0.6 m
-    that suits the NIC cards the bore spans only ~15 px and the first field run
-    resolved 2 of 5 ports.  Two things follow, and both are load-bearing:
+    7.6 x 22.4 mm aperture. A 10-13 degree displacement normal to the long face
+    gives the checked side view while the bore-margin gate proves every camera
+    ray still passes the narrow dimension. Tilt along the long face stays below
+    2 degrees so adjacent ports remain separated.
+    Resolution is still limiting at roughly 15-17 px, so nearest-first remains
+    load-bearing:
 
     All three cameras must frame the sector and stay gripper-clear.  Relaxing
     that to the reference camera alone, to chase a closer view, is a regression
@@ -389,9 +415,12 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     # Side cameras stay guarded: relaxing this put the tool over the ports.
     assert sc["require_all_cameras_frame"] is True
     assert sc["prefer_far_standoff"] is False  # cone is met; take the pixels
-    assert sc["max_obliquity_rad"] <= math.radians(13.7)  # inside the bore cone
+    low, high = sc["cross_rail_tilt_band_rad"]
+    assert math.radians(9.5) <= low <= high <= math.radians(13.5)
+    assert sc["directional_tilt_axis_board"] == (1.0, 0.0, 0.0)
+    assert sc["max_along_rail_tilt_rad"] <= math.radians(2.0)
     standoffs = sc["standoffs_m"]
-    assert min(standoffs) >= 0.50, "closer drives the TCP down onto the board"
+    assert standoffs == (0.62,)
 
     # The tool must clear the tallest thing standing on the board (the NIC card
     # tips), not merely the board plane -- the plane guard sits below them.
@@ -401,6 +430,27 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
         source, _method("_run_sfp_geometric_stage2")
     )
     assert "BOARD_TALLEST_COMPONENT_Z + TOOL_COMPONENT_CLEARANCE_M" in method_source
+    # All-camera framing alone does not guarantee that the separated side
+    # camera origins can see through the SC mouth.  The diagonal-board hardware
+    # failure selected an IK-clear pose with both side-camera rays outside the
+    # narrow 7.6 mm aperture cone; SC must gate the physical bore margin before
+    # accepting the first reachable pose.
+    assert "rectangular_bore_visibility_margin" in method_source
+    assert "sc_bore_sample_points()" in method_source
+    assert "half_width_x_m=0.0038" in method_source
+    assert "half_width_y_m=0.0112" in method_source
+    assert "depth_m=0.01564" in method_source
+    assert "bore_margin < 0.0" in method_source
+    assert method_source.count("required_camera_count=2") >= 2
+    assert "rectangular_bore_depth_cue_px" in method_source
+    assert "min_view_quality = 3.0" in method_source
+    assert "view_quality_motion_tolerance = 0.1" in method_source
+    assert "view_quality=view_quality_fn" in method_source
+    assert "SC_MOVE_ROBOT_JOINT_LIMITS" in method_source
+    assert "live finite IK inside the configured" in method_source
+    assert "Move Robot joint window" in method_source
+    assert "joint_motion_preference=joint_motion_preference_fn" in method_source
+    assert "joint_preference_motion_tolerance_rad=math.radians(30.0)" in method_source
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():
