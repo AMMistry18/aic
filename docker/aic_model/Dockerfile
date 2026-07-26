@@ -56,7 +56,7 @@ RUN cd /ws_aic/src/aic && \
        "import cv2, ultralytics; from aic_model.RLInsert import RLInsert; from aic_model.v50_controller import run_v50_script; from aic_perception.gripper_masks import GripperMaskBank; GripperMaskBank(); print('SFP V50 imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
-ENV RL_INSERT_ACTION_TIME_BUDGET_S=45
+ENV RL_INSERT_ACTION_TIME_BUDGET_S=150
 ENV RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=1
 ENV RL_INSERT_VISUAL_GAP_DEBUG=1
 ENV RL_INSERT_V50_TARGET_FORCE_N=10.0

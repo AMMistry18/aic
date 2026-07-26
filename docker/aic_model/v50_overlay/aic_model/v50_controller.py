@@ -38,6 +38,13 @@ LOCAL_SFP_PORT_KPS = np.array(
 SEATED = "seated"
 STALLED = "stalled"
 HARD_FAILURE = "hard_failure"
+# WEDGED means the plug is stuck short of the seat -- either the gross
+# lateral/rotation excursion check tripped, or it stopped advancing while still
+# in the bore (diag-5's ~36 mm stalls carried 4.3-4.8 N of lateral bind, which is
+# a jam by any other name). Only WEDGED earns a retract-and-retry: STALLED is
+# reserved for a plug at seat depth whose event never arrived, where backing out
+# would throw away an insertion that may already be physically complete.
+WEDGED = "wedged"
 # Correction gains below ship at 1e-4 / 0.01 -- deliberately short of the
 # observe constants (0.00015 / 0.02).  Diag-5's ~36 mm stalls carried 4-5 N of
 # lateral bind while the correction sat near 0.1 mm, which is the authority the
@@ -114,6 +121,18 @@ class V50Config:
     seat_candidate_depth_m: float = 0.0445
     insertion_event_timeout_wall_s: float = 10.0
     plug_max_age_s: float = 0.35
+    # Wedge retry: back the plug out to where it started and run the whole
+    # attempt again. Retries are unbounded by count (max_wedge_retries=0); the
+    # action deadline is the only terminator, so the budget is what actually
+    # limits how many attempts fit in a trial.
+    wedge_retry_enable: bool = True
+    max_wedge_retries: int = 0
+    wedge_retry_on_wall_stall: bool = True
+    retract_clear_depth_m: float = -0.003
+    retract_step_m: float = 0.0015
+    retract_free_step_m: float = 0.004
+    retract_arrive_tol_m: float = 0.002
+    retract_timeout_wall_s: float = 10.0
 
     @classmethod
     def from_env(cls) -> "V50Config":
@@ -163,6 +182,24 @@ class V50Config:
                 "RL_INSERT_V50_EVENT_TIMEOUT_S", 10.0
             ),
             plug_max_age_s=_env_float("RL_INSERT_V50_PLUG_MAX_AGE_S", 0.35),
+            wedge_retry_enable=_env_bool("RL_INSERT_V50_WEDGE_RETRY_ENABLE", True),
+            max_wedge_retries=_env_int("RL_INSERT_V50_MAX_WEDGE_RETRIES", 0),
+            wedge_retry_on_wall_stall=_env_bool(
+                "RL_INSERT_V50_WEDGE_RETRY_ON_WALL_STALL", True
+            ),
+            retract_clear_depth_m=_env_float(
+                "RL_INSERT_V50_RETRACT_CLEAR_DEPTH_M", -0.003
+            ),
+            retract_step_m=_env_float("RL_INSERT_V50_RETRACT_STEP_M", 0.0015),
+            retract_free_step_m=_env_float(
+                "RL_INSERT_V50_RETRACT_FREE_STEP_M", 0.004
+            ),
+            retract_arrive_tol_m=_env_float(
+                "RL_INSERT_V50_RETRACT_ARRIVE_TOL_M", 0.002
+            ),
+            retract_timeout_wall_s=_env_float(
+                "RL_INSERT_V50_RETRACT_TIMEOUT_S", 10.0
+            ),
         ).validated()
 
     def validated(self) -> "V50Config":
@@ -183,6 +220,19 @@ class V50Config:
             )
         if self.seat_align_max_step_m <= 0.0 or self.seat_align_max_tilt_step_rad <= 0.0:
             raise ValueError("v50 seat alignment slew limits must be positive")
+        if self.max_wedge_retries < 0:
+            raise ValueError("v50 max wedge retries must be >= 0 (0 means unlimited)")
+        if self.retract_clear_depth_m > 0.0:
+            raise ValueError(
+                "v50 retract clear depth must be at or outside the port mouth"
+            )
+        if (
+            self.retract_step_m <= 0.0
+            or self.retract_free_step_m <= 0.0
+            or self.retract_arrive_tol_m <= 0.0
+            or self.retract_timeout_wall_s <= 0.0
+        ):
+            raise ValueError("v50 retract parameters must be positive")
         if not 0.0 <= self.seat_align_release_decay <= 1.0:
             raise ValueError("v50 seat alignment release decay must be within 0-1")
         if (
@@ -649,6 +699,7 @@ class PlugRelativeV50Controller:
         )
         self.last_observation_stamp = None
         self.last_accepted_plug_stamp = None
+        self._port_pos_initial = self.port_pos.copy()
 
     def _event(self):
         parent = self.policy._parent_node
@@ -1061,7 +1112,7 @@ class PlugRelativeV50Controller:
                         seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
                     )
                 log_seat_slope(summary="stall")
-                return STALLED
+                return WEDGED
 
             if depth >= self.config.seat_candidate_depth_m:
                 fixed_tip, fixed_rotation = self._seat_target_pose(
@@ -1095,7 +1146,7 @@ class PlugRelativeV50Controller:
                                 seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
                             )
                         log_seat_slope(summary="stall")
-                        return STALLED
+                        return self._wall_stall_outcome()
                 else:
                     self.log.warn(
                         f"[v50] wall-time stall: depth={depth*1000:.1f}mm "
@@ -1106,7 +1157,7 @@ class PlugRelativeV50Controller:
                             seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
                         )
                     log_seat_slope(summary="stall")
-                    return STALLED
+                    return self._wall_stall_outcome()
 
             depth_config = self.config
             if (
@@ -1144,6 +1195,163 @@ class PlugRelativeV50Controller:
             )
             self.policy.sleep_for(self.config.command_dt_sim_s)
 
+    def _wall_stall_outcome(self) -> str:
+        """A plug that stopped advancing inside the bore is a jam, not a mystery.
+
+        Diag-5's three ~36 mm stalls all carried 4.3-4.8 N of lateral bind, so
+        they are treated as wedges and earn a retry. Set
+        RL_INSERT_V50_WEDGE_RETRY_ON_WALL_STALL=0 to restrict retries to the
+        gross-excursion wedge check alone.
+        """
+        return WEDGED if self.config.wedge_retry_on_wall_stall else STALLED
+
+    def _attempt_wedge_rescue(self) -> bool:
+        """Let the visual-gap rescue re-aim at the physical opening, if present.
+
+        The rescue lives on RLInsert as a mixin the overlay image adds, so the
+        method may simply not exist here; a missing or disabled rescue is not an
+        error, it just means the retract-and-retry is the only option left.
+        Returns True when the port estimate was corrected and seating is worth
+        re-running without backing out.
+        """
+        enabled = getattr(self.policy, "_visual_gap_wedge_enabled", None)
+        rescue = getattr(self.policy, "_run_visual_gap_wedge_recovery", None)
+        if rescue is None or enabled is None or not enabled():
+            self.log.info("[v50] no wedge rescue available; retract and retry")
+            return False
+        try:
+            hole_point = rescue(
+                self.get_observation,
+                self.move_robot,
+                # Measured against the ORIGINAL perception, so the rescue's own
+                # excursion cap bounds total drift no matter how many retries
+                # run; passing the already-corrected estimate would let the port
+                # walk that cap again on every attempt.
+                raw_port_pos=self._port_pos_initial,
+                Rp=self.Rp,
+                R_seat=self.Rp,
+                local_port_kps=LOCAL_SFP_PORT_KPS,
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+                step_dt=self.config.command_dt_sim_s,
+            )
+        except Exception as exc:
+            self.log.warn(
+                f"[v50] wedge rescue raised {type(exc).__name__}: {exc}; "
+                "retract and retry"
+            )
+            return False
+        if hole_point is None:
+            return False
+        shift = self.Rp.T @ (
+            np.asarray(hole_point, dtype=np.float64).reshape(3) - self.port_pos
+        )
+        self.port_pos = np.asarray(hole_point, dtype=np.float64).reshape(3)
+        self.log.warn(
+            "[v50] wedge rescue corrected the port estimate by "
+            f"{np.round(shift[:2] * 1000.0, 2).tolist()}mm; re-seating without retract"
+        )
+        return True
+
+    def _retract_to_start(self, start_tip_pos, start_tip_rotation) -> bool:
+        """Back the plug out of the bore and return it near its starting pose.
+
+        The seat setpoint cannot walk backwards: next_persistent_depth() clamps
+        the command to at least the current depth, so asking for less depth is
+        silently ignored. Retraction therefore drives set_pose_target directly.
+
+        Withdrawal is two phases because orientation is the dangerous part. While
+        the plug is still inside the cage its rotation is held at whatever was
+        measured -- correcting a cocked plug in place cams it harder against the
+        walls -- and only once it is clear of the mouth does it move back to the
+        starting pose and orientation.
+        """
+        deadline = time.monotonic() + self.config.retract_timeout_wall_s
+        cleared = False
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            depth, _, _, tip_pos, tip_rotation = self._errors()
+            if depth <= self.config.retract_clear_depth_m:
+                cleared = True
+                break
+            step = min(
+                self.config.retract_step_m,
+                depth - self.config.retract_clear_depth_m,
+            )
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(
+                    tip_pos - self.Rp[:, 2] * step, tip_rotation
+                ),
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+
+        if not cleared:
+            depth, _, _, _, _ = self._errors()
+            self.log.error(
+                f"[v50] retract could not clear the port mouth: depth={depth*1000:.1f}mm "
+                f"after {self.config.retract_timeout_wall_s:.1f}s"
+            )
+            return False
+
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            _, _, _, tip_pos, _ = self._errors()
+            delta = np.asarray(start_tip_pos, dtype=np.float64).reshape(3) - tip_pos
+            distance = float(np.linalg.norm(delta))
+            if distance <= self.config.retract_arrive_tol_m:
+                self.log.warn("[v50] retracted to the starting pose; retrying insertion")
+                return True
+            step = delta * min(1.0, self.config.retract_free_step_m / max(distance, 1e-9))
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(tip_pos + step, start_tip_rotation),
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+
+        # Clear of the bore but short of the start pose is still a usable restart:
+        # alignment re-converges from wherever the plug ended up.
+        _, _, _, tip_pos, _ = self._errors()
+        remaining = float(
+            np.linalg.norm(np.asarray(start_tip_pos, dtype=np.float64).reshape(3) - tip_pos)
+        )
+        self.log.warn(
+            f"[v50] retract cleared the mouth but stopped {remaining*1000:.1f}mm "
+            "from the starting pose; retrying from here"
+        )
+        return True
+
+    def _refresh_plug_pose_after_retract(self) -> bool:
+        """Re-solve the grasp transform now that the plug is clear of the port.
+
+        This is the one viewpoint where re-perception is trustworthy: at the
+        aligned standoff the cable drapes over the port, but a retracted plug is
+        back in the pose priming already worked from. A failure here is not
+        fatal -- the previous measured transform is stale, not fabricated, and it
+        is what got the plug into the bore in the first place.
+        """
+        observation = self._wait_new_observation(
+            after_stamp=self.last_observation_stamp,
+            timeout_wall_s=2.0,
+        )
+        if observation is None:
+            self.log.warn(
+                "[v50] no fresh observation after retract; reusing the last "
+                "measured grasp transform"
+            )
+            return False
+        if not self._activate_plug_pose(observation):
+            self.log.warn(
+                "[v50] re-perception after retract failed; reusing the last "
+                "measured grasp transform"
+            )
+            return False
+        return True
+
     def _hold_legacy_safe_pose(self):
         """Hold the TCP itself when no visually calibrated plug transform exists."""
 
@@ -1159,17 +1367,60 @@ class PlugRelativeV50Controller:
             self._hold_legacy_safe_pose()
             return False
 
-        if not self._align():
-            return False
-        self.send_feedback("v50 persistent force-regulated seating")
-        outcome = self._seat()
-        if outcome == SEATED:
-            self.log.info(
-                f"[v50] matching insertion event confirmed for {self.expected_event}"
+        # Where the plug started, so a wedge can be undone rather than accepted.
+        start_tip_pos, start_tip_rotation = self._tip_pose()
+        self._port_pos_initial = self.port_pos.copy()
+        retries = 0
+        rescued_since_retract = False
+
+        while True:
+            # Retries are bounded by the action deadline alone, so every cycle
+            # must touch it even if a stage returns without entering its loop.
+            self.policy._enforce_action_deadline(self.move_robot)
+            if not self._align():
+                return False
+            self.send_feedback("v50 persistent force-regulated seating")
+            outcome = self._seat()
+            if outcome == SEATED:
+                self.log.info(
+                    f"[v50] matching insertion event confirmed for {self.expected_event}"
+                )
+                self.send_feedback("correct-port insertion event confirmed")
+                return True
+            # A wrong-port event or a sustained over-force is not something another
+            # attempt fixes, and a plug at seat depth is not worth backing out of.
+            if outcome != WEDGED or not self.config.wedge_retry_enable:
+                return False
+            if (
+                self.config.max_wedge_retries
+                and retries >= self.config.max_wedge_retries
+            ):
+                self.log.error(
+                    f"[v50] wedged after {retries} retries; retry budget exhausted"
+                )
+                return False
+
+            # Rescue first, retract only if there is no rescue to be had. One
+            # rescue per retract keeps a drifting port estimate from being nudged
+            # indefinitely without ever backing the plug out.
+            if not rescued_since_retract and self._attempt_wedge_rescue():
+                rescued_since_retract = True
+                continue
+
+            retries += 1
+            self.send_feedback(f"wedged; retracting to retry (attempt {retries + 1})")
+            self.log.warn(
+                f"[v50] wedged with no rescue; retract-and-retry {retries}"
+                + (
+                    ""
+                    if not self.config.max_wedge_retries
+                    else f"/{self.config.max_wedge_retries}"
+                )
             )
-            self.send_feedback("correct-port insertion event confirmed")
-            return True
-        return False
+            if not self._retract_to_start(start_tip_pos, start_tip_rotation):
+                return False
+            rescued_since_retract = False
+            self._refresh_plug_pose_after_retract()
 
 
 def run_v50_script(
@@ -1201,6 +1452,7 @@ __all__ = [
     "PlugRelativeV50Controller",
     "SEATED",
     "STALLED",
+    "WEDGED",
     "V50Config",
     "WallProgressWatch",
     "configure_v50",

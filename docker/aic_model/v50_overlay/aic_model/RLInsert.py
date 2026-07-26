@@ -116,8 +116,14 @@ WRENCH_MODE = os.environ.get("RL_INSERT_WRENCH_MODE", "baseline").strip().lower(
 # Temporary script-only deployment. Restoring learned control requires an
 # intentional source/image change rather than a runtime environment override.
 CONTROL_MODE = "script"
+# Wedge retries need room to run: one attempt is align (<=15 s) plus seating
+# (~10-25 s), and a retract-and-retry cycle adds ~12 s, so 45 s bought exactly
+# zero retries.  The engine's per-task time_limit is 180 s in every shipped
+# config, and the scorer's 60 s is only where the duration bonus reaches zero --
+# not a cutoff -- so trading ~3 remaining duration points for a converted
+# full insertion (75 points) is strongly net positive.
 ACTION_TIME_BUDGET_S = float(
-    os.environ.get("RL_INSERT_ACTION_TIME_BUDGET_S", "45.0")
+    os.environ.get("RL_INSERT_ACTION_TIME_BUDGET_S", "150.0")
 )
 # Restore the bounded visual board-framing pass from b269872.  It is opt-in for
 # normal insertion tasks; the reserved task ID runs only the board search.

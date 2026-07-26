@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import sys
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from aic_model.v50_controller import (  # noqa: E402
     SEATED,
     STALLED,
     V50Config,
+    WEDGED,
     WallProgressWatch,
     _normalize_event,
     next_persistent_depth,
@@ -310,16 +312,39 @@ class _Log:
 
 
 class _SequenceHarness(PlugRelativeV50Controller):
-    def __init__(self, outcomes, *, initial_pose=True, visual=True, refresh=True):
-        self.config = V50Config().validated()
+    def __init__(
+        self,
+        outcomes,
+        *,
+        initial_pose=True,
+        visual=True,
+        refresh=True,
+        rescue=False,
+        retract=True,
+        config=None,
+    ):
+        self.config = (config or V50Config()).validated()
         self.outcomes = list(outcomes)
         self.initial_pose = initial_pose
         self.visual_result = visual
         self.refresh_result = refresh
+        self.rescue_result = rescue
+        self.retract_result = retract
         self.trace = []
         self.log = _Log()
         self.expected_event = "nic_card_mount_0/sfp_port_0"
         self.send_feedback = lambda message: self.trace.append(("feedback", message))
+        self.port_pos = np.zeros(3, dtype=np.float64)
+        self.Rp = np.eye(3, dtype=np.float64)
+        self.move_robot = None
+        # The retry loop is bounded by the action deadline, so the double has to
+        # offer one; counting the calls proves no cycle can skip it.
+        self.deadline_checks = 0
+
+        def _deadline(_move_robot):
+            self.deadline_checks += 1
+
+        self.policy = SimpleNamespace(_enforce_action_deadline=_deadline)
 
     def _activate_initial_plug_pose(self):
         self.trace.append("fresh-plug")
@@ -328,6 +353,9 @@ class _SequenceHarness(PlugRelativeV50Controller):
     def _hold_legacy_safe_pose(self):
         self.trace.append("safe-hold")
 
+    def _tip_pose(self):
+        return np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64)
+
     def _align(self):
         self.trace.append("align")
         return True
@@ -335,6 +363,18 @@ class _SequenceHarness(PlugRelativeV50Controller):
     def _seat(self):
         self.trace.append("seat")
         return self.outcomes.pop(0)
+
+    def _attempt_wedge_rescue(self):
+        self.trace.append("rescue")
+        return self.rescue_result
+
+    def _retract_to_start(self, _start_tip_pos, _start_tip_rotation):
+        self.trace.append("retract")
+        return self.retract_result
+
+    def _refresh_plug_pose_after_retract(self):
+        self.trace.append("re-perceive")
+        return True
 
     def _visual_rescue(self):
         self.trace.append("visual")
@@ -519,6 +559,69 @@ def test_hard_failure_never_invokes_visual_or_lift_recovery():
     assert "lift-fresh" not in harness.trace
 
 
+def test_hard_failure_and_no_event_stall_never_retry():
+    # A wrong-port event or sustained over-force is not fixed by another attempt,
+    # and a plug already at seat depth must not be backed out of the port.
+    for outcome in (HARD_FAILURE, STALLED):
+        harness = _SequenceHarness([outcome])
+        assert harness.run() is False
+        assert "retract" not in harness.trace
+        assert "rescue" not in harness.trace
+        assert harness.trace.count("seat") == 1
+
+
+def test_wedge_retries_until_it_seats_with_no_retry_ceiling():
+    # Ten wedges then a seat: retries are unbounded by count, so the run must
+    # keep backing out and trying rather than giving up at some fixed number.
+    harness = _SequenceHarness([WEDGED] * 10 + [SEATED])
+    assert harness.run() is True
+    assert harness.trace.count("retract") == 10
+    assert harness.trace.count("align") == 11
+    assert harness.trace.count("seat") == 11
+    # Every retract re-perceives the plug from the cleared viewpoint.
+    assert harness.trace.count("re-perceive") == 10
+    # Unbounded by count means the deadline is the only thing that can stop it,
+    # so every cycle must consult it.
+    assert harness.deadline_checks == 11
+
+
+def test_wedge_prefers_rescue_and_retracts_only_when_there_is_none():
+    # Rescue first; the retract is the fallback for when no rescue is available.
+    harness = _SequenceHarness([WEDGED, SEATED], rescue=True)
+    assert harness.run() is True
+    assert harness.trace.count("rescue") == 1
+    assert "retract" not in harness.trace
+
+
+def test_second_wedge_after_a_rescue_falls_through_to_retract():
+    # One rescue per retract: a port estimate must not be nudged indefinitely
+    # without ever backing the plug out.
+    harness = _SequenceHarness([WEDGED, WEDGED, SEATED], rescue=True)
+    assert harness.run() is True
+    assert harness.trace.count("rescue") == 1
+    assert harness.trace.count("retract") == 1
+
+
+def test_failed_retract_ends_the_run_instead_of_looping():
+    harness = _SequenceHarness([WEDGED] * 3, retract=False)
+    assert harness.run() is False
+    assert harness.trace.count("retract") == 1
+
+
+def test_wedge_retry_can_be_disabled_and_capped():
+    disabled = _SequenceHarness(
+        [WEDGED, SEATED], config=V50Config(wedge_retry_enable=False)
+    )
+    assert disabled.run() is False
+    assert "retract" not in disabled.trace
+
+    capped = _SequenceHarness(
+        [WEDGED] * 5, config=V50Config(max_wedge_retries=2)
+    )
+    assert capped.run() is False
+    assert capped.trace.count("retract") == 2
+
+
 def test_overlay_rewrites_v49_dispatch_and_truthful_result():
     rl_source = "\n".join(
         [
@@ -580,8 +683,12 @@ def test_release_dockerfile_disables_bias_and_pins_safety():
     assert "RL_INSERT_SCRIPT_BIAS_Y_M=0" in dockerfile
     assert "RL_INSERT_SCRIPT_BIAS_RX_RAD=0" in dockerfile
     assert "RL_INSERT_FORCE_ABORT_N=18.0" in dockerfile
-    assert "RL_INSERT_ACTION_TIME_BUDGET_S=45" in dockerfile
     assert "best_sfp_plug_pose.pt" in dockerfile
+    # The budget must leave room for wedge retries but stay inside the engine's
+    # 180 s per-task time_limit; a run that never returns scores nothing at all.
+    budget = re.search(r"RL_INSERT_ACTION_TIME_BUDGET_S=(\d+)", dockerfile)
+    assert budget is not None
+    assert 60 <= int(budget.group(1)) <= 170
 
     # Baked ENV wins over source defaults, and Flowstate takes no runtime knobs,
     # so a seat-force retune in V50Config is a no-op in the image unless these
