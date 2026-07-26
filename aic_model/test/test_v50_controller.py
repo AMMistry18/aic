@@ -22,6 +22,7 @@ from aic_model.v50_controller import (  # noqa: E402
     WallProgressWatch,
     _normalize_event,
     next_persistent_depth,
+    next_retract_depth,
     prime_v50_plug_pose,
     solve_tip_in_tcp,
     tcp_for_tip_transform,
@@ -167,6 +168,78 @@ def test_persistent_depth_allows_bounded_overtravel_near_insert_depth():
 
     assert command_depth > INSERT_DEPTH_M
     assert np.isclose(command_depth, INSERT_DEPTH_M + config.seat_overtravel_m)
+
+
+def test_retract_depth_accumulates_pull_lead_on_a_stuck_plug():
+    """The retry-killer: commanding current-1.5mm afresh each tick caps the
+    pull at stiffness * 1.5mm = 0.75 N forever, which never unseats a wedge
+    held by diag-5's 4-5 N lateral bind.  The persistent setpoint must keep
+    receding until the lead cap, and no further."""
+    config = V50Config().validated()
+    current_depth = 0.036  # diag-5's wedge depth; the plug is not moving
+    command_depth = current_depth
+
+    offsets = []
+    for _ in range(40):
+        command_depth = next_retract_depth(current_depth, command_depth, config)
+        offsets.append(current_depth - command_depth)
+
+    # Monotone build-up, no oscillation, saturating exactly at the lead.
+    assert all(b >= a - 1e-12 for a, b in zip(offsets, offsets[1:]))
+    assert np.isclose(offsets[-1], config.retract_pull_lead_m)
+    # At the documented 500 N/m that is ~12 N of pull, under the 18 N abort.
+    nominal_pull = config.axial_stiffness_n_m * offsets[-1]
+    assert 10.0 <= nominal_pull < config.force_abort_n
+
+
+def test_retract_depth_walks_at_step_rate_when_the_plug_follows():
+    # Free withdrawal must be unchanged from the old per-tick behaviour: when
+    # the plug tracks the setpoint the offset never exceeds one step.
+    config = V50Config().validated()
+    current_depth = 0.020
+    command_depth = current_depth
+
+    for _ in range(10):
+        command_depth = next_retract_depth(current_depth, command_depth, config)
+        assert np.isclose(current_depth - command_depth, config.retract_step_m)
+        current_depth = command_depth  # impedance catches up before next tick
+
+
+def test_retract_depth_never_commands_back_into_the_bore_after_pop_free():
+    # A wedge that lets go all at once leaves the plug shallower than the
+    # setpoint; reusing the stale command would push it back IN.
+    config = V50Config().validated()
+    command_depth = next_retract_depth(0.036, 0.036, config)
+    for _ in range(15):
+        command_depth = next_retract_depth(0.036, command_depth, config)
+    popped_depth = 0.002  # sprang most of the way out of the bore
+
+    command_depth = next_retract_depth(popped_depth, command_depth, config)
+
+    assert command_depth <= popped_depth
+
+
+def test_retract_depth_builds_full_pull_even_when_stuck_near_the_mouth():
+    # A chamfer catch just inside the mouth is still a stick; flooring the
+    # setpoint at retract_clear_depth_m would cap the pull at
+    # stiffness * (depth - clear) ~ 3.5 N here, resurrecting the plateau bug
+    # for exactly the shallow catches the retry most often faces.
+    config = V50Config().validated()
+    stuck_depth = 0.004
+    command_depth = stuck_depth
+    for _ in range(50):
+        command_depth = next_retract_depth(stuck_depth, command_depth, config)
+
+    assert np.isclose(stuck_depth - command_depth, config.retract_pull_lead_m)
+    assert command_depth < config.retract_clear_depth_m, \
+        "the setpoint may recede past the clear point; actual clearance ends the loop"
+
+
+def test_retract_pull_lead_must_stay_under_the_hard_abort():
+    with pytest.raises(ValueError, match="hard force abort"):
+        V50Config(retract_pull_lead_m=0.040).validated()  # 500 N/m * 40mm = 20 N
+    with pytest.raises(ValueError, match="positive"):
+        V50Config(retract_pull_lead_m=0.0).validated()
 
 
 def test_wall_progress_watch_uses_elapsed_time_not_loop_count():

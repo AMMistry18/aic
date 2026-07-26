@@ -107,6 +107,18 @@ then back to the run-start pose. It drives `set_pose_target` directly because
 setpoint physically cannot retract.** Clearing the mouth but stopping short of
 the start pose still counts as success.
 
+**Fixed 2026-07-26: the pull now builds.** The original phase-1 loop commanded
+`current_tip - retract_step_m` afresh every tick, pinning the pull at
+stiffness x 1.5 mm ~ 0.75 N forever — the v49 chase-the-tip mistake in
+reverse, and no match for a wedge held by diag-5's 4-5 N lateral bind; the
+retry would grind for 10 s and die. `next_retract_depth` now recedes a
+persistent setpoint (mirror of `next_persistent_depth`), building pull to the
+`retract_pull_lead_m` cap: 24 mm x 500 N/m ~ 12 N nominal, validated to stay
+under the 18 N abort (`RL_INSERT_V50_RETRACT_PULL_LEAD_M` to tune).
+Deliberately no floor at the clear depth — a chamfer catch just inside the
+mouth needs the full pull too — and the setpoint clamps to the measured depth
+on pop-free so it never commands the plug back into the bore.
+
 Retries are unbounded by count; the action deadline is the only terminator and
 every cycle consults it.
 
