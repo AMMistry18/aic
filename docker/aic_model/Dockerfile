@@ -50,10 +50,12 @@ RUN cd /ws_aic/src/aic && \
     .pixi/envs/default/bin/python -m py_compile \
        /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
        /ws_aic/src/aic/aic_model/aic_model/v50_controller.py \
+       /ws_aic/src/aic/aic_model/aic_model/sc_controller.py \
+       /ws_aic/src/aic/aic_model/aic_model/sc_visual_alignment.py \
        /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
        /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
     .pixi/envs/default/bin/python -c \
-       "import cv2, ultralytics; from aic_model.RLInsert import RLInsert; from aic_model.v50_controller import run_v50_script; from aic_perception.gripper_masks import GripperMaskBank; GripperMaskBank(); print('SFP V50 imports OK')"
+       "import cv2, ultralytics; from aic_model.RLInsert import RLInsert; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_perception.gripper_masks import GripperMaskBank; GripperMaskBank(); print('SFP V50 + SC visual imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
 ENV RL_INSERT_ACTION_TIME_BUDGET_S=150

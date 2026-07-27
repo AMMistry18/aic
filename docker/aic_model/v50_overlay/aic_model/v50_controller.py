@@ -57,6 +57,7 @@ SEAT_ALIGN_OBSERVE_MOMENT_GAIN = 0.02
 SEAT_WRENCH_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_WINDOW_S = 0.5
+MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1382,26 +1383,79 @@ class PlugRelativeV50Controller:
 
         This is the one viewpoint where re-perception is trustworthy: at the
         aligned standoff the cable drapes over the port, but a retracted plug is
-        back in the pose priming already worked from. A failure here is not
-        fatal -- the previous measured transform is stale, not fabricated, and it
-        is what got the plug into the bore in the first place.
+        back in the pose priming already worked from.  Retry motion is forbidden
+        from using the previous transform, so clear it before requesting a new
+        observation and fail closed if that observation cannot establish one.
         """
+        self.policy._v50_grasp_transform = None
         observation = self._wait_new_observation(
             after_stamp=self.last_observation_stamp,
             timeout_wall_s=2.0,
         )
         if observation is None:
-            self.log.warn(
-                "[v50] no fresh observation after retract; reusing the last "
-                "measured grasp transform"
+            self.log.error(
+                "[v50] no fresh plug observation after retract; retry aborted"
             )
             return False
         if not self._activate_plug_pose(observation):
-            self.log.warn(
-                "[v50] re-perception after retract failed; reusing the last "
-                "measured grasp transform"
+            self.log.error(
+                "[v50] fresh plug pose after retract failed; retry aborted"
             )
             return False
+        return True
+
+    def _refresh_port_pose_after_retract(self) -> bool:
+        """Replace the SFP port target using camera frames newer than the plug pose."""
+
+        perceive = getattr(self.policy, "perceive_port_pose_consensus", None)
+        if perceive is None:
+            self.log.error("[v50] SFP port refresh hook unavailable; retry aborted")
+            return False
+
+        def get_fresh_observation():
+            return self._wait_new_observation(
+                after_stamp=self.last_observation_stamp,
+                timeout_wall_s=2.0,
+            )
+
+        perceived = perceive(self.task, get_fresh_observation)
+        if perceived is None:
+            self.log.error("[v50] fresh SFP port pose after retract failed; retry aborted")
+            return False
+        try:
+            new_pos, new_quat, reproj_px = perceived
+            new_pos = np.asarray(new_pos, dtype=np.float64).reshape(3)
+            new_quat = np.asarray(new_quat, dtype=np.float64).reshape(4)
+            reproj_px = float(reproj_px)
+            quat_norm = float(np.linalg.norm(new_quat))
+            if (
+                not np.all(np.isfinite(new_pos))
+                or not np.all(np.isfinite(new_quat))
+                or not np.isfinite(reproj_px)
+                or quat_norm <= 1e-12
+                or reproj_px > MAX_PORT_REPROJ_PX
+            ):
+                raise ValueError("non-finite or out-of-gate port pose")
+            new_quat = new_quat / quat_norm
+            from .rl_insert_contract import port_frame
+
+            new_Rp = port_frame(new_quat)
+        except (TypeError, ValueError, np.linalg.LinAlgError) as exc:
+            self.log.error(f"[v50] invalid refreshed SFP port pose ({exc}); retry aborted")
+            return False
+
+        # Atomic replacement: no retry stage can observe a mixture of old and
+        # new port position/orientation.  The visual rescue reference follows
+        # this fresh target as well, so no later retry consults the old pose.
+        self.port_pos = new_pos
+        self.port_quat = new_quat
+        self.Rp = new_Rp
+        self._port_pos_initial = new_pos.copy()
+        self.log.info(
+            "[v50] fresh port pose accepted: "
+            f"p={np.round(new_pos, 5).tolist()} "
+            f"q_wxyz={np.round(new_quat, 5).tolist()} reproj={reproj_px:.2f}px"
+        )
         return True
 
     def _hold_legacy_safe_pose(self):
@@ -1472,7 +1526,10 @@ class PlugRelativeV50Controller:
             if not self._retract_to_start(start_tip_pos, start_tip_rotation):
                 return False
             rescued_since_retract = False
-            self._refresh_plug_pose_after_retract()
+            if not self._refresh_plug_pose_after_retract():
+                return False
+            if not self._refresh_port_pose_after_retract():
+                return False
 
 
 def run_v50_script(

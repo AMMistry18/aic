@@ -55,11 +55,23 @@ def test_config_bounds_are_scaled_to_the_bore():
     # its own bore (~11% and ~13%).
     assert 0.05 < config.seat_overtravel_m / SC_INSERT_DEPTH_M < 0.15
     assert 0.05 < config.seat_mouth_zone_m / SC_INSERT_DEPTH_M < 0.20
+    assert config.align_lateral_tol_m == pytest.approx(0.0003)
+    assert config.align_lateral_tol_m < (
+        SC_OPENING_HEIGHT_M - sc_controller.SC_PLUG_HEIGHT_M
+    ) * 0.5
 
     with pytest.raises(ValueError, match="candidate depth"):
         SCConfig(seat_candidate_depth_m=0.030).validated()
     with pytest.raises(ValueError, match="overtravel"):
         SCConfig(seat_overtravel_m=0.004).validated()
+    with pytest.raises(ValueError, match="align tolerance"):
+        SCConfig(align_lateral_tol_m=0.001).validated()
+
+
+def test_alignment_tolerance_has_a_deployment_override(monkeypatch):
+    monkeypatch.setenv("RL_INSERT_SC_ALIGN_LATERAL_TOL_M", "0.0004")
+
+    assert SCConfig.from_env().align_lateral_tol_m == pytest.approx(0.0004)
 
 
 def test_persistent_depth_stops_at_bore_plus_overtravel():
@@ -303,6 +315,126 @@ class _AlignHarness(ScInsertionController):
         return self._f, self._m
 
 
+def test_align_keeps_correcting_below_the_old_one_mm_stop():
+    """A 0.9 mm residual used to start seating; it must now earn another move."""
+
+    class _Policy:
+        def __init__(self):
+            self.targets = []
+
+        def _enforce_action_deadline(self, _move_robot):
+            pass
+
+        def set_pose_target(self, _move_robot, target, **_kwargs):
+            self.targets.append(target)
+
+        def sleep_for(self, _duration):
+            pass
+
+    controller = object.__new__(ScInsertionController)
+    controller.config = SCConfig().validated()
+    controller.policy = _Policy()
+    controller.move_robot = object()
+    controller.log = _RecordingLog()
+    controller.Rp = np.eye(3)
+    controller.Rs = np.eye(3)
+    errors = iter(
+        [
+            (0.0, np.array([0.0009, 0.0]), np.zeros(3), np.zeros(3), np.eye(3)),
+            (0.0, np.array([0.0009, 0.0]), np.zeros(3), np.zeros(3), np.eye(3)),
+            (0.0, np.array([0.0003, 0.0]), np.zeros(3), np.zeros(3), np.eye(3)),
+        ]
+    )
+    controller._errors = lambda: next(errors)
+    controller._tcp_target = lambda tip, rotation: (tip, rotation)
+
+    assert controller._align() is True
+    assert len(controller.policy.targets) == 1
+
+
+def test_missing_visual_observation_is_fail_soft_and_retains_target():
+    controller = object.__new__(ScInsertionController)
+    controller.config = SCConfig().validated()
+    controller.log = _RecordingLog()
+    controller.get_observation = lambda: None
+    controller.port_pos = np.array([0.1, -0.2, 0.3])
+    controller._visual_origin_port_pos = controller.port_pos.copy()
+    controller._visual_last_attempt_wall_s = float("-inf")
+    controller._visual_last_miss_log_wall_s = float("-inf")
+
+    before = controller.port_pos.copy()
+    corrected = controller._visual_refine_port(None, phase="align")
+
+    assert corrected is False
+    np.testing.assert_array_equal(controller.port_pos, before)
+    assert any(
+        "retain_last_target_and_continue" in message
+        for message in controller.log.warn_lines
+    )
+
+
+def test_visual_target_uses_temporal_median_then_freezes():
+    controller = object.__new__(ScInsertionController)
+    controller.config = SCConfig(
+        visual_align_consensus_samples=5,
+        visual_align_consensus_min_agree=4,
+        visual_align_consensus_spread_m=0.00025,
+    ).validated()
+    controller.log = _RecordingLog()
+    controller.Rp = np.eye(3)
+    controller.port_pos = np.zeros(3)
+    controller._visual_origin_port_pos = np.zeros(3)
+    controller._visual_target_locked = False
+    controller._visual_last_correction_xy = np.zeros(2)
+    controller._visual_samples_xy = [
+        np.array([-0.00050, 0.00010]),
+        np.array([-0.00052, 0.00012]),
+        np.array([-0.00048, 0.00009]),
+        np.array([-0.00051, 0.00011]),
+        np.array([+0.00080, -0.00060]),  # temporal outlier
+    ]
+
+    assert controller._finalize_visual_target(phase="prealign") is True
+
+    assert controller._visual_target_locked is True
+    np.testing.assert_allclose(
+        controller.port_pos[:2],
+        [-0.000505, 0.000105],
+        atol=0.000011,
+    )
+    assert any(
+        "SC_VISUAL_LOCK" in message and "target_frozen=true" in message
+        for message in controller.log.info_lines
+    )
+
+
+def test_visual_target_insufficient_batch_freezes_raw_pose_and_continues():
+    controller = object.__new__(ScInsertionController)
+    controller.config = SCConfig(
+        visual_align_consensus_samples=7,
+        visual_align_consensus_min_agree=4,
+    ).validated()
+    controller.log = _RecordingLog()
+    controller.Rp = np.eye(3)
+    controller.port_pos = np.array([0.1, -0.2, 0.3])
+    controller._visual_origin_port_pos = controller.port_pos.copy()
+    controller._visual_target_locked = False
+    controller._visual_samples_xy = [
+        np.array([-0.0005, 0.0001]),
+        np.array([-0.0006, 0.0002]),
+    ]
+
+    before = controller.port_pos.copy()
+    assert controller._finalize_visual_target(phase="prealign") is False
+
+    assert controller._visual_target_locked is True
+    np.testing.assert_array_equal(controller.port_pos, before)
+    assert any(
+        "freeze_raw_pose_and_continue" in message
+        for message in controller.log.warn_lines
+    )
+
+
 class _FakeProjectionCore:
     def build_projection_matrix(self, K, T):
         return np.array(
@@ -544,6 +676,113 @@ def test_sc_prefilter_does_not_warn_when_a_camera_survives(monkeypatch):
     assert log.warn_lines == []
 
 
+def test_port_selection_gates_lateral_distance_in_the_candidate_port_frame(monkeypatch):
+    """A high handoff stays selectable when it is laterally over the mouth."""
+    log = _RecordingLog()
+    tip_pos = np.array([0.3, -0.2, 0.4], dtype=np.float64)
+    # Runtime SC candidates use world -Z as inward.  The 40 mm axial separation
+    # would fail the retired 30 mm 3D gate; its 9 mm port-frame lateral
+    # separation must pass the 10 mm gate.
+    Rp = np.array(
+        [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=np.float64
+    )
+    q_wxyz = matrix_to_quat(Rp)
+    target = {
+        "X": tip_pos - Rp @ np.array([0.009, 0.0, 0.040]),
+        "q_wxyz": q_wxyz,
+        "score": 1.0,
+        "reproj_px": 1.0,
+        "width": _LABEL_WIDTH_M,
+        "height": _LABEL_HEIGHT_M,
+        "opening": "gt_label",
+        "opening_residual_m": 0.0,
+    }
+    assert np.linalg.norm(target["X"] - tip_pos) > 0.030
+
+    class _SelectionCore:
+        def detect_sc_pose(self, *_args, **_kwargs):
+            return []
+
+        def build_projection_matrix(self, *_args):
+            return np.eye(3, 4)
+
+    class _SelectionPolicy:
+        _pc = _SelectionCore()
+
+        def get_logger(self):
+            return log
+
+        def _build_views(self, _obs):
+            return {"left": (None, np.eye(3), np.eye(4)), "right": (None, np.eye(3), np.eye(4))}
+
+        def _tcp(self):
+            return tip_pos - SC_TIP_IN_TCP_POS, np.array([1.0, 0.0, 0.0, 0.0])
+
+    monkeypatch.setattr(sc_controller, "sc_multiview_candidates", lambda *_: [target])
+
+    perceived = sc_controller.perceive_sc_port_pose(_SelectionPolicy(), None, object())
+
+    assert perceived is not None
+    np.testing.assert_allclose(perceived[0], target["X"])
+    assert sc_controller._sc_candidate_lateral_distance(target, tip_pos) == pytest.approx(0.009)
+
+
+def test_port_selection_ranks_lateral_distance_not_full_3d_distance(monkeypatch):
+    """The mouth most laterally aligned wins even when it is axially farther."""
+    log = _RecordingLog()
+    tip_pos = np.array([0.3, -0.2, 0.4], dtype=np.float64)
+    Rp = np.diag([1.0, -1.0, -1.0])
+    q_wxyz = matrix_to_quat(Rp)
+
+    def candidate(lateral_m, axial_m):
+        return {
+            "X": tip_pos - Rp @ np.array([lateral_m, 0.0, axial_m]),
+            "q_wxyz": q_wxyz,
+            "score": 1.0,
+            "reproj_px": 1.0,
+            "width": _LABEL_WIDTH_M,
+            "height": _LABEL_HEIGHT_M,
+            "opening": "gt_label",
+            "opening_residual_m": 0.0,
+        }
+
+    laterally_aligned = candidate(0.002, 0.040)
+    nearer_in_3d = candidate(0.009, 0.001)
+    assert np.linalg.norm(nearer_in_3d["X"] - tip_pos) < np.linalg.norm(
+        laterally_aligned["X"] - tip_pos
+    )
+
+    class _SelectionCore:
+        def detect_sc_pose(self, *_args, **_kwargs):
+            return []
+
+        def build_projection_matrix(self, *_args):
+            return np.eye(3, 4)
+
+    class _SelectionPolicy:
+        _pc = _SelectionCore()
+
+        def get_logger(self):
+            return log
+
+        def _build_views(self, _obs):
+            return {"left": (None, np.eye(3), np.eye(4)), "right": (None, np.eye(3), np.eye(4))}
+
+        def _tcp(self):
+            return tip_pos - SC_TIP_IN_TCP_POS, np.array([1.0, 0.0, 0.0, 0.0])
+
+    monkeypatch.setattr(
+        sc_controller,
+        "sc_multiview_candidates",
+        lambda *_: [nearer_in_3d, laterally_aligned],
+    )
+
+    perceived = sc_controller.perceive_sc_port_pose(_SelectionPolicy(), None, object())
+
+    assert perceived is not None
+    np.testing.assert_allclose(perceived[0], laterally_aligned["X"])
+
+
 # --- the size gate, against the label convention the shipped weights use ------
 #
 # best_sc_pose.pt does not outline the port.  It labels a rectangle centred on
@@ -642,6 +881,48 @@ def test_size_gate_admits_the_shipped_label_rectangle():
     assert candidates, "the model's own 8.8x6.0mm label must not be rejected"
     assert candidates[0]["width"] == pytest.approx(_LABEL_WIDTH_M, abs=1e-5)
     assert candidates[0]["height"] == pytest.approx(_LABEL_HEIGHT_M, abs=1e-5)
+    fitted = candidates[0]["kp_3d"]
+    fitted_width = np.linalg.norm(
+        (fitted[0] + fitted[3]) * 0.5 - (fitted[1] + fitted[2]) * 0.5
+    )
+    fitted_height = np.linalg.norm(
+        (fitted[0] + fitted[1]) * 0.5 - (fitted[2] + fitted[3]) * 0.5
+    )
+    assert fitted_width == pytest.approx(_LABEL_WIDTH_M, abs=1e-9)
+    assert fitted_height == pytest.approx(_LABEL_HEIGHT_M, abs=1e-9)
+    np.testing.assert_allclose(candidates[0]["X"], [0.0, 0.0, _PORT_DEPTH_M], atol=1e-8)
+
+
+def test_joint_fit_is_retained_as_diagnostic_under_corner_noise():
+    views = _stereo_views(_LABEL_WIDTH_M, _LABEL_HEIGHT_M)
+    noise = {
+        "cam_a": np.array([[1.0, -0.5], [-0.5, 0.5], [-1.0, -0.5], [0.5, 0.5]]),
+        "cam_b": np.array([[-0.5, 0.25], [0.25, -0.25], [0.5, 0.25], [-0.25, -0.25]]),
+    }
+    for camera, delta in noise.items():
+        views[camera][0]["kps"] = views[camera][0]["kps"] + delta
+
+    candidate = sc_controller.sc_multiview_candidates(
+        _stereo_policy(), views
+    )[0]
+    # The raw DLT centre drives motion so a forced-size fit cannot reject a
+    # common-centre-biased but otherwise usable frame.  The rigid rectangle is
+    # still computed and exposed for validation/logging.
+    fitted = candidate["fit_kp_3d"]
+    assert fitted is not None
+    fitted_width = np.linalg.norm(
+        (fitted[0] + fitted[3]) * 0.5 - (fitted[1] + fitted[2]) * 0.5
+    )
+    fitted_height = np.linalg.norm(
+        (fitted[0] + fitted[1]) * 0.5 - (fitted[2] + fitted[3]) * 0.5
+    )
+
+    assert fitted_width == pytest.approx(_LABEL_WIDTH_M, abs=1e-9)
+    assert fitted_height == pytest.approx(_LABEL_HEIGHT_M, abs=1e-9)
+    assert candidate["reproj_px"] == candidate["raw_reproj_px"]
+    assert candidate["fit_reproj_px"] is not None
+    assert np.isfinite(candidate["reproj_px"])
+    assert candidate["fit_reproj_px"] != pytest.approx(candidate["reproj_px"])
 
 
 def test_size_gate_survives_a_realistic_underestimate_of_the_short_axis():
