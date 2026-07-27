@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package ai.tar2;
+
+// Intentionally empty: this skill is a deployment/restart probe only.
+message TestSkillParams {}
+
+message TestSkillResult {
+  bool success = 1;
+  string message = 2;
+}

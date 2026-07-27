@@ -107,3 +107,83 @@ def analyze_purple(
         center_error=center_error,
     )
 
+
+
+REQUIRED_CAMERAS = ("left_camera", "center_camera", "right_camera")
+
+
+def purple_centered(report: PurpleReport, trigger: float = 0.10) -> bool:
+    """True when the insignia centroid sits near the image centre."""
+    if not report.seen:
+        return False
+    return (
+        abs(float(report.center_error[0])) < float(trigger)
+        and abs(float(report.center_error[1])) < float(trigger)
+    )
+
+
+def any_purple_seen(reports: dict) -> bool:
+    """True when at least one camera has the insignia in view."""
+    return any(report.seen for report in reports.values())
+
+
+def purple_all_full(
+    reports: dict,
+    *,
+    required: tuple[str, ...] = REQUIRED_CAMERAS,
+) -> bool:
+    """True when every required camera sees the whole unclipped insignia."""
+    for name in required:
+        report = reports.get(name)
+        if report is None or not report.seen or not report.full:
+            return False
+    return True
+
+
+def purple_done(
+    reports: dict,
+    *,
+    center_trigger: float = 0.10,
+    required: tuple[str, ...] = REQUIRED_CAMERAS,
+) -> bool:
+    """All required cameras hold the full insignia and the centre cam is centred.
+
+    Retained from the ``move_to_board_skill`` port for completeness.  Stage 1
+    does **not** use this as its terminal condition -- it hands off on
+    ``_stage2_has_complete_landmark`` instead, which is what Stage 2 actually
+    needs and is reached strictly earlier.
+    """
+    if not purple_all_full(reports, required=required):
+        return False
+    center = reports.get("center_camera")
+    if center is not None and center.seen:
+        return purple_centered(center, trigger=center_trigger)
+    for name in required:
+        report = reports.get(name)
+        if report is not None and purple_centered(report, trigger=center_trigger):
+            return True
+    return False
+
+
+def pick_purple_camera(reports: dict, *, preferred: str | None = None):
+    """Pick the camera to drive insignia centring.
+
+    Prefers a camera that still needs work -- clipped or off-centre -- over one
+    that is already satisfied, so the loop finishes the hard views instead of
+    polishing an easy one.
+    """
+    seen = [(name, report) for name, report in reports.items() if report.seen]
+    if not seen:
+        return None, None
+
+    def rank(item):
+        name, report = item
+        return (
+            0 if report.full else 1,
+            0 if purple_centered(report) else 1,
+            1 if name == "center_camera" else 0,
+            1 if preferred is not None and name == preferred else 0,
+            float(report.area_frac),
+        )
+
+    return max(seen, key=rank)

@@ -1327,6 +1327,77 @@ Stage 2, by contrast, is deterministic, hypothesis-first, offline-sweepable,
 and has been debugged to the point of being trustworthy. **The fix is to make
 Stage 1 look like Stage 2.**
 
+### 19.3 The wrist force guard was the shared root cause (fixed 2026-07-27)
+
+The rebuilt deterministic Stage 1 failed on its very first hardware run without
+commanding a single joint:
+
+```text
+16:06:47  board visibility: success=False done=False force=25.72N
+          msg=wrist force guard active at 25.72N;
+              deterministic acquisition refused
+```
+
+**The wrist FTS reading is raw and untared.** It carries a large constant
+sensor bias plus the tool weight, and only the tool weight rotates in the
+sensor frame. Writing `F = b + R*g`, the free-space magnitude `|F|` sweeps the
+whole interval `[ | |b|-|g| |, |b|+|g| ]` as the wrist reorients — it is **not**
+rotation-invariant, which is exactly what the previous "compare magnitudes
+instead of vectors" guard assumed.
+
+Fitting the two extremes actually observed in free space:
+
+```text
+min free-space reading   13.59 N
+max free-space reading   25.72 N
+  =>  |b| = 19.66 N  (constant bias)
+      |g| =  6.07 N  (tool weight, ~0.62 kg)
+      free-space magnitude swing = 12.13 N
+```
+
+Both shipped thresholds sat **inside** that swing, so both fired in free space:
+
+- the **18 N absolute ceiling** lies inside `[13.6, 25.7]`. It refused the new
+  Stage 1 outright at 25.72 N. It is also why the *old* Stage 1 aborted at
+  17.79 N and 17.06 N;
+- the **5 N magnitude-delta** is less than the 12.13 N swing, so any large
+  reorientation tripped it. That is the `02:01`-`02:10` sequence where four
+  consecutive invocations force-aborted while the arm was in free space.
+
+This retires the "the tool is in contact with the board" reading of §19.1.
+Those were free-space readings at different wrist orientations.
+
+**The fix** (`robot_motion.force_guard_tripped` / `contact_force_n`, now the
+single source of truth for both the skill and `RobotMotion`): contact is force
+the static load **cannot explain**, i.e. magnitude above the measured envelope
+`STATIC_FORCE_ENVELOPE_HI_N = 27 N`, plus a `FORCE_RUNAWAY_CEILING_N = 45 N`
+backstop and a magnitude-change test that only trips beyond the entire
+free-space swing. A caller-supplied ceiling below the envelope is deliberately
+ignored — on an untared sensor it only reports which way the wrist points.
+
+Only force *above* the envelope counts. A reading below it is left alone on
+purpose: a lightly-loaded or properly-tared sensor sits there, and treating
+that as contact fires the guard on a healthy zero reading.
+
+Verified against every magnitude the hardware actually produced:
+
+```text
+raw 13.59 / 14.31 / 14.73 / 17.06 / 17.79 / 25.72 N  ->  unexplained 0.00 N, no trip
+raw 35 N  ->  unexplained  8.00 N, trips
+raw 50 N  ->  unexplained 23.00 N, trips
+```
+
+**Cost, stated plainly:** contact below ~5 N on top of the worst-case static
+load is no longer detectable. That is the unavoidable price of an untared
+sensor. Recovering it needs real gravity compensation — fit `b` and `g` from
+orientation-tagged samples (the skill already resolves `base_T_tcp` at every
+snapshot, so the data is there) and gate on the residual against the predicted
+static wrench. That is the right next step if Stage 1 ever needs finer contact
+sensing; it was out of scope for unblocking the run.
+
+Always log the unexplained component next to the raw magnitude. A bare
+"25.72 N" reads as alarming and is in fact free space.
+
 ## 20. Plan: replace Stage 1 with a deterministic acquisition search
 
 ### 20.1 The prior art on `origin/navigate-to-purple`

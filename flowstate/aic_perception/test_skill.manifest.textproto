@@ -1,0 +1,30 @@
+id {
+  package: "ai.tar2"
+  name: "test_skill_v1"
+}
+display_name: "Test Skill v1 (Lifecycle Probe)"
+vendor {
+  display_name: "TAR-2"
+}
+documentation {
+  description: "Stateless deployment and restart probe. It starts only the standard Flowstate Python gRPC skill service and returns lifecycle probe ok; it has no AIC model, ROS, camera, TF, controller, or persistent-state dependency."
+}
+options {
+  supports_cancellation: true
+  python_config {
+    skill_module: "aic_perception.test_skill"
+    proto_module: "aic_perception.test_skill_pb2"
+    create_skill: "aic_perception.test_skill.TestSkill"
+  }
+}
+dependencies {
+}
+parameter {
+  message_full_name: "ai.tar2.TestSkillParams"
+  default_value {
+    type_url: "type.googleapis.com/ai.tar2.TestSkillParams"
+  }
+}
+return_type {
+  message_full_name: "ai.tar2.TestSkillResult"
+}

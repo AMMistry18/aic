@@ -67,6 +67,7 @@ FROM ubuntu:24.04 AS runtime
 
 ARG SKILL_PACKAGE=aic_perception
 ARG SKILL_NAME=check_board_visibility_skill
+ARG SKILL_CONFIG_NAME=check_board_visibility_skill
 ARG SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main
 # Flowstate lifecycle identity.  This must match the manifest id/name even
 # though the historical source/config basename intentionally omits "_v4".

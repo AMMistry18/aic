@@ -10,6 +10,7 @@ BUILD_SCRIPT = (
     FLOWSTATE_DIR / "scripts" / "build_check_board_visibility_skill.sh"
 )
 MOVE_BUILD_SCRIPT = FLOWSTATE_DIR / "scripts" / "build_move_to_board_skill.sh"
+TEST_BUILD_SCRIPT = FLOWSTATE_DIR / "scripts" / "build_test_skill.sh"
 MANIFEST = (
     FLOWSTATE_DIR
     / "aic_perception"
@@ -24,6 +25,7 @@ def test_v4_image_declares_both_flowstate_identity_labels():
     source = DOCKERFILE.read_text(encoding="utf-8")
     runtime = source.split("FROM ubuntu:24.04 AS runtime", maxsplit=1)[1]
 
+    assert "ARG SKILL_CONFIG_NAME=check_board_visibility_skill" in runtime
     assert "ARG SKILL_ASSET_ID" in runtime
     assert "ARG SKILL_IMAGE_NAME" in runtime
     assert 'test -n "${SKILL_ASSET_ID}"' in runtime
@@ -76,5 +78,23 @@ def test_shared_dockerfile_receives_the_move_skill_identity_too():
     assert "SKILL_IMAGE_NAME=move_to_board_skill_v1" in source
     assert '--build-arg SKILL_NAME="${SKILL_IMAGE_NAME}"' in source
     assert '--build-arg SKILL_CONFIG_NAME="${SKILL_NAME}"' in source
+
+
+def test_stateless_lifecycle_probe_has_an_independent_identity_and_clean_smoke():
+    source = TEST_BUILD_SCRIPT.read_text(encoding="utf-8")
+    manifest = (FLOWSTATE_DIR / "aic_perception" / "test_skill.manifest.textproto").read_text(
+        encoding="utf-8"
+    )
+    implementation = (FLOWSTATE_DIR / "aic_perception" / "test_skill.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'name: "test_skill_v1"' in manifest
+    assert "SKILL_ASSET_ID=ai.tar2.test_skill_v1" in source
+    assert "SKILL_IMAGE_NAME=test_skill_v1" in source
+    assert "\nimport rclpy" not in implementation
+    assert "\nimport cv2" not in implementation
+    assert "RobotMotion" not in implementation
+    assert 'grep -q "TestSkill stopped"' in source
     assert '--build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}"' in source
     assert '--build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}"' in source

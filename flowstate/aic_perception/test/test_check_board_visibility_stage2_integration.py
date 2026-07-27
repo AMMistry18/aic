@@ -72,14 +72,14 @@ def test_stage1_has_no_wall_clock_deadline_and_hands_off_on_exposed_insignia():
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    # Stage 1 is bounded by one deterministic path, per-segment timeouts, and
-    # two observations. An exposed insignia hands off to Stage 2 immediately.
+    # Stage 1 is bounded by a move budget and per-move timeouts, not a
+    # wall clock. An exposed insignia hands off to Stage 2 immediately.
     assert "deadline = started_at" not in method_source
     assert "stage2_reserve_sec" not in method_source
     assert "_stage2_has_complete_landmark(" in method_source
     assert "handoff_to_stage2(snapshot, reports)" in method_source
-    assert "interpolated_joint_waypoints(" in method_source
-    assert "move_joint_target(" in method_source
+    assert "SEEK_STALL_MOVES" in method_source
+    assert "_seek_step(" in method_source
 
 
 def test_stage1_uses_wide_purple_only_as_a_cue_not_completion_authority():
@@ -93,13 +93,13 @@ def test_stage1_uses_wide_purple_only_as_a_cue_not_completion_authority():
     assert "_stage2_has_complete_landmark(" in method_source
 
 
-def test_deterministic_exhaustion_returns_normal_not_done_without_stage2_call():
+def test_seek_stall_returns_normal_not_done_without_stage2_call():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "deterministic_observation_exhausted" in method_source
-    assert "deterministic observation pose reached safely" in method_source
+    assert "seek_stalled" in method_source
+    assert "board seek stalled" in method_source
     assert "_stage2_not_done(" in method_source
     assert "result.target_valid = False" in method_source
 

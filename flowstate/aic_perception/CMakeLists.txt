@@ -71,6 +71,7 @@ endfunction()
 # intentionally minimal move-to-board skill alongside it.
 add_python_skill(check_board_visibility_skill)
 add_python_skill(move_to_board_skill)
+add_python_skill(test_skill)
 
 install(
   DIRECTORY aic_perception/

@@ -24,6 +24,112 @@ ARM_JOINT_NAMES = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Wrist force guard
+#
+# The FTS reading is **raw and untared**: it carries a large constant sensor
+# bias plus the tool weight, and only the tool weight rotates in the sensor
+# frame.  Writing ``F = b + R*g``, the free-space magnitude ``|F|`` sweeps the
+# whole interval ``[ | |b|-|g| |, |b|+|g| ]`` as the wrist reorients.  It is
+# **not** rotation-invariant, which is exactly what the previous "compare
+# magnitudes instead of vectors" guard assumed.
+#
+# Fitted from hardware on 2026-07-27: free-space readings spanned 13.59 N to
+# 25.72 N purely as a function of wrist orientation, giving
+# ``|b| = 19.66 N`` and ``|g| = 6.07 N`` (a ~0.62 kg tool).  Both shipped
+# thresholds sat *inside* that 12.1 N swing, so both fired in free space:
+#
+#   * the 18 N absolute ceiling lies inside [13.6, 25.7].  This is what
+#     refused deterministic Stage 1 outright at 25.72 N, before it commanded a
+#     single joint -- "wrist force guard active at 25.72N; deterministic
+#     acquisition refused";
+#   * the 5 N magnitude-delta is less than the 12.1 N swing, so any large
+#     reorientation tripped it.  That is the 2026-07-27 01:59-02:10 sequence
+#     where four consecutive invocations force-aborted at 14.3-17.8 N while
+#     the arm was in free space.
+#
+# Contact can therefore only be inferred from force that the static envelope
+# cannot explain.  The envelope is padded either side of the measured span.
+STATIC_FORCE_ENVELOPE_LO_N = 12.0
+STATIC_FORCE_ENVELOPE_HI_N = 27.0
+# Free-space magnitude swing the envelope permits; any change larger than this
+# plus the contact threshold cannot be reorientation.
+STATIC_FORCE_SWING_N = STATIC_FORCE_ENVELOPE_HI_N - STATIC_FORCE_ENVELOPE_LO_N
+# Genuine runaway backstop, well clear of the envelope.  A raw ceiling below
+# ``STATIC_FORCE_ENVELOPE_HI_N`` is meaningless on an untared sensor: it only
+# reports which way the wrist happens to be pointing.
+FORCE_RUNAWAY_CEILING_N = 45.0
+
+
+def contact_force_n(
+    force_xyz,
+    *,
+    envelope_lo_n: float = STATIC_FORCE_ENVELOPE_LO_N,
+    envelope_hi_n: float = STATIC_FORCE_ENVELOPE_HI_N,
+) -> float:
+    """Force magnitude that the untared static load cannot account for.
+
+    Zero whenever the reading is consistent with the arm hanging in free space
+    at *some* wrist orientation, which is the most that can be concluded from a
+    single untared sample.  Gravity compensation (fitting ``b`` and ``g`` from
+    orientation-tagged samples) would recover the lost sensitivity; until then
+    this is the honest bound.
+
+    Only force *above* the envelope counts.  A reading below it is left alone
+    deliberately: a lightly-loaded or properly-tared sensor sits there, and
+    calling that "contact" would fire the guard on a healthy zero reading.
+    ``envelope_lo_n`` therefore documents the measured span without gating on
+    it.
+    """
+    if force_xyz is None:
+        return 0.0
+    magnitude = float(np.linalg.norm(np.asarray(force_xyz, dtype=float)))
+    if not math.isfinite(magnitude):
+        return 0.0
+    if magnitude > envelope_hi_n:
+        return magnitude - envelope_hi_n
+    return 0.0
+
+
+def force_guard_tripped(
+    force_xyz,
+    baseline_xyz,
+    max_force_n: float,
+    force_delta_n: float,
+) -> bool:
+    """True when the wrist reading cannot be explained by the static load.
+
+    ``max_force_n`` is honoured as a raw ceiling only when the caller asks for
+    something above the static envelope; otherwise the runaway backstop is
+    used, because a lower raw ceiling cannot distinguish contact from wrist
+    orientation.
+    """
+    if force_xyz is None:
+        return False
+    force = np.asarray(force_xyz, dtype=float)
+    magnitude = float(np.linalg.norm(force))
+    if not math.isfinite(magnitude):
+        return False
+    ceiling = max(float(max_force_n), FORCE_RUNAWAY_CEILING_N)
+    if magnitude >= ceiling:
+        return True
+    if contact_force_n(force_xyz) >= force_delta_n:
+        return True
+    if baseline_xyz is None:
+        return False
+    # A magnitude change larger than the entire free-space swing plus the
+    # contact threshold cannot be reorientation, wherever inside the envelope
+    # both samples happen to sit.
+    baseline = np.asarray(baseline_xyz, dtype=float)
+    baseline_magnitude = float(np.linalg.norm(baseline))
+    if not math.isfinite(baseline_magnitude):
+        return False
+    return (
+        abs(magnitude - baseline_magnitude)
+        >= STATIC_FORCE_SWING_N + force_delta_n
+    )
+
+
 @dataclass(frozen=True)
 class ControllerPose:
     position: tuple[float, float, float]
@@ -860,25 +966,12 @@ class RobotMotion:
         max_force_n: float,
         force_delta_n: float,
     ) -> bool:
-        if force_xyz is None:
-            return False
-        force = np.asarray(force_xyz, dtype=float)
-        if float(np.linalg.norm(force)) >= max_force_n:
-            return True
-        if baseline_xyz is None:
-            return False
-        # The wrist sensor reports its static ~14 N gravity/bias load in the
-        # sensor frame, so any tool reorientation rotates that vector even in
-        # free space (a 0.30 rad wrist yaw moves it by ~4 N against a 5 N
-        # threshold).  Compare magnitudes instead: the norm of a constant
-        # load is rotation-invariant, while genuine contact changes it.
-        baseline = np.asarray(baseline_xyz, dtype=float)
-        return (
-            abs(
-                float(np.linalg.norm(force))
-                - float(np.linalg.norm(baseline))
-            )
-            >= force_delta_n
+        # See ``force_guard_tripped``: the raw reading is untared, so its
+        # magnitude is not rotation-invariant and neither a fixed absolute
+        # ceiling nor a small magnitude-delta can separate contact from wrist
+        # orientation.
+        return force_guard_tripped(
+            force_xyz, baseline_xyz, max_force_n, force_delta_n
         )
 
     def _retreat_to_step_start(

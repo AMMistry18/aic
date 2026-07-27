@@ -9,6 +9,11 @@ import pytest
 
 from aic_perception.robot_motion import (
     base_yaw_target_pose,
+    contact_force_n,
+    force_guard_tripped,
+    FORCE_RUNAWAY_CEILING_N,
+    STATIC_FORCE_ENVELOPE_HI_N,
+    STATIC_FORCE_ENVELOPE_LO_N,
     ControllerPose,
     JointReference,
     MotionFailure,
@@ -863,11 +868,15 @@ def test_full_joint_target_force_abort_reverses_complete_vector(monkeypatch):
     class CameraRig:
         @staticmethod
         def wait_for_force_xyz(timeout_sec, max_age_sec):
-            return (19.0, 0.0, 0.0)
+            # Above the untared free-space envelope (see
+            # STATIC_FORCE_ENVELOPE_HI_N): 19 N is not contact on this sensor.
+            return (34.0, 0.0, 0.0)
 
         @staticmethod
         def latest_force_xyz(max_age_sec):
-            return (19.0, 0.0, 0.0)
+            # Above the untared free-space envelope (see
+            # STATIC_FORCE_ENVELOPE_HI_N): 19 N is not contact on this sensor.
+            return (34.0, 0.0, 0.0)
 
     motion = RobotMotion.__new__(RobotMotion)
     motion._joint_publisher = Publisher()
@@ -991,11 +1000,15 @@ def test_joint1_yaw_force_guard_reverses_to_entire_starting_target(monkeypatch):
     class CameraRig:
         @staticmethod
         def wait_for_force_xyz(timeout_sec, max_age_sec):
-            return (19.0, 0.0, 0.0)
+            # Above the untared free-space envelope (see
+            # STATIC_FORCE_ENVELOPE_HI_N): 19 N is not contact on this sensor.
+            return (34.0, 0.0, 0.0)
 
         @staticmethod
         def latest_force_xyz(max_age_sec):
-            return (19.0, 0.0, 0.0)
+            # Above the untared free-space envelope (see
+            # STATIC_FORCE_ENVELOPE_HI_N): 19 N is not contact on this sensor.
+            return (34.0, 0.0, 0.0)
 
     motion = RobotMotion.__new__(RobotMotion)
     motion._joint_publisher = Publisher()
@@ -1147,22 +1160,110 @@ def test_current_joint1_is_none_until_full_reference_is_fresh(monkeypatch):
     assert motion.current_joint1() == pytest.approx(0.42)
 
 
-def test_force_guard_checks_absolute_and_change_from_baseline():
+def test_force_guard_checks_unexplained_force_not_a_raw_ceiling():
+    """A caller-supplied ceiling below the static envelope is not honoured.
+
+    It cannot be: on an untared sensor a 12 N raw limit only reports which way
+    the wrist is pointing.  Contact is force the static load cannot explain.
+    """
     assert not RobotMotion._force_exceeded((1.0, 2.0, 1.0), (1.0, 2.0, 1.0), 12.0, 5.0)
-    assert RobotMotion._force_exceeded((12.0, 0.0, 0.0), (0.0, 0.0, 0.0), 12.0, 5.0)
-    assert RobotMotion._force_exceeded((6.1, 0.0, 0.0), (1.0, 0.0, 0.0), 12.0, 5.0)
+    assert not RobotMotion._force_exceeded((12.0, 0.0, 0.0), (0.0, 0.0, 0.0), 12.0, 5.0)
+    assert RobotMotion._force_exceeded(
+        (STATIC_FORCE_ENVELOPE_HI_N + 5.0, 0.0, 0.0), (0.0, 0.0, 0.0), 12.0, 5.0
+    )
     assert not RobotMotion._force_exceeded(None, None, 12.0, 5.0)
 
 
 def test_force_guard_ignores_gravity_rotating_in_the_sensor_frame():
-    # A J5/J6 reorientation rotates the static ~14 N gravity/bias load in the
-    # wrist sensor frame.  The vector difference here is ~19.8 N, which used
-    # to trip the 5 N delta guard in free space (live run failure); the
-    # magnitude is unchanged, so the guard must stay quiet.
+    # A J5/J6 reorientation rotates the tool weight in the sensor frame, which
+    # moves the vector *and* the magnitude, because the constant bias does not
+    # rotate with it.  Neither a vector delta nor a magnitude delta survives
+    # that; only force outside the measured free-space envelope does.
     assert not RobotMotion._force_exceeded(
         (0.0, 14.0, 0.0), (14.0, 0.0, 0.0), 18.0, 5.0
     )
-    # Genuine contact changes the magnitude and must still trip.
-    assert RobotMotion._force_exceeded(
-        (0.0, 19.5, 0.0), (14.0, 0.0, 0.0), 25.0, 5.0
+    # 13 -> 19 N is an ordinary free-space swing on this sensor and must stay
+    # quiet: trusting it is what force-aborted four consecutive live runs.
+    assert not RobotMotion._force_exceeded(
+        (19.0, 0.0, 0.0), (13.0, 0.0, 0.0), 18.0, 5.0
     )
+    # Genuine contact leaves the envelope and must still trip.
+    assert RobotMotion._force_exceeded(
+        (0.0, STATIC_FORCE_ENVELOPE_HI_N + 5.0, 0.0), (14.0, 0.0, 0.0), 25.0, 5.0
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wrist force guard on an untared sensor
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_n",
+    (13.59, 14.31, 14.73, 17.06, 17.79, 25.72),
+)
+def test_free_space_hardware_readings_are_not_contact(raw_n):
+    """Every one of these tripped a guard on hardware while in free space.
+
+    The wrist FTS is untared: it reports a ~19.7 N constant bias plus a ~6.1 N
+    tool weight that rotates in the sensor frame, so the free-space magnitude
+    sweeps 13.6-25.7 N with wrist orientation alone.  25.72 N is the reading
+    that refused deterministic Stage 1 before it moved a single joint.
+    """
+    force = (raw_n, 0.0, 0.0)
+    assert contact_force_n(force) == 0.0
+    assert not force_guard_tripped(force, None, 18.0, 5.0)
+
+
+def test_reorientation_across_the_whole_envelope_is_not_contact():
+    """The old magnitude-delta guard fired here; the swing is free space."""
+    low = (STATIC_FORCE_ENVELOPE_LO_N, 0.0, 0.0)
+    high = (STATIC_FORCE_ENVELOPE_HI_N, 0.0, 0.0)
+    assert not force_guard_tripped(high, low, 18.0, 5.0)
+    assert not force_guard_tripped(low, high, 18.0, 5.0)
+
+
+def test_force_beyond_the_static_envelope_is_contact():
+    over = STATIC_FORCE_ENVELOPE_HI_N + 6.0
+    assert contact_force_n((over, 0.0, 0.0)) == pytest.approx(6.0)
+    assert force_guard_tripped((over, 0.0, 0.0), None, 18.0, 5.0)
+
+
+def test_a_reading_below_the_envelope_is_not_treated_as_contact():
+    """A lightly-loaded or tared sensor sits below the envelope.
+
+    Calling that "contact" would fire the guard on a healthy zero reading, so
+    only force *above* the envelope counts.
+    """
+    under = STATIC_FORCE_ENVELOPE_LO_N - 6.0
+    assert contact_force_n((under, 0.0, 0.0)) == 0.0
+    assert not force_guard_tripped((under, 0.0, 0.0), None, 18.0, 5.0)
+    assert contact_force_n((0.0, 0.0, 0.0)) == 0.0
+
+
+def test_a_change_larger_than_the_whole_swing_is_contact():
+    """Even inside the envelope, no reorientation explains this much change."""
+    swing = STATIC_FORCE_ENVELOPE_HI_N - STATIC_FORCE_ENVELOPE_LO_N
+    baseline = (STATIC_FORCE_ENVELOPE_LO_N, 0.0, 0.0)
+    force = (STATIC_FORCE_ENVELOPE_LO_N + swing + 5.0, 0.0, 0.0)
+    assert force_guard_tripped(force, baseline, 18.0, 5.0)
+
+
+def test_raw_ceiling_below_the_envelope_is_ignored():
+    """A ceiling inside the envelope only reports where the wrist points.
+
+    The shipped 18 N absolute limit sits inside [13.6, 25.7] N, so honouring it
+    literally is what refused Stage 1 in free space.
+    """
+    assert STATIC_FORCE_ENVELOPE_LO_N < 18.0 < STATIC_FORCE_ENVELOPE_HI_N
+    assert not force_guard_tripped((25.72, 0.0, 0.0), None, 18.0, 5.0)
+    # The runaway backstop still applies.
+    assert force_guard_tripped(
+        (FORCE_RUNAWAY_CEILING_N + 1.0, 0.0, 0.0), None, 18.0, 5.0
+    )
+
+
+def test_missing_or_nonfinite_force_never_trips():
+    assert not force_guard_tripped(None, None, 18.0, 5.0)
+    assert contact_force_n(None) == 0.0
+    assert contact_force_n((float("nan"), 0.0, 0.0)) == 0.0
