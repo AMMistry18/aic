@@ -7,11 +7,14 @@ WORKSPACE_ROOT=${AIC_WORKSPACE_ROOT:-$(cd -- "${AIC_ROOT}/../.." && pwd)}
 SDK_ROOT="${WORKSPACE_ROOT}/src/sdk-ros"
 DOCKERFILE="${AIC_ROOT}/flowstate/resources/Dockerfile.skill.cv"
 OUTPUT_ROOT=${AIC_SKILL_OUTPUT_ROOT:-"${WORKSPACE_ROOT}/images"}
-OUTPUT_DIR="${OUTPUT_ROOT}/check_board_visibility_skill"
-IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"flowstate:check-board-visibility"}
 INBUILD_BIN=${INBUILD_BIN:-$(command -v inbuild || true)}
 SKILL_ASSET_ID=ai.tar2.check_board_visibility_skill_v4
 SKILL_IMAGE_NAME=check_board_visibility_skill_v4
+OUTPUT_DIR="${OUTPUT_ROOT}/${SKILL_IMAGE_NAME}"
+IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"flowstate:check-board-visibility-v4"}
+IMAGE_TAR="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.tar"
+DESCRIPTOR_SET="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}_protos.desc"
+BUNDLE="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.bundle.tar"
 
 if [[ ! -f "${WORKSPACE_ROOT}/src/aic/pixi.toml" ]]; then
   echo "ERROR: workspace must contain src/aic (set AIC_WORKSPACE_ROOT)." >&2
@@ -77,16 +80,18 @@ docker run --rm --platform linux/amd64 \
         *) exit "$status" ;;
       esac
       grep -q "gRPC server listening" "/tmp/skill-smoke-${boot}.log"
+      ! grep -q "Exception in thread" "/tmp/skill-smoke-${boot}.log"
+      ! grep -q "RCLError" "/tmp/skill-smoke-${boot}.log"
     done
   '
 
-docker save "${IMAGE_TAG}" --output "${OUTPUT_DIR}/check_board_visibility_skill.tar"
+docker save "${IMAGE_TAG}" --output "${IMAGE_TAR}"
 
 container_id=$(docker create --platform linux/amd64 "${IMAGE_TAG}")
 trap 'docker rm -f "${container_id}" >/dev/null 2>&1 || true' EXIT
 docker cp \
   "${container_id}:/opt/ros/overlay/install/share/aic_perception/check_board_visibility_skill_protos.desc" \
-  "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc"
+  "${DESCRIPTOR_SET}"
 # The result now embeds intrinsic_proto.Pose (survey_pose); its transitive
 # descriptors must ship in the bundle for Flowstate to wire the pose output.
 docker cp \
@@ -103,14 +108,19 @@ trap - EXIT
 # and passing intrinsic_proto.desc as a second set duplicates point.proto.
 "${INBUILD_BIN}" skill bundle \
   --manifest "${AIC_ROOT}/flowstate/aic_perception/check_board_visibility_skill.manifest.textproto" \
-  --file_descriptor_set "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc" \
-  --oci_image "${OUTPUT_DIR}/check_board_visibility_skill.tar" \
-  --output "${OUTPUT_DIR}/check_board_visibility_skill.bundle.tar"
+  --file_descriptor_set "${DESCRIPTOR_SET}" \
+  --oci_image "${IMAGE_TAR}" \
+  --output "${BUNDLE}"
 
 sha256sum \
-  "${OUTPUT_DIR}/check_board_visibility_skill.tar" \
-  "${OUTPUT_DIR}/check_board_visibility_skill_protos.desc" \
-  "${OUTPUT_DIR}/check_board_visibility_skill.bundle.tar"
-tar -tf "${OUTPUT_DIR}/check_board_visibility_skill.bundle.tar"
+  "${IMAGE_TAR}" \
+  "${DESCRIPTOR_SET}" \
+  "${BUNDLE}"
+bundle_contents=$(tar -tf "${BUNDLE}")
+printf '%s\n' "${bundle_contents}"
+if ! grep -Fxq "${SKILL_IMAGE_NAME}.tar" <<<"${bundle_contents}"; then
+  echo "ERROR: bundle does not embed ${SKILL_IMAGE_NAME}.tar." >&2
+  exit 2
+fi
 
-echo "Bundle: ${OUTPUT_DIR}/check_board_visibility_skill.bundle.tar"
+echo "Bundle: ${BUNDLE}"

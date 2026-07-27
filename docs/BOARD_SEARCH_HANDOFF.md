@@ -572,7 +572,7 @@ autocalibrate, wrist-camera keep-out against the planner's own reported
 collision configs, `link_segments` tracking the elbow rather than the wrist),
 reachability-gate plumbing and the full-ranking regression in
 `test/test_board_stage2.py`, and per-sector view settings in
-`test/test_check_board_visibility_stage2_integration.py`. **282 passing**.
+`test/test_check_board_visibility_stage2_integration.py`. **286 passing**.
 
 ### 2026-07-26 timing split and Stage-2 optimization
 
@@ -702,7 +702,8 @@ Install the generated bundle only after re-reading the active cluster:
 inctl asset install \
   --org tar-2@xfa-prod-aic-us \
   --cluster "$CLUSTER" \
-  images/check_board_visibility_skill/check_board_visibility_skill.bundle.tar
+  --policy update_compatible \
+  images/check_board_visibility_skill_v4/check_board_visibility_skill_v4.bundle.tar
 ```
 
 Recommended serial wiring is:

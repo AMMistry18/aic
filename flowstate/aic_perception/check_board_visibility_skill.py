@@ -16,6 +16,7 @@ from __future__ import annotations
 from concurrent import futures
 from dataclasses import replace
 import math
+import signal
 import threading
 import time
 import traceback
@@ -37,6 +38,36 @@ BOARD_TALLEST_COMPONENT_Z = 0.1793
 # are never published in the first place.
 TOOL_COMPONENT_CLEARANCE_M = 0.06
 
+# SC bore geometry (``sc_sector_corners``): the mouth is 7.6 x 22.4 mm over a
+# 15.64 mm recess, and the camera is displaced along board X, the normal of the
+# adapter's board-Y long face.
+SC_BORE_DEPTH_M = 0.01564
+SC_BORE_HALF_WIDTH_Y_M = 0.0112
+# How far the ray may walk across the *narrow* axis before the pose is refused.
+#
+# This number is the acceptance criterion, not the adapter, and it is what caps
+# the achievable depth cue.  At the mouth *half* width (3.8 mm) the ray must
+# still reach the back-plane **centre**, which puts a hard 13.66 deg ceiling on
+# the long-face angle -- and the depth cue is f*depth*tan(theta)/dist, so that
+# ceiling capped the cue at 3.3-4.5 px.  That is most of why the SC view was
+# fragile: there was no headroom left to angle into.
+#
+# At the *full* mouth width the criterion instead becomes "a displaced dark
+# strip is still visible", which is what the estimator actually keys on.  The
+# back plane is then partly occluded rather than centred: at 18 deg the strip
+# is 7.6 - 15.64*tan(18) = 2.5 mm wide by 22.4 mm long, and its displacement --
+# the cue itself -- more than doubles.  Measured worst mouth over the whole
+# legal rail, 24 board placements:
+#
+#   band     criterion            worst cue   dark strip
+#   10-13    back centre           3.34 px      4.4 mm
+#   14-18    displaced strip       7.13 px      3.1 mm
+#   16-20    displaced strip       7.99 px      2.5 mm
+#
+# Do not read this as a relaxed *safety* gate: framing, gripper clearance,
+# live-seeded IK and arm-in-view are all unchanged and still hard.
+SC_BORE_X_TOLERANCE_M = 0.0076
+
 FLAGS = flags.FLAGS
 flags.DEFINE_integer("port", 8003, "Port to listen on.", allow_override=True)
 flags.DEFINE_string(
@@ -54,6 +85,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         super().__init__()
         import rclpy
         from rclpy.executors import SingleThreadedExecutor
+        from rclpy.signals import SignalHandlerOptions
         from tf2_ros.buffer import Buffer
         from tf2_ros.transform_listener import TransformListener
 
@@ -63,7 +95,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         from aic_perception.robot_motion import RobotMotion
 
         if not rclpy.ok():
-            rclpy.init()
+            # The gRPC service owns SIGINT/SIGTERM.  rclpy's default signal
+            # handler shuts down the context underneath the executor thread
+            # while the gRPC main thread is still waiting, producing an
+            # RCLError and forcing Kubernetes to SIGKILL the container.
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
         self.config = PerceptionConfig()
         self.node = rclpy.create_node("check_board_visibility_node")
         self.camera_rig = CameraRig(self.node, self.config)
@@ -89,6 +125,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             self.config.wrench_topic,
             self.config.joint_state_topic,
         )
+
+    def close(self) -> None:
+        """Stop ROS callbacks before invalidating their rclpy context."""
+        import rclpy
+
+        try:
+            self._executor.shutdown(timeout_sec=2.0)
+        finally:
+            if self._spin_thread.is_alive():
+                self._spin_thread.join(timeout=2.0)
+            try:
+                self._executor.remove_node(self.node)
+            except Exception:
+                pass
+            self.node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
     def execute(self, request, context):
         from aic_perception import check_board_visibility_skill_pb2 as pb2
@@ -2656,14 +2709,37 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         one camera saw the mouths from their short end and failed.  The mouth's
         transformed long face runs along board Y (22.4 mm); to stand off that
         long face, the camera is displaced along its board-X normal, explicitly
-        supplied rather than inferred from the cluster bounding box.  That is
-        the narrow 7.6 mm bore dimension, so the angle is limited to 10-13 deg and
-        the along-long-face component remains below 2 deg.  The reference view
-        is deliberately no longer allowed to settle near overhead. All three
-        cameras must still frame the entire sector and remain gripper-clear.
-        For each mouth, at least two cameras must also see through the physical
-        bore and retain at least 3.0 px of mouth-to-back-centre displacement.
-        The 144-case IK/camera sweep selects 0.62 m in every scenario.
+        supplied rather than inferred from the cluster bounding box.
+
+        The long-face direction is right and hardware-proven; what was wrong
+        was how far it was allowed to go.  The angle used to stop at 13 deg
+        because the bore gate demanded the ray still reach the back-plane
+        **centre**, a hard 13.66 deg ceiling on the narrow 7.6 mm axis (see
+        ``SC_BORE_X_TOLERANCE_M``).  Since the cue is
+        ``f*depth*tan(theta)/dist``, that ceiling *was* the flakiness: the
+        displacement never exceeded 3.3-4.5 px, and an adapter that slid along
+        its rail lost even that, because the search aims at the sector centroid
+        and a mouth offset ``delta`` is seen at ``atan(tan(theta) - delta/d)``
+        -- about 10 deg of swing over the 115 mm of legal travel, most of the
+        whole cone.
+
+        The gate now accepts a *displaced dark strip* instead of a centred back
+        plane, and the band moves out to 16-20 deg.  Measured worst mouth over
+        the whole legal rail, 24 board placements: 3.34 px -> 7.99 px.  The
+        144-case sweep reports 7.36-8.55 px where it used to report 3.34-4.45,
+        and the bore margin's worst case *improves* from 0.013 to 0.031.
+
+        Standoff follows the angle down to a 0.55-0.62 m ladder -- closest
+        feasible wins, and on this axis closer is also deeper.  Do not go below
+        0.55 m: 0.45 m is the pose that put the tool on top of the ports in
+        both side cameras.
+
+        The along-long-face component still stays below 2 deg.  Tilting there
+        was measured and rejected: the wide axis has a 35.61 deg cone and would
+        carry more cue still, but it is not the face the detector was validated
+        against.  All three cameras must frame the entire sector and remain
+        gripper-clear, and for each mouth at least two cameras must see through
+        the physical bore and retain at least 3.0 px of displacement.
 
         **SFP (0/1)** pick modules read fine from the standard close all-camera
         near-overhead view.
@@ -2690,8 +2766,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 # is longer along X and caused the exact axis swap seen in the
                 # failed camera image.
                 cross_rail_tilt_band_rad=(
-                    math.radians(10.0),
-                    math.radians(13.0),
+                    math.radians(16.0),
+                    math.radians(20.0),
                 ),
                 directional_tilt_axis_board=(1.0, 0.0, 0.0),
                 max_along_rail_tilt_rad=math.radians(2.0),
@@ -2718,9 +2794,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 yaws_rad=tuple(
                     math.radians(deg) for deg in range(-180, 180, 15)
                 ),
-                # The stronger-view 144-case sweep selects this distance in
-                # every scenario. Do not reintroduce closer, weak-angle poses.
-                standoffs_m=(0.62,),
+                # Standoff is a short ladder, not a pin.  ``prefer_far_standoff``
+                # is False so the closest feasible rung wins, and on this axis
+                # closer is also deeper: the cue is f*depth*tan(theta)/dist.
+                # It stays a ladder rather than the full grid because the rungs
+                # below 0.55 m never survive all-camera framing and gripper
+                # clearance -- the 0.45 m pose is the one that put the tool on
+                # top of the ports in both side cameras.
+                standoffs_m=(0.55, 0.58, 0.60, 0.62),
             )
         # SFP (0/1/anything else): the close, all-camera, near-overhead view.
         # The keep-out margin and reorientation budget are NIC's already-proven
@@ -3325,9 +3406,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     board_pose.base_T_board,
                     pose,
                     tcp_T_cam,
-                    half_width_x_m=0.0038,
-                    half_width_y_m=0.0112,
-                    depth_m=0.01564,
+                    half_width_x_m=SC_BORE_X_TOLERANCE_M,
+                    half_width_y_m=SC_BORE_HALF_WIDTH_Y_M,
+                    depth_m=SC_BORE_DEPTH_M,
                     camera_names=expected,
                     required_camera_count=2,
                 )
@@ -3339,7 +3420,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     pose,
                     tcp_T_cam,
                     camera_models,
-                    depth_m=0.01564,
+                    depth_m=SC_BORE_DEPTH_M,
                     camera_names=expected,
                     required_camera_count=2,
                 )
@@ -3405,9 +3486,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 board_pose.base_T_board,
                 candidate.base_T_tcp,
                 tcp_T_cam,
-                half_width_x_m=0.0038,
-                half_width_y_m=0.0112,
-                depth_m=0.01564,
+                half_width_x_m=SC_BORE_X_TOLERANCE_M,
+                half_width_y_m=SC_BORE_HALF_WIDTH_Y_M,
+                depth_m=SC_BORE_DEPTH_M,
                 camera_names=expected,
                 required_camera_count=2,
             )
@@ -3827,9 +3908,20 @@ def start_runner(argv):
     server.add_insecure_port(f"[::]:{FLAGS.port}")
     server.start()
     logging.info("gRPC server listening on port %s", FLAGS.port)
+
+    def stop_service(signum, _frame):
+        logging.info(
+            "CheckBoardVisibilitySkill stopping on signal %s", signum
+        )
+        server.stop(grace=1.0)
+
+    signal.signal(signal.SIGINT, stop_service)
+    signal.signal(signal.SIGTERM, stop_service)
     try:
         server.wait_for_termination()
-    except KeyboardInterrupt:
+    finally:
+        server.stop(grace=0)
+        skill_instance.close()
         logging.info("CheckBoardVisibilitySkill stopped")
 
 

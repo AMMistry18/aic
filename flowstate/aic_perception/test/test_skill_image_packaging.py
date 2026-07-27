@@ -53,10 +53,17 @@ def test_build_rejects_identity_drift_and_smokes_two_cold_starts():
 
     assert f"SKILL_ASSET_ID={SKILL_ASSET_ID}" in source
     assert f"SKILL_IMAGE_NAME={SKILL_IMAGE_NAME}" in source
+    assert 'OUTPUT_DIR="${OUTPUT_ROOT}/${SKILL_IMAGE_NAME}"' in source
+    assert 'IMAGE_TAR="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.tar"' in source
+    assert 'BUNDLE="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.bundle.tar"' in source
+    assert '--oci_image "${IMAGE_TAR}"' in source
+    assert 'grep -Fxq "${SKILL_IMAGE_NAME}.tar"' in source
     assert "actual_asset_id=$(docker image inspect" in source
     assert "actual_image_name=$(docker image inspect" in source
     assert "for boot in 1 2; do" in source
     assert 'grep -q "gRPC server listening"' in source
+    assert '! grep -q "Exception in thread"' in source
+    assert '! grep -q "RCLError"' in source
 
 
 def test_shared_dockerfile_receives_the_move_skill_identity_too():

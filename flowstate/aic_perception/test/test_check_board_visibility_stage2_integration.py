@@ -414,7 +414,7 @@ def test_only_sc_uses_the_explicit_long_face_approach_axis():
         assert settings(target)["cross_rail_tilt_band_rad"] is None
     sc = settings(3)
     band = tuple(math.degrees(value) for value in sc["cross_rail_tilt_band_rad"])
-    assert band == pytest.approx((10.0, 13.0))
+    assert band == pytest.approx((16.0, 20.0))
     assert sc["directional_tilt_axis_board"] == (1.0, 0.0, 0.0)
     assert sc["max_along_rail_tilt_rad"] <= math.radians(2.0)
     assert sc["max_angular_motion_rad"] == pytest.approx(math.pi)
@@ -453,11 +453,17 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     assert sc["require_all_cameras_frame"] is True
     assert sc["prefer_far_standoff"] is False  # cone is met; take the pixels
     low, high = sc["cross_rail_tilt_band_rad"]
-    assert math.radians(9.5) <= low <= high <= math.radians(13.5)
+    # Past the 13.66 deg back-centre cone on purpose: the gate below accepts a
+    # displaced dark strip rather than a centred back plane, and that is where
+    # the depth cue lives (3.3 px at 10-13 deg vs 8.0 px at 16-20 deg).
+    assert math.radians(15.0) <= low <= high <= math.radians(22.0)
     assert sc["directional_tilt_axis_board"] == (1.0, 0.0, 0.0)
     assert sc["max_along_rail_tilt_rad"] <= math.radians(2.0)
+    # A ladder, not a pin: closest-feasible wins and closer is also deeper.
     standoffs = sc["standoffs_m"]
-    assert standoffs == (0.62,)
+    assert standoffs == tuple(sorted(standoffs))
+    assert min(standoffs) >= 0.55, "0.45 put the tool over the ports"
+    assert max(standoffs) <= 0.62
 
     # The tool must clear the tallest thing standing on the board (the NIC card
     # tips), not merely the board plane -- the plane guard sits below them.
@@ -474,9 +480,13 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     # accepting the first reachable pose.
     assert "rectangular_bore_visibility_margin" in method_source
     assert "sc_bore_sample_points()" in method_source
-    assert "half_width_x_m=0.0038" in method_source
-    assert "half_width_y_m=0.0112" in method_source
-    assert "depth_m=0.01564" in method_source
+    # The narrow-axis tolerance is the *acceptance criterion*, and at the full
+    # mouth width it accepts a displaced dark strip instead of demanding the
+    # back-plane centre -- which is what lifts the long-face angle ceiling.
+    assert "half_width_x_m=SC_BORE_X_TOLERANCE_M" in method_source
+    assert "SC_BORE_X_TOLERANCE_M = 0.0076" in source
+    assert "half_width_y_m=SC_BORE_HALF_WIDTH_Y_M" in method_source
+    assert "depth_m=SC_BORE_DEPTH_M" in method_source
     assert "bore_margin < 0.0" in method_source
     assert method_source.count("required_camera_count=2") >= 2
     assert "rectangular_bore_depth_cue_px" in method_source

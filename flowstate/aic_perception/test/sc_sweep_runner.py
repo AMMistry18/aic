@@ -61,15 +61,19 @@ EXIT_JOINTS = (
     np.radians([-17.5, -95.8, -19.5, -143.9, 82.9, 26.8]),
 )
 DEFAULT_POLICY = {
-    "tilt_min_deg": 10.0,
-    "tilt_max_deg": 13.0,
+    "tilt_min_deg": 16.0,
+    "tilt_max_deg": 20.0,
     "aim_x_m": 0.0,
-    "min_standoff_m": 0.62,
+    "min_standoff_m": 0.55,
     "max_standoff_m": 0.62,
     "min_depth_cue_px": 3.0,
     "depth_cue_motion_tolerance_px": 0.10,
     "required_bore_cameras": 2,
     "min_bore_margin": 0.0,
+    # Acceptance criterion on the narrow bore axis.  The full mouth width
+    # (0.0076) accepts a displaced dark strip; the half width (0.0038) demands
+    # the back-plane centre and caps the long-face angle at 13.66 deg.
+    "bore_x_tolerance_m": 0.0076,
     "required_depth_cameras": 2,
     "max_joint_motion_deg": 185.0,
     "j6_preference_motion_tolerance_deg": 30.0,
@@ -158,7 +162,7 @@ def _run_case(case):
             board_pose.base_T_board,
             pose,
             tcp_T_cam,
-            half_width_x_m=0.0038,
+            half_width_x_m=policy["bore_x_tolerance_m"],
             half_width_y_m=0.0112,
             depth_m=0.01564,
             camera_names=tuple(cameras),
@@ -281,7 +285,7 @@ def _run_case(case):
             board_pose.base_T_board,
             candidate.base_T_tcp,
             tcp_T_cam,
-            half_width_x_m=0.0038,
+            half_width_x_m=policy["bore_x_tolerance_m"],
             half_width_y_m=0.0112,
             depth_m=0.01564,
             camera_names=tuple(cameras),
@@ -316,10 +320,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--json", type=Path)
-    parser.add_argument("--tilt-min-deg", type=float, default=10.0)
-    parser.add_argument("--tilt-max-deg", type=float, default=13.0)
+    parser.add_argument("--tilt-min-deg", type=float, default=16.0)
+    parser.add_argument("--tilt-max-deg", type=float, default=20.0)
     parser.add_argument("--aim-x-mm", type=float, default=0.0)
-    parser.add_argument("--min-standoff-m", type=float, default=0.62)
+    parser.add_argument("--min-standoff-m", type=float, default=0.55)
     parser.add_argument("--max-standoff-m", type=float, default=0.62)
     parser.add_argument("--min-depth-cue-px", type=float, default=3.0)
     parser.add_argument(
@@ -327,6 +331,7 @@ def main():
     )
     parser.add_argument("--required-bore-cameras", type=int, default=2)
     parser.add_argument("--min-bore-margin", type=float, default=0.0)
+    parser.add_argument("--bore-x-tolerance-m", type=float, default=0.0076)
     parser.add_argument("--required-depth-cameras", type=int, default=2)
     parser.add_argument("--max-joint-motion-deg", type=float, default=185.0)
     parser.add_argument(
@@ -345,6 +350,7 @@ def main():
         ),
         "required_bore_cameras": args.required_bore_cameras,
         "min_bore_margin": args.min_bore_margin,
+        "bore_x_tolerance_m": args.bore_x_tolerance_m,
         "required_depth_cameras": args.required_depth_cameras,
         "max_joint_motion_deg": args.max_joint_motion_deg,
         "j6_preference_motion_tolerance_deg": (

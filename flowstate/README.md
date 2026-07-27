@@ -123,6 +123,18 @@ fresh-install-only behavior: it can allow the first pod to start while leaving
 the skill unavailable after a solution stop/start reconciliation. Confirm the
 fix with one real stop/start cycle after installing the rebuilt bundle.
 
+The OCI filename is the third identity-bearing value. The generated bundle
+must list:
+
+```text
+check_board_visibility_skill_v4.tar
+```
+
+Do not install a bundle that still contains
+`check_board_visibility_skill.tar`; that disagrees with the v4
+`skill-image-name` and can leave the asset installed without a runnable skill
+workload.
+
 Install against the current cluster, which must be re-read after a simulator
 restart:
 
@@ -130,7 +142,8 @@ restart:
 inctl asset install \
   --org tar-2@xfa-prod-aic-us \
   --cluster "$CLUSTER" \
-  images/check_board_visibility_skill/check_board_visibility_skill.bundle.tar
+  --policy update_compatible \
+  images/check_board_visibility_skill_v4/check_board_visibility_skill_v4.bundle.tar
 ```
 
 Recommended serial process wiring.

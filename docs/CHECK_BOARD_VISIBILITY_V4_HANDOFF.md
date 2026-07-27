@@ -894,7 +894,7 @@ python -m pytest test/ -q
 Current result:
 
 ```text
-282 passed in 79.69s
+286 passed in 65.11s
 ```
 
 Run the SC production sweep separately:
@@ -939,7 +939,7 @@ find src/aic/flowstate -type f \( -name '*.py' -o -name '*.sh' \) \
   -exec sed -i 's/\r$//' {} +
 INBUILD_BIN=$PWD/inbuild \
   bash src/aic/flowstate/scripts/build_check_board_visibility_skill.sh
-AIC_SOLUTION=dc50ce22-2362-4345-85b3-89945912e761_BRANCH \
+AIC_SOLUTION=162d7a70-b696-4260-974d-fdae049e6eaa_BRANCH \
   bash install_skill.sh
 ```
 
@@ -958,7 +958,9 @@ The build script:
    `"gRPC server listening"` log on both starts;
 5. exports the OCI image and descriptor set;
 6. bundles them with `inbuild`;
-7. prints SHA-256 hashes and bundle contents.
+7. requires the bundle manifest to embed
+   `check_board_visibility_skill_v4.tar`;
+8. prints SHA-256 hashes and bundle contents.
 
 The label checks were added after a repeatable lifecycle failure: a freshly
 uploaded pod worked, but stopping and restarting the solution left the v4
@@ -968,15 +970,30 @@ The leading repository-side cause was concrete. The old image advertised
 and omitted `ai.intrinsic.skill-image-name` entirely, while the installed
 manifest and Kubernetes service use `check_board_visibility_skill_v4`.
 Intrinsic's supported skill image template requires both labels. Keep the
-manifest, asset-id label, and image-name label aligned. A real solution
+manifest, asset-id label, and image-name label aligned.
+
+The first label-only rebuild was still incomplete: the bundle embedded
+`check_board_visibility_skill.tar` while the corrected image label said
+`check_board_visibility_skill_v4`. `SkillManifest.assets.image_filename` is
+the platform's image locator, so an installed asset could exist without a
+reconciled skill workload. The build now gives the output directory, OCI tar,
+descriptor, bundle, and image-name label the same v4 basename and rejects a
+bundle that does not contain `check_board_visibility_skill_v4.tar`.
+
+The smoke test also owns SIGINT/SIGTERM and stops gRPC plus the ROS executor in
+order. The prior `RCLError: context is not valid` appeared only after the
+eight-second smoke timeout had already observed port 8003; it was a forced
+shutdown race, not a startup failure.
+
+A real solution
 stop/start after installing the corrected bundle is still the authoritative
 end-to-end validation.
 
 The output bundle is:
 
 ```text
-images/check_board_visibility_skill/
-check_board_visibility_skill.bundle.tar
+images/check_board_visibility_skill_v4/
+check_board_visibility_skill_v4.bundle.tar
 ```
 
 The user will build and push/install. Do not deploy automatically.
