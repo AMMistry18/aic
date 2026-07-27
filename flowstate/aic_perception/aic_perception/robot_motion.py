@@ -504,6 +504,16 @@ class RobotMotion:
             return None
         return float(reference.positions[joint_index])
 
+    def current_joints(
+        self, timeout_sec: float = 0.25
+    ) -> tuple[float, ...] | None:
+        """Expose one coherent fresh six-joint measurement."""
+
+        reference = self._current_joint_reference(timeout_sec)
+        if reference is None or len(reference.positions) != len(ARM_JOINT_NAMES):
+            return None
+        return tuple(float(value) for value in reference.positions)
+
     def current_joint1(self, timeout_sec: float = 0.25) -> float | None:
         """Expose measured shoulder-pan position as a readiness signal."""
 
@@ -1269,6 +1279,322 @@ class RobotMotion:
             cancelled=cancelled,
             _joint_index=5,
             _joint_label="joint 6 (wrist_3_joint)",
+        )
+
+    def move_joint_target(
+        self,
+        target_positions: tuple[float, ...],
+        *,
+        max_speed_radps: float = 0.20,
+        publish_hz: float,
+        settle_tolerance_rad: float = 0.01,
+        settle_tcp_speed_mps: float = 0.02,
+        timeout_sec: float,
+        baseline_force_xyz: tuple[float, float, float] | None,
+        max_force_n: float,
+        force_delta_n: float,
+        cancelled: Callable[[], bool],
+    ) -> MotionOutcome:
+        """Move all six measured joints as one guarded transaction.
+
+        The target is an exact physical joint branch selected by the caller.
+        Force, cancellation, feedback, controller-mode, or settling failures
+        reverse to the complete measured vector saved at transaction start.
+        """
+
+        try:
+            target = tuple(float(value) for value in target_positions)
+        except (TypeError, ValueError):
+            return MotionOutcome(
+                False,
+                "joint target must contain finite numeric positions",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+        numeric_parameters = (
+            max_speed_radps,
+            publish_hz,
+            settle_tolerance_rad,
+            settle_tcp_speed_mps,
+            timeout_sec,
+            max_force_n,
+            force_delta_n,
+        )
+        if len(target) != len(ARM_JOINT_NAMES) or not all(
+            math.isfinite(value) for value in target
+        ):
+            return MotionOutcome(
+                False,
+                "joint target must contain six finite positions",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+        if not all(math.isfinite(float(value)) for value in numeric_parameters):
+            return MotionOutcome(
+                False,
+                "joint-target parameters must be finite",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+        if not 0.0 < max_speed_radps <= 0.20:
+            return MotionOutcome(
+                False,
+                "joint-target speed must be in (0, 0.20] rad/s",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+        if publish_hz <= 0.0 or timeout_sec <= 0.0:
+            return MotionOutcome(
+                False,
+                "publish rate and timeout must be positive",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+        if settle_tolerance_rad < 0.0 or settle_tcp_speed_mps < 0.0:
+            return MotionOutcome(
+                False,
+                "joint settling tolerances must be non-negative",
+                failure=MotionFailure.INVALID_REQUEST,
+            )
+
+        if self._joint_publisher.get_subscription_count() < 1:
+            deadline = time.monotonic() + min(timeout_sec, 2.0)
+            while (
+                self._joint_publisher.get_subscription_count() < 1
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+        if self._joint_publisher.get_subscription_count() < 1:
+            return MotionOutcome(
+                False,
+                "joint pose command has no subscriber",
+                failure=MotionFailure.CONTROLLER_UNAVAILABLE,
+            )
+
+        pre_switch = self._current_joint_reference(min(timeout_sec, 2.0))
+        if pre_switch is None:
+            return MotionOutcome(
+                False,
+                "no fresh measured arm joint state",
+                failure=MotionFailure.JOINT_FEEDBACK_STALE,
+            )
+        if len(pre_switch.positions) != len(target):
+            return MotionOutcome(
+                False,
+                "measured arm vector does not contain six joints",
+                failure=MotionFailure.JOINT_FEEDBACK_STALE,
+            )
+        mode_ok, mode_error = self._ensure_joint_mode(min(timeout_sec, 2.0))
+        if not mode_ok:
+            return MotionOutcome(
+                False, mode_error, failure=MotionFailure.MODE_UNAVAILABLE
+            )
+
+        def finish(outcome: MotionOutcome) -> MotionOutcome:
+            restored, restore_error = self._ensure_cartesian_mode(
+                min(timeout_sec, 2.0)
+            )
+            if restored:
+                return outcome
+            return replace(
+                outcome,
+                success=False,
+                message=f"{outcome.message}; {restore_error}",
+                failure=MotionFailure.MODE_UNAVAILABLE,
+            )
+
+        start = self._next_joint_reference(
+            pre_switch.received_at,
+            min(timeout_sec, 2.0),
+            target_mode=self._mode_joint,
+        )
+        if start is None:
+            return finish(
+                MotionOutcome(
+                    False,
+                    "no newer measured arm state confirming joint target mode",
+                    failure=MotionFailure.MODE_UNAVAILABLE,
+                )
+            )
+        if len(start.positions) != len(target):
+            return finish(
+                MotionOutcome(
+                    False,
+                    "measured arm vector changed size in joint target mode",
+                    failure=MotionFailure.JOINT_FEEDBACK_STALE,
+                )
+            )
+
+        deltas = np.abs(
+            np.asarray(target, dtype=float)
+            - np.asarray(start.positions, dtype=float)
+        )
+        worst_distance = float(deltas.max())
+        if worst_distance <= settle_tolerance_rad:
+            return finish(
+                MotionOutcome(
+                    True,
+                    "joint target already within tolerance",
+                    target_reached=True,
+                )
+            )
+        # Quintic minimum jerk peaks at 1.875 times its average speed.
+        duration = max(0.35, 1.875 * worst_distance / max_speed_radps)
+        if duration >= timeout_sec:
+            return finish(
+                MotionOutcome(
+                    False,
+                    "joint profile exceeds per-move timeout",
+                    joint_distance_rad=worst_distance,
+                    failure=MotionFailure.INVALID_REQUEST,
+                )
+            )
+        if self._camera_rig.wait_for_force_xyz(
+            timeout_sec=min(1.0, timeout_sec), max_age_sec=0.5
+        ) is None:
+            return finish(
+                MotionOutcome(
+                    False,
+                    "no fresh wrist-force sample before joint motion; motion refused",
+                    joint_distance_rad=worst_distance,
+                    failure=MotionFailure.FORCE_FEEDBACK_STALE,
+                )
+            )
+
+        guard_reason = None
+
+        def stop_requested() -> bool:
+            nonlocal guard_reason
+            if cancelled():
+                guard_reason = "cancelled"
+                return True
+            force_xyz = self._camera_rig.latest_force_xyz(max_age_sec=0.5)
+            if force_xyz is None:
+                guard_reason = "stale_force"
+                return True
+            if self._force_exceeded(
+                force_xyz, baseline_force_xyz, max_force_n, force_delta_n
+            ):
+                guard_reason = "force"
+                return True
+            if self._current_joint_reference(0.0) is None:
+                guard_reason = "stale_joints"
+                return True
+            reported_mode = self._reported_target_mode()
+            if reported_mode is not None and reported_mode != self._mode_joint:
+                guard_reason = "mode_changed"
+                return True
+            return False
+
+        def guarded_failure(*, settling: bool = False) -> MotionOutcome:
+            suffix = " while settling" if settling else ""
+            messages = {
+                "cancelled": f"joint target cancelled{suffix} and reversed",
+                "stale_force": (
+                    f"wrist force feedback became stale{suffix}; "
+                    "joint target reversed"
+                ),
+                "stale_joints": (
+                    f"measured joint feedback became stale{suffix}; "
+                    "joint target reversed"
+                ),
+                "mode_changed": (
+                    f"controller left joint target mode{suffix}; "
+                    "joint target reversed"
+                ),
+                "force": (
+                    f"wrist force guard triggered{suffix}; joint target reversed"
+                ),
+            }
+            failures = {
+                "cancelled": MotionFailure.CANCELLED,
+                "stale_force": MotionFailure.FORCE_FEEDBACK_STALE,
+                "stale_joints": MotionFailure.JOINT_FEEDBACK_STALE,
+                "mode_changed": MotionFailure.MODE_CHANGED,
+                "force": MotionFailure.FORCE_LIMIT,
+            }
+            return MotionOutcome(
+                False,
+                messages.get(guard_reason or "", "joint target stopped and reversed"),
+                joint_distance_rad=worst_distance,
+                force_abort=guard_reason == "force",
+                cancelled=guard_reason == "cancelled",
+                failure=failures.get(guard_reason or ""),
+            )
+
+        completed, last_commanded = self._publish_joint_profile(
+            start.positions,
+            target,
+            duration,
+            publish_hz,
+            stop_requested,
+        )
+        if not completed:
+            self._retreat_joint_target(
+                start, last_commanded, max_speed_radps, publish_hz
+            )
+            return finish(guarded_failure())
+
+        deadline = time.monotonic() + max(0.2, timeout_sec - duration)
+        stable_samples = 0
+        last_received_at = start.received_at
+        target_array = np.asarray(target, dtype=float)
+        while time.monotonic() < deadline:
+            if stop_requested():
+                self._retreat_joint_target(
+                    start, target, max_speed_radps, publish_hz
+                )
+                return finish(guarded_failure(settling=True))
+            self._joint_publisher.publish(self._joint_command(target))
+            remaining = max(0.0, deadline - time.monotonic())
+            reference = self._next_joint_reference(
+                last_received_at, min(0.15, remaining)
+            )
+            if reference is not None:
+                last_received_at = reference.received_at
+                if len(reference.positions) != len(target):
+                    self._retreat_joint_target(
+                        start, target, max_speed_radps, publish_hz
+                    )
+                    return finish(
+                        MotionOutcome(
+                            False,
+                            "measured joint vector size changed; target reversed",
+                            joint_distance_rad=worst_distance,
+                            failure=MotionFailure.JOINT_FEEDBACK_STALE,
+                        )
+                    )
+                error = float(
+                    np.max(
+                        np.abs(
+                            np.asarray(reference.positions, dtype=float)
+                            - target_array
+                        )
+                    )
+                )
+                if (
+                    error <= settle_tolerance_rad
+                    and reference.tcp_speed_mps <= settle_tcp_speed_mps
+                ):
+                    stable_samples += 1
+                    if stable_samples >= 3:
+                        return finish(
+                            MotionOutcome(
+                                True,
+                                "measured arm settled at joint target",
+                                joint_distance_rad=worst_distance,
+                                target_reached=True,
+                            )
+                        )
+                else:
+                    stable_samples = 0
+            time.sleep(max(0.02, 1.0 / publish_hz))
+
+        self._retreat_joint_target(
+            start, target, max_speed_radps, publish_hz
+        )
+        return finish(
+            MotionOutcome(
+                False,
+                "measured arm did not settle before timeout; joint target reversed",
+                joint_distance_rad=worst_distance,
+                failure=MotionFailure.TARGET_TIMEOUT,
+            )
         )
 
     def move_smooth(

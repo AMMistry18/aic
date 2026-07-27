@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Flowstate skill that searches for a fully visible task board.
+"""Flowstate skill for deterministic insignia acquisition and board survey.
 
-The skill consumes only documented wrist-camera, measured joint-state,
-controller-state, wrist-force, and robot-mounted TF data. It performs
-image-feedback shoulder-pan centering, wrist-3 long-axis alignment, center-
-camera top-down leveling, and upward clearance through the documented AIC
-controller interface.
-TF lookups are hard-coded to the gripper TCP and the three robot-mounted camera
-optical frames relative to ``base_link``; object and scoring frames are never
-requested.
+Stage 1 observes first and, only when needed, executes one offline-swept,
+force-guarded joint path to a known observation posture. Stage 2 is
+perception-only and computes the target-specific survey pose from the complete
+purple insignia. Inputs remain restricted to documented wrist cameras,
+measured robot state, wrist force, and robot-mounted TF; object, simulation,
+and scoring frames are never requested.
 """
 
 from __future__ import annotations
@@ -206,6 +204,426 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         return result
 
     def _execute_inner(self, params, result, cancelled) -> None:
+        """Expose the insignia from one deterministic observation posture.
+
+        Stage 2 remains the only authority for declaring a usable insignia and
+        for producing the downstream survey target.  Stage 1 observes first,
+        executes one offline-swept joint path only when necessary, observes
+        once more, then either hands the fresh triplet to Stage 2 or returns a
+        normal not-done result while holding the known-safe observation pose.
+        """
+
+        from aic_perception.arm_ik import UR5eArm
+        from aic_perception.board_stage2 import CameraModel
+        from aic_perception.board_visibility import analyze_board, view_quality
+        from aic_perception.purple_insignia import analyze_purple
+        from aic_perception.stage1_acquisition import (
+            OBSERVATION_JOINTS_RAD,
+            interpolated_joint_waypoints,
+            validate_observation_path,
+        )
+
+        min_contrast = int(params.min_contrast or 30)
+        margin_px = int(params.margin_px or 15)
+        ignore_bottom = float(params.ignore_bottom_frac)
+        step_m = float(params.step_m or 0.04)
+        backoff_step_m = float(params.backoff_step_m or step_m)
+        timeout_sec = float(params.timeout_seconds or 10)
+        min_area_frac = float(params.min_area_frac or 0.005)
+        max_force_n = float(params.max_force_n or 18.0)
+        max_speed_mps = float(params.max_speed_mps or 0.05)
+        publish_hz = float(params.publish_hz or 20.0)
+        settle_tolerance_m = float(params.settle_tolerance_m or 0.008)
+        move_timeout_sec = float(params.move_timeout_seconds or 6.0)
+        max_travel_m = float(params.max_travel_m or 0.80)
+        force_delta_n = float(params.force_delta_n or 5.0)
+        search_timeout_sec = float(params.search_timeout_seconds or 60.0)
+        max_displacement_m = float(params.max_displacement_m or 0.50)
+        angular_step_rad = float(params.angular_step_rad or 0.10)
+        max_angular_displacement_rad = float(
+            params.max_angular_displacement_rad or 1.60
+        )
+        max_angular_travel_rad = float(
+            params.max_angular_travel_rad or 2.20
+        )
+        context_margin_frac = float(params.context_margin_frac or 0.05)
+        min_detail_area_frac = float(params.min_detail_area_frac or 0.06)
+        min_rectangularity = float(params.min_rectangularity or 0.50)
+        stable_frames = int(params.stable_frames or 2)
+        max_angular_speed_rps = float(
+            params.max_angular_speed_rps or 0.30
+        )
+        settle_orientation_tolerance_rad = float(
+            params.settle_orientation_tolerance_rad or 0.05
+        )
+        survey_target = int(getattr(params, "survey_target", 0))
+        self._validate_parameters(
+            min_contrast=min_contrast,
+            margin_px=margin_px,
+            ignore_bottom=ignore_bottom,
+            step_m=step_m,
+            backoff_step_m=backoff_step_m,
+            timeout_sec=timeout_sec,
+            min_area_frac=min_area_frac,
+            max_force_n=max_force_n,
+            max_speed_mps=max_speed_mps,
+            publish_hz=publish_hz,
+            settle_tolerance_m=settle_tolerance_m,
+            move_timeout_sec=move_timeout_sec,
+            max_travel_m=max_travel_m,
+            force_delta_n=force_delta_n,
+            search_timeout_sec=search_timeout_sec,
+            max_displacement_m=max_displacement_m,
+            angular_step_rad=angular_step_rad,
+            max_angular_displacement_rad=max_angular_displacement_rad,
+            max_angular_travel_rad=max_angular_travel_rad,
+            context_margin_frac=context_margin_frac,
+            min_detail_area_frac=min_detail_area_frac,
+            min_rectangularity=min_rectangularity,
+            stable_frames=stable_frames,
+            max_angular_speed_rps=max_angular_speed_rps,
+            settle_orientation_tolerance_rad=(
+                settle_orientation_tolerance_rad
+            ),
+        )
+
+        started_at = time.monotonic()
+        baseline_force_xyz = None
+
+        def motion_cancelled() -> bool:
+            return bool(cancelled())
+
+        def handoff_to_stage2(snapshot, reports) -> None:
+            self._run_sfp_geometric_stage2(
+                snapshot=snapshot,
+                reports=reports,
+                result=result,
+                survey_target=survey_target,
+                timeout_sec=timeout_sec,
+                started_at=started_at,
+                max_speed_mps=max_speed_mps,
+                max_angular_speed_rps=max_angular_speed_rps,
+                publish_hz=publish_hz,
+                settle_tolerance_m=settle_tolerance_m,
+                settle_orientation_tolerance_rad=(
+                    settle_orientation_tolerance_rad
+                ),
+                move_timeout_sec=move_timeout_sec,
+                baseline_force_xyz=baseline_force_xyz,
+                max_force_n=max_force_n,
+                force_delta_n=force_delta_n,
+                cancelled=cancelled,
+                motion_cancelled=motion_cancelled,
+            )
+
+        def observe(label: str):
+            nonlocal baseline_force_xyz
+            if cancelled():
+                raise skill_interface.SkillCancelledError(
+                    f"board acquisition cancelled before {label}"
+                )
+            snapshot = self.camera_rig.grab(timeout_sec=timeout_sec)
+            if snapshot is None or not snapshot.frames:
+                result.success = False
+                result.done = False
+                result.target_valid = False
+                result.message = (
+                    "no fresh wrist-camera frame received from approved topics"
+                )
+                return None, None
+            if snapshot.force_xyz is not None and baseline_force_xyz is None:
+                baseline_force_xyz = snapshot.force_xyz
+
+            result.elapsed_seconds = max(
+                0.0, time.monotonic() - started_at
+            )
+            result.target_valid = False
+            result.target_frame = ""
+            result.component_coverage_ready = False
+            result.dx = result.dy = result.dz = 0.0
+            result.backoff = False
+            result.num_cameras = len(snapshot.frames)
+            result.force_n = float(snapshot.force_norm or 0.0)
+            reports = {}
+            purple_reports = {}
+            for camera_name, frame in snapshot.frames.items():
+                ignored = self.gripper_masks.ignored_pixels(
+                    camera_name, frame["image"].shape
+                )
+                reports[camera_name] = analyze_board(
+                    frame["image"],
+                    margin_px=margin_px,
+                    min_area_frac=min_area_frac,
+                    ignore_bottom_frac=ignore_bottom,
+                    min_contrast=float(min_contrast),
+                    min_rectangularity=min_rectangularity,
+                    min_detail_area_frac=min_detail_area_frac,
+                    context_pad_frac=context_margin_frac,
+                    ignore_mask=ignored,
+                )
+                masked = frame["image"].copy()
+                masked[ignored] = 0
+                purple_reports[camera_name] = analyze_purple(
+                    masked, margin_px=margin_px
+                )
+                board_report = reports[camera_name]
+                purple_report = purple_reports[camera_name]
+                logging.info(
+                    "deterministic Stage 1 %s %s: board_seen=%s "
+                    "edges=%s area=%.3f long_ratio=%.2f "
+                    "purple_seen=%s purple_full=%s purple_edges=%s "
+                    "purple_area=%.4f stamp=%s",
+                    label,
+                    camera_name,
+                    board_report.seen,
+                    sorted(board_report.edges),
+                    board_report.area_frac,
+                    board_report.long_axis_ratio,
+                    purple_report.seen,
+                    purple_report.full,
+                    sorted(purple_report.edges),
+                    purple_report.area_frac,
+                    frame["stamp_ns"],
+                )
+
+            result.seen = any(report.seen for report in reports.values())
+            if reports:
+                camera_name, report = max(
+                    reports.items(),
+                    key=lambda item: float(view_quality(item[1])),
+                )
+                result.steer_camera = camera_name
+                result.edges = ",".join(sorted(report.edges))
+                result.area_frac = float(report.area_frac)
+                result.rectangularity = float(report.rectangularity)
+                result.view_quality = float(view_quality(report))
+            return snapshot, reports
+
+        snapshot, reports = observe("initial")
+        if snapshot is None:
+            return
+        if self._force_exceeded(
+            snapshot.force_xyz,
+            baseline_force_xyz,
+            max_force_n,
+            force_delta_n,
+        ):
+            result.success = False
+            result.done = False
+            result.force_abort = True
+            result.message = (
+                f"wrist force guard active at {result.force_n:.2f}N; "
+                "deterministic acquisition refused"
+            )
+            return
+        if self._stage2_has_complete_landmark(snapshot, reports):
+            result.last_action = "initial_insignia_handoff"
+            logging.info(
+                "Stage-2-valid insignia already exposed; no Stage-1 motion"
+            )
+            handoff_to_stage2(snapshot, reports)
+            return
+
+        expected = tuple(sorted(self.config.camera_frames))
+        missing_frames = sorted(set(expected) - set(snapshot.frames))
+        missing_calibration = sorted(
+            set(expected) - set(snapshot.calibrations)
+        )
+        if missing_frames or missing_calibration:
+            result.success = False
+            result.done = False
+            result.message = (
+                "deterministic acquisition requires all approved cameras; "
+                f"missing_frames={missing_frames} "
+                f"missing_calibration={missing_calibration}"
+            )
+            return
+
+        fresh_force = snapshot.force_xyz
+        if fresh_force is None:
+            fresh_force = self.camera_rig.wait_for_force_xyz(
+                timeout_sec=timeout_sec, max_age_sec=0.5
+            )
+        if fresh_force is None:
+            result.success = False
+            result.done = False
+            result.message = (
+                "no fresh wrist-force sample for deterministic acquisition"
+            )
+            return
+        if baseline_force_xyz is None:
+            baseline_force_xyz = fresh_force
+
+        current_joints = self.robot_motion.current_joints(
+            min(timeout_sec, 2.0)
+        )
+        if current_joints is None:
+            result.success = False
+            result.done = False
+            result.message = (
+                "no coherent fresh six-joint state for deterministic acquisition"
+            )
+            return
+
+        try:
+            camera_models = {}
+            tcp_T_cam = {}
+            base_T_tcp_for_calibration = None
+            for camera_name in expected:
+                calibration = snapshot.calibrations[camera_name]
+                frame = snapshot.frames[camera_name]
+                camera_models[camera_name] = CameraModel(
+                    name=camera_name,
+                    K=np.asarray(
+                        calibration.camera_matrix, dtype=float
+                    ).reshape(3, 3),
+                    width=int(calibration.width),
+                    height=int(calibration.height),
+                    distortion=np.asarray(
+                        calibration.distortion, dtype=float
+                    ),
+                )
+                stamp_ns = int(frame["stamp_ns"])
+                base_T_tcp = self._base_transform_at(
+                    self.config.gripper_frame, stamp_ns, timeout_sec
+                )
+                base_T_cam = self._base_transform_at(
+                    self.config.camera_frames[camera_name],
+                    stamp_ns,
+                    timeout_sec,
+                )
+                tcp_T_cam[camera_name] = (
+                    base_T_tcp.inverse().compose(base_T_cam)
+                )
+                if camera_name == "center_camera":
+                    base_T_tcp_for_calibration = base_T_tcp
+            if base_T_tcp_for_calibration is None:
+                raise ValueError("center-camera timestamped TCP is unavailable")
+            arm, calibration_description = UR5eArm.autocalibrate(
+                current_joints, base_T_tcp_for_calibration
+            )
+            if arm is None:
+                raise ValueError(
+                    "UR5e live calibration rejected: "
+                    f"{calibration_description}"
+                )
+            arm = replace(
+                arm,
+                flange_T_probes=tuple(
+                    arm.flange_T_tcp.compose(extrinsic)
+                    for extrinsic in tcp_T_cam.values()
+                ),
+            )
+        except Exception as error:
+            self._stage2_not_done(
+                result,
+                "deterministic acquisition geometry unavailable: "
+                f"{error}",
+            )
+            result.last_action = "acquisition_geometry_rejected"
+            return
+
+        path = validate_observation_path(
+            arm,
+            current_joints,
+            endpoint_arm_clear=lambda pose, joints: (
+                self._arm_clear_of_own_cameras(
+                    pose,
+                    joints,
+                    arm,
+                    tcp_T_cam,
+                    camera_models,
+                )
+            ),
+        )
+        logging.info(
+            "deterministic acquisition path: safe=%s reason=%s "
+            "worst=%.1fdeg total=%.1fdeg min_z=%.3fm max_reach=%.3fm",
+            path.safe,
+            path.reason,
+            math.degrees(path.travel.worst_rad),
+            math.degrees(path.travel.total_rad),
+            path.min_tcp_height_m,
+            path.max_tcp_reach_m,
+        )
+        if not path.safe:
+            self._stage2_not_done(
+                result, f"deterministic acquisition path rejected: {path.reason}"
+            )
+            result.last_action = "acquisition_path_rejected"
+            return
+
+        joint_speed_radps = min(0.20, max_angular_speed_rps)
+        max_segment_joint_rad = max(
+            0.02,
+            0.90
+            * joint_speed_radps
+            * move_timeout_sec
+            / 1.875,
+        )
+        waypoints = interpolated_joint_waypoints(
+            current_joints,
+            OBSERVATION_JOINTS_RAD,
+            max_segment_joint_rad=max_segment_joint_rad,
+        )
+        result.last_action = "move_to_deterministic_observation"
+        for index, waypoint in enumerate(waypoints, start=1):
+            if cancelled():
+                raise skill_interface.SkillCancelledError(
+                    "board acquisition cancelled before joint segment"
+                )
+            outcome = self.robot_motion.move_joint_target(
+                waypoint,
+                max_speed_radps=joint_speed_radps,
+                publish_hz=publish_hz,
+                settle_tolerance_rad=min(
+                    0.02, settle_orientation_tolerance_rad
+                ),
+                timeout_sec=move_timeout_sec,
+                baseline_force_xyz=baseline_force_xyz,
+                max_force_n=max_force_n,
+                force_delta_n=force_delta_n,
+                cancelled=motion_cancelled,
+            )
+            if outcome.cancelled:
+                raise skill_interface.SkillCancelledError(outcome.message)
+            if not outcome.success:
+                result.success = False
+                result.done = False
+                result.target_valid = False
+                result.force_abort = outcome.force_abort
+                result.message = (
+                    "deterministic acquisition segment "
+                    f"{index}/{len(waypoints)} failed: {outcome.message}"
+                )
+                return
+            result.moves_executed += 1
+            result.angular_travel_rad += float(
+                outcome.joint_distance_rad
+            )
+            result.moved = result.moved or (
+                outcome.joint_distance_rad > 0.0
+            )
+
+        snapshot, reports = observe("observation_pose")
+        if snapshot is None:
+            return
+        if self._stage2_has_complete_landmark(snapshot, reports):
+            result.last_action = "deterministic_insignia_handoff"
+            logging.info(
+                "deterministic observation exposed a Stage-2-valid insignia"
+            )
+            handoff_to_stage2(snapshot, reports)
+            return
+
+        result.last_action = "deterministic_observation_exhausted"
+        self._stage2_not_done(
+            result,
+            "deterministic observation pose reached safely, but no calibrated "
+            "camera contains a complete unobstructed insignia",
+        )
+
+    def _execute_inner_legacy(self, params, result, cancelled) -> None:
         from aic_perception.board_visibility import (
             analyze_board,
             combine_cameras,

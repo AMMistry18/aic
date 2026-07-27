@@ -783,6 +783,150 @@ def test_joint1_yaw_rejects_speed_above_documented_limit():
     assert outcome.failure is MotionFailure.INVALID_REQUEST
 
 
+def test_full_joint_target_settles_exact_measured_vector(monkeypatch):
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+        @staticmethod
+        def publish(_message):
+            pass
+
+    class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+        @staticmethod
+        def latest_force_xyz(max_age_sec):
+            return (0.0, 0.0, 0.0)
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._joint_publisher = Publisher()
+    motion._camera_rig = CameraRig()
+    motion._mode_joint = 2
+    start = JointReference(
+        (0.2, -0.4, 0.6, -0.8, 1.0, -1.2),
+        0.0,
+        1.0,
+        target_mode=1,
+    )
+    joint_start = JointReference(start.positions, 0.0, 2.0, target_mode=2)
+    target = (0.25, -0.35, 0.55, -0.75, 0.95, -1.15)
+    settled = JointReference(target, 0.0, 3.0, target_mode=2)
+    monkeypatch.setattr(motion, "_ensure_joint_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion, "_ensure_cartesian_mode", lambda _: (True, "")
+    )
+    monkeypatch.setattr(
+        motion, "_current_joint_reference", lambda *_args, **_kwargs: start
+    )
+    monkeypatch.setattr(
+        motion,
+        "_next_joint_reference",
+        lambda _after, _timeout, target_mode=None: (
+            joint_start if target_mode == 2 else settled
+        ),
+    )
+    monkeypatch.setattr(
+        motion,
+        "_publish_joint_profile",
+        lambda _start, requested, *_args: (True, requested),
+    )
+    monkeypatch.setattr(motion, "_reported_target_mode", lambda: 2)
+    monkeypatch.setattr(
+        motion, "_joint_command", lambda positions: positions
+    )
+
+    outcome = motion.move_joint_target(
+        target,
+        max_speed_radps=0.20,
+        publish_hz=50.0,
+        timeout_sec=2.0,
+        baseline_force_xyz=(0.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert outcome.success and outcome.target_reached
+    assert outcome.joint_distance_rad == pytest.approx(0.05)
+
+
+def test_full_joint_target_force_abort_reverses_complete_vector(monkeypatch):
+    class Publisher:
+        @staticmethod
+        def get_subscription_count():
+            return 1
+
+    class CameraRig:
+        @staticmethod
+        def wait_for_force_xyz(timeout_sec, max_age_sec):
+            return (19.0, 0.0, 0.0)
+
+        @staticmethod
+        def latest_force_xyz(max_age_sec):
+            return (19.0, 0.0, 0.0)
+
+    motion = RobotMotion.__new__(RobotMotion)
+    motion._joint_publisher = Publisher()
+    motion._camera_rig = CameraRig()
+    motion._mode_joint = 2
+    start = JointReference(
+        (0.2, -0.4, 0.6, -0.8, 1.0, -1.2),
+        0.0,
+        1.0,
+        target_mode=1,
+    )
+    joint_start = JointReference(start.positions, 0.0, 2.0, target_mode=2)
+    monkeypatch.setattr(motion, "_ensure_joint_mode", lambda _: (True, ""))
+    monkeypatch.setattr(
+        motion, "_ensure_cartesian_mode", lambda _: (True, "")
+    )
+    monkeypatch.setattr(
+        motion, "_current_joint_reference", lambda *_args, **_kwargs: start
+    )
+    monkeypatch.setattr(
+        motion,
+        "_next_joint_reference",
+        lambda _after, _timeout, target_mode=None: joint_start,
+    )
+    monkeypatch.setattr(motion, "_reported_target_mode", lambda: 2)
+
+    def guarded_profile(start_positions, _target, _duration, _hz, stop):
+        assert stop()
+        return False, start_positions
+
+    monkeypatch.setattr(
+        motion, "_publish_joint_profile", guarded_profile
+    )
+    reversed_to = {}
+    monkeypatch.setattr(
+        motion,
+        "_retreat_joint_target",
+        lambda saved, last, speed, hz: reversed_to.update(
+            saved=saved.positions, last=last, speed=speed, hz=hz
+        ),
+    )
+
+    outcome = motion.move_joint_target(
+        (0.25, -0.35, 0.55, -0.75, 0.95, -1.15),
+        max_speed_radps=0.20,
+        publish_hz=20.0,
+        timeout_sec=2.0,
+        baseline_force_xyz=(13.0, 0.0, 0.0),
+        max_force_n=18.0,
+        force_delta_n=5.0,
+        cancelled=lambda: False,
+    )
+
+    assert not outcome.success and outcome.force_abort
+    assert outcome.failure is MotionFailure.FORCE_LIMIT
+    assert reversed_to["saved"] == start.positions
+    assert reversed_to["last"] == start.positions
+
+
 def test_joint1_yaw_requires_newer_reference_confirming_joint_mode(monkeypatch):
     class Publisher:
         @staticmethod

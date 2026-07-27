@@ -1,9 +1,4 @@
-"""Source-level contracts for the ROS/Flowstate wrapper sequencing.
-
-The runtime wrapper imports Intrinsic and ROS modules that are unavailable in
-the lightweight unit-test environment.  These AST checks protect the ordering
-regression without importing or mocking that external runtime.
-"""
+"""Source-level contracts for deterministic Stage 1 and Flowstate cleanup."""
 
 from __future__ import annotations
 
@@ -26,187 +21,140 @@ def skill_source() -> tuple[str, ast.ClassDef]:
     return source, skill
 
 
-def execute_inner_source() -> tuple[str, ast.FunctionDef]:
+def method(name: str) -> tuple[str, ast.FunctionDef]:
     source, skill = skill_source()
-    execute_inner = next(
+    return source, next(
         node
         for node in skill.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_execute_inner"
+        if isinstance(node, ast.FunctionDef) and node.name == name
     )
-    return source, execute_inner
 
 
 def call_lines(node: ast.AST, attribute: str) -> list[int]:
-    return [
+    return sorted(
         item.lineno
         for item in ast.walk(node)
         if isinstance(item, ast.Call)
         and isinstance(item.func, ast.Attribute)
         and item.func.attr == attribute
-    ]
+    )
 
 
 def named_call_lines(node: ast.AST, name: str) -> list[int]:
-    return [
+    return sorted(
         item.lineno
         for item in ast.walk(node)
         if isinstance(item, ast.Call)
         and isinstance(item.func, ast.Name)
         and item.func.id == name
-    ]
-
-
-def test_planner_runs_before_any_cartesian_motion():
-    _, execute_inner = execute_inner_source()
-
-    planner_lines = call_lines(execute_inner, "next_action")
-    cartesian_lines = call_lines(execute_inner, "move_smooth")
-
-    assert len(planner_lines) == 1
-    assert cartesian_lines
-    assert planner_lines[0] < min(cartesian_lines)
-
-
-def test_leveling_is_phase_gated_and_completion_is_planner_confirmed():
-    source, _ = execute_inner_source()
-
-    assert 'if planner.phase == "j2_4_level":' in source
-    assert "planner.mark_level_complete()" in source
-    assert "survey_confirmation_frames=2" in source
-    assert "ivm_survey_ready" not in source
-
-
-def test_center_topdown_and_side_full_evidence_reach_planner():
-    source, execute_inner = execute_inner_source()
-
-    full_keywords = [
-        keyword.value
-        for item in ast.walk(execute_inner)
-        if isinstance(item, ast.Call)
-        and isinstance(item.func, ast.Name)
-        and item.func.id == "replace"
-        for keyword in item.keywords
-        if keyword.arg == "full"
-    ]
-    assert len(full_keywords) == 1
-    assert isinstance(full_keywords[0], ast.Call)
-    assert isinstance(full_keywords[0].func, ast.Name)
-    assert full_keywords[0].func.id == "bool"
-    assert len(full_keywords[0].args) == 1
-    assert isinstance(full_keywords[0].args[0], ast.BoolOp)
-    assert isinstance(full_keywords[0].args[0].op, ast.And)
-    full_gate = ast.unparse(full_keywords[0])
-    assert "name != 'center_camera'" in full_gate
-    assert "item.full" in full_gate
-    assert "center_top_down" in full_gate
-
-    axes_lines = call_lines(execute_inner, "_camera_axes_in_base")
-    planner_lines = call_lines(execute_inner, "next_action")
-    assert min(axes_lines) < planner_lines[0]
-    assert call_lines(execute_inner, "request_relevel")
-    assert "synchronized three-camera survey" in source
-
-
-def test_component_coverage_is_true_only_on_done():
-    source, _ = execute_inner_source()
-
-    assert "component_coverage_ready = bool" not in source
-    # Legacy NIC/SC completion and geometric staged-SFP completion each own
-    # one terminal assignment.
-    assert source.count("result.component_coverage_ready = True") == 2
-    assert source.count("result.done = True") == 2
-    assert "if action.kind == ActionKind.DONE:" in source
-    done_positions = [
-        index
-        for index in range(len(source))
-        if source.startswith("result.done = True", index)
-    ]
-    coverage_positions = [
-        index
-        for index in range(len(source))
-        if source.startswith("result.component_coverage_ready = True", index)
-    ]
-    assert all(done < coverage for done, coverage in zip(done_positions, coverage_positions))
-
-
-def test_leveling_checks_local_j1_j6_drift_before_acknowledgement():
-    source, _ = execute_inner_source()
-
-    for name in (
-        "pre_level_joint1",
-        "pre_level_joint6",
-        "post_level_joint1",
-        "post_level_joint6",
-        "level_joint1_drift",
-        "level_joint6_drift",
-        "level_joint_drift_tolerance_rad",
-        "level_anchor_joint1",
-        "level_anchor_joint6",
-        "min_level_progress_rad",
-    ):
-        assert name in source
-    assert "post_level_joint1 - level_anchor_joint1" in source
-    assert "post_level_joint6 - level_anchor_joint6" in source
-    assert "returning to visual correction" in source
-    assert "planner.request_recenter()" in source
-    assert source.index("level_joint1_drift =") < source.index(
-        "planner.mark_level_complete()"
     )
 
 
-def test_leveling_uses_fresh_vertical_image_feedback_and_can_reverse():
-    source, _ = execute_inner_source()
-
-    for contract in (
-        "level_vertical_polarity",
-        "pending_level_vertical_sample",
-        "center_report.center_error[1]",
-        "level_image_down",
-        "level_image_right",
-        "gripper_escape_direction",
-        "gripper_overlap_px",
-        "gripper_clearance_px",
-        "level_center_delta",
-        "reversing image-y",
-    ):
-        assert contract in source
-    assert source.index("pending_level_vertical_sample is not None") < source.index(
-        'if planner.phase == "j2_4_level":'
+def test_stage2_landmark_is_checked_before_and_after_only_joint_motion():
+    source, execute_inner = method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
+    landmark_lines = call_lines(
+        execute_inner, "_stage2_has_complete_landmark"
     )
+    joint_lines = call_lines(execute_inner, "move_joint_target")
+
+    assert len(landmark_lines) == 2
+    assert len(joint_lines) == 1
+    assert landmark_lines[0] < joint_lines[0] < landmark_lines[1]
+    assert "move_smooth" not in method_source
+    assert "next_action" not in method_source
 
 
-def test_force_is_acquired_only_after_planning_and_before_motion():
-    source, execute_inner = execute_inner_source()
+def test_path_is_validated_before_any_joint_command():
+    _, execute_inner = method("_execute_inner")
+    path_lines = named_call_lines(
+        execute_inner, "validate_observation_path"
+    )
+    waypoint_lines = named_call_lines(
+        execute_inner, "interpolated_joint_waypoints"
+    )
+    motion_lines = call_lines(execute_inner, "move_joint_target")
 
-    planner_line = call_lines(execute_inner, "next_action")[0]
-    force_lines = named_call_lines(execute_inner, "require_motion_force")
-    assert len(force_lines) == 2
-    assert planner_line < min(force_lines)
-    assert source.count("require_motion_force(snapshot)") == 2
+    assert len(path_lines) == len(waypoint_lines) == len(motion_lines) == 1
+    assert path_lines[0] < waypoint_lines[0] < motion_lines[0]
+    assert call_lines(execute_inner, "_arm_clear_of_own_cameras")
 
 
-def test_legacy_motion_envelopes_do_not_terminate_viewpoint_search():
-    source, _ = execute_inner_source()
+def test_motion_requires_fresh_force_and_coherent_six_joint_state():
+    source, execute_inner = method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
+
+    assert "wait_for_force_xyz" in method_source
+    assert "current_joints" in method_source
+    assert "baseline_force_xyz" in method_source
+    assert "no fresh wrist-force sample" in method_source
+    assert "no coherent fresh six-joint state" in method_source
+    assert call_lines(execute_inner, "wait_for_force_xyz")[0] < call_lines(
+        execute_inner, "move_joint_target"
+    )[0]
+
+
+def test_stage1_never_publishes_an_internal_motion_as_final_target():
+    source, execute_inner = method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
+
+    assert "result.target_valid = False" in method_source
+    assert "result.target.x" not in method_source
+    assert "result.target.qw" not in method_source
+    assert "result.target_frame = \"\"" in method_source
+
+
+def test_deterministic_exhaustion_is_normal_not_done_at_observation_pose():
+    source, execute_inner = method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
+
+    assert 'result.last_action = "deterministic_observation_exhausted"' in method_source
+    assert "deterministic observation pose reached safely" in method_source
+    assert call_lines(execute_inner, "_stage2_not_done")
+    assert "while True" not in method_source
+
+
+def test_legacy_descriptor_inputs_are_still_validated_for_compatibility():
+    source, execute_inner = method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
 
     for name in (
         "max_travel_m",
         "max_displacement_m",
         "max_angular_displacement_rad",
         "max_angular_travel_rad",
+        "search_timeout_sec",
+        "stable_frames",
     ):
-        assert f"{name} = math.inf" in source
-    assert "motion_envelopes=controller_native" in source
+        assert name in method_source
+    assert call_lines(execute_inner, "_validate_parameters")
 
 
-def test_faster_defaults_and_precise_j6_are_declared_by_wrapper():
-    source, _ = execute_inner_source()
+def test_old_phase_machine_is_retained_but_not_runtime_selected():
+    source, skill = skill_source()
+    names = {
+        node.name
+        for node in skill.body
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "_execute_inner" in names
+    assert "_execute_inner_legacy" in names
 
-    assert "params.max_speed_mps or 0.05" in source
-    assert "params.max_angular_speed_rps or 0.30" in source
-    assert "params.move_timeout_seconds or 6.0" in source
-    assert "params.search_timeout_seconds or 60.0" in source
-    assert "j6_tolerance=%.1fdeg" in source
+    execute = next(
+        node
+        for node in skill.body
+        if isinstance(node, ast.FunctionDef) and node.name == "execute"
+    )
+    assert len(call_lines(execute, "_execute_inner")) == 1
+    assert not call_lines(execute, "_execute_inner_legacy")
+    assert "AdaptiveViewpointPlanner" not in ast.get_source_segment(
+        source, next(
+            node
+            for node in skill.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_execute_inner"
+        )
+    )
 
 
 def test_execute_finalizer_prepares_handoff_before_unlocking():

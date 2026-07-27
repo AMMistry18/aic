@@ -15,69 +15,54 @@ base_link <- gripper/tcp
 ```
 
 It does not request task-board, port, module, cable, Gazebo, entity-state, or
-scoring transforms. TF is resolved at each image timestamp. One invocation
-performs the camera/motion loop itself. If
-no camera sees the board, it sends a bounded joint-1 horizontal acquisition
-sweep as a small base-Z Cartesian TCP arc through
-`/aic_controller/pose_commands`. This target rotates TCP position and
-orientation together and is the local forward-kinematics motion of shoulder
-pan, without requiring the live controller to accept a joint-target-mode
-switch. Detection does not end horizontal alignment: a visible left/right edge,
-missing camera, or low board-area fraction seeds a small yaw probe.
-The result is scored across all three cameras, prioritizing camera count and
-then the worst camera's visible board area. The search continues toward an
-improving yaw and tests the opposite side when a probe makes coverage worse.
-Only after all three cameras meet the horizontal coverage target does it send
-base-frame `+Z` Cartesian clearance steps through
-`/aic_controller/pose_commands`, passing the measured TCP orientation through
-unchanged.
+scoring transforms. TF is resolved at each image timestamp.
 
-Stage 1 is feedback-driven, not random and not a fixed sequence. If neither
-yaw direction improves three-camera coverage, it restores the best measured
-yaw, takes one upward escape step, and immediately repeats horizontal
-optimization at the new height. It does not stack upward moves before that yaw
-retry. Stage 1 never pitches the camera or approaches an uncertain board.
-There is no fixed move-count terminal.
+Stage 1 is a deterministic acquisition policy:
 
-For NIC/SC routes, legacy `done` first requires every configured wrist camera
-to see at least 12% board
-pixels by default. After that horizontal gate latches, the board silhouette plus
-a dynamic 5%-of-projected-board context envelope must remain inside one usable
-camera frame for two fresh snapshots. It also requires enough board pixels for
-downstream NIC/SC detail, a sufficiently clean silhouette, and no broad
-board-body contact with the gripper-exclusion boundary. A narrow arm/finger
-bridge into that band is removed before this contact test. This is a geometric
-coverage guarantee for the plate and protruding component zones; IVM downstream
-remains responsible for semantic NIC/SC pose detection.
+1. capture one fresh calibrated three-camera triplet;
+2. hand it directly to Stage 2 if the existing Stage-2 detector finds a
+   complete unobstructed purple insignia in any camera;
+3. otherwise validate and execute one offline-swept observation joint path;
+4. capture one new triplet and either hand it to Stage 2 or return normally
+   with `success=true, done=false, target_valid=false`.
 
-For `STAGED_SFP_MODULE`, Stage 1 hands off only with a complete unobstructed
-purple landmark. A calibrated CAD/PnP Stage 2 then searches one deterministic
-board-relative survey pose. The complete conservative staged-SFP envelope and
-individual legal-seat detail probes must be fully inside all three images,
-clear of every conservative gripper mask by at least 32 pixels, in two fresh
-triplets with at most 50 ms skew. Every camera must produce a board pose that
-agrees with the plan and the other cameras before `done=true`.
+The observation posture was swept over 8 board yaws, 2 tilts, 3 placements,
+and 3 historical live starts. All 144 cases fully frame the insignia in at
+least one calibrated camera. The policy has no image-gradient servo, J1/J6
+phase machine, polarity learning, or open-ended correction loop. A wider
+hardware-proven purple HSV detector is logged as an acquisition cue only; the
+unchanged Stage-2 polygon detector remains the completion authority.
+
+Before motion, the exact six-joint interpolation is checked against physical
+joint limits, live-calibrated UR5e FK, wrist/forearm self-clearance, endpoint
+arm-in-camera exclusion, TCP height/reach, a 185-degree worst-joint cap, and a
+250-degree total-joint cap. The known 501.3-degree failure is therefore
+rejected. The path is split into bounded minimum-jerk transactions, and every
+transaction reverses to its measured start on force, cancellation, stale
+feedback, mode change, or settling timeout. Exhaustion leaves the arm at the
+validated observation posture rather than at an arbitrary failed search exit.
+
+For every deployed `survey_target`, Stage 2 is unchanged: it PnPs the complete
+purple landmark, searches the target-specific board-relative survey pose, and
+publishes that pose for downstream Move Robot. Stage 2 commands no motion.
 
 The internal motion safeguards are:
 
-- quintic minimum-jerk Cartesian setpoints at 20 Hz;
-- at most 0.05 m/s and 0.30 rad/s, with direct-joint moves capped at 0.20 rad/s
-  and coarse-to-fine 0.05-0.15 rad
-  visible-board yaw actions;
-- a 60 second overall deadline, 0.50 m start-relative TCP envelope, 0.80 m
-  cumulative translation, 1.60 rad start-relative J1 yaw, and 2.20 rad
-  cumulative angular travel by default;
-- a finite four-leg joint-1 scan when no camera detects the board, plus
-  image-feedback joint-1 centering when a partial board is already visible;
+- quintic minimum-jerk six-joint setpoints at 20 Hz;
+- direct-joint speed capped at 0.20 rad/s;
+- deterministic segmentation sized from the configured per-move timeout;
+- 185-degree worst-joint and 250-degree total Stage-1 travel caps;
+- live-calibrated FK, joint-limit, self-clearance, arm-in-camera, height, and
+  reach validation before the first command;
 - no motion above 18 N absolute wrist force (2 N below the documented 20 N
   scoring threshold) or a 5 N change from the initial force baseline;
 - immediate reversal to the beginning of the current step on force or
   cancellation;
-- measured-TCP pose settling and controller-subscriber checks after every move;
-- confirmation of a strictly newer joint-mode controller sample before any
-  shoulder-pan command; and
-- bounded time, force, displacement, and cumulative-travel termination rather
-  than a trial-step limit.
+- measured full-joint settling and controller-subscriber checks after every
+  segment;
+- confirmation of a strictly newer joint-mode controller sample before every
+  segment; and
+- exactly two observations and one bounded path rather than an open search.
 
 `aic_controller` provides command clamping, smoothing, impedance control, and a
 tracking-error safety reset. It is not the Flowstate world-model motion planner

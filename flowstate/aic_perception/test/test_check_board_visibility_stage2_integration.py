@@ -55,19 +55,16 @@ def _named_calls(node: ast.AST, name: str) -> list[int]:
     )
 
 
-def test_stage1_done_hands_off_in_place_instead_of_returning_success():
+def test_stage1_handoff_uses_the_existing_geometric_stage2_closure():
     source, _ = _source_and_class()
-    done_start = source.index("if action.kind == ActionKind.DONE:")
-    terminal_start = source.index("if action.terminal:", done_start)
-    done_branch = source[done_start:terminal_start]
+    execute_inner = _method("_execute_inner")
+    method_source = ast.get_source_segment(source, execute_inner)
 
-    # The DONE branch hands SFP off through the shared closure and keeps the
-    # legacy terminal contract for the NIC/SC enum values.
-    assert "handoff_to_stage2(snapshot, reports)" in done_branch
-    assert "if not staged_sfp_target" in done_branch
-    assert "result.done = True" in done_branch
-    # Stage 1 no longer imposes a wall-clock deadline on the handoff.
-    assert "deadline" not in done_branch
+    assert "self._run_sfp_geometric_stage2(" in method_source
+    # One nested function declaration and two call sites.
+    assert method_source.count("handoff_to_stage2(snapshot, reports)") == 3
+    assert method_source.count("_stage2_has_complete_landmark(") == 2
+    assert "result.done = True" not in method_source
 
 
 def test_stage1_has_no_wall_clock_deadline_and_hands_off_on_exposed_insignia():
@@ -75,36 +72,36 @@ def test_stage1_has_no_wall_clock_deadline_and_hands_off_on_exposed_insignia():
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    # Stage 1 imposes no wall-clock deadline; the planner terminates on its own
-    # stall condition and an exposed insignia hands off to Stage 2 early.
+    # Stage 1 is bounded by one deterministic path, per-segment timeouts, and
+    # two observations. An exposed insignia hands off to Stage 2 immediately.
     assert "deadline = started_at" not in method_source
     assert "stage2_reserve_sec" not in method_source
-    assert "deadline_reached=False" in method_source
     assert "_stage2_has_complete_landmark(" in method_source
     assert "handoff_to_stage2(snapshot, reports)" in method_source
+    assert "interpolated_joint_waypoints(" in method_source
+    assert "move_joint_target(" in method_source
 
 
-def test_stage1_does_not_inject_logo_acquisition_moves():
+def test_stage1_uses_wide_purple_only_as_a_cue_not_completion_authority():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "max_logo_acquisition_moves" not in method_source
+    assert "analyze_purple" in method_source
     assert "_move_to_acquire_complete_logo(" not in method_source
+    assert "purple_report.full" in method_source  # diagnostics only
+    assert "_stage2_has_complete_landmark(" in method_source
 
 
-def test_stagnated_legacy_stage1_hands_its_final_triplet_to_stage2():
+def test_deterministic_exhaustion_returns_normal_not_done_without_stage2_call():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "if action.terminal:" in method_source
-    assert "if staged_sfp_target:" in method_source
-    assert "Stage-1 planner ended" in method_source
-    assert "to geometric Stage 2" in method_source
-    assert "handoff_to_stage2(snapshot, reports)" in method_source
-    # The shared closure still invokes the geometric stage.
-    assert "self._run_sfp_geometric_stage2(" in method_source
+    assert "deterministic_observation_exhausted" in method_source
+    assert "deterministic observation pose reached safely" in method_source
+    assert "_stage2_not_done(" in method_source
+    assert "result.target_valid = False" in method_source
 
 
 def test_stage2_seed_uses_insignia_not_the_board_outline_or_full_report():
