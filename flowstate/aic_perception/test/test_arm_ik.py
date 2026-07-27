@@ -7,8 +7,6 @@ import pytest
 
 from aic_perception.arm_ik import (
     JOINT_LIMITS,
-    SC_MOVE_ROBOT_JOINT_LIMITS,
-    SC_MOVE_ROBOT_JOINT_LIMITS_DEG,
     UR5eArm,
     _DH_A,
     _DH_ALPHA,
@@ -17,6 +15,20 @@ from aic_perception.arm_ik import (
     lift_into_joint_limits,
 )
 from aic_perception.board_stage2 import Transform
+
+
+_TEST_JOINT_WINDOW_DEG = np.array(
+    [
+        [-180.0, 180.0],
+        [-190.0, -20.0],
+        [-150.0, 150.0],
+        [-170.0, 100.0],
+        [-130.0, 130.0],
+        [-90.0, 190.0],
+    ],
+    dtype=float,
+)
+_TEST_JOINT_WINDOW = np.radians(_TEST_JOINT_WINDOW_DEG)
 
 
 def _random_joints(rng, n):
@@ -146,45 +158,23 @@ def test_solve_ranked_exposes_every_forearm_clear_finite_branch():
     assert ranked[0][5] == pytest.approx(seed[5])
 
 
-def test_sc_move_robot_limits_are_j1_through_j6_and_exclude_full_turns():
-    assert SC_MOVE_ROBOT_JOINT_LIMITS_DEG.tolist() == [
-        [-53.6, 170.1],
-        [-187.0, -28.9],
-        [-122.4, 94.1],
-        [-127.7, 43.8],
-        [-116.1, 114.8],
-        [-71.5, 180.8],
-    ]
-    assert np.allclose(
-        SC_MOVE_ROBOT_JOINT_LIMITS,
-        np.radians(SC_MOVE_ROBOT_JOINT_LIMITS_DEG),
-    )
-    assert np.all(SC_MOVE_ROBOT_JOINT_LIMITS[:, 0] >= JOINT_LIMITS[:, 0])
-    assert np.all(SC_MOVE_ROBOT_JOINT_LIMITS[:, 1] <= JOINT_LIMITS[:, 1])
-    assert np.all(
-        SC_MOVE_ROBOT_JOINT_LIMITS[:, 1]
-        - SC_MOVE_ROBOT_JOINT_LIMITS[:, 0]
-        < 2.0 * math.pi
-    )
-
-
-def test_flowstate_joint_window_maps_coterminal_wrist_values():
-    # Values observed in the 96-case sweep.  The Flowstate window represents
-    # them as the identical physical poses at -102.1 and -18.2 degrees.
+def test_optional_joint_window_maps_coterminal_wrist_values():
+    # The generic IK API can still represent a solution inside a caller-owned
+    # window, but production SC target selection no longer installs one.
     raw = np.radians([20.0, -80.0, 70.0, -100.0, 257.9, 341.8])
     mapped = lift_into_joint_limits(
         raw,
-        SC_MOVE_ROBOT_JOINT_LIMITS,
+        _TEST_JOINT_WINDOW,
         reference=np.radians([-9.15, -77.59, -95.39, -97.02, 90.01, 170.84]),
     )
     assert mapped is not None
     assert np.degrees(mapped[4]) == pytest.approx(-102.1)
     assert np.degrees(mapped[5]) == pytest.approx(-18.2)
-    assert np.all(mapped >= SC_MOVE_ROBOT_JOINT_LIMITS[:, 0])
-    assert np.all(mapped <= SC_MOVE_ROBOT_JOINT_LIMITS[:, 1])
+    assert np.all(mapped >= _TEST_JOINT_WINDOW[:, 0])
+    assert np.all(mapped <= _TEST_JOINT_WINDOW[:, 1])
 
 
-def test_solve_ranked_can_mirror_the_flowstate_joint_window():
+def test_solve_ranked_can_honor_an_optional_caller_joint_window():
     arm = UR5eArm()
     seed = np.radians([-9.15, -77.59, -95.39, -97.02, 90.01, 170.84])
     target_joints = np.radians([20.0, -80.0, 70.0, -100.0, -102.1, -18.2])
@@ -193,12 +183,12 @@ def test_solve_ranked_can_mirror_the_flowstate_joint_window():
     ranked = arm.solve_ranked(
         target,
         seed,
-        joint_limits=SC_MOVE_ROBOT_JOINT_LIMITS,
+        joint_limits=_TEST_JOINT_WINDOW,
     )
 
     assert ranked
-    assert all(np.all(q >= SC_MOVE_ROBOT_JOINT_LIMITS[:, 0]) for q in ranked)
-    assert all(np.all(q <= SC_MOVE_ROBOT_JOINT_LIMITS[:, 1]) for q in ranked)
+    assert all(np.all(q >= _TEST_JOINT_WINDOW[:, 0]) for q in ranked)
+    assert all(np.all(q <= _TEST_JOINT_WINDOW[:, 1]) for q in ranked)
     assert any(np.allclose(q, target_joints, atol=1e-9) for q in ranked)
 
 

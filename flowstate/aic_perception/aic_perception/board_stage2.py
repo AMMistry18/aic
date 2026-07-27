@@ -282,10 +282,82 @@ def sfp_sector_corners() -> np.ndarray:
     """SFP pick modules on the +Y rail (SFP mount rail 1).
 
     Rail at board-X 0.055; rail-1 mounts sit at Y = 0.10625 +/- 0.09625 travel;
-    the box adds the SFP body half-extent.  This is the ``STAGED_SFP_MODULE``
-    survey target.
+    the box adds the SFP body half-extent.
+
+    **Superseded as the ``STAGED_SFP_MODULE`` survey target.**  This box covers
+    one rail only.  Staged modules occupy five of *six* legal seats spread over
+    **both** rails (board Y -0.15625 .. +0.15625, see
+    ``sfp_module_detail_boxes``), so framing this box guarantees nothing about
+    the -Y rail: the search would push to its closest standoff with the +Y half
+    just fitting and the outer -Y seat cropped.  That is exactly the observed
+    hardware failure -- four modules returned at board Y -0.1066, -0.0565,
+    +0.1066, +0.1566 with the fifth seat at -0.15625 outside the frame.  Kept
+    for the regression sweep; use ``sfp_module_strip_corners``.
     """
     return _sector_box_corners((0.02, 0.09), (0.0, 0.225), (0.01, 0.06))
+
+
+# Board-X strip that contains the staged modules.  Covers the CAD mount origins
+# (SFP_RAIL_X 0.055 +/- the 0.025 body half-extent = 0.030 .. 0.080) *and* the
+# detected module bodies, which sit at board X ~0.0862 because the transceiver
+# protrudes from its mount origin -- only 3.8 mm inside the superseded sector's
+# 0.09 edge, and 28 mm inside this one.
+#
+# Measured: board-X width is not what costs standoff.  85 mm, 65 mm and 50 mm
+# boxes give bit-identical sweep results; only board Y moves the frontier.  So
+# this is sized for margin, not for tightness.
+SFP_SPAN_X = (0.030, 0.115)
+SFP_SPAN_Z = (0.01, SFP_ENVELOPE_Z_MAX)
+# Outermost legal seat centre on either rail, padded by the module body
+# half-extent along Y (both from ``sfp_module_detail_boxes``).
+SFP_SEAT_Y_ABS = 0.15625
+SFP_SEAT_HALF_Y = 0.022
+
+
+# Board-Y half-span of the staged-SFP coverage box.  Deliberately the *same*
+# 0.225 m extent as the superseded one-rail sector -- only its placement moves.
+#
+# It does not itself contain the outermost seats (+/-0.15625).  It does not need
+# to: the box sets what the survey aims at and how far it stands off, and the
+# resulting view then holds every seat with 119-158 px of image margin, measured
+# over the full 144-case board/placement/live-start sweep.  Growing it past this
+# is a bad trade -- it buys ~30 px of seat margin nobody needs and pushes the
+# selected standoff from 0.64 m out to 0.85-0.90 m, shrinking every module in
+# the image.  See ``test/sfp_sweep_runner.py`` for the frontier:
+#
+#   y_half   found/144   all-5 framed   standoff
+#   0.1125      92           92         0.64-0.85
+#   0.1450      58           58         0.80-0.85
+#   0.1600      35           35         0.85-0.90
+#   0.1783       0            -         infeasible
+SFP_COVERAGE_HALF_Y = 0.1125
+
+
+def sfp_module_strip_corners() -> np.ndarray:
+    """The staged-SFP coverage target: the module strip, centred (board frame).
+
+    This is the ``STAGED_SFP_MODULE`` survey target.  It has the same size as
+    the superseded ``sfp_sector_corners`` and sits in a different place, and
+    that placement is the entire fix.
+
+    The old box covered the +Y rail alone (Y 0.0 .. 0.225), so the point the
+    survey aimed at sat 112.5 mm off the middle of the staged modules.  The
+    modules run Y -0.15625 .. +0.15625 across both rails, so every bit of the
+    search's framing slack was banked on the +Y side -- one sweep case puts the
+    -Y end 57 px outside the image while the +Y end carries 318-387 px of
+    margin.  That asymmetry is the 4-of-5 hardware failure.
+
+    Straddling Y=0 spreads the same slack evenly over both ends of the strip.
+    Measured over the 144-case sweep at identical search settings: the old box
+    clips a module in **96 of its 96** found poses (35 of them showing only
+    four of the six seats, worst seat 123.9 px outside frame); this one frames
+    every module in **all 92** of its found poses, with 118.5 px to spare.
+    """
+    return _sector_box_corners(
+        SFP_SPAN_X,
+        (-SFP_COVERAGE_HALF_Y, SFP_COVERAGE_HALF_Y),
+        SFP_SPAN_Z,
+    )
 
 
 def sc_sector_corners() -> np.ndarray:

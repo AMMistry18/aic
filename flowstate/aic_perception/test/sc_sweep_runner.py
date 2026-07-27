@@ -1,4 +1,4 @@
-"""Offline 96-case production-geometry sweep for the SC survey policy.
+"""Offline production-geometry sweep for the SC survey policy.
 
 Run from ``flowstate/aic_perception``:
 
@@ -7,9 +7,9 @@ Run from ``flowstate/aic_perception``:
 This is intentionally not named ``test_*.py`` because the full sweep takes
 minutes and is a pre-hardware validation tool, not part of the two-minute unit
 suite.  It exercises board yaw, tilt, placement, two Stage-1 wrist-roll exits,
+the exact chained hardware start that exposed the old absolute-window failure,
 the production camera intrinsics/extrinsics and gripper masks, the analytic IK
-and camera/forearm gates, SC bore visibility, and the fixed Flowstate joint
-window used to prevent co-terminal full-turn paths.
+and camera/forearm gates, SC bore visibility, and live-relative joint travel.
 """
 
 from __future__ import annotations
@@ -34,11 +34,7 @@ from test_board_stage2 import (  # noqa: E402
     axis_angle_rotation,
 )
 
-from aic_perception.arm_ik import (  # noqa: E402
-    SC_MOVE_ROBOT_JOINT_LIMITS,
-    UR5eArm,
-    _rot_z,
-)
+from aic_perception.arm_ik import JOINT_LIMITS, UR5eArm, _rot_z  # noqa: E402
 from aic_perception.board_stage2 import (  # noqa: E402
     BoardPoseEstimate,
     Transform,
@@ -58,6 +54,11 @@ HOME_DEG = np.array([-9.15, -77.59, -95.39, -97.02, 90.01, 80.84])
 EXIT_JOINTS = (
     np.radians(HOME_DEG),
     np.radians(HOME_DEG + np.array([0, 0, 0, 0, 0, 90.0])),
+    # Exact live start from the 2026-07-26 chained NIC/SFP -> SC failure.  The
+    # former absolute window rejected J4=-143.9 deg before evaluating a single
+    # SC pose.  Relative gating must accept this state and judge only travel
+    # from it.
+    np.radians([-17.5, -95.8, -19.5, -143.9, 82.9, 26.8]),
 )
 DEFAULT_POLICY = {
     "tilt_min_deg": 10.0,
@@ -70,7 +71,7 @@ DEFAULT_POLICY = {
     "required_bore_cameras": 2,
     "min_bore_margin": 0.0,
     "required_depth_cameras": 2,
-    "max_joint_motion_deg": 220.0,
+    "max_joint_motion_deg": 185.0,
     "j6_preference_motion_tolerance_deg": 30.0,
 }
 
@@ -117,16 +118,17 @@ def _run_case(case):
     )
     seed = EXIT_JOINTS[exit_index]
     current_base_T_tcp = arm.fk(seed)
-    j6_low, j6_high = SC_MOVE_ROBOT_JOINT_LIMITS[5]
+    j6_low, j6_high = JOINT_LIMITS[5]
     requested_flips = (seed[5] + math.pi, seed[5] - math.pi)
-    clipped_flips = tuple(
-        float(np.clip(value, j6_low, j6_high)) for value in requested_flips
+    legal_flips = tuple(
+        float(value)
+        for value in requested_flips
+        if j6_low - 1e-9 <= value <= j6_high + 1e-9
     )
-    preferred_j6 = min(
-        clipped_flips,
-        key=lambda clipped: min(
-            abs(clipped - requested) for requested in requested_flips
-        ),
+    preferred_j6 = (
+        legal_flips[0]
+        if legal_flips
+        else float(np.clip(requested_flips[0], j6_low, j6_high))
     )
 
     rotation = axis_angle_rotation(
@@ -181,7 +183,6 @@ def _run_case(case):
         solutions = arm.solve_ranked(
             pose,
             seed,
-            joint_limits=SC_MOVE_ROBOT_JOINT_LIMITS,
         )
         ik_counts["solved"] += len(solutions)
         clear = [
@@ -327,7 +328,7 @@ def main():
     parser.add_argument("--required-bore-cameras", type=int, default=2)
     parser.add_argument("--min-bore-margin", type=float, default=0.0)
     parser.add_argument("--required-depth-cameras", type=int, default=2)
-    parser.add_argument("--max-joint-motion-deg", type=float, default=220.0)
+    parser.add_argument("--max-joint-motion-deg", type=float, default=185.0)
     parser.add_argument(
         "--j6-preference-motion-tolerance-deg", type=float, default=30.0
     )

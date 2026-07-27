@@ -1,6 +1,11 @@
 # Board-search handoff
 
-Updated: 2026-07-25
+Updated: 2026-07-26
+
+For the consolidated end-to-end v4 handoff covering shared Stage 1/Stage 2,
+SFP, NIC, SC, Flowstate wiring, downstream filters, testing, and deployment,
+start with `docs/CHECK_BOARD_VISIBILITY_V4_HANDOFF.md`. This document remains
+the deeper behavior contract and SC reasoning trail.
 
 ## Pinned implementation
 
@@ -67,10 +72,11 @@ Stage 2 is deterministic:
   sections below;
 - the skill is **perception-only**: it publishes the existing scalar Cartesian
   target on `result.target.{x,y,z,qx,qy,qz,qw}` for the deployed Python pose
-  packer and does not execute the survey move itself. The skill mirrors the
-  fixed J1..J6 position window configured directly on Move Robot when judging
-  IK; no joint target is exposed or linked. There is **no** aggregate Stage-2
-  time budget and **no** two-triplet consistency gauntlet.
+  packer and does not execute the survey move itself. IK branches are expressed
+  at the physical winding nearest the measured live joint vector and judged by
+  relative travel from that origin; no artificial absolute joint window, joint
+  target, or joint-limit output is used. There is **no** aggregate Stage-2 time
+  budget and **no** two-triplet consistency gauntlet.
 
 Any calibration, geometry, reach, path, or confirmation failure returns
 `success=true, done=false` so the Flowstate process can decide whether to retry.
@@ -258,9 +264,9 @@ increased at board yaw 180 deg.
 | `require_all_cameras_frame` | **`True`** | IVM needs all three cameras framing the sector (confirmed by the user) |
 | `prefer_far_standoff` | `False` | cone is met from 0.27 m, so take the pixels |
 | `min_required_clearance_px` | `25` | gripper keep-out margin |
-| `max_angular_motion_rad` | **`180 deg`** | do not discard camera-clear rolls after a rolled Stage-1 exit; Move Robot's fixed position window constrains the actual joint winding |
+| `max_angular_motion_rad` | **`180 deg`** | do not discard camera-clear rolls after a rolled Stage-1 exit; the separate live-relative IK gate constrains physical joint travel |
 | `yaws_rad` | 24 values, 15 deg | roll rotates the sector clear of the gripper silhouette |
-| `standoffs_m` | **`(0.62,)`** | selected in all 96 scenarios by the stronger-view sweep |
+| `standoffs_m` | **`(0.62,)`** | selected in all 144 scenarios by the stronger-view sweep |
 | rectangular-bore view margin | **>= 0.0 in at least 2 cameras per mouth** | all three still frame the sector, but requiring all three to see through every bore made every >=10 deg pose impossible |
 | projected bore-depth cue | **>= 3.0 px in at least 2 cameras per mouth** | requires a detector-meaningful displaced dark interior rather than the prior nearly head-on ~1.4 px cue |
 
@@ -269,15 +275,16 @@ bodies -- the search aims the optical axis at the box centroid, and the old box
 (X -0.14..-0.01, Y -0.02..0.10, Z 0.01..0.05) predated the 3-port row and swept
 in ~47 mm of empty board on the -Y side, pulling the aim point 10 mm off.
 
-The current full production sweep is **96/96** (board yaw 0-315 deg x tilt
-0-10 deg x +/-50 mm placement x two Stage-1 wrist-roll exits), including exact
-IK, wrist-camera/forearm collision, arm-in-view rejection, all three gripper
-masks, the exact fixed Flowstate joint window, and the 220 deg SC motion
-cap. With the explicit long-face approach, depth-cue gate and J6 preference,
+The current full production sweep is **144/144** (board yaw 0-315 deg x tilt
+0-10 deg x +/-50 mm placement x three live starts: two Stage-1 wrist-roll
+exits plus the exact chained predecessor state that exposed the old absolute
+window failure), including exact live-relative IK, wrist-camera/forearm
+collision, arm-in-view rejection, all three gripper masks, and the 185 deg SC
+relative-motion cap. With the explicit long-face approach, depth-cue gate and J6 preference,
 selected ranges are: standoff **0.62 m**, two-camera projected depth cue
-**3.343..4.451 px**, normalized two-camera bore margin **+0.0135..+0.1572**,
+**3.343..4.451 px**, normalized two-camera bore margin **+0.0135..+0.2674**,
 all-camera clearance **37.8..74.0 px**, board-X tilt **10..13 deg**, board-Y tilt
-**<=2 deg**, worst-joint motion **27.6..219.5 deg**. Reproduce with
+**<=2 deg**, worst-joint motion **27.4..182.4 deg**. Reproduce with
 `python test/sc_sweep_runner.py --workers 4` from
 `flowstate/aic_perception`.
 
@@ -298,11 +305,11 @@ Fix: `UR5eArm.link_segments()` returns the upper arm and forearm as base-frame
 capsules (60 mm / 50 mm tubes), and `_arm_clear_of_own_cameras()` rejects a
 branch whose links project into any camera. `UR5eArm.solve_ranked()` now exposes
 **every** finite, forearm-clear analytic branch; the selector tests arm-in-view
-on all of them and keeps the lowest-motion clear branch. The earlier version
-tested only the one branch nearest the seed and could reject a pose without
-checking its other exact IK branches. For SC, every branch is first expressed
-inside the same fixed absolute position window configured on Move Robot; only
-the resulting Cartesian TCP pose is published.
+on all of them and keeps the lowest-relative-motion clear branch. The earlier
+version tested only the one branch nearest the seed and could reject a pose
+without checking its other exact IK branches. For SC, every branch is lifted
+to the physically equivalent winding nearest the live seed before its relative
+delta is scored; only the resulting Cartesian TCP pose is published.
 
 ### All-camera framing is not all-camera bore visibility
 
@@ -395,23 +402,24 @@ The corrected fused-view policy keeps full-sector framing and gripper clearance
 in all three cameras, while requiring a positive bore margin and >=3.0 px depth
 cue in at least two cameras for every mouth. The sweep found:
 
-* 10-13 deg, fixed 0.62 m, no aim bias: **96/96**;
+* 10-13 deg, fixed 0.62 m, no aim bias: **144/144** including the chained hardware start;
 * selected worst two-camera cue **3.343 px**;
-* 11-13 deg: **94/96**; 12-13 deg: **74/96**;
-* the 220 deg SC joint cap preserves **96/96**; 215 deg loses 1/96.
+* on the original two-start sweep, 11-13 deg: **94/96**; 12-13 deg: **74/96**;
+* the 185 deg live-relative SC joint cap preserves **144/144**; 182 deg loses
+  2/96 on the original two-start sweep.
 
 Only scores within **0.1 px** of the best reachable cue at one standoff are
 treated as perception-equivalent before joint/J6 ranking. This stops the
 preferred wrist roll from trading away the feature the new model preserves.
 
 The desired arm picture also places the wrist/tool on the opposite side. SC now
-computes a preferred J6 target at live J6 +/-180 deg, clipped to the fixed
-Flowstate J6 window when an exact half-turn is illegal. This is a **preference,
-not a validity escape**: absolute limits and the 220 deg SC cap remain, and the
-preferred roll may buy no more than 30 deg additional worst-joint travel over
-the safest perception-equivalent route. A fixed board-X sign was swept and
-rejected (only 72/96), because board yaw changes which world-side pose is
-reachable; both signs remain available and the J6/arm-clear ranking chooses.
+computes a preferred target at live J6 +/-180 deg, choosing an exact half-turn
+inside the modeled physical J6 limits. This is a **preference, not a validity
+escape**: the 185 deg live-relative cap remains, and the preferred roll may buy
+no more than 30 deg additional worst-joint travel over the safest
+perception-equivalent route. A fixed board-X sign was swept and rejected (only
+72/96), because board yaw changes which world-side pose is reachable; both
+signs remain available and the J6/arm-clear ranking chooses.
 
 The sparse IVM coordinates cannot identify absolute missing labels because the
 randomized rail translations and detection orientations are absent. The two
@@ -454,50 +462,41 @@ reverted.
 
    The deployed process cannot expose a joint target from this skill. It reads
    only `result.target.{x,y,z,qx,qy,qz,qw}`, packs those seven scalars into a
-   Cartesian TCP pose in a Python node, and sends that pose to Move Robot. The
-   fix therefore keeps that interface unchanged and puts one **fixed absolute
-   J1..J6 position window directly on the Move Robot segment**:
+   Cartesian TCP pose in a Python node, and sends that pose to Move Robot.
 
-   ```
-   min deg = [-53.6, -187.0, -122.4, -127.7, -116.1, -71.5]
-   max deg = [170.1,  -28.9,   94.1,   43.8,  114.8, 180.8]
+   The fixed absolute-window mitigation was removed on 2026-07-26. It judged a
+   global coordinate rather than motion from the live start. In the hardware
+   failure that exposed the problem, a preceding valid survey pose ended at
+   J4 `-143.9 deg`; the SC window started at `-127.7 deg`, so SC rejected the
+   current state before evaluating any pose. The ungated BT then sent the empty
+   result to Move Robot and produced `norm(quat)==0`.
 
-   min rad = [-0.9355, -3.2638, -2.1363, -2.2288, -2.0263, -1.2479]
-   max rad = [ 2.9688, -0.5044,  1.6424,  0.7645,  2.0038,  3.1556]
-   ```
+   The current policy uses the measured six-joint vector as the origin:
 
-   Configure those constants on
-   `motion_segments[0].joint_limits.min_position.values` and
-   `.max_position.values`. They are ordered J1 through J6. The six interval
-   widths are 223.7, 158.1, 216.5, 171.5, 230.9 and 252.3 deg, so no interval
-   can contain a co-terminal full revolution.
-
-   * `UR5eArm.solve_ranked(..., joint_limits=...)` expresses every analytic IK
-     branch inside that exact same window before scoring it. For example, the
-     identical physical endpoints J5 `+257.9 deg` and J6 `+341.8 deg` become
-     `-102.1 deg` and `-18.2 deg`.
-   * If the live start is outside the Flowstate window, SC returns `done=false`
-     and prints the current and configured J1..J6 arrays. Move Robot would be
-     unable to plan legally from such a start.
-   * Every in-window shoulder/elbow/wrist branch is checked for wrist-camera
+   * `UR5eArm.solve_ranked(pose, seed=live_joints)` lifts every analytic branch
+     to the physically equivalent winding nearest that live seed. No
+     task-specific absolute position box is passed.
+   * Every physical shoulder/elbow/wrist branch is checked for wrist-camera
      collision and arm-in-view.
    * At the nearest reachable standoff, the best **reachable** projected
      depth-cue score defines a 0.1 px perception plateau. Inside that plateau
      the selector
      minimizes worst-joint and then total travel. An unreachable high-score roll
      must not suppress a slightly lower-score reachable one.
-   * The SC internal worst-joint cap is **220 deg**. Under the current stronger
-     view policy it preserves 96/96 and the selected maximum is 219.5 deg. A
-     215 deg cap loses 1/96. Other sectors retain the prior 225 deg budget. The
-     fixed Flowstate windows still make a 360 deg route impossible.
+   * The SC internal worst-relative-joint cap is **185 deg**. The selected
+     maximum is 182.4 deg; 182 deg loses 2/96 of the original Stage-1-start
+     sweep. Other sectors retain the prior 225 deg budget.
    * The selected-pose log prints current/target/delta vectors plus
-     `joint_max`, `joint_total`, and the fixed Flowstate bounds.
+     `joint_max`, `joint_total`, and `relative_origin=live_joints`.
 
-   The exact-window production sweep is **96/96** over board yaw, tilt,
-   placement and both Stage-1 exits. This validates endpoint geometry and the
-   winding contract offline; Move Robot remains authoritative for the actual
-   collision-free path and needs hardware validation. Velocity/acceleration
-   limits are still useful safety backstops but do not replace position bounds.
+   The live-relative production sweep is **144/144** over board yaw, tilt,
+   placement, both Stage-1 exits, and the exact chained hardware start above.
+   This validates the skill's selected endpoint branch offline. It does **not**
+   force Move Robot to use that branch: a Cartesian pose contains no joint
+   winding, so Move Robot remains authoritative for the actual collision-free
+   path. Remove the old custom absolute position bounds from the SC Move Robot
+   segment, retain conservative velocity/acceleration limits, and validate the
+   planned transit on hardware.
 2. **Validate the corrected long-face axis and J6 preference on hardware.** The
    code now uses board X explicitly, keeps all three cameras fully framed, and
    biases the wrist toward the best legal half-turn inside a bounded motion
@@ -573,7 +572,7 @@ autocalibrate, wrist-camera keep-out against the planner's own reported
 collision configs, `link_segments` tracking the elbow rather than the wrist),
 reachability-gate plumbing and the full-ranking regression in
 `test/test_board_stage2.py`, and per-sector view settings in
-`test/test_check_board_visibility_stage2_integration.py`. **279 passing**.
+`test/test_check_board_visibility_stage2_integration.py`. **282 passing**.
 
 ### 2026-07-26 timing split and Stage-2 optimization
 
@@ -594,22 +593,23 @@ camera. This is only a reordering/short-circuit of the same hard gates. The
 representative case fell from about **8.0 s to 3.6 s** locally and selected the
 same pose/IK branch; deployment timing remains to be measured.
 
-The stronger-view sweep now selects standoff 0.62 m in all 96 scenarios.
-Restricting SC to that one value preserves **96/96** and removes the remaining
-unused distance groups. The complete 96-case sweep takes about **9 s** with four
-local workers. Hardware timing still needs to be measured after deployment.
+The stronger-view sweep selects standoff 0.62 m in all 144 scenarios.
+Restricting SC to that one value preserves **144/144** and removes the remaining
+unused distance groups. The complete 144-case sweep takes about **23 s** with
+four local workers on the current Windows host. Hardware timing still needs to
+be measured after deployment.
 
 Log lines that tell you what is actually live:
 
 ```
 arm IK joint-motion gate active: base=Rz180 tool=197.1mm axial=1.00
     wrist-camera keep-out 140mm over 3 probes; arm-in-view rejection over 3 cameras;
-    max predicted joint move 220deg
+    max predicted joint move 185deg
 survey IK motion current_deg=[...] target_deg=[...] delta_deg=[...]
-    max=<deg> total=<deg> flowstate_min_deg=[...] flowstate_max_deg=[...]
+    max=<deg> total=<deg> relative_origin=live_joints
 SC survey image geometry required_depth_cameras=2
     bore_margin_2cam=<margin> depth_cue_2cam=<pixels>px
-SFP Stage 2 published survey pose ... standoff=0.580m ... obliquity=<deg>
+SFP Stage 2 published survey pose ... standoff=0.620m ... obliquity=<deg>
     cross_tilt=<deg> along_tilt=<deg>
     joint_max=<deg> joint_total=<deg>
 ```

@@ -39,6 +39,7 @@ from aic_perception.board_stage2 import (
     search_survey_pose,
     sfp_envelope_center,
     sfp_sector_corners,
+    sfp_module_strip_corners,
     sfp_envelope_corners,
     sfp_module_detail_boxes,
     verify_survey_view,
@@ -883,6 +884,65 @@ def test_isotropic_sfp_survey_is_close_and_near_overhead():
     assert candidate.standoff_m <= 0.70
     assert math.degrees(_reference_obliquity_rad(candidate, board, tcp_T_cam)) <= 20.0
     assert candidate.min_clearance_px >= 40.0
+
+
+def test_one_rail_sector_misses_half_the_legal_staged_seats():
+    """Pin the defect the staged-SFP coverage ladder exists to fix.
+
+    Staged modules occupy five of six legal seats spread over *both* rails.
+    The superseded sector box covers only the +Y rail, so its centre -- the
+    point the survey aims at -- sits 112.5 mm off the middle of the strip and
+    the three -Y seats fall outside it entirely.  Hardware returned 4 of 5
+    modules, the missing one seated at board Y -0.15625.
+    """
+    sector = sfp_sector_corners()
+    y_lo, y_hi = float(sector[:, 1].min()), float(sector[:, 1].max())
+    seat_ys = [float(box[:, 1].mean()) for box in sfp_module_detail_boxes()]
+
+    assert len(seat_ys) == 6
+    outside = [y for y in seat_ys if not (y_lo <= y <= y_hi)]
+    assert len(outside) == 3, "the whole -Y rail is outside the old sector"
+    assert max(outside) < 0.0
+    # The aimed centre is off the strip's true middle by half the box.
+    assert abs(0.5 * (y_lo + y_hi)) == pytest.approx(0.1125)
+
+
+def test_staged_sfp_coverage_straddles_the_module_strip_at_the_same_size():
+    """Centring is the whole fix -- the box must not grow to get it.
+
+    Growing it was measured and rejected: it pushes the selected standoff from
+    0.64 m to 0.85-0.90 m, shrinking every module in the image for ~30 px of
+    seat margin that is already comfortable.
+    """
+    corners = sfp_module_strip_corners()
+    ys = corners[:, 1]
+    assert float(ys.mean()) == pytest.approx(0.0, abs=1e-12)
+    assert float(ys.max()) == pytest.approx(-float(ys.min()))
+
+    old = sfp_sector_corners()
+    old_extent = float(old[:, 1].max()) - float(old[:, 1].min())
+    new_extent = float(ys.max()) - float(ys.min())
+    assert new_extent == pytest.approx(old_extent)
+
+    # Board X must clear the detected module bodies with real margin.  The
+    # hardware detections sat at board X 0.0862, only 3.8 mm inside the old
+    # sector's 0.09 edge.
+    assert float(corners[:, 0].max()) >= 0.0862 + 0.020
+    # ...while still covering the CAD mount origins the seats are built from.
+    assert float(corners[:, 0].min()) <= 0.030 + 1e-9
+
+
+def test_staged_sfp_coverage_is_symmetric_about_every_legal_seat():
+    """The box need not contain the outer seats, but must not favour a rail.
+
+    The sweep's seat audit is what certifies coverage; this pins the property
+    that made the old box fail -- its slack was one-sided.
+    """
+    corners = sfp_module_strip_corners()
+    seat_ys = sorted(float(box[:, 1].mean()) for box in sfp_module_detail_boxes())
+    y_lo, y_hi = float(corners[:, 1].min()), float(corners[:, 1].max())
+    # Equal reach past the outermost seat at both ends.
+    assert (seat_ys[0] - y_lo) == pytest.approx(y_hi - seat_ys[-1])
 
 
 def test_sector_survey_takes_the_closest_standoff_not_the_roomiest():

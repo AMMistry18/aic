@@ -68,27 +68,6 @@ JOINT_LIMITS: np.ndarray = np.array(
     dtype=float,
 )
 
-# Absolute J1..J6 bounds configured on the downstream Flowstate Move Robot
-# segment.  The skill still publishes only a Cartesian TCP target; mirroring
-# the same bounds here makes its analytic IK gate reject windings that the real
-# planner is forbidden to use.  These cover every endpoint in the 96-case SC
-# sweep and both modeled Stage-1 exits while every interval remains well below
-# one full revolution.
-SC_MOVE_ROBOT_JOINT_LIMITS_DEG: np.ndarray = np.array(
-    [
-        [-53.6, 170.1],
-        [-187.0, -28.9],
-        [-122.4, 94.1],
-        [-127.7, 43.8],
-        [-116.1, 114.8],
-        [-71.5, 180.8],
-    ],
-    dtype=float,
-)
-SC_MOVE_ROBOT_JOINT_LIMITS: np.ndarray = np.radians(
-    SC_MOVE_ROBOT_JOINT_LIMITS_DEG
-)
-
 # Denavit-Hartenberg parameters of the same chain, in the classical UR form
 #     T_i = Rz(theta_i) . Tz(d_i) . Tx(a_i) . Rx(alpha_i)
 # The MJCF chain above *is* this chain: ``fk_flange`` and the DH product agree to
@@ -223,10 +202,11 @@ def lift_into_joint_limits(
     """Represent one IK solution inside an absolute joint-position window.
 
     A Cartesian TCP pose does not encode whether (for example) wrist joint 6 is
-    ``-18 deg`` or the co-terminal ``+342 deg``.  Move Robot receives fixed
-    position limits directly in Flowstate, so the analytic gate must express
-    every solution inside that exact same window.  ``None`` means at least one
-    joint has no co-terminal representation in the window.
+    ``-18 deg`` or the co-terminal ``+342 deg``. This generic helper is retained
+    for callers that genuinely own an absolute constraint. Production SC
+    survey selection deliberately does not use it: SC measures travel from the
+    live joint state instead. ``None`` means at least one joint has no
+    co-terminal representation in the supplied window.
     """
 
     principal = np.asarray(joints, dtype=float)
@@ -574,10 +554,10 @@ class UR5eArm:
         upper arm in a wrist camera, the whole pose was rejected even when a
         different exact shoulder/elbow/wrist branch left every image clear.
         This method exposes the complete filtered set and orders it by travel.
-        When ``joint_limits`` is supplied, each branch is represented inside
-        that absolute window instead of merely choosing the physical-limit
-        winding nearest the seed.  This mirrors a downstream Cartesian Move
-        Robot segment that has the same fixed position limits.
+        When an optional caller-owned ``joint_limits`` array is supplied, each
+        branch is represented inside that absolute window instead of choosing
+        the physical-limit winding nearest the seed. Production SC survey
+        selection leaves it unset and ranks live-relative physical travel.
         """
 
         solutions = [

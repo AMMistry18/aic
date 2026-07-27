@@ -10,6 +10,8 @@ OUTPUT_ROOT=${AIC_SKILL_OUTPUT_ROOT:-"${WORKSPACE_ROOT}/images"}
 OUTPUT_DIR="${OUTPUT_ROOT}/check_board_visibility_skill"
 IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"flowstate:check-board-visibility"}
 INBUILD_BIN=${INBUILD_BIN:-$(command -v inbuild || true)}
+SKILL_ASSET_ID=ai.tar2.check_board_visibility_skill_v4
+SKILL_IMAGE_NAME=check_board_visibility_skill_v4
 
 if [[ ! -f "${WORKSPACE_ROOT}/src/aic/pixi.toml" ]]; then
   echo "ERROR: workspace must contain src/aic (set AIC_WORKSPACE_ROOT)." >&2
@@ -35,8 +37,25 @@ docker build --platform linux/amd64 \
   --build-arg SKILL_PACKAGE=aic_perception \
   --build-arg SKILL_NAME=check_board_visibility_skill \
   --build-arg SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main \
+  --build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}" \
+  --build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}" \
   --tag "${IMAGE_TAG}" \
   "${WORKSPACE_ROOT}"
+
+actual_asset_id=$(docker image inspect \
+  --format '{{ index .Config.Labels "ai.intrinsic.asset-id" }}' \
+  "${IMAGE_TAG}")
+actual_image_name=$(docker image inspect \
+  --format '{{ index .Config.Labels "ai.intrinsic.skill-image-name" }}' \
+  "${IMAGE_TAG}")
+if [[ "${actual_asset_id}" != "${SKILL_ASSET_ID}" ]]; then
+  echo "ERROR: skill image asset-id label is '${actual_asset_id}', expected '${SKILL_ASSET_ID}'." >&2
+  exit 2
+fi
+if [[ "${actual_image_name}" != "${SKILL_IMAGE_NAME}" ]]; then
+  echo "ERROR: skill image name label is '${actual_image_name}', expected '${SKILL_IMAGE_NAME}'." >&2
+  exit 2
+fi
 
 docker run --rm --platform linux/amd64 \
   --entrypoint /bin/bash "${IMAGE_TAG}" --noprofile --norc -c '
@@ -45,18 +64,20 @@ docker run --rm --platform linux/amd64 \
     python -c "import cv2; from aic_perception import board_visibility, check_board_visibility_skill_pb2; print(cv2.__version__)"
     test -x "$SKILL_EXEC_PATH"
     test -f "/workspace/install/$SKILL_CONFIG"
-    set +e
-    timeout --kill-after=2s 8s /run_skill.sh \
-      --skill_service_config_filename=/skills/skill_service_config.proto.bin \
-      >/tmp/skill-smoke.log 2>&1
-    status=$?
-    set -e
-    cat /tmp/skill-smoke.log
-    case "$status" in
-      124|137) ;;
-      *) exit "$status" ;;
-    esac
-    grep -q "gRPC server listening" /tmp/skill-smoke.log
+    for boot in 1 2; do
+      set +e
+      timeout --kill-after=2s 8s /run_skill.sh \
+        --skill_service_config_filename=/skills/skill_service_config.proto.bin \
+        >"/tmp/skill-smoke-${boot}.log" 2>&1
+      status=$?
+      set -e
+      cat "/tmp/skill-smoke-${boot}.log"
+      case "$status" in
+        124|137) ;;
+        *) exit "$status" ;;
+      esac
+      grep -q "gRPC server listening" "/tmp/skill-smoke-${boot}.log"
+    done
   '
 
 docker save "${IMAGE_TAG}" --output "${OUTPUT_DIR}/check_board_visibility_skill.tar"

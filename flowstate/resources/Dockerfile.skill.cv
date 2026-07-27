@@ -67,6 +67,10 @@ FROM ubuntu:24.04 AS runtime
 ARG SKILL_PACKAGE=aic_perception
 ARG SKILL_NAME=check_board_visibility_skill
 ARG SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main
+# Flowstate lifecycle identity.  This must match the manifest id/name even
+# though the historical source/config basename intentionally omits "_v4".
+ARG SKILL_ASSET_ID
+ARG SKILL_IMAGE_NAME
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -120,9 +124,16 @@ RUN printf '%s\n' \
 RUN mkdir -p /skills \
     && ln -sf /run_skill.sh /skills/skill_service \
     && ln -sf "/workspace/install/${SKILL_CONFIG}" \
-       /skills/skill_service_config.proto.bin
+       /skills/skill_service_config.proto.bin \
+    && test -n "${SKILL_ASSET_ID}" \
+    && test -n "${SKILL_IMAGE_NAME}"
 
-LABEL "ai.intrinsic.asset-id"="ai.tar2.check_board_visibility_skill"
+# These are the two labels set by Intrinsic's supported skill.Dockerfile.
+# Reconciliation after a solution stop/start uses the installed v4 identity;
+# advertising the old non-v4 name can leave no correctly named skill image for
+# a later cold restart even when the initially uploaded pod works.
+LABEL "ai.intrinsic.asset-id"="${SKILL_ASSET_ID}"
+LABEL "ai.intrinsic.skill-image-name"="${SKILL_IMAGE_NAME}"
 ENV ZENOH_ROUTER_CHECK_ATTEMPTS=-1
 
 CMD ["/skills/skill_service", "--skill_service_config_filename=/skills/skill_service_config.proto.bin"]

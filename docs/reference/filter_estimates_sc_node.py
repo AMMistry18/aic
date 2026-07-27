@@ -174,6 +174,8 @@ print(
     f"selected_xyz_mm={[round(float(v), 1) for v in position(best) * 1000.0]}",
 )
 
-output.pose_estimates.append(best)
-output.root_ts_target.append(best.root_t_target)
+# This Flowstate node's ReturnValue schema exposes repeated Pose field
+# ``sc_ports``. Append only the requested pose so the downstream belief step
+# creates exactly one object, not one belief per detected port.
+output.sc_ports.append(best.root_t_target)
 return output

@@ -223,13 +223,14 @@ def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     assert "joint_motion=joint_motion_fn" in method_source
     assert "UR5eArm.autocalibrate(" in method_source
     assert "_arm.solve_ranked(" in method_source
-    assert "joint_limits=_joint_limits" in method_source
+    assert "joint_limits=" not in method_source
+    assert "joints - seed" in method_source
     assert "select_clear_ik_solution(target)" in method_source
-    assert "220.0 if int(survey_target) == 3 else 225.0" in method_source
+    assert "185.0 if int(survey_target) == 3 else 225.0" in method_source
     assert "max_joint_motion_rad=joint_motion_limit_rad" in method_source
     assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
-    assert "self._sector_for_target(survey_target)" in method_source
+    assert "self._coverage_targets_for_target(survey_target)" in method_source
 
 
 def test_sfp_stage2_does_no_motion_and_has_no_time_budget():
@@ -297,14 +298,50 @@ def test_every_deployed_target_mode_uses_the_geometric_survey():
 
 def test_each_target_mode_maps_to_its_own_board_sector():
     source, _ = _source_and_class()
-    selector = ast.get_source_segment(source, _method("_sector_for_target"))
+    selector = ast.get_source_segment(
+        source, _method("_coverage_targets_for_target")
+    )
 
     assert "nic_sector_corners()" in selector
     assert "sc_sector_corners()" in selector
-    assert "sfp_sector_corners()" in selector
-    # NIC=2, SC=3, everything else (0/1) is the staged-SFP rail.
+    # NIC=2, SC=3, everything else (0/1) is the staged-SFP strip.
     assert "target == 2" in selector
     assert "target == 3" in selector
+
+    # The staged-SFP target must never be the one-rail sector: its centre sits
+    # 112.5 mm off the module strip, which is what cropped a physically present
+    # module on hardware (4 of 5 modules returned).
+    assert "sfp_sector_corners()" not in selector  # docstring may still cite it
+    assert "sfp_module_strip_corners()" in selector
+
+
+def test_staged_sfp_coverage_straddles_both_rails():
+    """Execute the selector: the SFP box must straddle board Y=0.
+
+    The old box covered the +Y rail alone, so the survey aimed 112.5 mm off the
+    middle of the strip and banked all its framing slack on one side.
+    """
+    helper = copy.deepcopy(_method("_coverage_targets_for_target"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(
+        ast.Module(body=[helper], type_ignores=[])
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    select = namespace["_coverage_targets_for_target"]
+
+    for sfp_target in (0, 1):
+        targets = select(sfp_target)
+        assert len(targets) == 1
+        ys = targets[0][:, 1]
+        assert abs(float(ys.mean())) < 1e-9
+        assert abs(float(ys.max()) + float(ys.min())) < 1e-9
+        # Same extent as the box it replaces -- placement is the fix, not size.
+        assert float(ys.max()) - float(ys.min()) == pytest.approx(0.225)
+
+    # NIC and SC remain single, already-validated sectors.
+    assert len(select(2)) == 1
+    assert len(select(3)) == 1
 
 
 def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
@@ -446,9 +483,9 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     assert "min_view_quality = 3.0" in method_source
     assert "view_quality_motion_tolerance = 0.1" in method_source
     assert "view_quality=view_quality_fn" in method_source
-    assert "SC_MOVE_ROBOT_JOINT_LIMITS" in method_source
-    assert "live finite IK inside the configured" in method_source
-    assert "Move Robot joint window" in method_source
+    assert "SC_MOVE_ROBOT_JOINT_LIMITS" not in method_source
+    assert method_source.count("relative joint-motion") >= 2
+    assert "relative_origin=live_joints" in method_source
     assert "joint_motion_preference=joint_motion_preference_fn" in method_source
     assert "joint_preference_motion_tolerance_rad=math.radians(30.0)" in method_source
 

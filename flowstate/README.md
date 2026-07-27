@@ -108,6 +108,21 @@ cd ~/ws_aic_phase1
 bash src/aic/flowstate/scripts/build_check_board_visibility_skill.sh
 ```
 
+The build must report both cold-start smoke tests reaching
+`gRPC server listening`, and it fails if the image labels do not match the
+manifest:
+
+```text
+ai.intrinsic.asset-id=ai.tar2.check_board_visibility_skill_v4
+ai.intrinsic.skill-image-name=check_board_visibility_skill_v4
+```
+
+Those labels are part of Flowstate's skill-image lifecycle contract. The
+previous non-v4/missing metadata is the leading repository-side cause of the
+fresh-install-only behavior: it can allow the first pod to start while leaving
+the skill unavailable after a solution stop/start reconciliation. Confirm the
+fix with one real stop/start cycle after installing the rebuilt bundle.
+
 Install against the current cluster, which must be re-read after a simulator
 restart:
 
@@ -136,19 +151,12 @@ Move Robot: Cartesian target
 IVM NIC estimate -> filter estimates -> remaining process
 ```
 
-For `SC_DESTINATION_PORT`, configure the Move Robot segment's absolute J1..J6
-position limits as constants; they are not skill outputs:
-
-```text
-min deg = [-53.6, -187.0, -122.4, -127.7, -116.1, -71.5]
-max deg = [170.1,  -28.9,   94.1,   43.8,  114.8, 180.8]
-
-min rad = [-0.9355, -3.2638, -2.1363, -2.2288, -2.0263, -1.2479]
-max rad = [ 2.9688, -0.5044,  1.6424,  0.7645,  2.0036,  3.1556]
-```
-
-The skill mirrors those limits internally when selecting a Cartesian target,
-but preserves the deployed seven-scalar output interface.
+Do not add task-specific absolute J1..J6 position bounds to the Move Robot
+segment. The survey skill treats the measured live joint vector as the motion
+origin, expresses each analytic IK branch at the physically equivalent winding
+nearest that origin, and rejects SC candidates whose worst relative joint
+travel exceeds 185 degrees. The deployed seven-scalar Cartesian output
+interface is unchanged.
 
 SC survey poses use a mandatory 10-13 degree board-X displacement normal to the
 adapters' board-Y long face (at most 2 degrees along that face/port rows), at a
@@ -157,9 +165,14 @@ and rotates into the base frame with the estimated board orientation. All three
 cameras must fully frame the sector and remain gripper-clear; for every mouth,
 at least two cameras must also retain a positive rectangular-bore margin and at
 least 3.0 px of projected mouth-to-back-centre depth cue. SC also prefers the
-best legal J6 half-turn from the live start, but only inside a 30-degree
-worst-motion plateau. Arm-in-view, fixed joint-window, and 220-degree SC motion
-gates remain authoritative.
+best physical J6 half-turn from the live start, but only inside a 30-degree
+worst-motion plateau. Arm-in-view and the 185-degree live-relative SC motion
+gate remain authoritative.
+
+The skill can rank and reject Cartesian targets using live-relative IK, but the
+seven-scalar pose does not encode the selected joint branch. Move Robot remains
+authoritative for the executed trajectory. Keep conservative velocity and
+acceleration limits, and validate the generated path before hardware execution.
 
 Do not run Move Robot, another Insert Cable policy, or any other motion session
 in parallel with this skill. Always switch back to the default controller before

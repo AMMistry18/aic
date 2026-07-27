@@ -18,7 +18,8 @@ import numpy as np
 
 
 SOURCE = Path(__file__).with_name("filter_estimates_sc_node.py")
-HELPERS = SOURCE.read_text(encoding="utf-8").split(
+SOURCE_TEXT = SOURCE.read_text(encoding="utf-8")
+HELPERS = SOURCE_TEXT.split(
     "# ---------------------------------------------------------------------------\n"
     "# Node body\n"
     "# ---------------------------------------------------------------------------",
@@ -27,6 +28,12 @@ HELPERS = SOURCE.read_text(encoding="utf-8").split(
 namespace: dict[str, object] = {}
 exec(compile(HELPERS, str(SOURCE), "exec"), namespace)
 fixed = SimpleNamespace(**namespace)
+
+
+def assert_flowstate_output_contract():
+  assert "output.sc_ports.append(best.root_t_target)" in SOURCE_TEXT
+  assert "output.pose_estimates" not in SOURCE_TEXT
+  assert "output.root_ts_target" not in SOURCE_TEXT
 
 
 @dataclass
@@ -187,6 +194,7 @@ def assert_background_scores_are_rejected():
 
 
 if __name__ == "__main__":
+  assert_flowstate_output_contract()
   assert_orientation_sweep()
   assert_non_alignment_never_rejects()
   assert_missing_slot_only_blocks_that_slot()

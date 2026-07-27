@@ -12,6 +12,8 @@ IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"flowstate:move-to-board"}
 INBUILD_BIN=${INBUILD_BIN:-$(command -v inbuild || true)}
 SKILL_NAME=move_to_board_skill
 SKILL_EXECUTABLE_NAME=move_to_board_skill_main
+SKILL_ASSET_ID=ai.tar2.move_to_board_skill_v1
+SKILL_IMAGE_NAME=move_to_board_skill_v1
 
 if [[ ! -f "${WORKSPACE_ROOT}/src/aic/pixi.toml" ]]; then
   echo "ERROR: workspace must contain src/aic (set AIC_WORKSPACE_ROOT)." >&2
@@ -37,6 +39,8 @@ docker build --platform linux/amd64 \
   --build-arg SKILL_PACKAGE=aic_perception \
   --build-arg SKILL_NAME="${SKILL_NAME}" \
   --build-arg SKILL_EXECUTABLE_NAME="${SKILL_EXECUTABLE_NAME}" \
+  --build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}" \
+  --build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}" \
   --tag "${IMAGE_TAG}" \
   "${WORKSPACE_ROOT}"
 
