@@ -61,9 +61,11 @@ def test_stage1_handoff_uses_the_existing_geometric_stage2_closure():
     method_source = ast.get_source_segment(source, execute_inner)
 
     assert "self._run_sfp_geometric_stage2(" in method_source
-    # One nested function declaration and two call sites.
-    assert method_source.count("handoff_to_stage2(snapshot, reports)") == 3
-    assert method_source.count("_stage2_has_complete_landmark(") == 2
+    # The nested declaration plus its single call site: with Stage 1 removed
+    # there is exactly one observation and one opportunity to hand off.
+    assert method_source.count("handoff_to_stage2(snapshot, reports)") == 2
+    assert method_source.count("_stage2_has_complete_landmark(") == 1
+    # Only Stage 2 may declare done; Stage 1 no longer exists to try.
     assert "result.done = True" not in method_source
 
 
@@ -78,8 +80,9 @@ def test_stage1_has_no_wall_clock_deadline_and_hands_off_on_exposed_insignia():
     assert "stage2_reserve_sec" not in method_source
     assert "_stage2_has_complete_landmark(" in method_source
     assert "handoff_to_stage2(snapshot, reports)" in method_source
-    assert "SEEK_STALL_MOVES" in method_source
-    assert "_seek_step(" in method_source
+    assert "_stage2_has_complete_landmark(" in method_source
+    # No search loop of any kind remains.
+    assert "_seek_step(" not in method_source
 
 
 def test_stage1_uses_wide_purple_only_as_a_cue_not_completion_authority():
@@ -93,14 +96,14 @@ def test_stage1_uses_wide_purple_only_as_a_cue_not_completion_authority():
     assert "_stage2_has_complete_landmark(" in method_source
 
 
-def test_seek_stall_returns_normal_not_done_without_stage2_call():
+def test_missing_insignia_fails_without_calling_stage2():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
     method_source = ast.get_source_segment(source, execute_inner)
 
-    assert "seek_stalled" in method_source
-    assert "board seek stalled" in method_source
-    assert "_stage2_not_done(" in method_source
+    assert "insignia_not_exposed" in method_source
+    assert "Stage 1 acquisition has been removed" in method_source
+    assert "result.success = False" in method_source
     assert "result.target_valid = False" in method_source
 
 

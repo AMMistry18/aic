@@ -75,6 +75,18 @@ JOINT_MODE_SWITCH_ALLOWANCE_SEC = 3.0
 JOINT_SETTLE_ALLOWANCE_SEC = 2.0
 
 
+class InsigniaNotExposedError(RuntimeError):
+    """The start pose does not expose the insignia to any calibrated camera.
+
+    Raised out of ``execute`` as a real skill error so the Flowstate process
+    fails loudly instead of quietly branching on a result field.  It is
+    deliberately raised **after** the controller handoff has been published --
+    see ``execute`` -- because throwing before that cleanup leaves the AIC
+    controller bridge holding ``arm`` and the next Move Robot fails with
+    "Part: 'arm' is already in use."
+    """
+
+
 def _contact_force_n(force_xyz) -> float:
     """Wrist force the untared static load cannot explain, for diagnostics.
 
@@ -169,6 +181,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         if not self._execute_lock.acquire(blocking=False):
             result.message = "another board-visibility invocation is still running"
             return result
+        pending_error: InsigniaNotExposedError | None = None
         try:
             context.canceller.ready()
             self._execute_inner(
@@ -178,6 +191,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             )
         except skill_interface.SkillCancelledError:
             raise
+        except InsigniaNotExposedError as error:
+            # Held, not raised here: the ``finally`` below must publish the
+            # controller handoff first.
+            pending_error = error
         except Exception:
             result.message = "crashed: " + traceback.format_exc(limit=8)
             logging.error(result.message)
@@ -214,36 +231,49 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             "board visibility returning normally; "
             "controller_handoff=Switch To Default Controller required"
         )
-        # Search/sensor failures are represented by the result rather than a
-        # gRPC skill error.  The Flowstate process must always execute
-        # ``Switch To Default Controller`` immediately after this skill and
-        # only then gate on ``result.success && result.done``.  Raising here
-        # aborted a normal Sequence before that cleanup node, leaving the AIC
-        # controller bridge's ICON session holding ``arm`` and causing the
-        # following Move Robot skill to fail with "Part: 'arm' is already in
-        # use."  Cancellation still propagates through SkillCancelledError.
+        # A missing insignia is a real skill error, not a result field: with
+        # Stage 1 removed there is nothing for the process to retry, so it
+        # should fail loudly rather than be silently branched around.
+        #
+        # It is raised *here*, after the ``finally`` above has published the
+        # measured-state handoff, precisely because raising before that
+        # cleanup is what previously left the AIC controller bridge's ICON
+        # session holding ``arm`` and made the following Move Robot fail with
+        # "Part: 'arm' is already in use."  The Flowstate process must still
+        # run ``Switch To Default Controller`` after this skill; that node
+        # releases the bridge lease and is unaffected by the raise.
+        #
+        # Sensor failures and Stage-2 rejections still come back as results.
+        if pending_error is not None:
+            # SkillError takes (status_code, message) -- two positional args.
+            # 9 is FAILED_PRECONDITION, which is what this is: the caller was
+            # required to hand us a start pose that already exposes the
+            # insignia, and did not.
+            raise skill_interface.SkillError(9, str(pending_error))
         return result
 
     def _execute_inner(self, params, result, cancelled) -> None:
-        """Expose the insignia from one deterministic observation posture.
+        """Observe once, then either run Stage 2 or fail.
 
-        Stage 2 remains the only authority for declaring a usable insignia and
-        for producing the downstream survey target.  Stage 1 observes first,
-        executes one offline-swept joint path only when necessary, observes
-        once more, then either hands the fresh triplet to Stage 2 or returns a
-        normal not-done result while holding the known-safe observation pose.
+        There is no Stage 1 any more.  Three successive acquisition designs
+        failed on hardware -- a phase machine steering on a board orientation
+        that is degenerate in clipped views, a joint plan the deployed
+        controller refused to execute, and an image-plane servo with no
+        gradient once the board overflowed the frame -- so the search was
+        removed rather than tuned again.
+
+        The skill is now pure perception and commands no motion at all.  Stage
+        2 remains the only authority for declaring a usable insignia and for
+        producing the downstream survey target.  If the start pose does not
+        already expose a complete unobstructed insignia to a calibrated
+        camera, this reports a hard failure and the caller must fix the start
+        pose.
         """
 
         from aic_perception.arm_ik import UR5eArm
         from aic_perception.board_stage2 import CameraModel
         from aic_perception.board_visibility import analyze_board, view_quality
         from aic_perception.purple_insignia import analyze_purple
-        from aic_perception.board_seek import (
-            SEEK_HARD_MOVE_CEILING,
-            SEEK_STALL_MOVES,
-            seek_progress_score,
-            select_work_target,
-        )
 
         min_contrast = int(params.min_contrast or 30)
         margin_px = int(params.margin_px or 15)
@@ -338,8 +368,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 motion_cancelled=motion_cancelled,
             )
 
+        purple_reports: dict = {}
+
         def observe(label: str):
-            nonlocal baseline_force_xyz
+            nonlocal baseline_force_xyz, purple_reports
             if cancelled():
                 raise skill_interface.SkillCancelledError(
                     f"board acquisition cancelled before {label}"
@@ -424,297 +456,48 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         snapshot, reports = observe("initial")
         if snapshot is None:
             return
-        if self._force_exceeded(
-            snapshot.force_xyz,
-            baseline_force_xyz,
-            max_force_n,
-            force_delta_n,
-        ):
-            result.success = False
-            result.done = False
-            result.force_abort = True
-            result.message = (
-                f"wrist force guard active: raw={result.force_n:.2f}N "
-                f"unexplained={_contact_force_n(snapshot.force_xyz):.2f}N "
-                f"(free-space envelope 12-27N); "
-                "deterministic acquisition refused"
-            )
-            return
+
         if self._stage2_has_complete_landmark(snapshot, reports):
-            result.last_action = "initial_insignia_handoff"
+            result.last_action = "insignia_handoff"
             logging.info(
-                "Stage-2-valid insignia already exposed; no Stage-1 motion"
+                "insignia exposed in a calibrated camera; handing off to "
+                "geometric Stage 2"
             )
             handoff_to_stage2(snapshot, reports)
             return
 
-        expected = tuple(sorted(self.config.camera_frames))
-        missing_frames = sorted(set(expected) - set(snapshot.frames))
-        missing_calibration = sorted(
-            set(expected) - set(snapshot.calibrations)
-        )
-        if missing_frames or missing_calibration:
-            result.success = False
-            result.done = False
-            result.message = (
-                "deterministic acquisition requires all approved cameras; "
-                f"missing_frames={missing_frames} "
-                f"missing_calibration={missing_calibration}"
-            )
-            return
-
-        fresh_force = snapshot.force_xyz
-        if fresh_force is None:
-            fresh_force = self.camera_rig.wait_for_force_xyz(
-                timeout_sec=timeout_sec, max_age_sec=0.5
-            )
-        if fresh_force is None:
-            result.success = False
-            result.done = False
-            result.message = (
-                "no fresh wrist-force sample for deterministic acquisition"
-            )
-            return
-        if baseline_force_xyz is None:
-            baseline_force_xyz = fresh_force
-
-        purple_reports = self._scan_purple(snapshot)
-
-
-        # ------------------------------------------------------------------
-        # Stage 1: image-plane seek (ported from move_to_board_skill v3).
+        # No search, no motion.  Stage 1 was removed after three successive
+        # designs failed on hardware -- a phase machine steering on a
+        # degenerate orientation cue, a joint plan the controller would not
+        # execute, and an image-plane servo with no gradient once the board
+        # overflowed the frame.  The skill is now pure perception: either the
+        # start pose already exposes the insignia or the caller must fix the
+        # start pose.
         #
-        # Small Cartesian translations at fixed orientation, steering on
-        # whichever camera most needs work.  No joint target mode, no phase
-        # sequencing, and no use of the board's orientation -- which is
-        # degenerate (`long_ratio=1.00`) in exactly the clipped views where
-        # Stage 1 is needed.  Purple takes over from the board mask the moment
-        # any camera sees it.
-        # ------------------------------------------------------------------
-        baseline_force_xyz = snapshot.force_xyz or baseline_force_xyz
-        mode, steer_camera, steer_report = select_work_target(
-            reports, purple_reports
+        # This is a hard failure, not the usual expected-rejection result,
+        # because there is nothing left for the process to retry.  It still
+        # returns normally rather than raising: throwing before cleanup leaves
+        # `arm` in use and breaks the next Move Robot node.
+        seen_anywhere = sorted(
+            name for name, report in purple_reports.items() if report.seen
         )
-        if steer_camera is None or steer_report is None:
-            self._stage2_not_done(
-                result,
-                "no board or purple insignia detected after gripper masking",
+        result.success = False
+        result.done = False
+        result.target_valid = False
+        result.last_action = "insignia_not_exposed"
+        result.message = (
+            "no calibrated camera contains a complete unobstructed purple "
+            "insignia and Stage 1 acquisition has been removed; "
+            + (
+                f"partial insignia visible in {','.join(seen_anywhere)}"
+                if seen_anywhere
+                else "no camera sees the insignia at all"
             )
-            result.last_action = "seek_no_target"
-            return
-
-        result.last_action = "board_seek"
-        # No fixed hop budget: a corner start legitimately needs far more moves
-        # than a near-framed one.  The search runs while it is still improving
-        # and stops when it stalls.  The ceiling only guarantees termination --
-        # Stage 1 has no aggregate wall clock, so an unbounded loop would hang
-        # the skill.
-        best_score = seek_progress_score(reports, purple_reports)
-        stalled_moves = 0
-        step = 0
-        while step < SEEK_HARD_MOVE_CEILING:
-            step += 1
-            if cancelled():
-                raise skill_interface.SkillCancelledError(
-                    "board acquisition cancelled during seek"
-                )
-            logging.info(
-                "seek step %d mode=%s on %s edges=%s area=%.3f "
-                "center=(%+.3f,%+.3f) best_score=%.3f",
-                step,
-                mode,
-                steer_camera,
-                ",".join(sorted(steer_report.edges)) or "none",
-                steer_report.area_frac,
-                float(steer_report.center_error[0]),
-                float(steer_report.center_error[1]),
-                best_score,
-            )
-            outcome, skip_reason = self._seek_step(
-                steer_camera,
-                steer_report,
-                timeout_sec=timeout_sec,
-                baseline_force_xyz=baseline_force_xyz,
-                max_force_n=max_force_n,
-                force_delta_n=force_delta_n,
-                publish_hz=publish_hz,
-                cancelled=motion_cancelled,
-                target_label=mode,
-            )
-            if skip_reason is not None:
-                self._stage2_not_done(
-                    result,
-                    f"{mode} seen on {steer_camera} after "
-                    f"{result.moves_executed} moves but no centering signal "
-                    f"remains: {skip_reason}",
-                )
-                result.last_action = "seek_no_signal"
-                return
-            if outcome.cancelled:
-                raise skill_interface.SkillCancelledError(outcome.message)
-            if not outcome.success:
-                result.success = False
-                result.done = False
-                result.target_valid = False
-                result.force_abort = outcome.force_abort
-                result.message = (
-                    f"board seek move {result.moves_executed + 1} failed: "
-                    f"{outcome.message}"
-                )
-                result.last_action = "seek_move_failed"
-                return
-
-            result.moves_executed += 1
-            result.moved = True
-            result.travel_m += float(outcome.distance_m)
-
-            snapshot, reports = observe(f"seek_{step}")
-            if snapshot is None:
-                return
-            purple_reports = self._scan_purple(snapshot)
-            if self._stage2_has_complete_landmark(snapshot, reports):
-                result.last_action = "seek_insignia_handoff"
-                logging.info(
-                    "board seek exposed a Stage-2-valid insignia after "
-                    "%d move(s)",
-                    result.moves_executed,
-                )
-                handoff_to_stage2(snapshot, reports)
-                return
-
-            score = seek_progress_score(reports, purple_reports)
-            if score > best_score + 1e-9:
-                best_score = score
-                stalled_moves = 0
-            else:
-                stalled_moves += 1
-                logging.info(
-                    "seek made no progress (%.3f <= best %.3f), %d/%d "
-                    "consecutive",
-                    score,
-                    best_score,
-                    stalled_moves,
-                    SEEK_STALL_MOVES,
-                )
-                if stalled_moves >= SEEK_STALL_MOVES:
-                    result.last_action = "seek_stalled"
-                    self._stage2_not_done(
-                        result,
-                        f"board seek stalled after {result.moves_executed} "
-                        f"move(s): {SEEK_STALL_MOVES} consecutive moves "
-                        "produced no progress toward exposing the insignia",
-                    )
-                    return
-
-            mode, steer_camera, steer_report = select_work_target(
-                reports, purple_reports, preferred=steer_camera
-            )
-            if steer_camera is None or steer_report is None:
-                self._stage2_not_done(
-                    result,
-                    "lost the board and the insignia after seek move "
-                    f"{result.moves_executed}",
-                )
-                result.last_action = "seek_target_lost"
-                return
-
-        result.last_action = "seek_ceiling_reached"
-        self._stage2_not_done(
-            result,
-            f"board seek hit its {SEEK_HARD_MOVE_CEILING}-move termination "
-            "backstop without exposing the insignia; the stall detector "
-            "should have ended this first",
+            + ". Move the arm to a start pose that already exposes it."
         )
+        logging.error(result.message)
+        raise InsigniaNotExposedError(result.message)
 
-    def _scan_purple(self, snapshot) -> dict:
-        """Purple-insignia report per fresh camera, after gripper masking."""
-        from aic_perception.board_seek import BOARD_MARGIN_PX
-        from aic_perception.purple_insignia import analyze_purple
-
-        reports = {}
-        for name, frame in snapshot.frames.items():
-            masked = self.gripper_masks.apply(name, frame["image"])
-            reports[name] = analyze_purple(masked, margin_px=BOARD_MARGIN_PX)
-        return reports
-
-    def _seek_step(
-        self,
-        camera: str,
-        report,
-        *,
-        timeout_sec: float,
-        baseline_force_xyz,
-        max_force_n: float,
-        force_delta_n: float,
-        publish_hz: float,
-        cancelled,
-        target_label: str = "target",
-    ):
-        """One bounded image-plane translation toward centring ``report``.
-
-        Cartesian and orientation-preserving on purpose.  Holding orientation
-        fixed is what removes the J1/J6 coupling that broke the phase machine
-        at the levelled pose, and staying in Cartesian mode avoids the joint
-        target-mode negotiation that the deployed controller drops
-        ("controller left joint target mode") mid-segment.
-        """
-        from aic_perception.board_seek import (
-            CENTER_STEP_M,
-            image_plane_direction,
-            MAX_SPEED_MPS,
-            MOVE_TIMEOUT_SEC,
-            SETTLE_TOLERANCE_M,
-        )
-        from aic_perception.board_visibility import world_delta
-        from aic_perception.robot_motion import normalize_quaternion
-
-        direction = image_plane_direction(report)
-        if direction is None:
-            return None, (
-                f"{target_label} is already near the image centre on {camera}"
-            )
-
-        position, orientation = self._gripper_pose(timeout_sec)
-        image_right, image_down, back_away = self._camera_axes_in_base(
-            camera, timeout_sec
-        )
-        delta = world_delta(
-            np.asarray(direction, dtype=float),
-            backoff=False,
-            step_m=CENTER_STEP_M,
-            base_image_right=image_right,
-            base_image_down=image_down,
-            base_backoff=back_away,
-        )
-        target = tuple(
-            float(value)
-            for value in np.asarray(position, dtype=float) + delta
-        )
-        logging.info(
-            "seek %s on %s: image_dir=(%+.2f,%+.2f) step=%.3fm "
-            "delta=(%+.4f,%+.4f,%+.4f)",
-            target_label,
-            camera,
-            direction[0],
-            direction[1],
-            CENTER_STEP_M,
-            delta[0],
-            delta[1],
-            delta[2],
-        )
-        outcome = self.robot_motion.move_smooth(
-            target,
-            target_orientation=normalize_quaternion(orientation),
-            max_speed_mps=MAX_SPEED_MPS,
-            publish_hz=publish_hz,
-            settle_tolerance_m=SETTLE_TOLERANCE_M,
-            timeout_sec=MOVE_TIMEOUT_SEC,
-            baseline_force_xyz=baseline_force_xyz,
-            max_force_n=max_force_n,
-            force_delta_n=force_delta_n,
-            cancelled=cancelled,
-        )
-        return outcome, None
 
     def _stage2_has_complete_landmark(self, snapshot, reports) -> bool:
         """Whether any calibrated camera has a complete Stage-2 landmark."""
@@ -735,197 +518,6 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             if observation is not None:
                 return True
         return False
-
-    def _move_to_acquire_complete_logo(
-        self,
-        *,
-        snapshot,
-        reports,
-        result,
-        timeout_sec: float,
-        step_m: float,
-        max_speed_mps: float,
-        max_angular_speed_rps: float,
-        publish_hz: float,
-        settle_tolerance_m: float,
-        settle_orientation_tolerance_rad: float,
-        move_timeout_sec: float,
-        baseline_force_xyz,
-        max_force_n: float,
-        force_delta_n: float,
-        cancelled,
-        motion_cancelled,
-    ) -> bool:
-        """Make one measured board-fit or camera-plane logo correction.
-
-        When the plate still fills or clips the image, a board-normal retreat
-        is more informative than sliding the logo around the same cropped
-        view.  Once scale is usable, use the logo direction for a bounded
-        camera-plane correction.  Both choices are measured from the fresh
-        frame; neither is a blind sweep.
-        """
-        import cv2
-
-        from aic_perception.board_visibility import detect_purple_logo
-
-        selected = None
-        for camera_name in ("center_camera", "left_camera", "right_camera"):
-            if camera_name not in snapshot.frames or camera_name not in reports:
-                continue
-            detected = detect_purple_logo(
-                snapshot.frames[camera_name]["image"]
-            )
-            if detected is not None:
-                selected = (camera_name, detected)
-                break
-        if selected is None:
-            self._stage2_not_done(
-                result,
-                "purple pixels are unavailable, so a logo-acquisition move "
-                "would be blind",
-            )
-            return False
-
-        camera_name, (logo_mask, logo_centroid, _, _) = selected
-        image = snapshot.frames[camera_name]["image"]
-        height, width = image.shape[:2]
-        ignored = self.gripper_masks.ignored_pixels(camera_name, image.shape)
-        uncertainty = cv2.dilate(
-            ignored.astype(np.uint8), np.ones((9, 9), np.uint8)
-        ).astype(bool)
-        center = np.array((0.5 * (width - 1), 0.5 * (height - 1)), dtype=float)
-        desired_image = center - np.asarray(logo_centroid, dtype=float)
-        desired_image /= np.array(
-            (max(1.0, 0.5 * width), max(1.0, 0.5 * height)), dtype=float
-        )
-        if np.any(logo_mask.astype(bool) & uncertainty):
-            logo_y, logo_x = np.nonzero(logo_mask)
-            mask_y, mask_x = np.nonzero(uncertainty)
-            if logo_x.size and mask_x.size:
-                escape = np.array(
-                    (
-                        float(logo_x.mean() - mask_x.mean()) / max(1.0, width),
-                        float(logo_y.mean() - mask_y.mean()) / max(1.0, height),
-                    ),
-                    dtype=float,
-                )
-                if float(np.linalg.norm(escape)) > 1e-6:
-                    desired_image = escape
-        source_report = reports[camera_name]
-        prefer_backoff = bool(
-            source_report.area_frac >= 0.32
-            or "context_clipped" in source_report.failure_reasons
-        )
-        desired_norm = float(np.linalg.norm(desired_image))
-        if desired_norm < 1e-4 and not prefer_backoff:
-            self._stage2_not_done(
-                result,
-                f"{camera_name} logo is visible but its complete outline "
-                "cannot be recovered; refusing an unmeasured direction",
-            )
-            return False
-        if desired_norm >= 1e-4:
-            desired_image /= desired_norm
-        try:
-            position, orientation = self._gripper_pose(timeout_sec)
-            image_right, image_down, camera_back_away = self._camera_axes_in_base(
-                camera_name, timeout_sec
-            )
-        except Exception as error:
-            self._stage2_not_done(
-                result, f"logo-acquisition camera/TCP TF unavailable: {error}"
-            )
-            return False
-        if prefer_backoff:
-            # The camera back-away axis is derived from the current optical
-            # TF.  This is the same physical zoom-out direction as the
-            # legacy BACKOFF action, but it remains available after that
-            # planner's two-backoff centroid limit.
-            correction_m = min(0.045, max(0.020, 0.9 * step_m))
-            delta = correction_m * np.asarray(camera_back_away, dtype=float)
-            acquisition_mode = "board_fit_backoff"
-        else:
-            # An object moves opposite camera translation in the image.
-            correction_m = min(0.025, max(0.010, 0.5 * step_m))
-            delta = -correction_m * (
-                float(desired_image[0]) * np.asarray(image_right, dtype=float)
-                + float(desired_image[1]) * np.asarray(image_down, dtype=float)
-            )
-            acquisition_mode = "logo_plane_shift"
-        target_position_array = np.asarray(position, dtype=float) + delta
-        target_position = tuple(float(value) for value in target_position_array)
-        fresh_force = snapshot.force_xyz
-        if fresh_force is None:
-            fresh_force = self.camera_rig.wait_for_force_xyz(
-                timeout_sec=timeout_sec, max_age_sec=0.5
-            )
-        if fresh_force is None:
-            self._stage2_not_done(
-                result,
-                "no fresh wrist-force sample for bounded logo acquisition",
-            )
-            return False
-        if baseline_force_xyz is None:
-            baseline_force_xyz = fresh_force
-        if cancelled():
-            raise skill_interface.SkillCancelledError(
-                "board search cancelled before logo acquisition"
-            )
-
-        result.last_action = "acquire_complete_purple_logo"
-        result.target_valid = True
-        result.target_frame = self.config.base_frame
-        result.target.x, result.target.y, result.target.z = target_position
-        result.dx, result.dy, result.dz = (
-            float(delta[0]),
-            float(delta[1]),
-            float(delta[2]),
-        )
-        logging.info(
-            "bounded Stage-1 acquisition mode=%s camera=%s "
-            "desired_image=(%+.3f,%+.3f) delta=(%+.4f,%+.4f,%+.4f)m",
-            acquisition_mode,
-            camera_name,
-            desired_image[0],
-            desired_image[1],
-            delta[0],
-            delta[1],
-            delta[2],
-        )
-        outcome = self.robot_motion.move_smooth(
-            target_position,
-            target_orientation=orientation,
-            max_speed_mps=max_speed_mps,
-            max_angular_speed_radps=max_angular_speed_rps,
-            publish_hz=publish_hz,
-            settle_tolerance_m=settle_tolerance_m,
-            settle_angular_tolerance_rad=settle_orientation_tolerance_rad,
-            timeout_sec=move_timeout_sec,
-            baseline_force_xyz=baseline_force_xyz,
-            max_force_n=max_force_n,
-            force_delta_n=force_delta_n,
-            cancelled=motion_cancelled,
-        )
-        if outcome.cancelled:
-            if cancelled():
-                raise skill_interface.SkillCancelledError(outcome.message)
-            self._stage2_not_done(
-                result, "search deadline reached during logo acquisition"
-            )
-            return False
-        if not outcome.success:
-            result.force_abort = outcome.force_abort
-            self._stage2_not_done(
-                result, f"bounded logo-acquisition move failed: {outcome.message}"
-            )
-            return False
-        result.moves_executed += 1
-        result.travel_m += float(outcome.distance_m)
-        result.angular_travel_rad += float(outcome.angular_distance_rad)
-        result.moved = result.moved or (
-            outcome.distance_m > 0.0 or outcome.angular_distance_rad > 0.0
-        )
-        return True
 
     @staticmethod
     def _uses_geometric_survey(survey_target: int) -> bool:
@@ -1585,6 +1177,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # back to the sphere rather than trusting a bad model.
         joint_motion_fn = None
         joint_motion_preference_fn = None
+        # Which gate actually rejected the candidates.  "none had a reachable,
+        # joint-motion-valid IK solution" conflates three very different
+        # failures -- unreachable, arm-in-view, and over the travel cap -- and
+        # they need opposite fixes, so count them separately.
+        ik_stats = {
+            "probed": 0,
+            "no_ik": 0,
+            "arm_blocked": 0,
+            "clear": 0,
+            "best_worst_joint_rad": math.inf,
+        }
+        # Per-pose detail for the near-miss table.  Bounded by the framed count
+        # (a few hundred), so holding it all and logging the best handful is
+        # cheap and is the only way to see *why* a whole sweep was refused.
+        ik_records: list[dict] = []
         ik_arm = None
         ik_seed = None
         preferred_j6_target = None
@@ -1667,18 +1274,53 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                         _extrinsics=tcp_T_cam,
                         _cameras=camera_models,
                     ):
+                        ik_stats["probed"] += 1
+                        reach = float(np.linalg.norm(pose.translation))
+                        tcp_z = float(pose.translation[2])
+                        solutions = _arm.solve_ranked(pose, _seed)
+                        record = {
+                            "reach_m": reach,
+                            "tcp_z_m": tcp_z,
+                            "n_ik": len(solutions),
+                            "n_clear": 0,
+                            "worst_joint_rad": math.inf,
+                            "gate": "unreachable",
+                        }
+                        if not solutions:
+                            ik_stats["no_ik"] += 1
+                            ik_records.append(record)
+                            return None
+                        # Cheapest branch travel regardless of arm-in-view, so
+                        # the table can separate "no branch exists" from "the
+                        # only clear branch is too far".
+                        record["worst_joint_rad"] = min(
+                            float(np.abs(joints - _seed).max())
+                            for joints in solutions
+                        )
                         clear = [
                             joints
-                            for joints in _arm.solve_ranked(
-                                pose,
-                                _seed,
-                            )
+                            for joints in solutions
                             if self._arm_clear_of_own_cameras(
                                 pose, joints, _arm, _extrinsics, _cameras
                             )
                         ]
+                        record["n_clear"] = len(clear)
                         if not clear:
+                            ik_stats["arm_blocked"] += 1
+                            record["gate"] = "arm_in_view"
+                            ik_records.append(record)
                             return None
+                        ik_stats["clear"] += 1
+                        clear_worst = min(
+                            float(np.abs(joints - _seed).max())
+                            for joints in clear
+                        )
+                        record["worst_joint_rad"] = clear_worst
+                        record["gate"] = "passed_ik"
+                        ik_records.append(record)
+                        ik_stats["best_worst_joint_rad"] = min(
+                            ik_stats["best_worst_joint_rad"], clear_worst
+                        )
                         return min(
                             clear,
                             key=lambda joints: (
@@ -1835,6 +1477,95 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             min_height_m=0.02,
         )
         if candidate is None:
+            best_worst = ik_stats["best_worst_joint_rad"]
+            cap_deg = math.degrees(joint_motion_limit_rad)
+            logging.error(
+                "survey IK rejection breakdown: probed=%d unreachable=%d "
+                "arm_in_view=%d arm_clear=%d best_worst_joint=%s cap=%.1fdeg",
+                ik_stats["probed"],
+                ik_stats["no_ik"],
+                ik_stats["arm_blocked"],
+                ik_stats["clear"],
+                (
+                    f"{math.degrees(best_worst):.1f}deg"
+                    if math.isfinite(best_worst)
+                    else "n/a"
+                ),
+                cap_deg,
+            )
+            # Name the binding gate outright rather than leaving it to be
+            # inferred from the counts.
+            if ik_stats["probed"] == 0:
+                verdict = (
+                    "no pose reached the IK gate at all -- everything died on "
+                    "framing, clearance, obliquity or the 0.85 m reach prune"
+                )
+            elif ik_stats["clear"] > 0:
+                verdict = (
+                    f"BINDING GATE = joint-travel cap: {ik_stats['clear']} "
+                    f"pose(s) had an arm-clear branch but the cheapest needed "
+                    f"{math.degrees(best_worst):.1f}deg against a "
+                    f"{cap_deg:.1f}deg cap"
+                )
+            elif ik_stats["arm_blocked"] >= ik_stats["no_ik"]:
+                verdict = (
+                    f"BINDING GATE = arm-in-view: {ik_stats['arm_blocked']} "
+                    "pose(s) had valid IK but the arm sat in a wrist camera "
+                    "on every branch"
+                )
+            else:
+                verdict = (
+                    f"BINDING GATE = reachability: {ik_stats['no_ik']} "
+                    "pose(s) had no analytic IK solution at all"
+                )
+            logging.error("survey IK verdict: %s", verdict)
+            logging.error(
+                "survey IK seed_deg=%s reach_span=%s tcp_z_span=%s",
+                (
+                    np.round(np.degrees(ik_seed), 1).tolist()
+                    if ik_seed is not None
+                    else "n/a"
+                ),
+                (
+                    f"{min(r['reach_m'] for r in ik_records):.3f}.."
+                    f"{max(r['reach_m'] for r in ik_records):.3f}m"
+                    if ik_records
+                    else "n/a"
+                ),
+                (
+                    f"{min(r['tcp_z_m'] for r in ik_records):.3f}.."
+                    f"{max(r['tcp_z_m'] for r in ik_records):.3f}m"
+                    if ik_records
+                    else "n/a"
+                ),
+            )
+            # Nearest misses: most IK branches first, then least travel.
+            for index, record in enumerate(
+                sorted(
+                    ik_records,
+                    key=lambda item: (
+                        -item["n_clear"],
+                        -item["n_ik"],
+                        item["worst_joint_rad"],
+                    ),
+                )[:8],
+                start=1,
+            ):
+                logging.error(
+                    "  near-miss %d: gate=%-12s reach=%.3fm tcp_z=%.3fm "
+                    "ik_branches=%d arm_clear=%d worst_joint=%s",
+                    index,
+                    record["gate"],
+                    record["reach_m"],
+                    record["tcp_z_m"],
+                    record["n_ik"],
+                    record["n_clear"],
+                    (
+                        f"{math.degrees(record['worst_joint_rad']):.1f}deg"
+                        if math.isfinite(record["worst_joint_rad"])
+                        else "n/a"
+                    ),
+                )
             self._stage2_not_done(
                 result, f"no safe all-camera survey pose: {search_reason}"
             )
