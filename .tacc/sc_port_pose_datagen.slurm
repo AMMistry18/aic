@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=sc-plug-pose
+#SBATCH --job-name=sc-port-pose
 #SBATCH --partition=rtx-small
 #SBATCH --account=IRI26004
 #SBATCH --nodes=1
@@ -7,19 +7,19 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
-#SBATCH --output=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/logs/sc-plug-pose-%j.out
+#SBATCH --output=/work2/11590/satya_a/stampede3/aic-sc-port-pose-datagen-20260726/logs/sc-port-pose-%j.out
 
 set -eo pipefail
 module load tacc-apptainer/1.4.1
 
-readonly job_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725
+readonly job_root=/work2/11590/satya_a/stampede3/aic-sc-port-pose-datagen-20260726
 readonly repo_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-src-20260725
 readonly mode="${SC_MODE:-smoke}"
-readonly trial_count="${SC_TRIAL_COUNT:-10}"
-readonly start_index="${SC_TRIAL_START:-1}"
-readonly seed="${SC_SEED:-20260725}"
-readonly eval_image="${job_root}/containers/aic_eval_pinned.sif"
-readonly engine_home="$(mktemp -d "/tmp/aic-sc-plug-${SLURM_JOB_ID}.XXXXXX")"
+readonly trial_count="${SC_PORT_TRIAL_COUNT:-10}"
+readonly start_index="${SC_PORT_TRIAL_START:-1}"
+readonly seed="${SC_PORT_SEED:-20260726}"
+readonly eval_image=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/containers/aic_eval_pinned.sif
+readonly engine_home="$(mktemp -d "/tmp/aic-sc-port-${SLURM_JOB_ID}.XXXXXX")"
 
 case "${mode}" in
   smoke)
@@ -52,8 +52,13 @@ readonly sim_log_cap_bytes="${SC_SIM_LOG_CAP_BYTES:-$((2 * 1024 * 1024 * 1024))}
 # being killed mid-write with a half-written label.
 readonly work_free_floor_kib="${SC_WORK_FREE_FLOOR_KIB:-$((20 * 1024 * 1024))}"
 
-readonly trial_config="${job_root}/config/sc_plug_pose_${mode}_${start_index}_${trial_count}.yaml"
+readonly trial_config="${job_root}/config/sc_port_pose_${mode}_${start_index}_${trial_count}.yaml"
 mkdir -p "${job_root}/logs" "${job_root}/config" "${dataset_root}" "${engine_home}"
+# This isolated smoke dataset exists to evaluate the shipped model, so make the
+# collector's first invocation its validation split (it increments 4 -> 5).
+if [[ ! -e "${dataset_root}/.run_counter" ]]; then
+  echo 4 >"${dataset_root}/.run_counter"
+fi
 
 readonly usage_log="${job_root}/logs/usage-${mode}-${SLURM_JOB_ID}.csv"
 readonly stop_reason_file="${job_root}/STOP_REASON_${SLURM_JOB_ID}.txt"
@@ -103,7 +108,7 @@ cd -- "${repo_root}"
   --trials "${trial_count}" \
   --start-index "${start_index}" \
   --seed "${seed}" \
-  --time-limit 20
+  --time-limit 180
 
 export WANDB_MODE=disabled WANDB_DISABLED=true WANDB_SILENT=true
 unset WANDB_API_KEY WANDB_ENTITY WANDB_PROJECT WANDB_RUN_ID WANDB_RUN_GROUP
@@ -112,11 +117,7 @@ export APPTAINERENV_WANDB_DISABLED=true
 export APPTAINERENV_WANDB_SILENT=true
 export ROS_LOG_DIR="${engine_home}/.ros/log"
 export APPTAINERENV_ROS_LOG_DIR="${ROS_LOG_DIR}"
-export AIC_SC_PLUG_POSE_OUTPUT_DIR="${dataset_root}"
-export AIC_SC_PLUG_POSE_VIEWPOINTS=1
-export AIC_SC_PLUG_POSE_FRAMES_PER_VIEW=3
-export AIC_SC_PLUG_POSE_SAVE_DEBUG="${debug_overlays}"
-export AIC_SC_PLUG_POSE_TRIAL_START="${start_index}"
+export AIC_SC_POSE_OUTPUT_DIR="${dataset_root}"
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp
 export ZENOH_ROUTER_CHECK_ATTEMPTS=-1
 export ZENOH_CONFIG_OVERRIDE='connect/endpoints=["tcp/127.0.0.1:7447"];transport/shared_memory/enabled=false'
@@ -293,7 +294,8 @@ progress_watchdog() {
   local waited=0 last_count=0 count
   while true; do
     sleep 30
-    count=$(grep -c 'collection complete: trial=' "${log}" 2>/dev/null || echo 0)
+    count=$(grep -c 'SC GT collection done' "${log}" 2>/dev/null || true)
+    : "${count:=0}"
     if (( count > last_count )); then
       last_count="${count}"
       waited=0
@@ -376,7 +378,7 @@ source .pixi/envs/default/setup.bash
 export PYTHONPATH="${repo_root}/aic_example_policies:${repo_root}/aic_model${PYTHONPATH:+:${PYTHONPATH}}"
 .pixi/envs/default/bin/ros2 run aic_model aic_model --ros-args \
   -p use_sim_time:=true \
-  -p policy:=aic_example_policies.ros.DataCollectorScPlugPoseGT \
+  -p policy:=aic_example_policies.ros.DataCollectorScPoseGT \
   >"${collector_log}" 2>&1 &
 collector_pid=$!
 collector_health_watchdog "${collector_pid}" &
@@ -400,7 +402,7 @@ done
 # whose teardown had to be forced, not a collection failure -- the integrity
 # checks below are what actually decide whether the data is good.
 if [[ -e "${collector_reaped_marker}" ]] \
-  && grep -q 'SC plug GT collection complete' "${collector_log}" 2>/dev/null; then
+  && grep -q 'SC GT collection done' "${collector_log}" 2>/dev/null; then
   echo "collector was reaped after a completed shutdown; treating as success"
   collector_status=0
 fi
@@ -412,7 +414,7 @@ image_count=$(find "${dataset_root}/images" -type f -name '*.png' 2>/dev/null | 
 label_count=$(find "${dataset_root}/labels" -type f -name '*.txt' 2>/dev/null | wc -l)
 metadata_count=$(find "${dataset_root}/metadata" -type f -name '*.json' 2>/dev/null | wc -l)
 bad_labels=$(find "${dataset_root}/labels" -type f -name '*.txt' -exec awk \
-  'NF != 29 {bad++} END {print bad+0}' {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+  'NF != 17 {bad++} END {print bad+0}' {} + 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
 used_kib=$(du -sk "${dataset_root}" | awk '{print $1}')
 
 printf 'collection_complete job=%s mode=%s trials=%s images=%s labels=%s metadata=%s bad_labels=%s used_kib=%s collector_status=%s\n' \
@@ -431,17 +433,6 @@ fi
 [[ ! -e "${stop_reason_file}" ]]
 [[ "${collector_status}" -eq 0 ]]
 [[ ! -e "${sim_crash_marker}" ]]
-[[ "${image_count}" -gt 0 ]]
+[[ "${image_count}" -ge 30 ]]
 [[ "${image_count}" -eq "${label_count}" ]]
 [[ "${bad_labels}" -eq 0 ]]
-
-# TACC can cap a user at two queued jobs.  When requested for the final
-# continuation batch, keep the already allocated GPU and invoke the strict
-# training launcher only after collection has passed every integrity check.
-if [[ "${SC_TRAIN_AFTER_COLLECTION:-0}" == "1" ]]; then
-  [[ "${mode}" == "full" ]]
-  mkdir -p "${job_root}/training/logs"
-  exec "${repo_root}/.tacc/train_sc_plug_pose.slurm" \
-    >"${job_root}/training/logs/sc-plug-pose-train-inline-${SLURM_JOB_ID}.out" \
-    2>&1
-fi

@@ -57,6 +57,7 @@ SEAT_ALIGN_OBSERVE_MOMENT_GAIN = 0.02
 SEAT_WRENCH_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_WINDOW_S = 0.5
+MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -133,6 +134,11 @@ class V50Config:
     retract_free_step_m: float = 0.004
     retract_arrive_tol_m: float = 0.002
     retract_timeout_wall_s: float = 10.0
+    # Cap on how far the retract setpoint may lead the plug OUTWARD, i.e. the
+    # reverse of force_lead_m.  At the 500 N/m axial stiffness the default
+    # bounds the nominal pull at ~12 N -- enough to break the 4-5 N lateral
+    # binds diag-5 measured, well under the 18 N hard abort.
+    retract_pull_lead_m: float = 0.024
 
     @classmethod
     def from_env(cls) -> "V50Config":
@@ -200,6 +206,9 @@ class V50Config:
             retract_timeout_wall_s=_env_float(
                 "RL_INSERT_V50_RETRACT_TIMEOUT_S", 10.0
             ),
+            retract_pull_lead_m=_env_float(
+                "RL_INSERT_V50_RETRACT_PULL_LEAD_M", 0.024
+            ),
         ).validated()
 
     def validated(self) -> "V50Config":
@@ -231,8 +240,14 @@ class V50Config:
             or self.retract_free_step_m <= 0.0
             or self.retract_arrive_tol_m <= 0.0
             or self.retract_timeout_wall_s <= 0.0
+            or self.retract_pull_lead_m <= 0.0
         ):
             raise ValueError("v50 retract parameters must be positive")
+        if self.axial_stiffness_n_m * self.retract_pull_lead_m >= self.force_abort_n:
+            raise ValueError(
+                "v50 retract pull lead demands a nominal pull at or above the "
+                "hard force abort; lower RL_INSERT_V50_RETRACT_PULL_LEAD_M"
+            )
         if not 0.0 <= self.seat_align_release_decay <= 1.0:
             raise ValueError("v50 seat alignment release decay must be within 0-1")
         if (
@@ -439,6 +454,39 @@ def next_persistent_depth(
         INSERT_DEPTH_M + config.seat_overtravel_m,
         candidate,
         current_depth + config.force_lead_m,
+    )
+
+
+def next_retract_depth(
+    current_depth: float,
+    commanded_depth: float,
+    config: V50Config,
+) -> float:
+    """Recede an absolute retract setpoint while bounding the pull.
+
+    ``next_persistent_depth`` run in reverse, for the same reason: commanding
+    ``current_tip - one_step`` afresh every tick pins the offset at
+    ``retract_step_m`` forever, so the pull plateaus at stiffness * step
+    (~0.75 N) -- the v49 chase-the-tip mistake, reproduced backwards.  A wedge
+    held by diag-5's 4-5 N of lateral bind never comes out under that; it
+    grinds until the timeout and the retry dies.  Here the setpoint keeps
+    RECEDING while the plug is stuck, so the pull builds until the lead cap
+    bounds the nominal demand at axial_stiffness_n_m * retract_pull_lead_m
+    (~12 N by default, under the 18 N hard abort; enforced by ``validated``).
+    """
+
+    current_depth = float(current_depth)
+    # Never sit deeper than the plug actually is: after a sudden pop-free the
+    # stale setpoint would otherwise command the plug back INTO the bore.
+    commanded_depth = min(float(commanded_depth), current_depth)
+    # Deliberately no retract_clear_depth_m floor: a plug stuck just inside the
+    # mouth needs the full pull as much as a deep wedge does, and flooring at
+    # the clear depth would cap it at stiffness * (depth - clear) instead.  The
+    # caller's clearance check terminates the walk; the lead cap keeps the
+    # command within retract_pull_lead_m of the measured tip everywhere.
+    return max(
+        commanded_depth - config.retract_step_m,
+        current_depth - config.retract_pull_lead_m,
     )
 
 
@@ -1258,7 +1306,12 @@ class PlugRelativeV50Controller:
 
         The seat setpoint cannot walk backwards: next_persistent_depth() clamps
         the command to at least the current depth, so asking for less depth is
-        silently ignored. Retraction therefore drives set_pose_target directly.
+        silently ignored. Retraction therefore runs next_retract_depth(), its
+        mirror image: a persistent setpoint receding from the measured depth so
+        the pull force BUILDS on a stuck plug instead of plateauing at
+        stiffness * retract_step_m.  Lateral is re-anchored on the measured tip
+        every tick, so the only sustained demand is the axial pull -- the plug
+        finds its own way off the chamfer instead of being dragged against it.
 
         Withdrawal is two phases because orientation is the dangerous part. While
         the plug is still inside the cage its rotation is held at whatever was
@@ -1268,20 +1321,20 @@ class PlugRelativeV50Controller:
         """
         deadline = time.monotonic() + self.config.retract_timeout_wall_s
         cleared = False
+        command_depth = None
         while time.monotonic() < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             depth, _, _, tip_pos, tip_rotation = self._errors()
             if depth <= self.config.retract_clear_depth_m:
                 cleared = True
                 break
-            step = min(
-                self.config.retract_step_m,
-                depth - self.config.retract_clear_depth_m,
-            )
+            if command_depth is None:
+                command_depth = depth
+            command_depth = next_retract_depth(depth, command_depth, self.config)
             self.policy.set_pose_target(
                 self.move_robot,
                 self.policy._tcp_target_for_tip(
-                    tip_pos - self.Rp[:, 2] * step, tip_rotation
+                    tip_pos + self.Rp[:, 2] * (command_depth - depth), tip_rotation
                 ),
                 stiffness=self.STIFFNESS,
                 damping=self.DAMPING,
@@ -1330,26 +1383,79 @@ class PlugRelativeV50Controller:
 
         This is the one viewpoint where re-perception is trustworthy: at the
         aligned standoff the cable drapes over the port, but a retracted plug is
-        back in the pose priming already worked from. A failure here is not
-        fatal -- the previous measured transform is stale, not fabricated, and it
-        is what got the plug into the bore in the first place.
+        back in the pose priming already worked from.  Retry motion is forbidden
+        from using the previous transform, so clear it before requesting a new
+        observation and fail closed if that observation cannot establish one.
         """
+        self.policy._v50_grasp_transform = None
         observation = self._wait_new_observation(
             after_stamp=self.last_observation_stamp,
             timeout_wall_s=2.0,
         )
         if observation is None:
-            self.log.warn(
-                "[v50] no fresh observation after retract; reusing the last "
-                "measured grasp transform"
+            self.log.error(
+                "[v50] no fresh plug observation after retract; retry aborted"
             )
             return False
         if not self._activate_plug_pose(observation):
-            self.log.warn(
-                "[v50] re-perception after retract failed; reusing the last "
-                "measured grasp transform"
+            self.log.error(
+                "[v50] fresh plug pose after retract failed; retry aborted"
             )
             return False
+        return True
+
+    def _refresh_port_pose_after_retract(self) -> bool:
+        """Replace the SFP port target using camera frames newer than the plug pose."""
+
+        perceive = getattr(self.policy, "perceive_port_pose_consensus", None)
+        if perceive is None:
+            self.log.error("[v50] SFP port refresh hook unavailable; retry aborted")
+            return False
+
+        def get_fresh_observation():
+            return self._wait_new_observation(
+                after_stamp=self.last_observation_stamp,
+                timeout_wall_s=2.0,
+            )
+
+        perceived = perceive(self.task, get_fresh_observation)
+        if perceived is None:
+            self.log.error("[v50] fresh SFP port pose after retract failed; retry aborted")
+            return False
+        try:
+            new_pos, new_quat, reproj_px = perceived
+            new_pos = np.asarray(new_pos, dtype=np.float64).reshape(3)
+            new_quat = np.asarray(new_quat, dtype=np.float64).reshape(4)
+            reproj_px = float(reproj_px)
+            quat_norm = float(np.linalg.norm(new_quat))
+            if (
+                not np.all(np.isfinite(new_pos))
+                or not np.all(np.isfinite(new_quat))
+                or not np.isfinite(reproj_px)
+                or quat_norm <= 1e-12
+                or reproj_px > MAX_PORT_REPROJ_PX
+            ):
+                raise ValueError("non-finite or out-of-gate port pose")
+            new_quat = new_quat / quat_norm
+            from .rl_insert_contract import port_frame
+
+            new_Rp = port_frame(new_quat)
+        except (TypeError, ValueError, np.linalg.LinAlgError) as exc:
+            self.log.error(f"[v50] invalid refreshed SFP port pose ({exc}); retry aborted")
+            return False
+
+        # Atomic replacement: no retry stage can observe a mixture of old and
+        # new port position/orientation.  The visual rescue reference follows
+        # this fresh target as well, so no later retry consults the old pose.
+        self.port_pos = new_pos
+        self.port_quat = new_quat
+        self.Rp = new_Rp
+        self._port_pos_initial = new_pos.copy()
+        self.log.info(
+            "[v50] fresh port pose accepted: "
+            f"p={np.round(new_pos, 5).tolist()} "
+            f"q_wxyz={np.round(new_quat, 5).tolist()} reproj={reproj_px:.2f}px"
+        )
         return True
 
     def _hold_legacy_safe_pose(self):
@@ -1420,7 +1526,10 @@ class PlugRelativeV50Controller:
             if not self._retract_to_start(start_tip_pos, start_tip_rotation):
                 return False
             rescued_since_retract = False
-            self._refresh_plug_pose_after_retract()
+            if not self._refresh_plug_pose_after_retract():
+                return False
+            if not self._refresh_port_pose_after_retract():
+                return False
 
 
 def run_v50_script(
@@ -1457,6 +1566,7 @@ __all__ = [
     "WallProgressWatch",
     "configure_v50",
     "next_persistent_depth",
+    "next_retract_depth",
     "prime_v50_plug_pose",
     "run_v50_script",
     "solve_tip_in_tcp",

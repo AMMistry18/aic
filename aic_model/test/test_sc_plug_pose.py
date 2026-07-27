@@ -264,3 +264,134 @@ def test_missing_weights_yields_no_estimator_rather_than_a_fallback(monkeypatch,
 def test_explicit_missing_weights_path_raises():
     with pytest.raises(FileNotFoundError):
         ScPlugPoseEstimator("/nonexistent/best_sc_plug_pose.pt")
+
+
+# ---------------------------------------------------------------------------
+# Crop-refine second pass.  The controller enables this in the field (it is
+# what reaches the 0.27 mm median), and until now it was only ever validated
+# offline on TACC -- pin its mechanics here.
+# ---------------------------------------------------------------------------
+class _FakeTensor:
+    def __init__(self, array):
+        self._array = np.asarray(array, dtype=np.float64)
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._array
+
+
+class _FakeBoxes:
+    def __init__(self, confs, xyxy=None):
+        self.conf = _FakeTensor(confs)
+        if xyxy is not None:
+            self.xyxy = _FakeTensor(xyxy)
+        self._count = len(np.atleast_1d(confs))
+
+    def __len__(self):
+        return self._count
+
+
+class _FakeKeypoints:
+    def __init__(self, xy, conf):
+        self.xy = _FakeTensor(xy)
+        self.conf = _FakeTensor(conf)
+
+
+class _FakeResult:
+    def __init__(self, boxes=None, keypoints=None):
+        self.boxes = boxes
+        self.keypoints = keypoints
+
+
+class _FakeYolo:
+    """Callable standing in for the Ultralytics model inside ``_predict``.
+
+    Programmed with one response list per expected call; records every batch
+    of images it is handed so tests can assert the crop geometry.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def __call__(self, images, **_kwargs):
+        self.calls.append([np.asarray(image) for image in images])
+        return self._responses.pop(0)
+
+
+def _one_view():
+    views, _, _ = _views_and_detections()
+    return [views[1]]
+
+
+def _result_with(keypoints_xy, box_xyxy=None, conf=0.9):
+    kp = np.asarray(keypoints_xy, dtype=np.float64)[None, :, :]
+    kp_conf = np.full((1, kp.shape[1]), 0.9)
+    boxes = _FakeBoxes([conf], xyxy=None if box_xyxy is None else [box_xyxy])
+    return _FakeResult(boxes=boxes, keypoints=_FakeKeypoints(kp, kp_conf))
+
+
+def test_crop_refine_remaps_crop_keypoints_by_pure_translation(monkeypatch):
+    monkeypatch.delenv("AIC_PLUG_POSE_CROP_PAD", raising=False)
+    truth = np.array([[520.0 + 3.0 * i, 420.0 + 2.0 * i] for i in range(8)])
+    box = [500.0, 400.0, 540.0, 440.0]
+    # pad 6 on a 40 px box -> half=120 -> crop origin (400, 300), inside frame.
+    origin = np.array([400.0, 300.0])
+    model = _FakeYolo([
+        [_result_with(truth + 5.0, box_xyxy=box)],       # full frame, biased
+        [_result_with(truth - origin, box_xyxy=[100.0, 100.0, 140.0, 140.0])],
+    ])
+    estimator = ScPlugPoseEstimator(model=model, crop_refine=True)
+
+    detections = estimator.detect_views(_one_view())
+
+    assert len(model.calls) == 2, "crop refine must run a second pass"
+    assert model.calls[1][0].shape == (240, 240, 3), "padded crop, native res"
+    assert len(detections) == 1
+    np.testing.assert_allclose(detections[0].keypoints_px, truth, atol=1e-9)
+
+
+def test_crop_refine_keeps_full_frame_result_when_crop_misses(monkeypatch):
+    monkeypatch.delenv("AIC_PLUG_POSE_CROP_PAD", raising=False)
+    full = np.array([[520.0 + i, 420.0 + i] for i in range(8)])
+    model = _FakeYolo([
+        [_result_with(full, box_xyxy=[500.0, 400.0, 540.0, 440.0])],
+        [_FakeResult(boxes=None, keypoints=None)],       # crop re-detect fails
+    ])
+    estimator = ScPlugPoseEstimator(model=model, crop_refine=True)
+
+    detections = estimator.detect_views(_one_view())
+
+    assert len(model.calls) == 2
+    assert len(detections) == 1, "a failed crop must not drop the view"
+    np.testing.assert_allclose(detections[0].keypoints_px, full, atol=1e-9)
+
+
+def test_crop_refine_defaults_off_and_runs_a_single_pass(monkeypatch):
+    monkeypatch.delenv("AIC_PLUG_POSE_CROP_REFINE", raising=False)
+    full = np.array([[520.0 + i, 420.0 - i] for i in range(8)])
+    model = _FakeYolo([[_result_with(full, box_xyxy=[500.0, 400.0, 540.0, 440.0])]])
+    estimator = ScPlugPoseEstimator(model=model)
+
+    assert estimator.crop_refine is False, "SFP-path safety: off unless asked"
+    detections = estimator.detect_views(_one_view())
+
+    assert len(model.calls) == 1, "no second inference when disabled"
+    np.testing.assert_allclose(detections[0].keypoints_px, full, atol=1e-9)
+
+
+def test_crop_refine_tolerates_results_without_boxes_xyxy(monkeypatch):
+    # Guards the guarded ``getattr(result.boxes, "xyxy", None)``: a result that
+    # only carries confidences must skip refinement, not crash mid-run.
+    monkeypatch.delenv("AIC_PLUG_POSE_CROP_PAD", raising=False)
+    full = np.array([[520.0 + i, 420.0 + 2.0 * i] for i in range(8)])
+    model = _FakeYolo([[_result_with(full, box_xyxy=None)]])
+    estimator = ScPlugPoseEstimator(model=model, crop_refine=True)
+
+    detections = estimator.detect_views(_one_view())
+
+    assert len(model.calls) == 1, "nothing to crop without a box"
+    assert len(detections) == 1
+    np.testing.assert_allclose(detections[0].keypoints_px, full, atol=1e-9)

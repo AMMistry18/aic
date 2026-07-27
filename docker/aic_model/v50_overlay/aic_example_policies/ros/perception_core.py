@@ -135,7 +135,173 @@ class PerceptionCore:
         out.sort(key=lambda d: -d["area"])
         return out
 
-    def detect_sc_pose(self, bgr: np.ndarray, conf_thresh: float = 0.2) -> list[dict]:
+    @staticmethod
+    def _sc_pose_record(
+        xyxy: np.ndarray,
+        conf: float,
+        kps: np.ndarray | None,
+    ) -> dict:
+        """Build one public SC detection while retaining precise box pixels.
+
+        ``_xyxy`` is intentionally private to this module: the public ``bbox``
+        retains its historical integer ``(x, y, w, h)`` contract, while crop
+        refinement needs the unrounded coarse box to choose and form a crop.
+        """
+        x1, y1, x2, y2 = [float(v) for v in xyxy]
+        det = {
+            "centroid": ((x1 + x2) * 0.5, (y1 + y2) * 0.5),
+            "bbox": (
+                int(round(x1)), int(round(y1)),
+                int(round(x2 - x1)), int(round(y2 - y1)),
+            ),
+            "conf": float(conf),
+        }
+        if kps is not None:
+            kps = np.asarray(kps, dtype=np.float32)
+            det["kps"] = kps
+            if kps.shape[0] >= 4:
+                corners = PerceptionCore._order_quad_points(kps[:4, :2])
+                tl, tr, br, bl = corners
+                if np.linalg.norm(tr - tl) >= np.linalg.norm(bl - tl):
+                    major_axis = (
+                        ((tl + bl) * 0.5).tolist(),
+                        ((tr + br) * 0.5).tolist(),
+                    )
+                else:
+                    major_axis = (
+                        ((tl + tr) * 0.5).tolist(),
+                        ((bl + br) * 0.5).tolist(),
+                    )
+                det["corners"] = [tuple(map(float, p)) for p in corners]
+                det["major_axis"] = (
+                    (float(major_axis[0][0]), float(major_axis[0][1])),
+                    (float(major_axis[1][0]), float(major_axis[1][1])),
+                )
+        return det
+
+    @classmethod
+    def _sc_pose_records_from_result(cls, result) -> list[dict]:
+        """Decode a YOLO result into internal detections in that image's frame."""
+        if result.boxes is None or len(result.boxes) == 0:
+            return []
+        boxes_xyxy = np.asarray(result.boxes.xyxy.cpu().numpy(), dtype=np.float64)
+        confs = np.asarray(result.boxes.conf.cpu().numpy(), dtype=np.float64)
+        kps_all = (
+            np.asarray(result.keypoints.xy.cpu().numpy(), dtype=np.float64)
+            if result.keypoints is not None
+            else None
+        )
+        count = min(len(boxes_xyxy), len(confs))
+        records = []
+        for index in range(count):
+            xyxy = boxes_xyxy[index]
+            if xyxy.shape != (4,) or not np.all(np.isfinite(xyxy)):
+                continue
+            if xyxy[2] <= xyxy[0] or xyxy[3] <= xyxy[1]:
+                continue
+            kps = kps_all[index] if kps_all is not None and index < len(kps_all) else None
+            records.append({
+                "xyxy": xyxy.copy(),
+                "conf": float(confs[index]),
+                "kps": None if kps is None else np.asarray(kps, dtype=np.float64).copy(),
+            })
+        return records
+
+    @staticmethod
+    def _box_iou_xyxy(a: np.ndarray, b: np.ndarray) -> float:
+        """IoU for two finite ``xyxy`` boxes in the same pixel frame."""
+        x1 = max(float(a[0]), float(b[0]))
+        y1 = max(float(a[1]), float(b[1]))
+        x2 = min(float(a[2]), float(b[2]))
+        y2 = min(float(a[3]), float(b[3]))
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        area_a = max(0.0, float(a[2] - a[0])) * max(0.0, float(a[3] - a[1]))
+        area_b = max(0.0, float(b[2] - b[0])) * max(0.0, float(b[3] - b[1]))
+        union = area_a + area_b - inter
+        return inter / union if union > 1e-9 else 0.0
+
+    @classmethod
+    def _refine_sc_pose_on_crops(
+        cls,
+        bgr: np.ndarray,
+        coarse: list[dict],
+        model,
+        kwargs: dict,
+        crop_pad_scale: float,
+    ) -> list[dict]:
+        """Refine every coarse port on a native-resolution crop.
+
+        Each crop is tied to its originating full-frame box.  A second-pass
+        detection must overlap that box (in crop pixels) *and* have a nearby
+        centre before it may replace the coarse result.  This deliberately
+        fails closed for crowded port images rather than letting a nearby,
+        higher-confidence port change an identity before multiview matching.
+        """
+        height, width = bgr.shape[:2]
+        crops: list[np.ndarray] = []
+        metadata: list[tuple[int, int, int, np.ndarray]] = []
+        for index, record in enumerate(coarse):
+            box = np.asarray(record["xyxy"], dtype=np.float64)
+            centre_x = 0.5 * (box[0] + box[2])
+            centre_y = 0.5 * (box[1] + box[3])
+            half = max(4.0, 0.5 * crop_pad_scale * max(box[2] - box[0], box[3] - box[1]))
+            x0 = int(max(0, np.floor(centre_x - half)))
+            y0 = int(max(0, np.floor(centre_y - half)))
+            x1 = int(min(width, np.ceil(centre_x + half)))
+            y1 = int(min(height, np.ceil(centre_y + half)))
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                continue
+            crops.append(bgr[y0:y1, x0:x1])
+            metadata.append((index, x0, y0, box - np.array([x0, y0, x0, y0])))
+
+        if not crops:
+            return coarse
+        try:
+            crop_results = model(crops, **kwargs)
+        except Exception:
+            # Refinement is optional accuracy work.  A crop batch failure must
+            # not discard the already-valid full-frame detections.
+            return coarse
+        if len(crop_results) != len(crops):
+            return coarse
+
+        refined = list(coarse)
+        for (index, x0, y0, coarse_local), result in zip(metadata, crop_results):
+            candidates = cls._sc_pose_records_from_result(result)
+            if not candidates:
+                continue
+            reference_centre = 0.5 * (coarse_local[:2] + coarse_local[2:])
+            reference_diag = float(np.linalg.norm(coarse_local[2:] - coarse_local[:2]))
+            valid = []
+            for candidate in candidates:
+                candidate_box = candidate["xyxy"]
+                iou = cls._box_iou_xyxy(coarse_local, candidate_box)
+                candidate_centre = 0.5 * (candidate_box[:2] + candidate_box[2:])
+                centre_distance = float(np.linalg.norm(candidate_centre - reference_centre))
+                # Both checks are intentional.  IoU alone can select a broad
+                # neighbouring box; centre alone can select a tiny false pose.
+                if iou < 0.10 or centre_distance > max(4.0, 0.5 * reference_diag):
+                    continue
+                valid.append((iou, -centre_distance, float(candidate["conf"]), candidate))
+            if not valid:
+                continue
+            candidate = max(valid, key=lambda item: item[:3])[3]
+            offset = np.array([x0, y0, x0, y0], dtype=np.float64)
+            refined_record = dict(candidate)
+            refined_record["xyxy"] = candidate["xyxy"] + offset
+            if candidate["kps"] is not None:
+                refined_record["kps"] = candidate["kps"] + np.array([x0, y0], dtype=np.float64)
+            refined[index] = refined_record
+        return refined
+
+    def detect_sc_pose(
+        self,
+        bgr: np.ndarray,
+        conf_thresh: float = 0.2,
+        *,
+        crop_refine: bool | None = None,
+        crop_pad_scale: float | None = None,
+    ) -> list[dict]:
         """
         Run YOLO pose model for SC ports.
 
@@ -155,48 +321,32 @@ class PerceptionCore:
         # downscaling the 1152x1024 camera frames ~1.8x AND running the model
         # off its training scale. Match the training resolution here.
         imgsz = int(os.environ.get("AIC_SC_POSE_IMGSZ", "960"))
-        result = model(bgr, verbose=False, conf=conf_thresh, imgsz=imgsz)[0]
-        out = []
-        if result.boxes is None or len(result.boxes) == 0:
-            return out
+        kwargs = {"verbose": False, "conf": conf_thresh, "imgsz": imgsz}
+        results = model(bgr, **kwargs)
+        if not results:
+            return []
+        records = self._sc_pose_records_from_result(results[0])
+        if not records:
+            return []
 
-        boxes_xywh = result.boxes.xywh.cpu().numpy()
-        boxes_xyxy = result.boxes.xyxy.cpu().numpy()
-        confs = result.boxes.conf.cpu().numpy()
-        kps_all = result.keypoints.xy.cpu().numpy() if result.keypoints is not None else None
+        # TACC evaluation on TF-labelled native camera frames selected a broad
+        # 24x context crop: it roughly halved median pose-centre error without
+        # increasing misses.  Keep an explicit opt-out for field comparison.
+        if crop_refine is None:
+            crop_refine = os.environ.get("AIC_SC_POSE_CROP_REFINE", "1") == "1"
+        if crop_refine:
+            if crop_pad_scale is None:
+                try:
+                    crop_pad_scale = float(os.environ.get("AIC_SC_POSE_CROP_PAD", "24"))
+                except ValueError:
+                    crop_pad_scale = 24.0
+            records = self._refine_sc_pose_on_crops(
+                bgr, records, model, kwargs, max(1.1, float(crop_pad_scale))
+            )
 
-        for i in range(len(boxes_xywh)):
-            cx, cy, w, h = [float(v) for v in boxes_xywh[i]]
-            x1, y1, x2, y2 = [float(v) for v in boxes_xyxy[i]]
-            det = {
-                "centroid": (cx, cy),
-                "bbox": (int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))),
-                "conf": float(confs[i]),
-            }
-            if kps_all is not None and i < len(kps_all):
-                kps = np.asarray(kps_all[i], dtype=np.float32)
-                det["kps"] = kps
-                if kps.shape[0] >= 4:
-                    corners = self._order_quad_points(kps[:4, :2])
-                    tl, tr, br, bl = corners
-                    if np.linalg.norm(tr - tl) >= np.linalg.norm(bl - tl):
-                        major_axis = (
-                            ((tl + bl) * 0.5).tolist(),
-                            ((tr + br) * 0.5).tolist(),
-                        )
-                    else:
-                        major_axis = (
-                            ((tl + tr) * 0.5).tolist(),
-                            ((bl + br) * 0.5).tolist(),
-                        )
-                    det["corners"] = [tuple(map(float, p)) for p in corners]
-                    det["major_axis"] = (
-                        (float(major_axis[0][0]), float(major_axis[0][1])),
-                        (float(major_axis[1][0]), float(major_axis[1][1])),
-                    )
-            out.append(det)
-
-        out.sort(key=lambda d: -d["conf"])
+        out = [self._sc_pose_record(record["xyxy"], record["conf"], record["kps"])
+               for record in records]
+        out.sort(key=lambda det: -det["conf"])
         return out
 
     # ─── NIC card detection via YOLO ───────────────────────────────────────

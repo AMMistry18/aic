@@ -22,11 +22,13 @@ from aic_model.v50_controller import (  # noqa: E402
     WallProgressWatch,
     _normalize_event,
     next_persistent_depth,
+    next_retract_depth,
     prime_v50_plug_pose,
     solve_tip_in_tcp,
     tcp_for_tip_transform,
     tip_from_tcp_transform,
 )
+from aic_model.rl_insert_contract import port_frame  # noqa: E402
 import patch_v49_plug_relative_v50 as overlay  # noqa: E402
 
 
@@ -167,6 +169,78 @@ def test_persistent_depth_allows_bounded_overtravel_near_insert_depth():
 
     assert command_depth > INSERT_DEPTH_M
     assert np.isclose(command_depth, INSERT_DEPTH_M + config.seat_overtravel_m)
+
+
+def test_retract_depth_accumulates_pull_lead_on_a_stuck_plug():
+    """The retry-killer: commanding current-1.5mm afresh each tick caps the
+    pull at stiffness * 1.5mm = 0.75 N forever, which never unseats a wedge
+    held by diag-5's 4-5 N lateral bind.  The persistent setpoint must keep
+    receding until the lead cap, and no further."""
+    config = V50Config().validated()
+    current_depth = 0.036  # diag-5's wedge depth; the plug is not moving
+    command_depth = current_depth
+
+    offsets = []
+    for _ in range(40):
+        command_depth = next_retract_depth(current_depth, command_depth, config)
+        offsets.append(current_depth - command_depth)
+
+    # Monotone build-up, no oscillation, saturating exactly at the lead.
+    assert all(b >= a - 1e-12 for a, b in zip(offsets, offsets[1:]))
+    assert np.isclose(offsets[-1], config.retract_pull_lead_m)
+    # At the documented 500 N/m that is ~12 N of pull, under the 18 N abort.
+    nominal_pull = config.axial_stiffness_n_m * offsets[-1]
+    assert 10.0 <= nominal_pull < config.force_abort_n
+
+
+def test_retract_depth_walks_at_step_rate_when_the_plug_follows():
+    # Free withdrawal must be unchanged from the old per-tick behaviour: when
+    # the plug tracks the setpoint the offset never exceeds one step.
+    config = V50Config().validated()
+    current_depth = 0.020
+    command_depth = current_depth
+
+    for _ in range(10):
+        command_depth = next_retract_depth(current_depth, command_depth, config)
+        assert np.isclose(current_depth - command_depth, config.retract_step_m)
+        current_depth = command_depth  # impedance catches up before next tick
+
+
+def test_retract_depth_never_commands_back_into_the_bore_after_pop_free():
+    # A wedge that lets go all at once leaves the plug shallower than the
+    # setpoint; reusing the stale command would push it back IN.
+    config = V50Config().validated()
+    command_depth = next_retract_depth(0.036, 0.036, config)
+    for _ in range(15):
+        command_depth = next_retract_depth(0.036, command_depth, config)
+    popped_depth = 0.002  # sprang most of the way out of the bore
+
+    command_depth = next_retract_depth(popped_depth, command_depth, config)
+
+    assert command_depth <= popped_depth
+
+
+def test_retract_depth_builds_full_pull_even_when_stuck_near_the_mouth():
+    # A chamfer catch just inside the mouth is still a stick; flooring the
+    # setpoint at retract_clear_depth_m would cap the pull at
+    # stiffness * (depth - clear) ~ 3.5 N here, resurrecting the plateau bug
+    # for exactly the shallow catches the retry most often faces.
+    config = V50Config().validated()
+    stuck_depth = 0.004
+    command_depth = stuck_depth
+    for _ in range(50):
+        command_depth = next_retract_depth(stuck_depth, command_depth, config)
+
+    assert np.isclose(stuck_depth - command_depth, config.retract_pull_lead_m)
+    assert command_depth < config.retract_clear_depth_m, \
+        "the setpoint may recede past the clear point; actual clearance ends the loop"
+
+
+def test_retract_pull_lead_must_stay_under_the_hard_abort():
+    with pytest.raises(ValueError, match="hard force abort"):
+        V50Config(retract_pull_lead_m=0.040).validated()  # 500 N/m * 40mm = 20 N
+    with pytest.raises(ValueError, match="positive"):
+        V50Config(retract_pull_lead_m=0.0).validated()
 
 
 def test_wall_progress_watch_uses_elapsed_time_not_loop_count():
@@ -318,7 +392,8 @@ class _SequenceHarness(PlugRelativeV50Controller):
         *,
         initial_pose=True,
         visual=True,
-        refresh=True,
+        plug_refresh=True,
+        port_refresh=True,
         rescue=False,
         retract=True,
         config=None,
@@ -327,7 +402,8 @@ class _SequenceHarness(PlugRelativeV50Controller):
         self.outcomes = list(outcomes)
         self.initial_pose = initial_pose
         self.visual_result = visual
-        self.refresh_result = refresh
+        self.plug_refresh_result = plug_refresh
+        self.port_refresh_result = port_refresh
         self.rescue_result = rescue
         self.retract_result = retract
         self.trace = []
@@ -373,8 +449,12 @@ class _SequenceHarness(PlugRelativeV50Controller):
         return self.retract_result
 
     def _refresh_plug_pose_after_retract(self):
-        self.trace.append("re-perceive")
-        return True
+        self.trace.append("re-perceive-plug")
+        return self.plug_refresh_result
+
+    def _refresh_port_pose_after_retract(self):
+        self.trace.append("re-perceive-port")
+        return self.port_refresh_result
 
     def _visual_rescue(self):
         self.trace.append("visual")
@@ -382,7 +462,83 @@ class _SequenceHarness(PlugRelativeV50Controller):
 
     def _lift_and_refresh(self):
         self.trace.append("lift-fresh")
-        return self.refresh_result
+        return self.plug_refresh_result
+
+
+def test_port_refresh_atomically_replaces_pose_using_newer_observations():
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.task = object()
+    controller.log = _Log()
+    controller.last_observation_stamp = 12.0
+    controller.port_pos = np.array([9.0, 9.0, 9.0])
+    controller.port_quat = np.array([1.0, 0.0, 0.0, 0.0])
+    controller.Rp = np.eye(3)
+    controller._port_pos_initial = controller.port_pos.copy()
+    fresh_observation = object()
+    waited_after = []
+
+    def wait_new(*, after_stamp, timeout_wall_s):
+        waited_after.append((after_stamp, timeout_wall_s))
+        controller.last_observation_stamp = 13.0
+        return fresh_observation
+
+    def perceive(_task, get_observation):
+        assert get_observation() is fresh_observation
+        return np.array([1.0, 2.0, 3.0]), np.array([2.0, 0.0, 0.0, 0.0]), 1.25
+
+    controller._wait_new_observation = wait_new
+    controller.policy = SimpleNamespace(perceive_port_pose_consensus=perceive)
+
+    assert controller._refresh_port_pose_after_retract() is True
+    np.testing.assert_allclose(controller.port_pos, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(controller.port_quat, [1.0, 0.0, 0.0, 0.0])
+    np.testing.assert_allclose(controller.Rp, port_frame(controller.port_quat))
+    np.testing.assert_allclose(controller._port_pos_initial, controller.port_pos)
+    assert waited_after == [(12.0, 2.0)]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,
+        (np.array([np.nan, 2.0, 3.0]), np.array([1.0, 0.0, 0.0, 0.0]), 1.0),
+        (np.array([1.0, 2.0, 3.0]), np.zeros(4), 1.0),
+        (np.array([1.0, 2.0, 3.0]), np.array([1.0, 0.0, 0.0, 0.0]), 30.0),
+    ],
+)
+def test_invalid_port_refresh_never_reuses_or_partially_updates_pose(result):
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.task = object()
+    controller.log = _Log()
+    controller.last_observation_stamp = 12.0
+    old_pos = np.array([9.0, 8.0, 7.0])
+    old_quat = np.array([1.0, 0.0, 0.0, 0.0])
+    old_Rp = np.diag([1.0, -1.0, -1.0])
+    controller.port_pos = old_pos.copy()
+    controller.port_quat = old_quat.copy()
+    controller.Rp = old_Rp.copy()
+    controller._port_pos_initial = old_pos.copy()
+    controller._wait_new_observation = lambda **_kwargs: object()
+    controller.policy = SimpleNamespace(
+        perceive_port_pose_consensus=lambda _task, _get_observation: result
+    )
+
+    assert controller._refresh_port_pose_after_retract() is False
+    np.testing.assert_allclose(controller.port_pos, old_pos)
+    np.testing.assert_allclose(controller.port_quat, old_quat)
+    np.testing.assert_allclose(controller.Rp, old_Rp)
+    np.testing.assert_allclose(controller._port_pos_initial, old_pos)
+
+
+def test_failed_plug_refresh_clears_stale_grasp_transform():
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.log = _Log()
+    controller.last_observation_stamp = 12.0
+    controller.policy = SimpleNamespace(_v50_grasp_transform=("stale", "pose"))
+    controller._wait_new_observation = lambda **_kwargs: None
+
+    assert controller._refresh_plug_pose_after_retract() is False
+    assert controller.policy._v50_grasp_transform is None
 
 
 class _AlignHarness(PlugRelativeV50Controller):
@@ -578,8 +734,13 @@ def test_wedge_retries_until_it_seats_with_no_retry_ceiling():
     assert harness.trace.count("retract") == 10
     assert harness.trace.count("align") == 11
     assert harness.trace.count("seat") == 11
-    # Every retract re-perceives the plug from the cleared viewpoint.
-    assert harness.trace.count("re-perceive") == 10
+    # Every retract requires both fresh poses before any retry motion.
+    assert harness.trace.count("re-perceive-plug") == 10
+    assert harness.trace.count("re-perceive-port") == 10
+    first_retract = harness.trace.index("retract")
+    assert harness.trace[first_retract:first_retract + 4] == [
+        "retract", "re-perceive-plug", "re-perceive-port", "align"
+    ]
     # Unbounded by count means the deadline is the only thing that can stop it,
     # so every cycle must consult it.
     assert harness.deadline_checks == 11
@@ -606,6 +767,29 @@ def test_failed_retract_ends_the_run_instead_of_looping():
     harness = _SequenceHarness([WEDGED] * 3, retract=False)
     assert harness.run() is False
     assert harness.trace.count("retract") == 1
+
+
+@pytest.mark.parametrize(
+    ("plug_refresh", "port_refresh", "expected_trace"),
+    [
+        (False, True, ["retract", "re-perceive-plug"]),
+        (True, False, ["retract", "re-perceive-plug", "re-perceive-port"]),
+    ],
+)
+def test_retry_aborts_instead_of_reusing_a_stale_pose(
+    plug_refresh, port_refresh, expected_trace
+):
+    harness = _SequenceHarness(
+        [WEDGED, SEATED],
+        plug_refresh=plug_refresh,
+        port_refresh=port_refresh,
+    )
+
+    assert harness.run() is False
+    assert harness.trace.count("align") == 1
+    assert harness.trace.count("seat") == 1
+    start = harness.trace.index("retract")
+    assert harness.trace[start:] == expected_trace
 
 
 def test_wedge_retry_can_be_disabled_and_capped():

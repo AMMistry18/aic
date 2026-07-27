@@ -1148,9 +1148,10 @@ class RLInsert(VisualGapRecoveryMixin, Policy):
             log.info(f"[board_search] whole board in view: {ok}")
 
         # SC branches to its own scripted controller: different bore depth,
-        # different force ladder, and a fixed grasp. It must branch BEFORE the
-        # v50 plug priming below, which loads the SFP-only plug-pose model and
-        # fails closed when it is missing.
+        # different force ladder, and its own per-run measured grasp transform
+        # (prime_sc_plug_pose inside run_sc_insertion). It must branch BEFORE
+        # the v50 plug priming below, which loads the SFP-only plug-pose model
+        # and fails closed when it is missing.
         if plug_type == "sc":
             from .sc_controller import run_sc_insertion
             return run_sc_insertion(self, task, get_observation, move_robot, send_feedback)

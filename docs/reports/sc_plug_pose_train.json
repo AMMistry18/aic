@@ -1,0 +1,31 @@
+{
+  "data": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/aic_sc_plug_pose.yaml",
+  "dataset_counts": {
+    "train_images": 3240,
+    "train_labels": 3240,
+    "val_images": 405,
+    "val_labels": 405,
+    "test_images": 405,
+    "test_labels": 405
+  },
+  "initial_model": "yolo11s-pose.pt",
+  "best_source": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/training/runs/sc_plug_pose_yolo11s_960/weights/best.pt",
+  "final_weights": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/training/best_sc_plug_pose.pt",
+  "device": "0",
+  "torch_version": "2.12.1+cu130",
+  "epochs_requested": 120,
+  "imgsz": 960,
+  "batch": 8,
+  "elapsed_seconds": 7375.073458645027,
+  "metrics": {
+    "metrics/precision(B)": 0.9998657028936018,
+    "metrics/recall(B)": 1.0,
+    "metrics/mAP50(B)": 0.995,
+    "metrics/mAP50-95(B)": 0.9729098790807142,
+    "metrics/precision(P)": 0.9998657028936018,
+    "metrics/recall(P)": 1.0,
+    "metrics/mAP50(P)": 0.995,
+    "metrics/mAP50-95(P)": 0.9949999999999999,
+    "fitness": 1.9679098790807141
+  }
+}

@@ -9,12 +9,12 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=06:00:00
-#SBATCH --output=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260719/training/logs/sc-plug-pose-train-%j.out
+#SBATCH --output=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/training/logs/sc-plug-pose-train-%j.out
 
 set -euo pipefail
 
-readonly job_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260719
-readonly repo_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-src-20260719
+readonly job_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725
+readonly repo_root=/work2/11590/satya_a/stampede3/aic-sc-plug-pose-src-20260725
 readonly dataset_root="${job_root}/dataset"
 readonly dataset_yaml="${dataset_root}/aic_sc_plug_pose.yaml"
 readonly training_root="${job_root}/training"
@@ -94,6 +94,9 @@ PY
 # working target and lateral_error_mm.p95 against the 0.725 mm binding
 # clearance.  Deliberately not --enforce: a first run that misses the gate is
 # information, not a reason to discard the checkpoint.
+# Crop-refine mirrors how the estimator runs in the controller; without it this
+# reports the ~0.45 mm uncropped number and looks like a regression.
+AIC_PLUG_POSE_CROP_REFINE=1 \
 .pixi/envs/default/bin/python validate_sc_plug_pose.py \
   --mode dataset \
   --weights "${training_root}/best_sc_plug_pose.pt" \

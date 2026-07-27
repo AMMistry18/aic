@@ -1,0 +1,688 @@
+{
+  "mode": "dataset",
+  "weights": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/training/best_sc_plug_pose.pt",
+  "data": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/aic_sc_plug_pose.yaml",
+  "split": "test",
+  "device": "0",
+  "groups_total": 135,
+  "groups_with_pose": 7,
+  "group_miss_rate": 0.9481481481481482,
+  "camera_images": 405,
+  "camera_detection_miss_rate": 0.0,
+  "position_error_mm": {
+    "mean": 0.4274174940315518,
+    "median": 0.41077747253813796,
+    "p95": 0.5982577066554309,
+    "max": 0.5997637479385843
+  },
+  "lateral_error_mm": {
+    "mean": 0.2348828059058722,
+    "median": 0.19928905500695385,
+    "p95": 0.4074730744742369,
+    "max": 0.4219532051551169
+  },
+  "axial_error_mm": {
+    "mean": 0.3510024447251182,
+    "median": 0.35919633141118795,
+    "p95": 0.46302749735542986,
+    "max": 0.469121785735402
+  },
+  "rotation_error_deg": {
+    "mean": 0.9196798339442118,
+    "median": 0.5185168557684008,
+    "p95": 1.6226611818180272,
+    "max": 1.6252855958090109
+  },
+  "axis_error_deg": {
+    "mean": 0.8826743515508451,
+    "median": 0.44222225501409634,
+    "p95": 1.537614462368403,
+    "max": 1.537983450915255
+  },
+  "keypoint_error_px": {
+    "mean": 21.143204046720744,
+    "median": 4.026808019442942,
+    "p95": 75.69969757854453,
+    "max": 95.19836603502249
+  },
+  "fusion_reprojection_error_px": {
+    "mean": 0.9027859916590791,
+    "median": 0.8944459336179409,
+    "p95": 1.046732703926796,
+    "max": 1.0738109019746809
+  },
+  "inference_seconds_per_group": {
+    "mean": 0.029307384985602564,
+    "median": 0.024830996990203857,
+    "p95": 0.025328560406342147,
+    "max": 0.6236316368449479
+  },
+  "gates": {
+    "group_miss_rate": {
+      "value": 0.9481481481481482,
+      "limit": 0.01,
+      "pass": false
+    },
+    "position_median_mm": {
+      "value": 0.41077747253813796,
+      "limit": 0.4,
+      "pass": false
+    },
+    "lateral_p95_mm": {
+      "value": 0.4074730744742369,
+      "limit": 0.725,
+      "pass": true
+    },
+    "axis_p95_deg": {
+      "value": 1.537614462368403,
+      "limit": 3.0,
+      "pass": true
+    }
+  },
+  "all_gates_pass": false,
+  "per_group": [
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0010_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0010_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0010_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0020_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0020_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0020_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0030_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0030_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0030_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0040_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0040_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0040_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0050_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0050_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0050_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0060_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0060_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0060_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0070_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0070_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0070_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0080_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0080_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0080_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0090_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0090_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0090_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0100_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0100_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0100_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0110_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0110_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0110_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0120_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0120_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0120_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0130_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0130_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0130_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0140_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0140_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0140_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0150_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0150_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0150_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0160_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0160_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0160_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0170_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0170_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0170_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0180_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0180_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0180_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0190_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0190_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0190_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0200_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0200_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0200_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0210_v000_s00.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.5947436103280727,
+      "lateral_error_mm": 0.4219532051551169,
+      "axial_error_mm": 0.41913655851690423,
+      "rotation_error_deg": 1.4298214897711679,
+      "axis_error_deg": 1.4183254458080867,
+      "confidence": 0.8356848772627147,
+      "reprojection_error_px": 1.0738109019746809,
+      "keypoint_rmse_m": 0.00021663701112036544,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0210_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0210_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0220_v000_s00.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.27187388847421395,
+      "lateral_error_mm": 0.10071870667755986,
+      "axial_error_mm": 0.25252950987813083,
+      "rotation_error_deg": 0.41124070869944046,
+      "axis_error_deg": 0.40854186286525085,
+      "confidence": 0.8502406009270269,
+      "reprojection_error_px": 0.8944459336179409,
+      "keypoint_rmse_m": 0.00023561841183575486,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0220_v000_s01.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.27348666543015226,
+      "lateral_error_mm": 0.09898111583644699,
+      "axial_error_mm": 0.254946454919216,
+      "rotation_error_deg": 0.4167905799700525,
+      "axis_error_deg": 0.416724027983485,
+      "confidence": 0.8501435885264199,
+      "reprojection_error_px": 0.8882525488325367,
+      "keypoint_rmse_m": 0.00023927385961734418,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0220_v000_s02.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.2721569160989201,
+      "lateral_error_mm": 0.09959490208432355,
+      "axial_error_mm": 0.2532789814794916,
+      "rotation_error_deg": 0.41956605841901157,
+      "axis_error_deg": 0.41816992917732576,
+      "confidence": 0.8523147152875317,
+      "reprojection_error_px": 0.8674107916383473,
+      "keypoint_rmse_m": 0.0002318850375234041,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0230_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0230_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0230_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0240_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0240_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0240_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0250_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0250_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0250_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0260_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0260_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0260_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0270_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0270_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0270_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0280_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0280_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0280_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0290_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0290_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0290_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0300_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0300_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0300_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0310_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0310_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0310_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0320_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0320_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0320_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0330_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0330_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0330_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0340_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0340_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0340_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0350_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0350_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0350_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0360_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0360_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0360_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0370_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0370_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0370_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0380_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0380_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0380_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0390_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0390_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0390_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0400_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0400_v000_s01.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.41077747253813796,
+      "lateral_error_mm": 0.19928905500695385,
+      "axial_error_mm": 0.35919633141118795,
+      "rotation_error_deg": 0.5185168557684008,
+      "axis_error_deg": 0.44222225501409634,
+      "confidence": 0.8746723758920121,
+      "reprojection_error_px": 0.6412012190245379,
+      "keypoint_rmse_m": 0.00020652727022352349,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0400_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0410_v000_s00.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.5997637479385843,
+      "lateral_error_mm": 0.3736861028855171,
+      "axial_error_mm": 0.469121785735402,
+      "rotation_error_deg": 1.6252855958090109,
+      "axis_error_deg": 1.537983450915255,
+      "confidence": 0.8411871836327665,
+      "reprojection_error_px": 0.9835502418150646,
+      "keypoint_rmse_m": 0.0002498201820690433,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0410_v000_s01.json",
+      "pose_estimated": true,
+      "position_error_mm": 0.569120157412782,
+      "lateral_error_mm": 0.34995655369518724,
+      "axial_error_mm": 0.4488074911354949,
+      "rotation_error_deg": 1.6165375491723988,
+      "axis_error_deg": 1.536753489092415,
+      "confidence": 0.8417386159947873,
+      "reprojection_error_px": 0.9708303047104465,
+      "keypoint_rmse_m": 0.0002522495334225508,
+      "views": 3
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0410_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0420_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0420_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0420_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0430_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0430_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0430_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0440_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0440_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0440_v000_s02.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0450_v000_s00.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0450_v000_s01.json",
+      "pose_estimated": false
+    },
+    {
+      "metadata": "/work2/11590/satya_a/stampede3/aic-sc-plug-pose-datagen-20260725/dataset/metadata/trial_0450_v000_s02.json",
+      "pose_estimated": false
+    }
+  ]
+}

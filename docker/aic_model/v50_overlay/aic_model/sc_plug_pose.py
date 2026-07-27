@@ -75,7 +75,17 @@ def default_sc_plug_pose_weights() -> Path | None:
         / "ros"
         / "weights"
         / SC_PLUG_POSE_WEIGHTS_BASENAME,
+        # v50 overlay layout: docker/aic_model/v50_overlay/{aic_model,
+        # aic_example_policies}, i.e. one aic_example_policies level, so the
+        # overlay copy of this file resolves its sibling weights too.
+        Path(__file__).resolve().parents[1]
+        / "aic_example_policies"
+        / "ros"
+        / "weights"
+        / SC_PLUG_POSE_WEIGHTS_BASENAME,
         Path(__file__).resolve().parent / "weights" / SC_PLUG_POSE_WEIGHTS_BASENAME,
+        # Container convention, mirroring the SFP checkpoint at /models.
+        Path("/models") / SC_PLUG_POSE_WEIGHTS_BASENAME,
     ]
     for candidate in candidates:
         if candidate.is_file():
