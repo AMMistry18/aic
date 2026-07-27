@@ -1,6 +1,12 @@
 # Check Board Visibility v4 — complete next-session handoff
 
-Updated: 2026-07-26
+Updated: 2026-07-27
+
+> **Read this first.** Stage 2 (the geometric survey) is in good shape: the SFP
+> and SC view policies were reworked on 2026-07-26/27 and both are confirmed
+> working on hardware. **Stage 1 (insignia acquisition) is inherently broken and
+> is to be scrapped and rebuilt** — see §19, which is the next session's whole
+> job. Sections 5 and 20 describe what is being replaced and why.
 
 This is the consolidated handoff for
 `ai.tar2.check_board_visibility_skill_v4`. It describes the current working
@@ -33,12 +39,15 @@ At the time of this handoff:
 
 ```text
 branch: main
-HEAD:   d499d5f953ee00bcf14d777a1cfb3fcca9c8ecf7
+HEAD:   467636d  (working tree clean)
 ```
 
-The survey work is an uncommitted working-tree change on top of that commit.
-Do not assume `HEAD` alone contains the behavior described here, and do not
-discard the working tree.
+Unlike the previous revision of this handoff, the Stage-2 policy work is
+**committed**. The SFP coverage fix and the SC depth fix described in §8 and
+§10 are both in `HEAD`, and both are confirmed working on hardware.
+
+The one relevant branch that is *not* merged is `origin/navigate-to-purple`
+(tip `4a20097`), which carries an independent Stage-1 experiment. §20 covers it.
 
 The v4 asset identity is defined in
 `flowstate/aic_perception/check_board_visibility_skill.manifest.textproto`:
@@ -58,7 +67,9 @@ The main implementation files are:
 | `flowstate/aic_perception/aic_perception/camera_rig.py` | Fresh images, CameraInfo, force, frame validation, timestamp handling |
 | `flowstate/aic_perception/aic_perception/gripper_masks.py` | Per-camera image-space gripper exclusions |
 | `flowstate/aic_perception/aic_perception/robot_motion.py` | Bounded force-guarded Stage-1 motion and controller handoff |
-| `flowstate/aic_perception/aic_perception/viewpoint_search.py` | Deterministic Stage-1 fallback phase machine |
+| `flowstate/aic_perception/aic_perception/viewpoint_search.py` | Stage-1 phase machine — **broken, to be scrapped, see §19** |
+| `flowstate/aic_perception/test/sc_sweep_runner.py` | 144-case SC pre-hardware sweep |
+| `flowstate/aic_perception/test/sfp_sweep_runner.py` | 144-case staged-SFP sweep with an independent seat audit |
 | `flowstate/aic_perception/check_board_visibility_skill.proto` | Flowstate parameter and result schema |
 | `docs/reference/filter_estimates_sc_node.py` | Paste-ready downstream SC target selector; not part of the skill bundle |
 
@@ -249,7 +260,13 @@ deadline; it is bounded by planner stall rules, per-move timeouts, cancellation,
 force, and controller checks. Stage 2 likewise has no aggregate compute
 deadline.
 
-## 5. Stage 1 — expose the insignia
+## 5. Stage 1 — expose the insignia (BROKEN — being replaced, see §19/§20)
+
+> This section describes the Stage 1 that **is deployed today**. It is retained
+> because you have to understand it to replace it safely, not because it is
+> correct. It fails structurally, not by mistuning; §19 has the hardware
+> evidence and §20 the replacement plan.
+
 
 Every invocation is serialized with an execution lock. A second simultaneous
 call returns normally with `"another board-visibility invocation is still
@@ -374,7 +391,9 @@ because the target fits the center image.
 Each camera has a calibrated binary gripper silhouette. Stage 2 creates a
 `GripperExclusion` with 32 px uncertainty around that silhouette. The sector's
 filled projected convex hull must clear both image boundaries and the gripper
-exclusion. The target policies add a further 25 or 40 px minimum clearance.
+exclusion. All three target policies now add a further 25 px minimum clearance
+(SFP moved 40 -> 25 on 2026-07-26; the 40 px default survives only for callers
+that do not override it).
 
 ### 6.4 Candidate grid and deterministic selection
 
@@ -388,8 +407,9 @@ The general search can vary:
 - optical roll;
 - either isotropic near-normal obliquity or a target-specific directional tilt.
 
-SC overrides the standoff to exactly 0.62 m. NIC and SC use 24 optical-roll
-samples at 15-degree intervals. SFP uses the default seven roll samples.
+SC overrides the standoff to a `0.55 / 0.58 / 0.60 / 0.62 m` ladder and takes
+the closest feasible rung. NIC and SC use 24 optical-roll samples at 15-degree
+intervals. SFP uses the default seven roll samples.
 
 For every candidate the search checks, in order:
 
@@ -484,40 +504,93 @@ reach the ungated Move Robot node.
 
 ### 8.1 Physical target
 
-`STAGED_SFP_MODULE` frames the loose SFP modules on the board's +Y staging
-rail. The conservative board-frame sector is:
+`STAGED_SFP_MODULE` frames the five loose SFP modules staged on the board.
+They occupy five of **six** legal seats at 50 mm pitch spread over **both**
+mount rails — board Y `-0.15625`, `-0.10625`, `-0.05625`, `+0.05625`,
+`+0.10625`, `+0.15625` (`sfp_module_detail_boxes`). Which seat is empty does
+not matter: the outermost seats are occupied, and they are what bind.
+
+The coverage target is `sfp_module_strip_corners()`:
 
 ```text
-X: 0.020 .. 0.090 m
-Y: 0.000 .. 0.225 m
+X: 0.030 .. 0.115 m
+Y: -0.1125 .. +0.1125 m
 Z: 0.010 .. 0.060 m
 ```
 
-This is the staging/pick sector, not the SFP cages on the NIC cards.
+This is the staging/pick strip, not the SFP cages on the NIC cards.
 
-### 8.2 View policy
+### 8.2 The one-rail bug this replaced (2026-07-26)
+
+The superseded `sfp_sector_corners()` covered `Y: 0.000 .. 0.225` — the **+Y
+rail alone**. Its centroid is what the survey aims at, so the aim point sat
+112.5 mm off the middle of the module strip and every bit of the search's
+framing slack was banked on the +Y side. Hardware returned **4 of 5 modules**;
+the missing one was the outer -Y seat. Decoded from that run: detections at
+board Y `-0.1066, -0.0565, +0.1066, +0.1566` and board X `+0.0862`.
+
+`sfp_sweep_runner.py` reproduces it. At identical search settings the old box
+clips a module in **96 of its 96** found poses — 35 of them holding only *four*
+of the six seats — with the worst seat 123.9 px outside the image.
+
+**The fix is placement, not size.** The replacement box has the same 0.225 m
+board-Y extent, straddling Y=0. Board X was widened from `0.020..0.090` to
+`0.030..0.115` because the detected module bodies sit at board X 0.0862, only
+3.8 mm inside the old edge — the transceiver protrudes from its mount origin.
+Board-X width costs nothing: 85 mm, 65 mm and 50 mm boxes sweep identically.
+
+Do **not** enlarge the box along Y to "guarantee" the outer seats. Measured:
+
+```text
+y_half   found/144   all-5 framed   selected standoff
+0.1125      92           92          0.64-0.85 m
+0.1450      58           58          0.80-0.85 m
+0.1600      35           35          0.85-0.90 m
+0.1783       0            -          infeasible
+```
+
+A wider box pushes the standoff out and shrinks every module in the image, and
+full-strip containment is not reachable at all: clearing the tool silhouette
+with a hull that wide needs >=0.85 m, and past ~0.85 m the arm's own links
+enter a wrist camera at every roll. The box sets the aim and the standoff; the
+sweep's **seat audit**, not the geometry, certifies coverage.
+
+### 8.3 View policy
 
 SFP uses the general near-overhead search:
 
-- all three cameras must frame the complete sector;
+- all three cameras must frame the complete strip;
 - closest feasible standoff wins for maximum component pixels;
 - no directional tilt band;
 - total reference-camera obliquity at most the general 20-degree cap;
-- additional all-camera clearance: 40 px;
-- Cartesian reorientation cap: the general 45 degrees;
+- additional all-camera clearance: **25 px** (was 40);
+- Cartesian reorientation cap: **90 degrees** (was 45);
 - default seven optical-roll samples;
 - live IK ranking when available, sphere fallback otherwise.
 
-SFP has no recessed-bore depth-quality callback. It relies on sector framing,
+The 25 px / 90 deg values are NIC's already-proven ones, adopted for
+availability rather than framing: the centred box finds a pose in 58 of 144
+swept cases at 40 px / 45 deg and in **92** at 25 px / 90 deg, and all 92 still
+frame every module, so the extra 34 are genuine gains rather than weaker views.
+25 px is measured against a silhouette `GripperExclusion` has already dilated
+by 32 px.
+
+SFP has no recessed-bore depth-quality callback. It relies on strip framing,
 gripper clearance, near-overhead conditioning, and reachability.
 
-### 8.3 Current status
+### 8.4 Current status
 
-SFP has worked in the three tested board orientations on the preceding
-hardware build. Preserve this policy while changing NIC or SC. The newest
-working-tree IK/arm-in-view changes are unit-tested but have not been rerun on
-hardware, so a shared-search change must be tested against SFP, not only
-against the target being tuned.
+**Confirmed working on hardware (2026-07-27).** Sweep result:
+
+```text
+92 / 144 poses found, 92 / 92 frame all six seats, 0 clipped
+selected standoff:  0.64 .. 0.85 m
+worst seat margin:  118.5 px
+```
+
+The 52 no-pose cases are IK / arm-in-view failures concentrated on the
+`home + J6 +90 deg` Stage-1 exit, not framing failures. That is a Stage-1
+problem, and §19 is where it belongs.
 
 The downstream SFP/NIC-card filtering code is a Flowstate code-execution node,
 not part of this repository's skill bundle. The previously working version
@@ -624,16 +697,23 @@ It is never a fixed base X/Y direction.
 
 Current SC view policy:
 
-- center-camera cross tilt: 10 to 13 degrees along ±board X;
+- center-camera cross tilt: **16 to 20 degrees** along ±board X;
 - along-board-Y tilt: at most 2 degrees;
 - both board-X sides are searched;
-- standoff: exactly 0.62 m;
+- standoff: **a 0.55 / 0.58 / 0.60 / 0.62 m ladder**, closest feasible wins;
 - all three cameras frame the complete SC sector;
 - additional clearance: 25 px;
 - 24 optical-roll samples at 15-degree intervals;
 - Cartesian orientation search envelope: 180 degrees;
 - live IK required;
 - worst relative joint delta: at most 185 degrees.
+
+**The long-face (board-X) direction is correct and hardware-proven. Do not add
+an along-board-Y tilt to buy depth.** It is geometrically tempting — the wide
+bore axis has a 35.61 degree cone against board X's 13.66, and it measured
+~2.8x the depth cue and is rail-invariant — but it is not the face the
+detector was validated against, and it was tried and reverted on 2026-07-27.
+Geometric headroom is not evidence about what the model keys on.
 
 Relaxing all-camera framing to get closer was tested and reverted. At the close
 candidate the side cameras had gripper clearance of -13 to -32 px while the
@@ -657,8 +737,44 @@ Z = +0.0301 m
 For every mouth, at least two of the three cameras must:
 
 1. have a nonnegative rectangular line-of-sight margin through a
-   3.8 mm × 11.2 mm half-aperture over 15.64 mm depth;
+   **7.6 mm** × 11.2 mm aperture tolerance over 15.64 mm depth
+   (`SC_BORE_X_TOLERANCE_M`);
 2. retain at least 3.0 px of projected mouth-to-back-center displacement.
+
+**The narrow-axis tolerance is the acceptance criterion, and it is what used to
+cap the depth.** At the mouth *half* width (3.8 mm) the ray must still reach
+the back-plane **centre**, which is a hard 13.66 degree ceiling on the
+long-face angle. Since the cue is `f*depth*tan(theta)/dist`, that ceiling *was*
+the flakiness the user reported as "works about 75% of the time, breaks when an
+adapter slides along its rail": the cue never exceeded 3.3-4.5 px.
+
+At the *full* mouth width the criterion becomes "a displaced dark strip is
+still visible", which is what the estimator actually reads. The back plane is
+partly occluded rather than centred: at 18 degrees the strip is
+`7.6 - 15.64*tan(18) = 2.5 mm` wide by 22.4 mm long, and its displacement more
+than doubles. Measured worst mouth over the whole legal rail, 24 placements:
+
+```text
+band     criterion            worst cue   dark strip
+10-13    back centre           3.34 px      4.4 mm
+14-18    displaced strip       7.13 px      3.1 mm
+16-20    displaced strip       7.99 px      2.5 mm
+```
+
+This is not a relaxed *safety* gate. Framing, gripper clearance, live-seeded IK
+and arm-in-view are all unchanged and still hard.
+
+Why the cue collapses when an adapter slides: the search aims at the sector
+centroid, so a mouth offset `delta` along the displacement axis is seen at
+`atan(tan(theta) - delta/d)`, not at `theta`. Over the 115 mm of legal rail
+travel at 0.62 m that swings the per-port angle about 10 degrees. Measured on
+the superseded pose, the centre camera ran 7.9 degrees at one end of the rail
+to 18.0 at the other — **past its own 13.66 degree cone over half the rail** —
+while the side cameras dropped to 2.6 degrees and saw almost no depth.
+
+Always score SC depth on the **worst mouth anywhere on the legal rail**, not on
+`sc_bore_sample_points()`'s six positions. A tuning that looked like +39% on
+the six samples was +10% on the real metric.
 
 All three cameras still independently pass sector framing and gripper
 clearance. Requiring all three cameras to pass the bore gate was too strong and
@@ -699,7 +815,18 @@ The current production-geometry sweep contains 144 cases:
   home, home with J6 +90 degrees, and the exact chained failure
   `[-17.5,-95.8,-19.5,-143.9,82.9,26.8]` degrees.
 
-Latest local result:
+Latest local result (current policy):
+
+```text
+144 / 144 pass
+selected standoff: 0.55 .. 0.58 m
+two-camera depth cue: 7.3609 .. 8.5487 px
+bore margin: 0.03126 .. 0.33149
+minimum image/gripper clearance: 25.0088 .. 53.4225 px
+selected relative joint-motion range: 30.0818 .. 184.8610 degrees
+```
+
+Superseded policy, same harness, for comparison:
 
 ```text
 144 / 144 pass
@@ -707,10 +834,17 @@ selected standoff: 0.62 m in every case
 two-camera depth cue: 3.3426 .. 4.4513 px
 bore margin: 0.01346 .. 0.26738
 minimum image/gripper clearance: 37.8355 .. 73.9906 px
-selected relative joint-motion range: 27.4051 .. 182.4348 degrees
 ```
 
+Reproduce the old policy with
+`--tilt-min-deg 10 --tilt-max-deg 13 --min-standoff-m 0.62
+--bore-x-tolerance-m 0.0038`.
+
 The 185-degree cap is measured. Tightening it to 182 degrees loses cases.
+
+**Two things now run with no slack** and want watching on hardware: minimum
+gripper clearance is 25.0 px against a 25 px floor (the closer standoff costs
+margin), and worst joint travel is 184.9 degrees against the 185 degree cap.
 
 The sweep validates the endpoint branch predicted by this skill. It does not
 prove that the downstream Move Robot node will choose that same branch.
@@ -732,9 +866,15 @@ This proves that run's IVM found five physical ports. The following filter
 created only four labels and ignored the fifth; that was a downstream labeling
 failure, not an IVM miss.
 
-The current arm-in-view rejection has not been run on hardware. At board yaw
-70 degrees the previously deployed endpoint put the upper arm in the center
-camera. Validate all three images, not only the final TCP geometry.
+**2026-07-27: the 16-20 degree / full-width-tolerance policy is confirmed
+working on hardware.** SC and staged-SFP Stage 2 are both considered good; the
+remaining SC failures in that session were all traced to Stage 1 (§19), not to
+the survey view.
+
+The current arm-in-view rejection has not been independently isolated on
+hardware. At board yaw 70 degrees the previously deployed endpoint put the
+upper arm in the center camera. Validate all three images, not only the final
+TCP geometry.
 
 ## 11. Motion-path limitation
 
@@ -878,6 +1018,11 @@ regression before it can be treated as hardware-representative.
 | Create Object index error `index=1 size=1` | Target filter correctly returned one pose but downstream still indexed it as a five-pose list |
 | Skill info service / registry unavailable | Skill pod/service startup or registry problem, before skill execution; inspect installed asset and pod logs |
 | IVM token `DEADLINE_EXCEEDED` | Cloud/auth service failure; no perception conclusion is possible |
+| **All three sectors return ~1 of 5 at once** | Not a per-sector bore/coverage bug — the survey pose was never correctly positioned. Go to §19 |
+| `wrist force guard triggered while settling` repeating | Stage 1 is wedged, likely in contact. Identical camera readings across attempts confirm the arm is not moving (§19.1) |
+| `logo=False` in all three cameras | Stage 1 has no gradient to follow and cannot recover on its own (§19.2) |
+| `long_ratio=1.00` with `long_axis_error=+0.0deg` | Degenerate frame-aligned `minAreaRect` from a clipped mask; the orientation is not a measurement |
+| `total` joint travel huge while `max` passes | Only the worst joint is capped; total is ungated (§18 item 2) |
 
 ## 14. Tests and validation
 
@@ -897,10 +1042,12 @@ Current result:
 286 passed in 65.11s
 ```
 
-Run the SC production sweep separately:
+Run the two production sweeps separately. Both take minutes and are
+pre-hardware validation tools, not part of the unit suite:
 
 ```powershell
-python test/sc_sweep_runner.py --workers 4
+python test/sc_sweep_runner.py --workers 8
+python test/sfp_sweep_runner.py --workers 8
 ```
 
 Run the code-node harness from the repository root:
@@ -913,19 +1060,32 @@ python docs/reference/filter_estimates_sc_node_test.py
 Current results:
 
 ```text
-SC sweep: 144 / 144 pass
+unit suite:  286 passed
+SC sweep:    144 / 144 found, depth cue 7.36 .. 8.55 px
+SFP sweep:   92 / 144 found, 92 / 92 frame all six seats, 0 clipped
 filter_estimates_sc reference harness: PASS
 ```
+
+`sfp_sweep_runner.py` carries an independent **seat audit** that is the point
+of the harness: `search_survey_pose` only guarantees the coverage target it was
+handed is framed, so the audit separately projects all six legal seats into all
+three cameras and reports how many survive. Reproduce the one-rail regression
+with `--coverage sector`.
 
 Before believing a shared-search change:
 
 1. run the full unit suite;
-2. run all 144 SC scenarios;
+2. run all 144 SC scenarios and all 144 SFP scenarios;
 3. retain all three SFP/NIC orientations already known to work;
 4. test the exact chained live joint seed;
 5. capture all three actual camera frames;
 6. compare the published-pose and predicted-joint log lines;
 7. inspect the downstream Move Robot trajectory rather than only its endpoint.
+
+Score per-sector view quality on the **physical worst case over the component's
+legal placement range**, not on whatever fixed samples the gate happens to use.
+Both bugs fixed this cycle hid behind a metric that averaged over the wrong
+thing.
 
 ## 15. Build and install
 
@@ -979,6 +1139,17 @@ the platform's image locator, so an installed asset could exist without a
 reconciled skill workload. The build now gives the output directory, OCI tar,
 descriptor, bundle, and image-name label the same v4 basename and rejects a
 bundle that does not contain `check_board_visibility_skill_v4.tar`.
+
+The subsequent `+dbec2569...` bundle proved that labels plus filename were
+still not the whole identity contract: after restart the asset was installed,
+but the cluster had no v4 skill log target/workload. Its OCI metadata still
+advertised `RepoTags=["flowstate:check-board-visibility-v4"]` and runtime
+`SKILL_NAME=check_board_visibility_skill`. Intrinsic's supported builder uses
+the exact `<skill_package>:<skill_name>` tag and the manifest skill name.
+The current build therefore uses
+`aic_perception:check_board_visibility_skill_v4`, passes
+`SKILL_NAME=check_board_visibility_skill_v4`, and keeps the historical config
+basename separate as `SKILL_CONFIG_NAME=check_board_visibility_skill`.
 
 The smoke test also owns SIGINT/SIGTERM and stops gRPC plus the ROS executor in
 order. The prior `RCLError: context is not valid` appeared only after the
@@ -1045,24 +1216,40 @@ Also capture:
 7. Do not infer occlusion safety from projected points merely being inside the
    image.
 8. Do not send a Stage-2 rejection pose to Move Robot.
+9. Do not add an along-board-Y tilt to the SC view to buy depth. The long-face
+   board-X direction is hardware-proven; the wide axis measured better and was
+   still rejected (§10.2).
+10. Do not enlarge the staged-SFP coverage box along board Y to "guarantee" the
+    outer seats. It pushes the standoff out, shrinks every module, and full
+    containment is unreachable anyway (§8.2).
+11. Do not trust a board `minAreaRect` orientation when the mask is clipped on
+    two or more image edges — `long_ratio ~= 1.00` with
+    `long_axis_error = +0.0deg` is the degenerate signature, not a measurement.
 
 ## 18. Highest-priority next-session work
 
-1. Deploy the current arm-in-view rejection and validate SC at board yaw
-   70 degrees. Confirm the upper arm and forearm are absent from all three
-   images.
-2. Add the latest five-candidate hardware regression to the SC filter harness,
-   then fix row/axis recovery without restoring metric alignment or spacing
-   rejection.
-3. Add the missing Flowstate
+**§19 — rebuilding Stage 1 — is the whole job.** Everything below is backlog
+behind it, because none of it can be evaluated while Stage 1 cannot reliably
+put the insignia in front of a camera.
+
+1. Add the missing Flowstate
    `result.success && result.done && result.target_valid` gate after the
    default-controller switch.
-4. Verify that the obsolete absolute J1-J6 position bounds are removed from
+2. Add a **total** joint-travel cap. The 185 degree limit is on the worst joint
+   only; `total_motion` is computed for ranking and never gated. A hardware run
+   on 2026-07-27 published a pose with
+   `delta_deg=[138.0, 16.9, 94.5, 56.1, -176.1, 19.6] max=176.1 total=501.3`,
+   which passed. Suggested cap 250-300 degrees, swept to confirm no coverage
+   loss.
+3. Add the latest five-candidate hardware regression to the SC filter harness,
+   then fix row/axis recovery without restoring metric alignment or spacing
+   rejection.
+4. Investigate `UR5eArm.autocalibrate()` instability: the same session logged
+   `tool=197.1mm` in four invocations and `tool=201.3mm` in a fifth. A 4.2 mm
+   shift in the flange-to-TCP estimate moves every projected candidate.
+5. Verify that the obsolete absolute J1-J6 position bounds are removed from
    the SC Move Robot segment, then inspect actual planned relative travel.
-5. Measure Stage-2 wall time on the deployed optimized build.
-6. Capture a known-working SFP Stage-2 published-pose line and compare its true
-   standoff and optical obliquity with the SC policy instead of inferring model
-   preferences from screenshots.
+6. Measure Stage-2 wall time on the deployed optimized build.
 7. Check the stale proto/manifest descriptions and target-neutralize the
    `"SFP Stage 2"` diagnostics after behavior is stable.
 
@@ -1071,3 +1258,179 @@ sweep the full board/placement/live-start matrix, and then validate all three
 real camera frames. A reachable Cartesian endpoint and an in-frame projection
 are necessary, but neither proves that IVM has an unoccluded, well-conditioned
 view or that Move Robot will take the predicted joint path.
+
+## 19. Stage 1 is broken and is being scrapped
+
+### 19.1 What the hardware run of 2026-07-27 showed
+
+Stage 2 is fine. Stage 1 is not, and it fails in a way that makes every
+downstream result meaningless. Timeline from one session (`01:50`-`02:10`):
+
+```text
+01:55:10  force=0.00N   done=True   SC pose published, insignia strong
+                                    (logo_area 0.0097 .. 0.0135)
+01:58:48  force=13.78N  done=False  169 poses framed, none IK-valid
+01:59:05  force=13.68N  done=True   published
+01:59:23  force=13.59N  done=True   published, but the pose needed
+                                    max=176.1deg TOTAL=501.3deg of joint travel
+02:01:12  force=17.79N  success=False  wrist force guard triggered
+02:04:31  force=14.73N  success=False  ... while settling
+02:07:58  force=17.06N  success=False  ... while settling
+02:10:51  force=14.31N  success=False  ... while settling
+```
+
+After the 501-degree reconfiguration at `01:59:23` the arm never recovered.
+From `02:01` onward **all three cameras report `logo=False`** — the insignia is
+not visible anywhere — and the camera readings are byte-identical across the
+four remaining attempts (`area=0.365`, `center=(0.474,-0.325)`, ...). The arm
+is wedged. Stage 1 tries its one corrective (`backoff`, ~0.06 m up) and the
+force guard reverses it every time.
+
+The force guard is `abs(|F| - |baseline|) >= 5 N` or `|F| >= 18 N`. 17.79 N is
+under the absolute limit, so the delta guard fired: the force climbed 5+ N
+during a 0.06 m *upward* move. Gravity norm is rotation-invariant, so that is
+not reorientation bias — it reads as genuine contact, consistent with the
+captured images where the tool sits on the board.
+
+Downstream, all three sectors collapsed at once: SFP returned 1 of 5, NIC 1 of
+5, SC 2 candidates of which one was 260 mm off the board plane
+(`z=1436.7 mm`, score 0.117). **When all three targets fail simultaneously the
+cause is the view, not any per-sector bore geometry.**
+
+### 19.2 Why the design is wrong, not just mistuned
+
+`AdaptiveViewpointPlanner` is a strict phase machine —
+`ACQUIRE (J1 sweep) -> CENTER (J1) -> ALIGN (J6) -> LEVEL (Cartesian) ->
+ASCEND -> DONE` — 1614 lines in `viewpoint_search.py` plus the wrapper's
+polarity learning, reversal and re-centre logic. Its problems are structural:
+
+1. **It is open-loop about where the insignia actually is.** It never forms a
+   hypothesis of the board pose; it nudges and re-measures, so it can only
+   hill-climb. When the insignia is out of frame in all three cameras there is
+   no gradient at all, which is exactly the wedged state above.
+2. **It leans on a degenerate orientation cue.** A board mask clipped on two or
+   more image edges yields a frame-aligned `minAreaRect`; the log shows
+   `long_axis_error=+0.0deg long_ratio=1.00` on every camera in the stuck runs.
+   That is the documented degenerate signature, and phases ALIGN/LEVEL consume
+   it as if it were real.
+3. **Its corrective moves are unbounded in consequence.** Each is a small
+   Cartesian nudge chosen from one camera's error, with no check that the
+   resulting configuration is still one from which recovery is possible.
+4. **It has no notion of a safe home.** There is no "the search failed, return
+   to a known-good observation pose" path, so a bad exit poisons every
+   subsequent invocation in the process.
+5. **It is the largest and least-tested part of the skill**, and the phase
+   interactions (J1 vs J6 at the levelled pose, polarity reversal, rollback)
+   have produced repeated field surprises.
+
+Stage 2, by contrast, is deterministic, hypothesis-first, offline-sweepable,
+and has been debugged to the point of being trustworthy. **The fix is to make
+Stage 1 look like Stage 2.**
+
+## 20. Plan: replace Stage 1 with a deterministic acquisition search
+
+### 20.1 The prior art on `origin/navigate-to-purple`
+
+Branch tip `4a20097`, skill `move_to_board_skill` (asset
+`ai.tar2.move_to_board_skill`, v3). Files worth reading first:
+
+- `flowstate/aic_perception/aic_perception/purple_insignia.py` (new, 185 lines)
+- `flowstate/aic_perception/move_to_board_skill.py`
+- `flowstate/aic_perception/test/test_move_to_board_loop.py` (448 lines)
+
+What it does well, and should be kept:
+
+- **A dedicated purple detector, ROS-free and unit-testable.**
+  `analyze_purple()` thresholds HSV `[125,45,45]-[165,255,255]`, morphological
+  open/close, largest contour over 100 px, and returns
+  `seen / full / edges / area_frac / centroid / center_error`. The band is
+  copied from the *proven* `PerceptionInsert._sc_purple_logo_centroid_px`, so
+  it is not a new guess.
+- **A flat greedy loop instead of a phase machine.** `_execute_inner` scans all
+  three cameras, and if any sees purple it drives on purple, else on the board
+  mask (`select_work_target`). No J1/J6 special-casing, no polarity learning,
+  no rollback.
+- **Pure image-plane translation with orientation held fixed.**
+  `_center_in_image` turns clipped edges plus centre error into a unit
+  (image-right, image-down) direction, maps it to base frame through the
+  camera's *actual* TF axes, and issues one 0.03 m `move_smooth`. Constant
+  orientation is what removes the J1/J6-at-the-levelled-pose coupling that bit
+  v4.
+- **An explicit, checkable terminal condition.** `purple_done` = all three
+  cameras see the *unclipped* insignia AND the centre camera centroid is within
+  10% of image centre. Budget `MAX_CENTER_MOVES = 14`.
+
+What it does **not** solve, and why it is a starting point rather than the
+answer: it is still a greedy servo. If no camera sees purple it falls back to
+centring the *board*, which is the same gradient-free situation that wedged v4,
+and it has no board-pose hypothesis and no reachability gate.
+
+### 20.2 The target design
+
+Make acquisition a **search over commanded poses**, not a sequence of nudges,
+reusing the Stage-2 machinery that already works.
+
+**Step 1 — hypothesise the board pose from what is visible.**
+The board plate is large and reliably visible (every failing log line still has
+`seen=True`, `area` 0.30-0.37); it is the *insignia* that is missing. Recover a
+board-pose hypothesis from non-insignia evidence:
+
+- `estimate_board_pose()` already exists in `board_stage2.py:839` and PnPs
+  `BOARD_OUTLINE_CORNERS`. **It cannot be used naively** — the plate is clipped
+  in exactly these situations, and a clipped mask gives the frame-aligned
+  degenerate rectangle described above. Any use must reject `long_ratio ~= 1.00`
+  and clipped-on-2+-edges masks outright.
+- Better: use the coloured landmarks that stay in frame. The blue SC adapters
+  and the green NIC cards are strong, well-separated, and at known board-frame
+  positions (`sc_sector_corners`, `nic_sector_corners`). Two identified
+  landmark clusters plus the board plane give enough for an in-plane pose.
+- The hypothesis only has to be good enough to say **which direction the
+  insignia is**, not to survey. Its uncertainty should be explicit and should
+  shrink as evidence accumulates.
+
+**Step 2 — solve for a pose that would expose the insignia.**
+This is the "another inverse kinematics thing like the current 3 targets" the
+task calls for. `INSIGNIA_RECT_CORNERS` is a known board-frame box, so
+acquisition is the *same* problem Stage 2 already solves for SFP/NIC/SC:
+generate candidate TCP poses that frame a board-frame target, then gate them
+with the existing, trusted machinery — `UR5eArm.solve_ranked` with the live
+joint seed, `self_clearance`, `_arm_clear_of_own_cameras`, workspace and
+component-clearance guards, and relative joint-travel caps. Command the single
+best candidate in **one** move rather than a chain of greedy nudges.
+
+**Step 3 — a deterministic fallback sweep when there is no hypothesis.**
+If nothing identifiable is visible, fall back to a fixed, precomputed ladder of
+*joint* configurations that tile the plausible board region, visited in a fixed
+order, each one IK-valid and arm-clear by construction. Deterministic, bounded,
+no gradient required, and trivially unit-testable. This is what replaces
+`ACQUIRE`.
+
+**Step 4 — a safe home, always.**
+On exhaustion, force abort, or any terminal failure, return to a known-good
+observation pose before releasing the controller. The 2026-07-27 session shows
+why: without it one bad exit poisons every later invocation.
+
+### 20.3 Constraints the rebuild must respect
+
+- Keep Stage 2 untouched. It is validated; §8 and §10 are hardware-confirmed.
+- Keep the input allowlist closed (§2) — no ground-truth board transform, no
+  component pose, no scoring state.
+- Keep returning expected failures as `success=true, done=false` so Flowstate
+  can always release the AIC controller (§3).
+- Preserve the force guard semantics, but treat a force abort as a **state to
+  recover from**, not merely a reason to return.
+- Everything must be offline-sweepable the way `sc_sweep_runner.py` and
+  `sfp_sweep_runner.py` are: board yaw x tilt x placement x live start, scored
+  on whether the insignia ends up unclipped in a calibrated camera.
+
+### 20.4 Suggested order of work
+
+1. Build the offline acquisition sweep harness **first**, scoring the current
+   Stage 1 so there is a baseline number to beat.
+2. Port `purple_insignia.py` from `4a20097` and unit-test it against the
+   captured hardware frames.
+3. Implement the board-pose hypothesis with explicit degeneracy rejection.
+4. Implement the pose search reusing the Stage-2 gates.
+5. Implement the deterministic joint ladder fallback and the safe home.
+6. Delete `viewpoint_search.py` and the wrapper's polarity/rollback logic only
+   once the replacement beats the baseline on the sweep.

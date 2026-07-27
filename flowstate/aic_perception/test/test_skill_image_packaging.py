@@ -53,6 +53,9 @@ def test_build_rejects_identity_drift_and_smokes_two_cold_starts():
 
     assert f"SKILL_ASSET_ID={SKILL_ASSET_ID}" in source
     assert f"SKILL_IMAGE_NAME={SKILL_IMAGE_NAME}" in source
+    assert 'IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"${SKILL_PACKAGE}:${SKILL_IMAGE_NAME}"}' in source
+    assert '--build-arg SKILL_NAME="${SKILL_IMAGE_NAME}"' in source
+    assert '--build-arg SKILL_CONFIG_NAME="${SKILL_SOURCE_NAME}"' in source
     assert 'OUTPUT_DIR="${OUTPUT_ROOT}/${SKILL_IMAGE_NAME}"' in source
     assert 'IMAGE_TAR="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.tar"' in source
     assert 'BUNDLE="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.bundle.tar"' in source
@@ -71,5 +74,7 @@ def test_shared_dockerfile_receives_the_move_skill_identity_too():
 
     assert "SKILL_ASSET_ID=ai.tar2.move_to_board_skill_v1" in source
     assert "SKILL_IMAGE_NAME=move_to_board_skill_v1" in source
+    assert '--build-arg SKILL_NAME="${SKILL_IMAGE_NAME}"' in source
+    assert '--build-arg SKILL_CONFIG_NAME="${SKILL_NAME}"' in source
     assert '--build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}"' in source
     assert '--build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}"' in source

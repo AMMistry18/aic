@@ -41,7 +41,8 @@ RUN pixi run --environment skill-build colcon build \
 FROM sdk-builder AS build
 
 ARG SKILL_PACKAGE=aic_perception
-ARG SKILL_NAME=check_board_visibility_skill
+ARG SKILL_NAME=check_board_visibility_skill_v4
+ARG SKILL_CONFIG_NAME=check_board_visibility_skill
 ARG SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main
 
 COPY src/aic/flowstate/ ./flowstate/
@@ -105,7 +106,7 @@ ENV LD_LIBRARY_PATH="/workspace/install/opt/bindings/pybind11_abseil:/workspace/
 ENV SKILL_PACKAGE=${SKILL_PACKAGE}
 ENV SKILL_NAME=${SKILL_NAME}
 ENV SKILL_EXEC_PATH="/workspace/install/lib/${SKILL_PACKAGE}/${SKILL_EXECUTABLE_NAME}"
-ENV SKILL_CONFIG="share/${SKILL_PACKAGE}/${SKILL_NAME}_config.pbbin"
+ENV SKILL_CONFIG="share/${SKILL_PACKAGE}/${SKILL_CONFIG_NAME}_config.pbbin"
 
 RUN printf '%s\n' \
       '#!/bin/bash' \

@@ -135,6 +135,17 @@ Do not install a bundle that still contains
 `skill-image-name` and can leave the asset installed without a runnable skill
 workload.
 
+The saved image must also carry the SDK-standard repository tag and logical
+name:
+
+```text
+RepoTags:  aic_perception:check_board_visibility_skill_v4
+SKILL_NAME=check_board_visibility_skill_v4
+```
+
+`SKILL_CONFIG_NAME=check_board_visibility_skill` intentionally remains the
+source/config basename.
+
 Install against the current cluster, which must be re-read after a simulator
 restart:
 

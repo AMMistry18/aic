@@ -8,10 +8,12 @@ SDK_ROOT="${WORKSPACE_ROOT}/src/sdk-ros"
 DOCKERFILE="${AIC_ROOT}/flowstate/resources/Dockerfile.skill.cv"
 OUTPUT_ROOT=${AIC_SKILL_OUTPUT_ROOT:-"${WORKSPACE_ROOT}/images"}
 INBUILD_BIN=${INBUILD_BIN:-$(command -v inbuild || true)}
+SKILL_PACKAGE=aic_perception
+SKILL_SOURCE_NAME=check_board_visibility_skill
 SKILL_ASSET_ID=ai.tar2.check_board_visibility_skill_v4
 SKILL_IMAGE_NAME=check_board_visibility_skill_v4
 OUTPUT_DIR="${OUTPUT_ROOT}/${SKILL_IMAGE_NAME}"
-IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"flowstate:check-board-visibility-v4"}
+IMAGE_TAG=${AIC_SKILL_IMAGE_TAG:-"${SKILL_PACKAGE}:${SKILL_IMAGE_NAME}"}
 IMAGE_TAR="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.tar"
 DESCRIPTOR_SET="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}_protos.desc"
 BUNDLE="${OUTPUT_DIR}/${SKILL_IMAGE_NAME}.bundle.tar"
@@ -37,9 +39,10 @@ mkdir -p "${OUTPUT_DIR}"
 
 docker build --platform linux/amd64 \
   --file "${DOCKERFILE}" \
-  --build-arg SKILL_PACKAGE=aic_perception \
-  --build-arg SKILL_NAME=check_board_visibility_skill \
-  --build-arg SKILL_EXECUTABLE_NAME=check_board_visibility_skill_main \
+  --build-arg SKILL_PACKAGE="${SKILL_PACKAGE}" \
+  --build-arg SKILL_NAME="${SKILL_IMAGE_NAME}" \
+  --build-arg SKILL_CONFIG_NAME="${SKILL_SOURCE_NAME}" \
+  --build-arg SKILL_EXECUTABLE_NAME="${SKILL_SOURCE_NAME}_main" \
   --build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}" \
   --build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}" \
   --tag "${IMAGE_TAG}" \

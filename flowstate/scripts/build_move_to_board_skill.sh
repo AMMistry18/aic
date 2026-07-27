@@ -37,7 +37,8 @@ mkdir -p "${OUTPUT_DIR}"
 docker build --platform linux/amd64 \
   --file "${DOCKERFILE}" \
   --build-arg SKILL_PACKAGE=aic_perception \
-  --build-arg SKILL_NAME="${SKILL_NAME}" \
+  --build-arg SKILL_NAME="${SKILL_IMAGE_NAME}" \
+  --build-arg SKILL_CONFIG_NAME="${SKILL_NAME}" \
   --build-arg SKILL_EXECUTABLE_NAME="${SKILL_EXECUTABLE_NAME}" \
   --build-arg SKILL_ASSET_ID="${SKILL_ASSET_ID}" \
   --build-arg SKILL_IMAGE_NAME="${SKILL_IMAGE_NAME}" \
