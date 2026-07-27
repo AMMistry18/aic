@@ -1,6 +1,11 @@
 # Insertion handoff
 
-Updated: 2026-07-22
+Updated: 2026-07-26
+
+> **Pending SC work:** The next SC change is the stall-time, camera-guided
+> blue-housing/gray-plug margin recovery documented in
+> [SC camera-guided seating recovery handoff](SC_VISUAL_RECOVERY_HANDOFF.md).
+> It is not implemented at this revision.
 
 ## Active behavior
 

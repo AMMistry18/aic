@@ -1,12 +1,13 @@
 # Current repository handoff
 
-Updated: 2026-07-22
+Updated: 2026-07-26
 
 `main` is the authoritative development branch. The previous insertion,
 board-search, deployment, and TACC handoff files were consolidated into this
 document and the two focused handoffs below:
 
 - [Insertion handoff](INSERTION_HANDOFF.md)
+- [SC camera-guided seating recovery handoff](SC_VISUAL_RECOVERY_HANDOFF.md)
 - [Board-search handoff](BOARD_SEARCH_HANDOFF.md)
 
 ## Current baseline
