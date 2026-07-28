@@ -55,6 +55,21 @@ def _named_calls(node: ast.AST, name: str) -> list[int]:
     )
 
 
+def _stage2_source() -> str:
+    """Source of the Stage-2 body *and* the per-tier search helper.
+
+    ``_run_sfp_geometric_stage2`` used to hold the ``search_survey_pose`` call
+    inline.  The relaxation ladder moved that call into
+    ``_search_survey_pose_tier``, so the search-argument contracts below have to
+    read both halves or they silently stop checking anything.
+    """
+    source, _ = _source_and_class()
+    return "\n".join(
+        ast.get_source_segment(source, _method(name))
+        for name in ("_run_sfp_geometric_stage2", "_search_survey_pose_tier")
+    )
+
+
 def test_stage1_handoff_uses_the_existing_geometric_stage2_closure():
     source, _ = _source_and_class()
     execute_inner = _method("_execute_inner")
@@ -152,17 +167,21 @@ def test_stage2_consumes_all_camera_info_and_full_camera_tcp_tf():
 
 def test_sfp_stage2_is_perception_only_and_publishes_a_cartesian_target():
     method = _method("_run_sfp_geometric_stage2")
+    tier = _method("_search_survey_pose_tier")
     estimate = _named_calls(method, "estimate_board_pose_from_insignia")
-    search = _named_calls(method, "search_survey_pose")
+    # The relaxation ladder calls the search once per tier through the helper,
+    # so the single ``search_survey_pose`` call site lives there now.
+    search = _named_calls(tier, "search_survey_pose")
     motions = _calls(method, "move_smooth")
     grabs = _calls(method, "grab")
     method_source = ast.get_source_segment(
         SOURCE_PATH.read_text(encoding="utf-8"), method
     )
 
-    # One insignia PnP and one survey search; no motion and no fresh-triplet grab.
+    # One insignia PnP and one survey search call site; no motion, no re-grab.
     assert len(estimate) == 1
     assert len(search) == 1
+    assert _named_calls(method, "search_survey_pose") == []
     assert len(motions) == 0
     assert len(grabs) == 0
     # Publishes scalar Cartesian fields instead of executing/confirming a move.
@@ -178,7 +197,7 @@ def test_sfp_stage2_is_perception_only_and_publishes_a_cartesian_target():
         "needs_retreat",
     ):
         assert gone not in method_source, gone
-    assert estimate[0] < search[0]
+    assert estimate[0] < _calls(method, "_search_survey_pose_tier")[0]
 
 
 def test_sfp_target_preserves_the_deployed_scalar_cartesian_interface():
@@ -212,8 +231,7 @@ def test_result_proto_declares_intrinsic_pose_survey_pose_output():
 
 
 def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
-    method = _method("_run_sfp_geometric_stage2")
-    method_source = ast.get_source_segment(SOURCE_PATH.read_text(encoding="utf-8"), method)
+    method_source = _stage2_source()
 
     # Reachability is decided by the real UR5e IK gate (calibrated from the live
     # joint state), not the base-origin sphere -- which wrongly rejected the
@@ -227,7 +245,9 @@ def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     assert "joints - seed" in method_source
     assert "select_clear_ik_solution(target)" in method_source
     assert "185.0 if int(survey_target) == 3 else 225.0" in method_source
-    assert "max_joint_motion_rad=joint_motion_limit_rad" in method_source
+    # The ladder passes the cap per tier; the strict tier is the sector cap.
+    assert "joint_motion_limit_rad, total_joint_motion_limit_rad" in method_source
+    assert "max_joint_motion_rad=max_joint_motion_rad" in method_source
     assert "max_reach_m=0.85" in method_source
     assert "min_height_m=0.02" in method_source
     assert "self._coverage_targets_for_target(survey_target)" in method_source
@@ -259,7 +279,7 @@ def test_stage2_uses_image_timestamp_tf_for_every_camera():
     source, _ = _source_and_class()
     transform = _method("_base_transform_at")
     transform_source = ast.get_source_segment(source, transform)
-    method_source = ast.get_source_segment(source, _method("_run_sfp_geometric_stage2"))
+    method_source = _stage2_source()
 
     assert "Time(nanoseconds=int(stamp_ns))" in transform_source
     assert "returned_ns" in transform_source
@@ -384,11 +404,11 @@ def test_nic_view_looks_straight_down_the_port_bores_from_far_off():
         assert sfp["cross_rail_sign"] == 0.0
         assert sfp["cross_rail_tilt_band_rad"] is None
 
-    method_source = ast.get_source_segment(
-        SOURCE_PATH.read_text(encoding="utf-8"),
-        _method("_run_sfp_geometric_stage2"),
-    )
-    assert "**self._survey_view_settings(survey_target)" in method_source
+    method_source = _stage2_source()
+    # Threaded through the relaxation ladder, which may override only the
+    # clearance margin -- never the sector view geometry.
+    assert "self._survey_view_settings(survey_target)" in method_source
+    assert "**view_settings" in method_source
     assert "cross_rail_tilt_band_rad=None" not in method_source
 
 
@@ -469,9 +489,7 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     # tips), not merely the board plane -- the plane guard sits below them.
     source = SOURCE_PATH.read_text(encoding="utf-8")
     assert "BOARD_TALLEST_COMPONENT_Z" in source
-    method_source = ast.get_source_segment(
-        source, _method("_run_sfp_geometric_stage2")
-    )
+    method_source = _stage2_source()
     assert "BOARD_TALLEST_COMPONENT_Z + TOOL_COMPONENT_CLEARANCE_M" in method_source
     # All-camera framing alone does not guarantee that the separated side
     # camera origins can see through the SC mouth.  The diagonal-board hardware
@@ -513,3 +531,191 @@ def test_deployed_target_enum_and_compatibility_fields_are_preserved():
         "SurveyTarget survey_target = 31;",
     ):
         assert declaration in proto
+
+
+def test_every_sector_searches_the_full_roll_family_from_any_start_pose():
+    """A reorientation cap measured from the live TCP must not pick the poses.
+
+    ``max_angular_motion_rad`` is measured against the *current* TCP, so it does
+    not merely bound how far the arm turns -- it decides which candidates are
+    ever scored.  Measured at the real hardware board distance (0.558 m
+    horizontal) over 8 board yaws, the shipped 90 deg cap made availability a
+    function of the Stage-1 exit wrist roll:
+
+        live start pose      cap=45   cap=90   cap=180
+        field 01:29            1/8      5/8      7/8
+        sweep home             3/8      6/8      7/8
+        home + J6 +90 deg      0/8      0/8      7/8
+        chained start          5/8      7/8      7/8
+
+    From the rolled-wrist start the 90 deg cap admitted 1036 framed candidates
+    of which *zero* had any IK solution -- the field "BINDING GATE =
+    reachability" refusal.  Bounding real motion is the live-seeded joint gate's
+    job; this one only narrowed the search.  The 24-roll family then takes every
+    one of those start poses from 7/8 to 8/8.
+    """
+    helper = copy.deepcopy(_method("_survey_view_settings"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {"math": math}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    settings = namespace["_survey_view_settings"]
+
+    for target in (0, 1, 2, 3, 99):
+        sector = settings(target)
+        assert sector["max_angular_motion_rad"] == pytest.approx(math.pi), (
+            f"target {target} reintroduced a reorientation cap that selects "
+            "the candidate set instead of bounding motion"
+        )
+        assert len(sector["yaws_rad"]) >= 20, (
+            f"target {target} lost the fine roll family"
+        )
+
+
+def test_one_insignia_view_is_enough_but_agreeing_views_are_fused():
+    """Requiring two complete views was tried on hardware and reverted.
+
+    The motivation was sound -- a single-view PnP of one small quad is a weak
+    *range* measurement, and two invocations 7 s apart at the same arm pose
+    disagreed enough to flip the near-standoff family across the 25 px
+    clearance floor.  But two complete views refuses far too many real start
+    poses: the field run rejected five consecutive invocations with "0 have
+    one" at poses where the board was plainly in view.  Stage 1 acquisition no
+    longer exists, so each of those is a dead stop rather than something the
+    skill recovers from.
+
+    What survives is the half that costs nothing: when two or more cameras do
+    accept an estimate they must agree, and their origins are averaged.
+    """
+    source, _ = _source_and_class()
+    assert "REQUIRED_INSIGNIA_CAMERAS = 1" in source
+
+    gate = ast.get_source_segment(source, _method("_stage2_has_complete_landmark"))
+    assert ">= REQUIRED_INSIGNIA_CAMERAS" in gate
+
+    stage2 = ast.get_source_segment(source, _method("_run_sfp_geometric_stage2"))
+    # A lone accepted estimate must still pass the agreement check.
+    assert "len(pose_estimates) > 1 and len(consistent) < 2" in stage2
+    # Opportunistic fusion: average the range whenever more than one view agrees.
+    assert "cluster_translations.mean(axis=0)" in stage2
+    assert "base_T_board=Transform(" in stage2
+    # Rotation stays with the preferred view -- averaging orientations over a
+    # near-square landmark can interpolate between mirror hypotheses.
+    assert "board_pose.base_T_board.rotation, mean_translation" in stage2
+
+
+def test_unreachable_and_camera_keepout_are_reported_as_different_gates():
+    """``solve_ranked`` filters the keep-out before returning, so an empty list
+    has two opposite meanings and reporting both as "no analytic IK solution at
+    all" sent debugging after the arm's workspace when the pose was reachable.
+    Measured at the hardware board distance, 231 of 926 "no IK" verdicts were
+    keep-out rejections."""
+    source, _ = _source_and_class()
+    stage2 = ast.get_source_segment(source, _method("_run_sfp_geometric_stage2"))
+
+    assert '"keepout": 0,' in stage2
+    # Re-solved without the keep-out, and only on the failure path.
+    assert "if _arm.solve_all(pose):" in stage2
+    assert 'record["gate"] = "camera_keepout"' in stage2
+    assert 'record["gate"] = "unreachable"' in stage2
+    assert "BINDING GATE = wrist-camera keep-out" in stage2
+    assert "camera_keepout=%d" in stage2
+
+
+def test_nic_refuses_short_standoffs_that_frame_the_ports_without_reading_them():
+    """NIC framing is not sufficiency -- the cage cone is.
+
+    Each port is a 16 x 12 mm aperture at the top of a 45.8 mm recess, so it
+    only shows the black depth the IVM keys on to a ray within
+    ``atan(6/45.8) = 7.46 deg``.  Over 144 offline placements the search
+    published 21 poses that framed all ten ports in all three cameras while the
+    outermost ports lay outside that cone -- roughly a 6-of-10 view that reports
+    success.  All of them had been pushed below 0.66 m because the arm could not
+    reach farther at that placement.
+
+    Poses that do resolve all ten sit in a tight band (0.66-0.76 m, worst cone
+    7.27 deg), and it is the same band the superseded 90 deg cap produced
+    whenever it worked.  Flooring the ladder there leaves the passing set
+    unchanged at 105/144 and turns the 21 into honest refusals.
+    """
+    helper = copy.deepcopy(_method("_survey_view_settings"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {"math": math}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    nic = namespace["_survey_view_settings"](2)
+
+    assert min(nic["standoffs_m"]) >= 0.66 - 1e-9, (
+        "a rung below 0.66 m puts the outer NIC ports outside the bore cone"
+    )
+    # prefer_far_standoff must still have somewhere to climb.
+    assert max(nic["standoffs_m"]) >= 1.0
+    assert nic["prefer_far_standoff"] is True
+
+
+def test_angled_view_is_the_last_resort_and_never_applies_to_sc():
+    """NIC may trade view angle for existence -- but only after everything else.
+
+    Section 9.3 records that tilting NIC across the rail resolved 0 of 10
+    ports, because the cages show their black interior only near the board
+    normal.  That experiment traded a *good* view for a tilted one.  This tier
+    fires only when no pose within the normal-view cap is reachable at all, so
+    the alternative is not a better view, it is no view.  Measured at the
+    2026-07-28 04:34 refusal, where the ports sat 0.715 m out and every
+    straight-down candidate needed >=0.914 m of reach:
+
+        obliquity cap    found   ports in the 7.46 deg cone
+         2 deg (ship)     no      -
+         5 deg            no      -
+         8 deg           YES     5/10
+
+    SC is excluded: its directional tilt band *is* the depth measurement, so
+    there is no degraded-but-useful angle to fall back to.
+    """
+    stage2 = _stage2_source()
+
+    # Ordering: the angled tiers must come after every geometry-preserving one.
+    strict = stage2.index('("strict"')
+    clearance = stage2.index('("reduced clearance margin"')
+    angled = stage2.index('("angled view (8deg off normal)"')
+    assert strict < clearance < angled
+
+    # SC opts out entirely.
+    assert 'if view_settings.get("cross_rail_tilt_band_rad") is not None:' in stage2
+    # Only ever widens, so SFP's existing 20 deg is untouched by an 8 deg tier.
+    assert 'view_settings["max_obliquity_rad"] = max(' in stage2
+    # A degraded view must announce itself.
+    assert "ANGLED view" in stage2
+
+
+def test_a_reachable_normal_view_is_never_affected_by_the_angled_tiers():
+    """The tiers that existed before the angled fallback must be untouched.
+
+    The deployed build searches four tiers and returns on the first that finds
+    a pose.  Appending angled-view tiers must not change any outcome that those
+    four already produced -- if tier 0 succeeds, nothing below it ever runs.
+    This pins both halves of that: the original four tiers carry no obliquity
+    relaxation, and the loop still breaks on the first candidate.
+    """
+    stage2 = _stage2_source()
+
+    # The four pre-existing tiers, in order, each with obliquity relaxation
+    # explicitly absent (the trailing ``None``).
+    for tier in (
+        '("strict", joint_motion_limit_rad, total_joint_motion_limit_rad,\n'
+        '             False, None, None)',
+        '("joint-travel caps lifted", math.radians(360.0), math.inf,\n'
+        '             False, None, None)',
+        '("any arm-clear IK branch", math.radians(360.0), math.inf,\n'
+        '             True, None, None)',
+        '("reduced clearance margin", math.radians(360.0), math.inf,\n'
+        '             True, 12.0, None)',
+    ):
+        assert tier in stage2, tier
+
+    # Tier 0 must still carry the *sector's own* caps, not a relaxed constant.
+    assert "joint_motion_limit_rad, total_joint_motion_limit_rad" in stage2
+    # And the search must stop at the first tier that yields a pose.
+    assert "if candidate is not None:" in stage2
+    body = stage2[stage2.index("if candidate is not None:"):]
+    assert "break" in body[: body.index("if joint_motion_fn is None:")]

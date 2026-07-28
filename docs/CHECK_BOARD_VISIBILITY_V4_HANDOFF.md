@@ -1,28 +1,13 @@
 # Check Board Visibility v4 — complete next-session handoff
 
-Updated: 2026-07-27
+Updated: 2026-07-27 (late)
 
-> **Read this first.** Stage 2 (the geometric survey) is in good shape: the SFP
-> and SC view policies were reworked on 2026-07-26/27 and both are confirmed
-> working on hardware. **Stage 1 (insignia acquisition) is inherently broken and
-> is to be scrapped and rebuilt** — see §19, which is the next session's whole
-> job. Sections 5 and 20 describe what is being replaced and why.
-
-This is the consolidated handoff for
-`ai.tar2.check_board_visibility_skill_v4`. It describes the current working
-tree, including changes that are tested locally but not committed or fully
-validated on hardware. It covers the shared pipeline, the separate SFP, NIC,
-and SC survey policies, the Flowstate motion boundary, downstream IVM/filter
-behavior, known failures, tests, and deployment.
-
-Use this document as the entry point next session. The deeper reasoning trail
-remains in:
-
-- `docs/BOARD_SEARCH_HANDOFF.md`, especially **SC destination ports — full
-  reference**;
-- `docs/SURVEY_IK_SESSION_HANDOFF.md`, especially section 9. Section 10 is
-  superseded history;
-- `flowstate/README.md`, for the concise runtime contract.
+> **Read this first.** **Stage 1 no longer exists.** The skill is pure
+> perception: it observes once and either runs Stage 2 or fails. Three
+> successive acquisition designs failed on hardware and the search was deleted
+> rather than tuned again -- §5 and §19 record what and why, so it is not
+> reinvented. Stage 2 (SC + staged-SFP survey geometry) is validated and
+> hardware-confirmed; §8 and §10 are the policy of record.
 
 ## 1. Repository and current source state
 
@@ -39,15 +24,17 @@ At the time of this handoff:
 
 ```text
 branch: main
-HEAD:   467636d  (working tree clean)
+HEAD:   e929eca + uncommitted working tree
 ```
 
-Unlike the previous revision of this handoff, the Stage-2 policy work is
-**committed**. The SFP coverage fix and the SC depth fix described in §8 and
-§10 are both in `HEAD`, and both are confirmed working on hardware.
+The SFP coverage fix and the SC depth fix (§8, §10) are committed and
+hardware-confirmed. **Everything from the 2026-07-27 late session is
+uncommitted working tree**: the Stage-1 deletion, the untared-force guard
+(§19.3), the SC total joint-travel cap and the all-branch arm-in-view hard stop
+(§7.1), and the IK rejection diagnostics. Do not discard the working tree.
 
-The one relevant branch that is *not* merged is `origin/navigate-to-purple`
-(tip `4a20097`), which carries an independent Stage-1 experiment. §20 covers it.
+`origin/navigate-to-purple` (tip `4a20097`) carries the Stage-1 image-plane
+search experiment. It was ported, run on hardware, and removed -- see §19.
 
 The v4 asset identity is defined in
 `flowstate/aic_perception/check_board_visibility_skill.manifest.textproto`:
@@ -260,72 +247,45 @@ deadline; it is bounded by planner stall rules, per-move timeouts, cancellation,
 force, and controller checks. Stage 2 likewise has no aggregate compute
 deadline.
 
-## 5. Stage 1 — expose the insignia (BROKEN — being replaced, see §19/§20)
+## 5. Stage 1 — removed
 
-> This section describes the Stage 1 that **is deployed today**. It is retained
-> because you have to understand it to replace it safely, not because it is
-> correct. It fails structurally, not by mistuning; §19 has the hardware
-> evidence and §20 the replacement plan.
+The skill commands **no motion at all**. `_execute_inner` grabs one fresh
+triplet, and:
 
+- if any calibrated camera holds a complete unobstructed insignia, it hands the
+  triplet to Stage 2;
+- otherwise it fails, naming which cameras saw a *partial* insignia so the
+  operator can tell "nothing there" from "nearly framed".
 
-Every invocation is serialized with an execution lock. A second simultaneous
-call returns normally with `"another board-visibility invocation is still
-running"`.
+**Two cameras are required** (`REQUIRED_INSIGNIA_CAMERAS = 2`, 2026-07-28).
+One was enough until a single-view PnP of one small quad was shown to be too
+weak a *range* measurement -- see §6.2 and §21. One `full=True` alongside two
+`full=False` is now a refusal, and the message names how many complete views
+were found so the operator can tell "one short" from "nothing there".
 
-Each Stage-1 iteration:
+The failure **raises** `skill_interface.SkillError(9, ...)` after the controller
+handoff is published. Two things to know about that:
 
-1. grabs fresh frames from the three approved cameras;
-2. applies each camera's calibrated gripper mask;
-3. computes a `MaskReport` with board evidence, clipping edges, area,
-   rectangularity, centre error, long-axis direction, purple insignia, context,
-   and gripper clearance;
-4. checks any available force sample;
-5. immediately hands the freshest triplet to Stage 2 if any calibrated camera
-   contains a complete, unobstructed insignia;
-6. otherwise asks `AdaptiveViewpointPlanner` for one bounded measured action.
+- `SkillError` takes `(status_code, message)`. Passing one argument raises
+  `TypeError` inside the skill service and the real diagnosis is lost. A test
+  pins the two-argument call shape, because the intrinsic SDK is not importable
+  locally and nothing else can catch it.
+- **Raising still aborts the behaviour tree before `Switch To Default
+  Controller`**, so the AIC bridge keeps its ICON session on `arm` and later
+  Move Robot calls fail with `upstream connect error ... connection
+  termination`. `prepare_controller_handoff()` publishes a measured-state hold;
+  it does **not** release the bridge lease. If that wedging is unacceptable,
+  either revert to `success=False` without raising, or restructure the BT so
+  the controller switch is in an always-run branch.
 
-The fallback planner is a strict phase machine:
+Deleted along with the search: `viewpoint_search.py` (the
+ACQUIRE/CENTER/ALIGN/LEVEL/ASCEND phase machine), `stage1_acquisition.py` (the
+deterministic joint plan), `board_seek.py` (the ported image-plane servo) and
+`_execute_inner_legacy`. A test asserts they are gone rather than dormant.
 
-```text
-ACQUIRE (J1 sweep)
--> CENTER (J1 proportional centring)
--> ALIGN (J6 board-long-axis alignment)
--> LEVEL (Cartesian correction, primarily J2-J4)
--> ASCEND (clearance/scale and synchronized three-camera confirmation)
--> DONE
-```
-
-J1 and J6 corrections are small, measured transactions. Cartesian corrections
-use minimum-jerk profiles and remeasure after every move. The wrapper learns
-image-motion polarity from the next fresh frame, can reverse a wrong-way
-vertical correction, and can recenter/relevel after Cartesian IK changes J1 or
-J6.
-
-For all current survey targets, this full sequence is only a fallback. In the
-normal case the purple insignia is already complete at iteration 0 and Stage 1
-commands no motion.
-
-Perception-only evaluation may continue without a simultaneous wrench sample.
-Any real Stage-1 motion requires a fresh force sample no older than 0.5 s.
-Defaults are:
-
-- absolute force limit: 18 N;
-- force change from initial baseline: 5 N;
-- Cartesian speed: 0.05 m/s;
-- direct-joint angular speed: at most 0.20 rad/s;
-- general angular setpoint speed: 0.30 rad/s;
-- one-move timeout: 6 s;
-- measured settle tolerances: 8 mm and 0.05 rad.
-
-Deprecated start-relative travel/displacement proto fields are accepted for
-binary compatibility but are not policy termination conditions. The motion
-remains incremental, measured, cancellable, force-guarded, and controller
-limited.
-
-`execute()` always calls `RobotMotion.prepare_controller_handoff()` in a
-`finally` block. This publishes a final measured-state hold target. It does not
-release the controller bridge; the following Flowstate **Switch To Default
-Controller** node does that.
+`purple_insignia.py` is kept: `analyze_purple` supplies the per-camera
+`purple_seen/full/edges/area` diagnostics in the Stage-1 log line, which is
+what makes a failure readable.
 
 ## 6. Shared Stage 2 — insignia to survey pose
 
@@ -369,11 +329,21 @@ and tilt directions are expressed in the board frame and therefore rotate and
 translate with the board. No SC or NIC camera displacement is a fixed world X/Y
 offset.
 
-A complete insignia in a side camera is sufficient. Accepted estimates from
-multiple cameras must form a cluster within 5 cm and 8 degrees. If multiple
-accepted estimates have no two-member consistent cluster, Stage 2 refuses to
-guess. Within the largest cluster it prefers the center-camera estimate,
-otherwise the lowest reprojection/centroid error.
+**Two accepted estimates are required, and they must agree** (2026-07-28).
+Estimates from multiple cameras must form a cluster within 5 cm and 8 degrees;
+Stage 2 now refuses unless at least `REQUIRED_INSIGNIA_CAMERAS` of them land in
+that cluster, rather than applying the check only when a second view happened to
+exist. Within the cluster it prefers the center-camera estimate, otherwise the
+lowest reprojection/centroid error.
+
+The cluster's board **origin is then averaged** across the agreeing views, while
+rotation stays with the preferred view. Range is the weak axis of a single-view
+PnP, the cameras are ~115 mm apart so their range errors are largely
+independent, and the survey search runs against a 25 px clearance floor that a
+few millimetres of range error can cross. Rotation is deliberately *not*
+averaged: an orientation mean over a near-square landmark can interpolate
+between two different mirror hypotheses, and the 8 degree cluster test already
+bounds the disagreement.
 
 ### 6.3 Camera rig and gripper exclusion
 
@@ -500,6 +470,59 @@ The previous absolute SC window was removed. It rejected a valid chained start
 at J4 = -143.9 degrees before evaluating any pose and caused an empty result to
 reach the ungated Move Robot node.
 
+### 7.1 Joint-travel and arm-in-view gates (2026-07-27 late)
+
+Two hardware failures produced two additional gates.
+
+**Total joint travel, SC only.** The 185/225 deg cap is on the *worst single
+joint*. Hardware published this and it passed:
+
+```text
+delta_deg=[-163.7, -16.0, 147.5, 33.7, 166.0, -34.9]
+max=166.0deg  total=561.8deg
+```
+
+Three joints swinging 150-166 deg at once -- a whole-arm reconfiguration, not a
+survey move, and what the field reported as "the arm contorts and does almost a
+360". `total_motion` was already computed for ranking and simply never gated.
+`max_total_joint_motion_rad` now caps it at **400 deg for SC**
+(`TOTAL_JOINT_MOTION_LIMIT_RAD`); SFP and NIC stay `math.inf`.
+
+The offline distribution is bimodal -- poses are either under ~300 deg or over
+450 -- so 300/350/400/450 select the identical set; 400 sits in the gap with
+margin over the 208 deg field maximum. Gating SFP as well costs 26 of 144
+placements, and SFP has not reported the problem, hence SC-only. Note the
+561.8 deg move above was logged on an *SFP* run (`view_quality=+inf`,
+`cross_tilt=0.0`, 225 deg gate), so an SC-only cap would not have refused that
+particular pose.
+
+**Every IK branch must be arm-clear.** `select_clear_ik_solution` used to
+accept a pose when *any* branch cleared the wrist cameras. But the skill
+publishes only a Cartesian pose: Move Robot re-solves it and may take a
+different co-terminal branch (§11), so validating one branch guaranteed
+nothing. Measured exposure at three board yaws:
+
+```text
+yaw   probed  some-clear  ALL-clear  partial
+  0     20        16          0        16
+140     31        15          0        15
+315     16        16          1        15
+```
+
+Essentially every accepted pose had a branch that puts the arm in frame. The
+gate now requires all branches clear, so whichever one Move Robot picks is
+safe. Cost: SC unchanged at 144/144, SFP 92 -> 91 of 144. Applied to all three
+sectors.
+
+This cannot cover a branch outside `solve_ranked`'s set. Closing that needs the
+skill to publish joint targets rather than a Cartesian pose, which the current
+interface does not allow.
+
+**Diagnostics.** A Stage-2 refusal now logs a per-gate breakdown, an explicit
+`BINDING GATE = ...` verdict (reachability / arm-in-view / travel cap), the
+live seed, reach and TCP-height spans, and the eight nearest misses. The old
+message conflated three failures needing opposite fixes.
+
 ## 8. SFP survey policy
 
 ### 8.1 Physical target
@@ -564,8 +587,8 @@ SFP uses the general near-overhead search:
 - no directional tilt band;
 - total reference-camera obliquity at most the general 20-degree cap;
 - additional all-camera clearance: **25 px** (was 40);
-- Cartesian reorientation cap: **90 degrees** (was 45);
-- default seven optical-roll samples;
+- Cartesian reorientation cap: **180 degrees** (was 90, was 45 -- see §21);
+- **24** optical-roll samples at 15-degree intervals (was seven);
 - live IK ranking when available, sphere fallback otherwise.
 
 The 25 px / 90 deg values are NIC's already-proven ones, adopted for
@@ -580,17 +603,24 @@ gripper clearance, near-overhead conditioning, and reachability.
 
 ### 8.4 Current status
 
-**Confirmed working on hardware (2026-07-27).** Sweep result:
+**Confirmed working on hardware (2026-07-27).** Sweep result, at the corrected
+board distance and the 180 deg / 24-roll policy (2026-07-28):
 
 ```text
-92 / 144 poses found, 92 / 92 frame all six seats, 0 clipped
-selected standoff:  0.64 .. 0.85 m
-worst seat margin:  118.5 px
+144 / 144 poses found, 144 / 144 frame all six seats, 0 clipped
+selected standoff:  0.64 .. 0.76 m
+clearance:          25.3 .. 62.8 px
+worst seat margin:  103.1 px
+worst joint travel: 178.8 deg (225 deg cap)
 ```
 
-The 52 no-pose cases are IK / arm-in-view failures concentrated on the
-`home + J6 +90 deg` Stage-1 exit, not framing failures. That is a Stage-1
-problem, and §19 is where it belongs.
+The previous row read `92 / 144 found, worst seat margin 118.5 px, standoff
+0.64 .. 0.85 m`, and this handoff attributed the 52 no-pose cases to the
+`home + J6 +90 deg` Stage-1 exit -- "a Stage-1 problem". **That was wrong.**
+They were the 90 degree Cartesian reorientation cap silently choosing the
+candidate set (§21). The 144/144 above is measured with the board 13 cm
+*farther* from the base than the run that scored 92, i.e. on strictly harder
+geometry.
 
 The downstream SFP/NIC-card filtering code is a Flowstate code-execution node,
 not part of this repository's skill bundle. The previously working version
@@ -632,7 +662,7 @@ NIC must look nearly straight down the cage bores:
 - additional clearance: 25 px;
 - farthest feasible standoff wins;
 - 24 optical-roll samples at 15-degree intervals;
-- Cartesian reorientation cap: 90 degrees.
+- Cartesian reorientation cap: 180 degrees (was 90 -- see §21).
 
 The far-view preference is physical, not aesthetic. The outermost port is
 about 81 mm from the aimed center. To keep it inside the 7.5-degree cone:
@@ -1023,6 +1053,8 @@ regression before it can be treated as hardware-representative.
 | `logo=False` in all three cameras | Stage 1 has no gradient to follow and cannot recover on its own (§19.2) |
 | `long_ratio=1.00` with `long_axis_error=+0.0deg` | Degenerate frame-aligned `minAreaRect` from a clipped mask; the orientation is not a measurement |
 | `total` joint travel huge while `max` passes | Only the worst joint is capped; total is ungated (§18 item 2) |
+| `BINDING GATE = reachability` on a pose you know the arm can reach | Believe it only since 2026-07-28. Before that `solve_ranked` filtered the 140 mm wrist-camera keep-out *before* returning and the empty list was reported as "no analytic IK solution at all"; at the real board distance 231 of 926 such verdicts were keep-out rejections. The log now says `camera_keepout=` and can name `BINDING GATE = wrist-camera keep-out` |
+| Two invocations at the *same* arm pose disagree | Single-view board range jitter crossing the 25 px clearance floor. Fixed by requiring two agreeing insignia views (§6.2); if it recurs, log `origin_spread` from the `board pose fused over N agreeing cameras` line |
 
 ## 14. Tests and validation
 
@@ -1060,11 +1092,24 @@ python docs/reference/filter_estimates_sc_node_test.py
 Current results:
 
 ```text
-unit suite:  286 passed
-SC sweep:    144 / 144 found, depth cue 7.36 .. 8.55 px
-SFP sweep:   92 / 144 found, 92 / 92 frame all six seats, 0 clipped
+unit suite:  263 passed
+SC sweep:    144 / 144 found, depth cue 6.02 .. 9.97 px, bore margin >= 0.0188
+SFP sweep:   144 / 144 found, 144 / 144 frame all six seats, 0 clipped
 filter_estimates_sc reference harness: PASS
 ```
+
+Both sweeps now place the board at its **measured hardware position**,
+`(-0.5189, 0.2054)` in `base_link` -- 0.558 m horizontally from the base. They
+had been pinned at `(-0.3445, 0.2602)`, 0.4317 m, which is 13 cm nearer than the
+real cell. That matters more than it sounds: the survey viewpoint sits 0.64 m
+*above* the board, so board distance is spent directly out of the arm's
+envelope, and a start pose that swept clean could still fail in the field.
+`--board-center-mm -344.5 260.2` reproduces the old pin for comparing against
+any recorded number.
+
+Watch the SC worst-case bore margin: the extra distance moved it from 0.0313 to
+**0.0188**. Still positive, still 144/144, but it is the number the extra reach
+is being paid for.
 
 `sfp_sweep_runner.py` carries an independent **seat audit** that is the point
 of the harness: `search_survey_pose` only guarantees the coverage target it was
@@ -1167,6 +1212,24 @@ images/check_board_visibility_skill_v4/
 check_board_visibility_skill_v4.bundle.tar
 ```
 
+`rebuild_and_install_stage1_v4.sh` (in the WSL workspace, **not** version
+controlled) pins `board_stage2.py` by hash so Stage 2 cannot drift by accident.
+It is a pin, not a freeze: an intentional change is allowed once its sweeps have
+been re-run.
+
+```bash
+# normal build+install
+AIC_SOLUTION=<uuid>_BRANCH bash rebuild_and_install_stage1_v4.sh
+
+# after an intentional Stage-2 change, with both sweeps re-run
+ALLOW_STAGE2_CHANGE=1 AIC_SOLUTION=<uuid>_BRANCH   bash rebuild_and_install_stage1_v4.sh
+# then paste the printed hash into EXPECTED_STAGE2_SHA
+```
+
+`AIC_SOLUTION` has no default -- it persists in the shell and more than one
+solution has been in play, so a stale default silently installs to the wrong
+cluster.
+
 The user will build and push/install. Do not deploy automatically.
 
 ## 16. Logs to capture on every hardware run
@@ -1222,36 +1285,49 @@ Also capture:
 10. Do not enlarge the staged-SFP coverage box along board Y to "guarantee" the
     outer seats. It pushes the standoff out, shrinks every module, and full
     containment is unreachable anyway (§8.2).
-11. Do not trust a board `minAreaRect` orientation when the mask is clipped on
+11. Do not rebuild a Stage-1 acquisition search without reading §20. Three
+    designs have failed on hardware for three different reasons.
+12. Do not gate summed joint travel on SFP/NIC. It costs 26 of 144 staged-SFP
+    placements and neither sector has reported contortion (§7.1).
+13. Do not accept a survey pose because *one* IK branch is arm-clear. Move
+    Robot picks the branch, not this skill (§7.1).
+14. Do not trust a board `minAreaRect` orientation when the mask is clipped on
     two or more image edges — `long_ratio ~= 1.00` with
     `long_axis_error = +0.0deg` is the degenerate signature, not a measurement.
+15. Do not reintroduce a Cartesian reorientation cap below 180 degrees to bound
+    arm motion. It is measured from the live TCP, so it *selects the candidate
+    set* before anything is scored; the live-seeded joint-travel gate is what
+    bounds real motion (§21).
+16. Do not size an offline sweep's board position by anything but the measured
+    cell. A sweep 13 cm closer than hardware certified a policy that scored
+    92/144 on easy geometry while failing in the field (§21).
 
 ## 18. Highest-priority next-session work
 
-**§19 — rebuilding Stage 1 — is the whole job.** Everything below is backlog
-behind it, because none of it can be evaluated while Stage 1 cannot reliably
-put the insignia in front of a camera.
-
-1. Add the missing Flowstate
-   `result.success && result.done && result.target_valid` gate after the
-   default-controller switch.
-2. Add a **total** joint-travel cap. The 185 degree limit is on the worst joint
-   only; `total_motion` is computed for ranking and never gated. A hardware run
-   on 2026-07-27 published a pose with
-   `delta_deg=[138.0, 16.9, 94.5, 56.1, -176.1, 19.6] max=176.1 total=501.3`,
-   which passed. Suggested cap 250-300 degrees, swept to confirm no coverage
-   loss.
-3. Add the latest five-candidate hardware regression to the SC filter harness,
-   then fix row/axis recovery without restoring metric alignment or spacing
-   rejection.
-4. Investigate `UR5eArm.autocalibrate()` instability: the same session logged
-   `tool=197.1mm` in four invocations and `tool=201.3mm` in a fifth. A 4.2 mm
-   shift in the flange-to-TCP estimate moves every projected candidate.
-5. Verify that the obsolete absolute J1-J6 position bounds are removed from
-   the SC Move Robot segment, then inspect actual planned relative travel.
-6. Measure Stage-2 wall time on the deployed optimized build.
+1. **Decide the raise-vs-return question** (§5). Raising on a missing insignia
+   aborts the BT before `Switch To Default Controller` and wedges the AIC
+   bridge, so later Move Robot calls fail with `upstream connect error`. Either
+   revert to `success=False`, or put the controller switch in an always-run BT
+   branch.
+2. **Add the Flowstate `result.success && result.done && result.target_valid`
+   gate** after the default-controller switch. Still missing, and it has now
+   crashed Move Robot with `norm(quat)==0` on SFP as well as SC.
+3. **SC J6 preference is not engaging.** §10.4 prefers a +/-180 deg J6 flip
+   specifically to keep the camera cluster off the occluding side, and field
+   logs show `j6_error` of 129-245 deg -- it lands on the wrong side every
+   time. It only wins inside a 30 deg travel plateau. This is the remaining
+   lead for the arm occluding its own view, and it is unmeasured.
+4. ~~**Start-pose sensitivity.**~~ **Done 2026-07-28 -- see §21.** This was the
+   cause of the field "no IK pose from certain start poses". The cap is now
+   180 deg in every sector and availability no longer depends on the start
+   wrist roll.
+5. **`UR5eArm.autocalibrate()` instability**: `tool=197.1mm` in most runs,
+   `200.4mm` and `201.1mm` in others. A 4.2 mm shift moves every projected
+   candidate.
+6. Add the five-candidate hardware regression to the SC filter harness, then
+   fix row/axis recovery without restoring metric spacing rejection.
 7. Check the stale proto/manifest descriptions and target-neutralize the
-   `"SFP Stage 2"` diagnostics after behavior is stable.
+   `"SFP Stage 2"` diagnostics.
 
 The core rule for future changes is: measure the workcell geometry offline,
 sweep the full board/placement/live-start matrix, and then validate all three
@@ -1259,7 +1335,7 @@ real camera frames. A reachable Cartesian endpoint and an in-frame projection
 are necessary, but neither proves that IVM has an unoccluded, well-conditioned
 view or that Move Robot will take the predicted joint path.
 
-## 19. Stage 1 is broken and is being scrapped
+## 19. The Stage-1 hardware record
 
 ### 19.1 What the hardware run of 2026-07-27 showed
 
@@ -1398,110 +1474,143 @@ sensing; it was out of scope for unblocking the run.
 Always log the unexplained component next to the raw magnitude. A bare
 "25.72 N" reads as alarming and is in fact free space.
 
-## 20. Plan: replace Stage 1 with a deterministic acquisition search
+## 20. What was tried for Stage 1, and why it is gone
 
-### 20.1 The prior art on `origin/navigate-to-purple`
+Do not rebuild an acquisition search without reading this. Three designs
+reached hardware; all three failed for different reasons.
 
-Branch tip `4a20097`, skill `move_to_board_skill` (asset
-`ai.tar2.move_to_board_skill`, v3). Files worth reading first:
+**1. Phase machine** (`viewpoint_search.py`, ACQUIRE -> CENTER -> ALIGN ->
+LEVEL -> ASCEND, 1614 lines). Steered on the board mask's `minAreaRect`
+orientation, which is degenerate exactly when needed: a mask clipped on two or
+more image edges yields a frame-aligned rectangle, logged as
+`long_ratio=1.00 long_axis_error=+0.0deg`. It also split J1/J6 authority across
+phases, which couples badly at the levelled pose where base-Z and wrist_3 are
+parallel. Wedged in the field with `logo=False` on all three cameras and
+identical readings across four consecutive attempts.
 
-- `flowstate/aic_perception/aic_perception/purple_insignia.py` (new, 185 lines)
-- `flowstate/aic_perception/move_to_board_skill.py`
-- `flowstate/aic_perception/test/test_move_to_board_loop.py` (448 lines)
+**2. Deterministic joint plan** (`stage1_acquisition.py`). Precomputed a safe
+path to a fixed observation pose. Never executed:
 
-What it does well, and should be kept:
+- the min-jerk profile outran its deadline (a 33 deg segment needs 5.4 s at the
+  0.20 rad/s cap; the 6 s budget also had to absorb up to 2 s of target-mode
+  retry). Sizing the deadline from the segment fixed that;
+- then the deployed controller dropped joint target mode 0.43 s in --
+  `controller left joint target mode; joint target reversed`. The controller
+  rejects `/aic_controller/change_target_mode` around in-flight executions, so
+  the joint-target path is not dependable.
 
-- **A dedicated purple detector, ROS-free and unit-testable.**
-  `analyze_purple()` thresholds HSV `[125,45,45]-[165,255,255]`, morphological
-  open/close, largest contour over 100 px, and returns
-  `seen / full / edges / area_frac / centroid / center_error`. The band is
-  copied from the *proven* `PerceptionInsert._sc_purple_logo_centroid_px`, so
-  it is not a new guess.
-- **A flat greedy loop instead of a phase machine.** `_execute_inner` scans all
-  three cameras, and if any sees purple it drives on purple, else on the board
-  mask (`select_work_target`). No J1/J6 special-casing, no polarity learning,
-  no rollback.
-- **Pure image-plane translation with orientation held fixed.**
-  `_center_in_image` turns clipped edges plus centre error into a unit
-  (image-right, image-down) direction, maps it to base frame through the
-  camera's *actual* TF axes, and issues one 0.03 m `move_smooth`. Constant
-  orientation is what removes the J1/J6-at-the-levelled-pose coupling that bit
-  v4.
-- **An explicit, checkable terminal condition.** `purple_done` = all three
-  cameras see the *unclipped* insignia AND the centre camera centroid is within
-  10% of image centre. Budget `MAX_CENTER_MOVES = 14`.
+**3. Image-plane servo** (`board_seek.py`, ported from
+`origin/navigate-to-purple` tip `4a20097`). Small Cartesian translations at
+fixed orientation, steering on clipped edges plus centre error, purple taking
+over from the board mask once visible. Avoids both problems above -- no joint
+mode, no orientation cue. Its limit is structural: when the board overflows the
+frame on opposite edges there is no gradient. `image_plane_direction` falls
+back to the centre error, which on the real stuck frame
+(`edges=left,right,top`, centre `(0.034, -0.596)`) was under the trigger on X,
+so the whole signal was a single vertical nudge. It also never backs off, and
+backing off is what a too-close view actually needs.
 
-What it does **not** solve, and why it is a starting point rather than the
-answer: it is still a greedy servo. If no camera sees purple it falls back to
-centring the *board*, which is the same gradient-free situation that wedged v4,
-and it has no board-pose hypothesis and no reachability gate.
+**Resolution.** Hardcoded Flowstate Move Robot poses that see the whole board.
+That works, and it removed the problem rather than solving it. The skill now
+requires the caller to supply such a pose.
 
-### 20.2 The target design
+If acquisition is ever rebuilt, the pieces worth reusing are
+`purple_insignia.analyze_purple` (HSV band copied from the proven
+`PerceptionInsert._sc_purple_logo_centroid_px`) and the flat no-phase loop
+shape. The missing piece in every attempt was a **board-pose hypothesis**: none
+of them ever formed one, so none could aim. `estimate_board_pose()`
+(`board_stage2.py`) PnPs the plate outline but must not be trusted on a clipped
+mask; the coloured landmarks that stay in frame -- blue SC adapters, green NIC
+cards, at known board-frame positions -- are the untried route.
 
-Make acquisition a **search over commanded poses**, not a sequence of nudges,
-reusing the Stage-2 machinery that already works.
+Whatever is built, score it offline the way `sc_sweep_runner.py` and
+`sfp_sweep_runner.py` do, and beat the current behaviour on that sweep before
+deleting anything.
 
-**Step 1 — hypothesise the board pose from what is visible.**
-The board plate is large and reliably visible (every failing log line still has
-`seen=True`, `area` 0.30-0.37); it is the *insignia* that is missing. Recover a
-board-pose hypothesis from non-insignia evidence:
+## 21. The reorientation cap, and why "definitively reachable" poses failed
 
-- `estimate_board_pose()` already exists in `board_stage2.py:839` and PnPs
-  `BOARD_OUTLINE_CORNERS`. **It cannot be used naively** — the plate is clipped
-  in exactly these situations, and a clipped mask gives the frame-aligned
-  degenerate rectangle described above. Any use must reject `long_ratio ~= 1.00`
-  and clipped-on-2+-edges masks outright.
-- Better: use the coloured landmarks that stay in frame. The blue SC adapters
-  and the green NIC cards are strong, well-separated, and at known board-frame
-  positions (`sc_sector_corners`, `nic_sector_corners`). Two identified
-  landmark clusters plus the board plane give enough for an in-plane pose.
-- The hypothesis only has to be good enough to say **which direction the
-  insignia is**, not to survey. Its uncertainty should be explicit and should
-  shrink as evidence accumulates.
+Field report (2026-07-28): *"for certain starting poses the perception just
+doesn't output an IK pose, and they are definitively reachable."* Correct on
+both counts. Three separate faults stacked up.
 
-**Step 2 — solve for a pose that would expose the insignia.**
-This is the "another inverse kinematics thing like the current 3 targets" the
-task calls for. `INSIGNIA_RECT_CORNERS` is a known board-frame box, so
-acquisition is the *same* problem Stage 2 already solves for SFP/NIC/SC:
-generate candidate TCP poses that frame a board-frame target, then gate them
-with the existing, trusted machinery — `UR5eArm.solve_ranked` with the live
-joint seed, `self_clearance`, `_arm_clear_of_own_cameras`, workspace and
-component-clearance guards, and relative joint-travel caps. Command the single
-best candidate in **one** move rather than a chain of greedy nudges.
+### 21.1 Reconstructing the run offline
 
-**Step 3 — a deterministic fallback sweep when there is no hypothesis.**
-If nothing identifiable is visible, fall back to a fixed, precomputed ladder of
-*joint* configurations that tile the plausible board region, visited in a fixed
-order, each one IK-valid and arm-clear by construction. Deterministic, bounded,
-no gradient required, and trivially unit-testable. This is what replaces
-`ACQUIRE`.
+The logs carry enough to rebuild the cell exactly. FK on the logged
+`target_deg` under the logged calibration (`base=Rz180 tool=197.1mm`)
+reproduces the published `target=(-0.5114, 0.1864, 0.4506)` to **0.4 mm** and
+the logged `move=0.280m` to 0.1 mm. Do this first on any future report -- it
+converts a log into a measurable scene.
 
-**Step 4 — a safe home, always.**
-On exhaustion, force abort, or any terminal failure, return to a known-good
-observation pose before releasing the controller. The 2026-07-27 session shows
-why: without it one bad exit poisons every later invocation.
+That reconstruction put the board's aim point at `(-0.5189, 0.2054, 0.0355)`,
+**0.558 m** horizontally from `base_link`, against the **0.4317 m** both sweep
+harnesses were pinned at.
 
-### 20.3 Constraints the rebuild must respect
+### 21.2 The cap was choosing the candidate set
 
-- Keep Stage 2 untouched. It is validated; §8 and §10 are hardware-confirmed.
-- Keep the input allowlist closed (§2) — no ground-truth board transform, no
-  component pose, no scoring state.
-- Keep returning expected failures as `success=true, done=false` so Flowstate
-  can always release the AIC controller (§3).
-- Preserve the force guard semantics, but treat a force abort as a **state to
-  recover from**, not merely a reason to return.
-- Everything must be offline-sweepable the way `sc_sweep_runner.py` and
-  `sfp_sweep_runner.py` are: board yaw x tilt x placement x live start, scored
-  on whether the insignia ends up unclipped in a calibrated camera.
+`max_angular_motion_rad` is measured against the *current* TCP. It reads like a
+motion bound; it is actually a filter applied before any candidate is scored.
+Measured at the real board distance over 8 board yaws:
 
-### 20.4 Suggested order of work
+```text
+live start pose      cap=45   cap=90   cap=180   cap=180 + 24 rolls
+field 01:29            1/8      5/8       7/8           8/8
+sweep home             3/8      6/8       7/8           8/8
+home + J6 +90 deg      0/8      0/8       7/8           8/8
+chained start          5/8      7/8       7/8           8/8
+```
 
-1. Build the offline acquisition sweep harness **first**, scoring the current
-   Stage 1 so there is a baseline number to beat.
-2. Port `purple_insignia.py` from `4a20097` and unit-test it against the
-   captured hardware frames.
-3. Implement the board-pose hypothesis with explicit degeneracy rejection.
-4. Implement the pose search reusing the Stage-2 gates.
-5. Implement the deterministic joint ladder fallback and the safe home.
-6. Delete `viewpoint_search.py` and the wrapper's polarity/rollback logic only
-   once the replacement beats the baseline on the sweep.
+From the rolled-wrist start the 90 degree cap admitted **1036 framed candidates
+of which zero had any IK solution** -- the exact `BINDING GATE = reachability`
+refusal seen in the field. The poses the arm *could* reach were never in scope.
+
+SC already ran at `math.pi` for this reason. SFP and NIC now do too, and SFP
+moves 7 -> 24 rolls (the last case at each start pose needs a camera-cluster
+orientation the coarse family skips). Cost: ~3.7x search time, ~2.1 s -> ~8 s
+per case offline. Hardware Stage-2 timing after this change is **unmeasured**.
+
+### 21.3 "Unreachable" was often not unreachable
+
+`UR5eArm.solve_ranked` filters the 140 mm wrist-camera/forearm keep-out before
+returning, so an empty list meant either "outside the workspace" or "reachable,
+but every branch folds a camera into the forearm" -- and the skill logged both
+as *"no analytic IK solution at all"*. At the real board distance **231 of 926**
+such verdicts were keep-out rejections. The true kinematic wall for a 0.64 m
+standoff is ~0.74 m of board distance; the keep-out wall is ~0.62 m.
+
+The failure path now re-solves without the keep-out and reports
+`camera_keepout=` plus a `BINDING GATE = wrist-camera keep-out` verdict. The hot
+path is unchanged.
+
+**Still open:** 140 mm was calibrated from a single planner rejection whose best
+branch sat at 111 mm, and it is measured to the forearm *centreline* of a 50 mm
+capsule -- roughly 90 mm of real surface clearance. Offline, dropping it to
+110 mm takes three of the four start poses from 7/8 to 8/8. Nobody has checked
+it against the workcell planner's actual mesh test. That is the next cheap win.
+
+### 21.4 The board pose was a single weak measurement
+
+Two invocations 7 s apart, at the same arm pose, on visually identical frames,
+disagreed: one published at 0.640 m standoff, the next framed a single candidate
+at 0.837 m reach and refused. The insignia held 0.45% of the centre image, only
+the centre camera had it complete, and selected poses sit at 25.3-26.7 px
+against a 25 px clearance floor -- so millimetre-level range error flips the
+whole near-standoff family across that floor. Hence `REQUIRED_INSIGNIA_CAMERAS`
+and the averaged cluster origin (§6.2).
+
+**The cost is a stricter start pose**, and it is not hypothetical: the 01:29 run
+that *did* publish had only one complete view and would now be refused at the
+gate. If that proves too tight in the cell, lower the one constant rather than
+spreading the policy back across three call sites.
+
+### 21.5 Result
+
+```text
+SFP sweep:  92 / 144  ->  144 / 144   (and at a board 13 cm farther out)
+SC sweep:  144 / 144  ->  144 / 144
+unit suite:      259  ->  263
+```
+
+The SFP jump is the headline, but note what it means about the *previous*
+number: 92/144 was measured on geometry the robot never sees, and this handoff
+then blamed the 52 misses on Stage 1. A sweep that does not sit where the
+hardware sits will keep producing confident, wrong conclusions.

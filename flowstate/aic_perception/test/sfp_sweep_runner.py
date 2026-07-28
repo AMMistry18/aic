@@ -78,6 +78,30 @@ from aic_perception.board_stage2 import (  # noqa: E402
 YAW_DEG = (0, 45, 70, 90, 140, 180, 250, 315)
 TILT_DEG = (0, 10)
 PLACEMENTS_M = ((0.0, 0.0), (0.050, 0.030), (-0.050, -0.040))
+# Board origin in ``base_link``.
+#
+# Recovered from the 2026-07-28 hardware run: FK on the logged survey joint
+# target reproduces the published pose to 0.4 mm, and its centre-camera axis at
+# the logged 0.640 m standoff aims at (-0.5189, 0.2054, 0.0355) -- 0.558 m
+# horizontally from base_link.  This harness had been pinned at 0.4317 m, 13 cm
+# nearer than the cell it is supposed to certify, which is why a start pose that
+# sweeps clean can still fail in the field: the survey viewpoint sits 0.64 m
+# *above* the board, so board distance spends the arm's envelope directly.
+#
+# The origin is the aim point rather than the plate centre, so it carries the
+# coverage centroid's ~0.07 m in-plane offset at unknown board yaw; the swept
+# yaws and +/-50 mm placements already cover that.  ``--board-center-mm`` takes
+# any other position, and the legacy pin is kept for comparing recorded numbers.
+BOARD_CENTER_M = (-0.5189, 0.2054)
+LEGACY_BOARD_CENTER_M = (-0.3445, 0.2602)
+# Seat-body geometry for the audit.  ``SFP_RAIL_X`` is the CAD mount origin;
+# the transceiver protrudes forward from it and hardware decoded the bodies at
+# board X ~0.0862.  See ``_seat_bodies``.
+SFP_RAIL_X = 0.055
+SFP_DETECTED_BODY_X = 0.0862
+SFP_BODY_HALF_X = 0.025
+SFP_BODY_HALF_Y = 0.022
+SFP_SEAT_Y = (-0.15625, -0.10625, -0.05625, 0.05625, 0.10625, 0.15625)
 HOME_DEG = np.array([-9.15, -77.59, -95.39, -97.02, 90.01, 80.84])
 EXIT_JOINTS = (
     np.radians(HOME_DEG),
@@ -108,12 +132,17 @@ DEFAULT_POLICY = {
     "y_half_m": 0.1125,
     "max_obliquity_deg": 20.0,
     "min_clearance_px": 25.0,
-    "max_angular_motion_deg": 90.0,
+    # Shipped values.  The cap is measured from the current TCP and therefore
+    # selects the candidate set rather than bounding motion, so at 90 deg a
+    # rolled-wrist start could leave only unreachable candidates in scope; 24
+    # rolls then recover the board yaws the 7-sample family skips.
+    "max_angular_motion_deg": 180.0,
     "max_joint_motion_deg": 225.0,
     "seat_edge_margin_px": 12.0,
     "aim_x_m": 0.0,
     "aim_y_m": 0.0,
-    "roll_count": 7,
+    "roll_count": 24,
+    "board_center_m": BOARD_CENTER_M,
 }
 
 
@@ -152,6 +181,40 @@ def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
     return True
 
 
+def _seat_bodies():
+    """Legal seat bodies spanning mount origin *through* protruding tip.
+
+    ``sfp_module_detail_boxes`` centres each seat on ``SFP_RAIL_X`` (0.055), so
+    it audits board X 0.030..0.080 -- the CAD *mount origins*.  The transceiver
+    protrudes from its mount, and the bodies decoded from hardware sit at board
+    X ~0.0862 (handoff 8.2), i.e. 0.061..0.111.  Auditing only the mount strip
+    checks a region ~31 mm behind the thing the camera actually sees, which is
+    how the sweep can report >100 px of margin while the field clips an end
+    module.
+
+    Span both: from the mount origin's near edge to the detected body's far
+    edge.  That is the physical extent of a seated module, and it is the
+    conservative choice -- it can only report *less* margin than either box
+    alone, never more.
+    """
+    x_min = SFP_RAIL_X - SFP_BODY_HALF_X
+    x_max = SFP_DETECTED_BODY_X + SFP_BODY_HALF_X
+    boxes = []
+    for y in SFP_SEAT_Y:
+        boxes.append(
+            np.asarray(
+                [
+                    (x, yy, z)
+                    for x in (x_min, x_max)
+                    for yy in (y - SFP_BODY_HALF_Y, y + SFP_BODY_HALF_Y)
+                    for z in (0.0, 0.06)
+                ],
+                dtype=float,
+            )
+        )
+    return tuple(boxes)
+
+
 def _seat_audit(base_T_tcp, base_T_board, tcp_T_cam, cameras, edge_margin_px):
     """Per-seat worst-camera image-boundary margin, in pixels.
 
@@ -161,7 +224,7 @@ def _seat_audit(base_T_tcp, base_T_board, tcp_T_cam, cameras, edge_margin_px):
     seat body leaves at least one image.
     """
     margins = []
-    for seat in sfp_module_detail_boxes():
+    for seat in _seat_bodies():
         worst = math.inf
         for name, camera in cameras.items():
             cam_from_board = (
@@ -208,10 +271,17 @@ def _run_case(case):
     rotation = axis_angle_rotation(
         [1, 0, 0], math.radians(tilt_deg)
     ) @ axis_angle_rotation([0, 0, 1], math.radians(yaw_deg + 2.7))
+    board_center = policy["board_center_m"]
     board_pose = BoardPoseEstimate(
         Transform(
             rotation,
-            np.array([-0.3445 + placement_m[0], 0.2602 + placement_m[1], 0.0]),
+            np.array(
+                [
+                    board_center[0] + placement_m[0],
+                    board_center[1] + placement_m[1],
+                    0.0,
+                ]
+            ),
         ),
         0.3,
         math.inf,
@@ -226,7 +296,9 @@ def _run_case(case):
             for target in solutions
             if _arm_clear_of_own_cameras(pose, target, arm, tcp_T_cam, cameras)
         ]
-        if not clear:
+        # Hard stop: every branch must be arm-clear, because Move Robot
+        # re-solves the published Cartesian pose and may take any of them.
+        if not clear or len(clear) != len(solutions):
             return None
         target = min(
             clear,
@@ -275,6 +347,7 @@ def _run_case(case):
         "reason": reason,
     }
     if candidate is not None:
+        selected_delta = joint_motion(candidate.base_T_tcp)
         margins = _seat_audit(
             candidate.base_T_tcp,
             board_pose.base_T_board,
@@ -302,6 +375,18 @@ def _run_case(case):
                 )
             ),
             joint_max_deg=math.degrees(candidate.max_joint_motion_rad),
+            # Per-joint target/seed, so the selected branch can be audited
+            # against the *workcell's* real position limits rather than the
+            # ones ``arm_ik.JOINT_LIMITS`` assumes.  A branch this model
+            # believes is legal but the planner cannot use does not fail --
+            # Move Robot re-solves the same Cartesian pose on another branch,
+            # which is how a survey move becomes a whole-arm reconfiguration.
+            seed_joints_deg=np.degrees(seed).tolist(),
+            target_joints_deg=(
+                np.degrees(seed + selected_delta).tolist()
+                if selected_delta is not None
+                else None
+            ),
             seats_covered=len(covered),
             seat_margin_min_px=(
                 min(margins) if all(math.isfinite(m) for m in margins) else None
@@ -333,11 +418,28 @@ def main():
     parser.add_argument("--x-max-mm", type=float, default=None)
     parser.add_argument("--max-obliquity-deg", type=float, default=20.0)
     parser.add_argument("--min-clearance-px", type=float, default=25.0)
-    parser.add_argument("--max-angular-motion-deg", type=float, default=90.0)
+    parser.add_argument(
+        "--max-angular-motion-deg",
+        type=float,
+        default=DEFAULT_POLICY["max_angular_motion_deg"],
+    )
     parser.add_argument("--max-joint-motion-deg", type=float, default=225.0)
     parser.add_argument("--seat-edge-margin-px", type=float, default=12.0)
     parser.add_argument("--aim-x-mm", type=float, default=0.0)
     parser.add_argument("--aim-y-mm", type=float, default=0.0)
+    parser.add_argument(
+        "--roll-count", type=int, default=DEFAULT_POLICY["roll_count"]
+    )
+    parser.add_argument(
+        "--board-center-mm",
+        type=float,
+        nargs=2,
+        default=None,
+        metavar=("X", "Y"),
+        help="Board origin in base_link, millimetres.  Default is the "
+             "measured hardware position; pass -344.5 260.2 for the legacy "
+             "harness pin the recorded numbers were taken at.",
+    )
     args = parser.parse_args()
     policy = {
         "coverage": args.coverage,
@@ -354,6 +456,12 @@ def main():
         "seat_edge_margin_px": args.seat_edge_margin_px,
         "aim_x_m": args.aim_x_mm / 1000.0,
         "aim_y_m": args.aim_y_mm / 1000.0,
+        "roll_count": args.roll_count,
+        "board_center_m": (
+            (args.board_center_mm[0] / 1000.0, args.board_center_mm[1] / 1000.0)
+            if args.board_center_mm is not None
+            else BOARD_CENTER_M
+        ),
     }
     cases = [
         (yaw, tilt, placement, exit_index, policy)

@@ -2034,3 +2034,51 @@ def test_joint_preference_may_only_buy_bounded_extra_worst_joint_motion():
 
     assert run(0.3).max_joint_motion_rad == pytest.approx(0.4)
     assert run(0.1).max_joint_motion_rad == pytest.approx(0.2)
+
+
+def test_the_reach_sphere_yields_to_whichever_kinematic_gate_is_supplied():
+    """The base-origin sphere is a fallback, and production never hit that path.
+
+    ``reach_cap`` tested ``reachable is None`` alone, but the deployed skill
+    supplies ``joint_motion`` and never ``reachable`` -- so the 0.85 m sphere
+    stayed live in the one configuration the comment said it would not.  A
+    sphere is the wrong shape for a tool that extends ~0.197 m past the flange:
+    a TCP 0.95 m out on a near-horizontal tool sits on a flange only 0.78 m out.
+    Either kinematic gate must therefore relax it to the generous prune.
+    """
+    cameras, tcp_T_cam, grippers = _production_camera_rig()
+    board_pose = BoardPoseEstimate(
+        Transform(np.eye(3), np.array([-0.5189, 0.2054, 0.0])),
+        0.3,
+        math.inf,
+        0.0,
+        "center_camera",
+    )
+    kwargs = dict(
+        reference_camera="center_camera",
+        coverage_targets=(sfp_module_strip_corners(),),
+        require_all_cameras_frame=True,
+        max_obliquity_rad=math.radians(20.0),
+        min_required_clearance_px=25.0,
+        max_angular_motion_rad=math.pi,
+        min_height_m=0.02,
+        # Absurdly small: every real survey pose is outside this sphere.
+        max_reach_m=0.05,
+    )
+
+    unguarded, _ = search_survey_pose(
+        board_pose, tcp_T_cam, cameras, grippers, **kwargs
+    )
+    assert unguarded is None, "with no kinematic gate the sphere is authority"
+
+    guarded, reason = search_survey_pose(
+        board_pose,
+        tcp_T_cam,
+        cameras,
+        grippers,
+        joint_motion=lambda _pose: np.zeros(6),
+        max_joint_motion_rad=math.radians(225.0),
+        **kwargs,
+    )
+    assert guarded is not None, reason
+    assert float(np.linalg.norm(guarded.base_T_tcp.translation)) > 0.05

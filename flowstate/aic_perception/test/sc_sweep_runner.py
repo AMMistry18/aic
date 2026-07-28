@@ -50,6 +50,14 @@ from aic_perception.board_stage2 import (  # noqa: E402
 YAW_DEG = (0, 45, 70, 90, 140, 180, 250, 315)
 TILT_DEG = (0, 10)
 PLACEMENTS_M = ((0.0, 0.0), (0.050, 0.030), (-0.050, -0.040))
+# Board origin in ``base_link``, recovered from the 2026-07-28 hardware run --
+# 0.558 m horizontally from the base against the 0.4317 m this harness had been
+# pinned at.  See ``sfp_sweep_runner.BOARD_CENTER_M`` for the derivation; both
+# sweeps must certify the same cell.  SC's standoff ladder is shorter than SFP's
+# (0.55-0.62 m), so it spends less of the envelope on height and is expected to
+# tolerate the extra distance better.
+BOARD_CENTER_M = (-0.5189, 0.2054)
+LEGACY_BOARD_CENTER_M = (-0.3445, 0.2602)
 HOME_DEG = np.array([-9.15, -77.59, -95.39, -97.02, 90.01, 80.84])
 EXIT_JOINTS = (
     np.radians(HOME_DEG),
@@ -143,8 +151,8 @@ def _run_case(case):
             rotation,
             np.array(
                 [
-                    -0.3445 + placement_m[0],
-                    0.2602 + placement_m[1],
+                    BOARD_CENTER_M[0] + placement_m[0],
+                    BOARD_CENTER_M[1] + placement_m[1],
                     0.0,
                 ]
             ),
@@ -197,7 +205,9 @@ def _run_case(case):
             )
         ]
         ik_counts["arm_clear"] += len(clear)
-        if not clear:
+        # Hard stop: every branch must be arm-clear, because Move Robot
+        # re-solves the published Cartesian pose and may take any of them.
+        if not clear or len(clear) != len(solutions):
             return None
         target = min(
             clear,
@@ -260,6 +270,7 @@ def _run_case(case):
         ],
         joint_motion=joint_motion,
         max_joint_motion_rad=math.radians(policy["max_joint_motion_deg"]),
+        max_total_joint_motion_rad=math.radians(400.0),
         joint_motion_preference=lambda delta: abs(
             float(seed[5] + delta[5] - preferred_j6)
         ),

@@ -70,6 +70,50 @@ SC_BORE_X_TOLERANCE_M = 0.0076
 # around in-flight executions, so the first request routinely times out and is
 # retried.  That happens before the profile starts and must not be charged to
 # the motion budget.
+# Ceiling on summed six-joint travel for a survey move.
+#
+# Every successful field move totalled 91-208 deg.  The contorted one that
+# reached hardware totalled 561.8 deg with a worst joint of only 166 deg, so
+# the worst-joint cap passed it.  The offline distribution is bimodal -- poses
+# are either under ~300 deg or over 450 -- so anything in 300..450 selects the
+# same set; 400 sits in the gap with margin over the 208 deg field maximum.
+#
+# Applied to **SC only** (see ``_run_sfp_geometric_stage2``).  Gating SFP as
+# well costs 26 of 144 staged-SFP placements -- those are placements whose only
+# survey pose is a whole-arm reconfiguration -- and SFP has not reported the
+# problem in the field, so it keeps its previous behaviour.
+#
+# Caveat worth keeping: the 561.8 deg move quoted above was logged on an *SFP*
+# run (``view_quality=+inf``, ``cross_tilt=0.0``, 225 deg gate).  An SC-only
+# cap therefore would not have refused that particular pose.
+TOTAL_JOINT_MOTION_LIMIT_RAD = math.radians(400.0)
+
+# How many calibrated cameras must hold a complete, unobstructed insignia before
+# Stage 2 will reconstruct the board.
+#
+# **One.  Two was tried on hardware on 2026-07-28 and reverted the same day.**
+#
+# The motivation was real: a single-view PnP of one small quad is a weak *range*
+# measurement, the insignia held 0.45% of the centre image, and two invocations
+# 7 s apart at the same arm pose disagreed -- one published at 0.640 m standoff,
+# the next framed a single candidate at 0.837 m reach and refused.  Selected
+# poses sit at 25.3-26.7 px against a 25 px clearance floor, so a few
+# millimetres of range error flips the near-standoff family across it.
+#
+# But requiring two complete views refuses far too many real start poses.  In
+# the field it rejected five consecutive invocations with "0 have one" -- at
+# poses where a side camera held a *partial* insignia and the board was plainly
+# in view -- before an arm position finally exposed it to all three.  Stage 1
+# acquisition no longer exists, so every one of those is a dead stop for the
+# operator rather than something the skill can recover from.  Availability at a
+# usable start pose beats a tighter board pose that is never computed.
+#
+# What is kept is the free half: whenever two or more cameras *do* accept an
+# estimate, they must agree within 5 cm / 8 deg and their board origins are
+# averaged (see ``_run_sfp_geometric_stage2``).  That is strictly better than
+# the old single-source pick and costs nothing when only one view exists.
+REQUIRED_INSIGNIA_CAMERAS = 1
+
 JOINT_MODE_SWITCH_ALLOWANCE_SEC = 3.0
 # Measured settling after the profile ends.
 JOINT_SETTLE_ALLOWANCE_SEC = 2.0
@@ -481,13 +525,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         seen_anywhere = sorted(
             name for name, report in purple_reports.items() if report.seen
         )
+        complete = sorted(
+            self._cameras_with_complete_landmark(snapshot, reports)
+        )
         result.success = False
         result.done = False
         result.target_valid = False
         result.last_action = "insignia_not_exposed"
         result.message = (
             "no calibrated camera contains a complete unobstructed purple "
-            "insignia and Stage 1 acquisition has been removed; "
+            "insignia"
+            + (
+                f" ({len(complete)} of {REQUIRED_INSIGNIA_CAMERAS} required)"
+                if REQUIRED_INSIGNIA_CAMERAS > 1
+                else ""
+            )
+            + " and Stage 1 acquisition has been removed; "
             + (
                 f"partial insignia visible in {','.join(seen_anywhere)}"
                 if seen_anywhere
@@ -499,8 +552,9 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         raise InsigniaNotExposedError(result.message)
 
 
-    def _stage2_has_complete_landmark(self, snapshot, reports) -> bool:
-        """Whether any calibrated camera has a complete Stage-2 landmark."""
+    def _cameras_with_complete_landmark(self, snapshot, reports) -> list[str]:
+        """Calibrated cameras holding a complete Stage-2 landmark."""
+        found = []
         for camera_name in ("center_camera", "left_camera", "right_camera"):
             if (
                 camera_name not in snapshot.frames
@@ -516,8 +570,19 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 image, reports[camera_name], ignored
             )
             if observation is not None:
-                return True
-        return False
+                found.append(camera_name)
+        return found
+
+    def _stage2_has_complete_landmark(self, snapshot, reports) -> bool:
+        """Whether enough calibrated cameras have a complete Stage-2 landmark.
+
+        ``REQUIRED_INSIGNIA_CAMERAS`` views, not one: a single small quad's PnP
+        range is the jitter that made two identical-input invocations disagree.
+        """
+        return (
+            len(self._cameras_with_complete_landmark(snapshot, reports))
+            >= REQUIRED_INSIGNIA_CAMERAS
+        )
 
     @staticmethod
     def _uses_geometric_survey(survey_target: int) -> bool:
@@ -573,8 +638,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         return (sfp_module_strip_corners(),)
 
     @staticmethod
-    def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
-        """True when no arm link stands in any wrist camera's view.
+    def _arm_clear_of_own_cameras(
+        base_T_tcp,
+        joints,
+        arm,
+        tcp_T_cam,
+        cameras,
+        sector_regions=None,
+        clearance_px=25.0,
+    ):
+        """True when no arm link occludes the *target sector* in any camera.
 
         A survey pose can be perfectly top-down, collision-free and fully
         framed, and still be useless because the robot's own upper arm or
@@ -584,9 +657,30 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         correct only for what is rigidly attached to wrist_3, while these links
         move independently of the wrist.
 
-        Approximate by construction: the configuration checked is the branch
-        nearest the current joints, and Move Robot may choose another.  That is
-        still far better than assuming the arm is never in frame.
+        **This is a view-quality gate, not a collision gate.**  The collision
+        check is ``UR5eArm.self_clearance`` (the 140 mm wrist-camera keep-out),
+        which is untouched and still hard.  Nothing here can drive the arm into
+        anything.
+
+        The rule used to be "reject if any arm sample lands anywhere in any
+        image", which is far stronger than the thing that actually matters and
+        was refusing sound poses.  On the 2026-07-28 hardware board it rejected
+        29 of 435 NIC candidates at board yaw 135 and 19 of 427 at yaw 180 --
+        enough to leave no pose at all, while the published SFP pose at the very
+        same board succeeded.  An arm limb clipping a far corner of a splayed
+        side image does not occlude ten recessed ports on the other side of the
+        frame; only a limb lying *across the ports* does.
+
+        So the test now mirrors how the gripper is already handled: the sector's
+        projected region, grown by ``clearance_px``, is the keep-out, and the
+        arm merely has to stay off it.  Measured on that board, this recovers a
+        pose at all eight swept yaws with zero arm rejections, and a limb over
+        the sector is still refused -- which is the SC yaw-70 case the gate was
+        built for.  ``sector_regions=None`` restores the old whole-image rule.
+
+        Approximate by construction: the configuration checked is one physical
+        branch, and Move Robot may choose another -- hence the caller's
+        all-branches-clear rule.
         """
         from aic_perception.board_stage2 import project_points
 
@@ -598,20 +692,123 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 camera_pose = base_T_tcp.compose(tcp_T_cam[name])
                 local = camera_pose.inverse().apply(samples)
                 pixels, in_front = project_points(local, camera)
+                region = (
+                    sector_regions.get(name)
+                    if sector_regions is not None
+                    else None
+                )
+                if sector_regions is not None and region is None:
+                    # The sector does not project into this camera at all, so
+                    # there is nothing here for the arm to occlude.
+                    continue
                 for pixel, ahead, point in zip(pixels, in_front, local):
                     if not ahead or not np.all(np.isfinite(pixel)):
                         continue
                     # Grow the segment by its own radius at that depth, so a
-                    # tube grazing the frame edge still counts as intruding.
+                    # tube grazing the boundary still counts as intruding.
                     margin = radius * float(camera.K[0, 0]) / max(
                         float(point[2]), 1e-6
                     )
+                    if region is None:
+                        if (
+                            -margin <= pixel[0] <= camera.width + margin
+                            and -margin <= pixel[1] <= camera.height + margin
+                        ):
+                            return False
+                        continue
+                    u_min, v_min, u_max, v_max = region
+                    pad = margin + clearance_px
                     if (
-                        -margin <= pixel[0] <= camera.width + margin
-                        and -margin <= pixel[1] <= camera.height + margin
+                        u_min - pad <= pixel[0] <= u_max + pad
+                        and v_min - pad <= pixel[1] <= v_max + pad
                     ):
                         return False
         return True
+
+    def _search_survey_pose_tier(
+        self,
+        board_pose,
+        tcp_T_cam,
+        camera_models,
+        grippers,
+        base_T_tcp,
+        survey_target,
+        view_settings,
+        view_quality_fn,
+        min_view_quality,
+        view_quality_motion_tolerance,
+        joint_motion_fn,
+        max_joint_motion_rad,
+        max_total_joint_motion_rad,
+        joint_motion_preference_fn,
+    ):
+        """One pass of the survey search at a given relaxation tier.
+
+        ``view_settings`` and the coverage targets carry the per-sector view
+        policy and are supplied by the caller unchanged from
+        ``_survey_view_settings`` except for the clearance margin, which the
+        last tier may reduce.  The joint-travel caps and the arm-branch rule are
+        what the tiers actually vary; see the ladder in
+        ``_run_sfp_geometric_stage2``.
+        """
+        from aic_perception.board_stage2 import search_survey_pose
+
+        return search_survey_pose(
+            board_pose,
+            tcp_T_cam,
+            camera_models,
+            grippers,
+            reference_camera="center_camera",
+            current_base_T_tcp=base_T_tcp,
+            # Frame a reachable sector, not the whole board: framing the whole
+            # board in all three canted cameras needs a standoff beyond the
+            # UR5e's ~0.85 m reach.  SFP supplies a centred ladder rather than
+            # one box -- see ``_coverage_targets_for_target`` for why an
+            # off-centre sector cropped a physically present module.
+            coverage_targets=self._coverage_targets_for_target(survey_target),
+            **view_settings,
+            view_quality=view_quality_fn,
+            min_view_quality=min_view_quality,
+            view_quality_motion_tolerance=view_quality_motion_tolerance,
+            # Reachability is decided by the live-seeded UR5e IK motion gate,
+            # not the base-origin sphere, which both admitted unsolvable poses
+            # and rejected reachable far ones.
+            joint_motion=joint_motion_fn,
+            max_joint_motion_rad=max_joint_motion_rad,
+            max_total_joint_motion_rad=max_total_joint_motion_rad,
+            joint_motion_preference=joint_motion_preference_fn,
+            # Let the requested J6 half-turn influence the selected roll only
+            # inside a bounded motion plateau.
+            joint_preference_motion_tolerance_rad=math.radians(30.0),
+            max_reach_m=0.85,
+            min_height_m=0.02,
+        )
+
+    @staticmethod
+    def _sector_image_regions(base_T_tcp, base_T_board, target_board,
+                              tcp_T_cam, cameras):
+        """Per-camera bounding box of the coverage target's projection."""
+        from aic_perception.board_stage2 import project_points
+
+        regions = {}
+        for name, camera in cameras.items():
+            cam_from_board = (
+                base_T_tcp.compose(tcp_T_cam[name])
+                .inverse()
+                .compose(base_T_board)
+            )
+            pixels, in_front = project_points(
+                cam_from_board.apply(target_board), camera
+            )
+            if not np.all(in_front) or not np.all(np.isfinite(pixels)):
+                continue
+            regions[name] = (
+                float(pixels[:, 0].min()),
+                float(pixels[:, 1].min()),
+                float(pixels[:, 0].max()),
+                float(pixels[:, 1].max()),
+            )
+        return regions
 
     @staticmethod
     def _survey_view_settings(survey_target: int) -> dict:
@@ -704,9 +901,51 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 prefer_far_standoff=True,
                 max_obliquity_rad=math.radians(2.0),
                 min_required_clearance_px=25.0,
-                max_angular_motion_rad=math.radians(90.0),
+                # Full finite roll family, as SC and SFP.  A cap measured from
+                # the current TCP selects the candidate set rather than
+                # bounding motion, so a rolled-wrist Stage-1 exit could leave
+                # only unreachable candidates in scope; the live-seeded joint
+                # gate bounds the actual travel.  See the SFP block below for
+                # the measured start-pose table.
+                max_angular_motion_rad=math.pi,
                 yaws_rad=tuple(
                     math.radians(deg) for deg in range(-180, 180, 15)
+                ),
+                # Standoff floor, measured 2026-07-28 (`test/nic_sweep_runner`).
+                #
+                # Framing is not sufficiency here, exactly as for the SC bore.
+                # Over 144 placements the search published 21 poses that framed
+                # all ten ports in all three cameras while the outermost ports
+                # sat *outside* the 7.5 deg cage cone -- a view that returns
+                # about 6 of 10 ports and looks like a success.  Every one of
+                # them had been driven below 0.66 m because the arm's envelope
+                # would not reach farther at that placement.
+                #
+                # The poses that do resolve all ten ports occupy a tight and
+                # very stable band -- 0.66 .. 0.76 m standoff, worst cone
+                # 7.27 deg against the 7.46 deg limit -- and it is the *same*
+                # band the previous 90 deg cap and the older harness board
+                # position produced whenever they worked.  So this floor is not
+                # a new preference; it is the measured signature of the view
+                # that has always been correct.
+                #
+                # Cost is honesty, not coverage: the passing set is unchanged at
+                # 105/144, and the 21 misleading successes become `done=false`
+                # refusals the process can branch on.  The rungs above 0.76 m
+                # are retained because `prefer_far_standoff` should still climb
+                # if a nearer board placement ever allows it.
+                standoffs_m=(
+                    0.66,
+                    0.68,
+                    0.70,
+                    0.73,
+                    0.76,
+                    0.80,
+                    0.85,
+                    0.90,
+                    1.00,
+                    1.15,
+                    1.25,
                 ),
             )
         if target == 3:  # SC_DESTINATION_PORT
@@ -762,13 +1001,42 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # still frame every module, so the extra 34 are genuine gains rather
         # than weaker views.  25 px is measured against a silhouette
         # ``GripperExclusion`` has already dilated by 32 px.
+        #
+        # **Reorientation budget.**  ``max_angular_motion_rad`` is measured from
+        # the *current* TCP, so it does not merely bound how far the arm turns
+        # -- it decides which candidates are ever scored.  At 90 deg that made
+        # availability a function of the Stage-1 exit wrist roll.  Measured at
+        # the real hardware board distance (0.558 m horizontal), 8 board yaws:
+        #
+        #     live start pose      cap=45   cap=90   cap=180
+        #     field 01:29            1/8      5/8      7/8
+        #     sweep home             3/8      6/8      7/8
+        #     home + J6 +90 deg      0/8      0/8      7/8
+        #     chained start          5/8      7/8      7/8
+        #
+        # From the rolled-wrist start the 90 deg cap admitted 1036 framed
+        # candidates of which *zero* had any IK solution, which is the field
+        # "BINDING GATE = reachability" refusal.  SC already searches the full
+        # finite roll family for exactly this reason; SFP and NIC now do too,
+        # and the live-seeded joint-travel gate -- which measures real motion
+        # from the real start -- remains the authority on how far the arm moves.
+        #
+        # The roll count goes 7 -> 24 with it: at cap=180 the 24-roll sweep
+        # takes every one of those start poses from 7/8 to 8/8, because the
+        # surviving pose at some board yaws needs a camera-cluster orientation
+        # that the coarse 7-sample family skips.  It costs ~3.7x search time
+        # (~2.1 s -> ~8 s per case offline), the same trade NIC and SC already
+        # make.
         return dict(
             cross_rail_tilt_band_rad=None,
             cross_rail_sign=0.0,
             require_all_cameras_frame=True,
             prefer_far_standoff=False,
             min_required_clearance_px=25.0,
-            max_angular_motion_rad=math.radians(90.0),
+            max_angular_motion_rad=math.pi,
+            yaws_rad=tuple(
+                math.radians(deg) for deg in range(-180, 180, 15)
+            ),
         )
 
     @staticmethod
@@ -932,6 +1200,7 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         from aic_perception.board_stage2 import (
             CameraModel,
             GripperExclusion,
+            Transform,
             estimate_board_pose_from_insignia,
             quaternion_from_matrix,
             rectangular_bore_depth_cue_px,
@@ -1085,13 +1354,21 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 pose_failures[camera_name] = pose_reason
             else:
                 pose_estimates.append(estimate)
-        if not pose_estimates:
+        if len(pose_estimates) < REQUIRED_INSIGNIA_CAMERAS:
+            accepted = sorted(item.camera_name for item in pose_estimates)
             self._stage2_not_done(
                 result,
-                "insignia pose rejected in every insignia camera: "
-                + "; ".join(
-                    f"{name}={reason}"
-                    for name, reason in pose_failures.items()
+                f"board reconstruction needs {REQUIRED_INSIGNIA_CAMERAS} "
+                f"accepted insignia pose estimates and has {len(accepted)}"
+                + (f" ({','.join(accepted)})" if accepted else "")
+                + (
+                    "; rejected: "
+                    + "; ".join(
+                        f"{name}={reason}"
+                        for name, reason in pose_failures.items()
+                    )
+                    if pose_failures
+                    else ""
                 ),
             )
             return
@@ -1133,11 +1410,15 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 any(item.camera_name == "center_camera" for item in cluster),
             ),
         )
+        # Two mutually contradictory accepted estimates may not be guessed
+        # between.  This only bites when a second view exists; a lone accepted
+        # estimate is its own cluster and passes, which is what keeps the
+        # one-camera start poses usable.
         if len(pose_estimates) > 1 and len(consistent) < 2:
             self._stage2_not_done(
                 result,
-                "accepted camera pose estimates disagree by more than "
-                "5 cm / 8 degrees",
+                f"{len(pose_estimates)} accepted camera pose estimates but "
+                f"only {len(consistent)} agree within 5 cm / 8 degrees",
             )
             return
         board_pose = next(
@@ -1155,6 +1436,43 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             ),
         )
         source_camera = board_pose.camera_name
+        # Average the agreeing views' board origin.  This is the point of
+        # demanding two of them: each is a single-view PnP whose weakest axis is
+        # range, the cameras are ~115 mm apart so their range errors are largely
+        # independent, and the survey search runs against a 25 px clearance
+        # floor that a few millimetres of range error can cross.  Rotation is
+        # left to the preferred view rather than averaged -- an orientation mean
+        # over a near-square landmark can interpolate between two different
+        # mirror hypotheses, and the 8 deg cluster test already bounds the
+        # disagreement.
+        cluster_translations = np.array(
+            [item.base_T_board.translation for item in consistent], dtype=float
+        )
+        mean_translation = cluster_translations.mean(axis=0)
+        translation_spread_m = float(
+            np.linalg.norm(
+                cluster_translations - mean_translation, axis=1
+            ).max()
+        )
+        logging.info(
+            "board pose fused over %d agreeing cameras (%s): source=%s "
+            "origin_spread=%.4fm shift_from_source=%.4fm",
+            len(consistent),
+            ",".join(sorted(item.camera_name for item in consistent)),
+            source_camera,
+            translation_spread_m,
+            float(
+                np.linalg.norm(
+                    mean_translation - board_pose.base_T_board.translation
+                )
+            ),
+        )
+        board_pose = replace(
+            board_pose,
+            base_T_board=Transform(
+                board_pose.base_T_board.rotation, mean_translation
+            ),
+        )
         base_T_tcp = base_T_tcp_by_camera[source_camera]
 
         grippers = {}
@@ -1184,6 +1502,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         ik_stats = {
             "probed": 0,
             "no_ik": 0,
+            # Analytic IK existed but every branch swung a wrist camera inside
+            # the forearm keep-out.  Counted apart from ``no_ik`` because the
+            # fixes are opposite: one needs a different standoff/board
+            # placement, the other a different keep-out or roll.
+            "keepout": 0,
             "arm_blocked": 0,
             "clear": 0,
             "best_worst_joint_rad": math.inf,
@@ -1202,6 +1525,17 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # budget for the other sectors, whose reach policies were not retuned.
         joint_motion_limit_rad = math.radians(
             185.0 if int(survey_target) == 3 else 225.0
+        )
+        # Summed six-joint travel is gated for **SC only**.  The contorted
+        # whole-arm reconfigurations were reported against the SC survey, where
+        # the adapters can sit close to the arm base and force the search onto
+        # a far joint branch.  SFP and NIC keep their previous behaviour --
+        # gating them costs 26 of 144 staged-SFP placements and neither sector
+        # has reported the problem.
+        total_joint_motion_limit_rad = (
+            TOTAL_JOINT_MOTION_LIMIT_RAD
+            if int(survey_target) == 3
+            else math.inf
         )
         try:
             measured_joints = [
@@ -1267,12 +1601,22 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     # nearest branch *before* the arm-in-view test falsely
                     # rejects a pose whenever that one branch blocks a camera,
                     # even if another finite branch leaves all three clear.
+                    # The sector this survey is for.  The arm-in-view gate needs
+                    # it to ask the right question -- "is the arm across the
+                    # ports" rather than "is the arm anywhere in frame".  The
+                    # coverage ladder's first entry is the sector proper; SFP is
+                    # the only multi-entry ladder and its entries share a centre.
+                    _sector_board = self._coverage_targets_for_target(
+                        survey_target
+                    )[0]
+
                     def select_clear_ik_solution(
                         pose,
                         _arm=arm,
                         _seed=seed,
                         _extrinsics=tcp_T_cam,
                         _cameras=camera_models,
+                        _sector_board=_sector_board,
                     ):
                         ik_stats["probed"] += 1
                         reach = float(np.linalg.norm(pose.translation))
@@ -1287,7 +1631,23 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                             "gate": "unreachable",
                         }
                         if not solutions:
-                            ik_stats["no_ik"] += 1
+                            # ``solve_ranked`` filters the wrist-camera/forearm
+                            # keep-out *before* returning, so an empty list has
+                            # two completely different meanings and the old
+                            # code reported both as "no analytic IK solution at
+                            # all".  That verdict sent debugging after the arm's
+                            # workspace when the pose was in fact reachable and
+                            # only the 140 mm keep-out refused it -- measured at
+                            # the hardware board distance, 231 of 926 "no IK"
+                            # verdicts were keep-out rejections.  Re-solve
+                            # without the keep-out (only on the failure path, so
+                            # the hot path is unchanged) and name the real gate.
+                            if _arm.solve_all(pose):
+                                ik_stats["keepout"] += 1
+                                record["gate"] = "camera_keepout"
+                            else:
+                                ik_stats["no_ik"] += 1
+                                record["gate"] = "unreachable"
                             ik_records.append(record)
                             return None
                         # Cheapest branch travel regardless of arm-in-view, so
@@ -1301,13 +1661,49 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                             joints
                             for joints in solutions
                             if self._arm_clear_of_own_cameras(
-                                pose, joints, _arm, _extrinsics, _cameras
+                                pose,
+                                joints,
+                                _arm,
+                                _extrinsics,
+                                _cameras,
+                                self._sector_image_regions(
+                                    pose,
+                                    board_pose.base_T_board,
+                                    _sector_board,
+                                    _extrinsics,
+                                    _cameras,
+                                ),
                             )
                         ]
                         record["n_clear"] = len(clear)
-                        if not clear:
+                        # HARD STOP on the arm occluding its own view.
+                        #
+                        # The skill publishes a *Cartesian* pose; Move Robot
+                        # re-solves it and may take any co-terminal branch, not
+                        # the one checked here.  Accepting a pose because *one*
+                        # branch is arm-clear therefore guarantees nothing --
+                        # and offline most accepted poses have only some
+                        # branches clear, which is how the arm keeps landing
+                        # under the camera in the field.
+                        #
+                        # Require every branch to be clear, so whichever one
+                        # Move Robot picks, the arm is out of frame.
+                        # The last tiers accept a pose with *an* arm-clear
+                        # branch rather than demanding every branch be clear.
+                        # Preferred remains all-clear -- Move Robot picks the
+                        # branch -- but a view that exists on one branch beats
+                        # publishing nothing, and the caller logs which tier
+                        # paid for it.
+                        if not clear or (
+                            len(clear) != len(solutions)
+                            and not relax["any_branch"]
+                        ):
                             ik_stats["arm_blocked"] += 1
-                            record["gate"] = "arm_in_view"
+                            record["gate"] = (
+                                "arm_in_view"
+                                if not clear
+                                else "arm_in_view_some_branches"
+                            )
                             ik_records.append(record)
                             return None
                         ik_stats["clear"] += 1
@@ -1435,55 +1831,273 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             # loses 2/96, so 10-13 is the strongest fully reachable band.
             min_view_quality = 3.0
             view_quality_motion_tolerance = 0.1
-        candidate, search_reason = search_survey_pose(
-            board_pose,
-            tcp_T_cam,
-            camera_models,
-            grippers,
-            reference_camera="center_camera",
-            current_base_T_tcp=base_T_tcp,
-            # Frame a reachable sector, not the whole board: framing the whole
-            # board in all three canted cameras needs a standoff beyond the
-            # UR5e's ~0.85 m reach.  The reach guard is the real UR5e envelope
-            # (base_link origin); min-motion then picks the closest reachable
-            # pose that frames the sector in all cameras.  SFP supplies a
-            # centred ladder rather than one box -- see
-            # ``_coverage_targets_for_target`` for why an off-centre sector
-            # cropped a physically present module.
-            coverage_targets=self._coverage_targets_for_target(survey_target),
-            # Framing, obliquity and standoff preference are per-sector; see
-            # ``_survey_view_settings`` for the port geometry that decides each.
-            **self._survey_view_settings(survey_target),
-            view_quality=view_quality_fn,
-            min_view_quality=min_view_quality,
-            view_quality_motion_tolerance=view_quality_motion_tolerance,
-            # Reachability is now decided by the live-seeded UR5e IK motion
-            # gate, not this base-origin sphere.  In addition to filtering
-            # impossible/arm-occluded poses it ranks camera-equivalent rolls by
-            # their physical joint travel from the live state and refuses any
-            # candidate over the configured relative motion cap.
-            # The base-origin sphere wrongly rejected reachable far,
-            # bore-facing poses and admitted unsolvable ones; it survives only
-            # as a loose fallback when IK is unavailable.  Standoff is still
-            # bounded by each sector's configured search band.
-            joint_motion=joint_motion_fn,
-            max_joint_motion_rad=joint_motion_limit_rad,
-            joint_motion_preference=joint_motion_preference_fn,
-            # Let the requested J6 half-turn influence the selected roll only
-            # inside a bounded motion plateau.  It may buy at most 30 degrees
-            # of additional worst-joint travel, never the old violent route.
-            joint_preference_motion_tolerance_rad=math.radians(30.0),
-            max_reach_m=0.85,
-            min_height_m=0.02,
+        # --- relaxation ladder -------------------------------------------
+        #
+        # Two things are non-negotiable and appear in *no* tier below:
+        #
+        #   1. the view.  Each sector's coverage box must be framed in all
+        #      three cameras and clear of the gripper silhouette, with its own
+        #      geometry -- SFP's near-overhead strip view, NIC's <=2 deg
+        #      straight-down look into the cages, SC's 16-20 deg long-face
+        #      depth band and two-camera bore gate.  ``coverage_targets``,
+        #      ``require_all_cameras_frame``, the obliquity/tilt bands and
+        #      ``min_view_quality`` are therefore fixed.
+        #   2. collisions.  ``UR5eArm.self_clearance``'s 140 mm wrist-camera
+        #      keep-out is applied inside ``solve_ranked`` and is never
+        #      loosened by anything here.
+        #
+        # Everything else is comfort, not correctness, and comfort should not
+        # be the reason the skill returns no pose at all.  The field kept
+        # hitting refusals whose binding gate was joint travel or the
+        # all-branches arm rule while a perfectly good view existed.  So try
+        # the strict policy first and, only if it finds nothing, step down one
+        # constraint at a time and log which tier paid for the result.
+        #
+        # Note the gripper is *allowed* in frame -- it always is, that is what
+        # the calibrated silhouette is for.  What must stay clear of the
+        # sector is the gripper's keep-out and the arm's own limbs.
+        # The last two tiers trade *view angle* for existence, and only for
+        # sectors using an isotropic obliquity cap (NIC, SFP) -- never for SC,
+        # whose directional tilt band is the depth measurement itself.
+        #
+        # This is deliberately last.  Section 9.3 records that tilting NIC
+        # across the rail resolved 0 of 10 ports, because the cages only show
+        # their black interior near the board normal.  But that experiment
+        # traded a good view for a tilted one; here the alternative is no pose
+        # at all, and a degraded view strictly beats nothing.  Measured at the
+        # 2026-07-28 04:34 refusal (NIC ports 0.715 m out, every straight-down
+        # candidate needing >=0.914 m of reach against an envelope of ~0.86 m):
+        #
+        #     obliquity cap   found   standoff   reach    ports in cone
+        #      2 deg (ship)    no       -          -         -
+        #      5 deg           no       -          -         -
+        #      8 deg          YES      0.66      0.862      5/10
+        #     15 deg          YES      0.66      0.862      5/10
+        #
+        # 8 deg is the threshold and buys 5 ports instead of 0.  Beyond it
+        # nothing improves: the ranking still prefers the most overhead
+        # feasible pose, so the wider cap is permission, not a worse view.
+        relax = {"any_branch": False}
+        search_tiers = (
+            ("strict", joint_motion_limit_rad, total_joint_motion_limit_rad,
+             False, None, None),
+            ("joint-travel caps lifted", math.radians(360.0), math.inf,
+             False, None, None),
+            ("any arm-clear IK branch", math.radians(360.0), math.inf,
+             True, None, None),
+            ("reduced clearance margin", math.radians(360.0), math.inf,
+             True, 12.0, None),
+            ("angled view (8deg off normal)", math.radians(360.0), math.inf,
+             True, 12.0, 8.0),
+            ("angled view (15deg off normal)", math.radians(360.0), math.inf,
+             True, 12.0, 15.0),
         )
+        # Verbose by design.  A refusal has to be explainable from the log
+        # alone: which sector policy ran, against which board, from which live
+        # joints, how many candidates each gate consumed, and at which tier.
+        # Three field sessions were spent re-deriving that from a single line.
+        base_settings = self._survey_view_settings(survey_target)
+        coverage_boxes = self._coverage_targets_for_target(survey_target)
+        board_origin = board_pose.base_T_board.translation
+        logging.info(
+            "survey policy target=%d sector_boxes=%d coverage_x=[%.3f,%.3f] "
+            "coverage_y=[%.3f,%.3f] coverage_z=[%.3f,%.3f] all_cameras=%s "
+            "prefer_far=%s obliquity_max=%.1fdeg clearance_floor=%.1fpx "
+            "rolls=%d standoffs=%s tilt_band=%s min_view_quality=%s",
+            int(survey_target),
+            len(coverage_boxes),
+            float(coverage_boxes[0][:, 0].min()),
+            float(coverage_boxes[0][:, 0].max()),
+            float(coverage_boxes[0][:, 1].min()),
+            float(coverage_boxes[0][:, 1].max()),
+            float(coverage_boxes[0][:, 2].min()),
+            float(coverage_boxes[0][:, 2].max()),
+            base_settings.get("require_all_cameras_frame"),
+            base_settings.get("prefer_far_standoff"),
+            math.degrees(
+                base_settings.get("max_obliquity_rad", math.radians(20.0))
+            ),
+            base_settings.get("min_required_clearance_px", math.nan),
+            len(base_settings.get("yaws_rad", ()) or ()) or 7,
+            (
+                "%.2f..%.2f"
+                % (
+                    min(base_settings["standoffs_m"]),
+                    max(base_settings["standoffs_m"]),
+                )
+                if base_settings.get("standoffs_m")
+                else "default 0.30..1.25"
+            ),
+            (
+                "%.1f..%.1fdeg"
+                % tuple(
+                    math.degrees(v)
+                    for v in base_settings["cross_rail_tilt_band_rad"]
+                )
+                if base_settings.get("cross_rail_tilt_band_rad")
+                else "none"
+            ),
+            (
+                f"{min_view_quality:.2f}"
+                if math.isfinite(min_view_quality)
+                else "none"
+            ),
+        )
+        logging.info(
+            "survey inputs board_origin=(%.4f,%.4f,%.4f) board_normal=(%.3f,"
+            "%.3f,%.3f) source=%s reprojection=%.2fpx tcp=(%.4f,%.4f,%.4f) "
+            "seed_deg=%s live_ik=%s",
+            board_origin[0],
+            board_origin[1],
+            board_origin[2],
+            *board_pose.base_T_board.rotation[:, 2],
+            source_camera,
+            board_pose.reprojection_error_px,
+            base_T_tcp.translation[0],
+            base_T_tcp.translation[1],
+            base_T_tcp.translation[2],
+            (
+                np.round(np.degrees(ik_seed), 1).tolist()
+                if ik_seed is not None
+                else "n/a"
+            ),
+            joint_motion_fn is not None,
+        )
+
+        candidate, search_reason, search_tier = None, "", "strict"
+        tier_reports: list[str] = []
+        for (
+            tier_label,
+            tier_joint_cap,
+            tier_total_cap,
+            tier_any_branch,
+            tier_clearance_px,
+            tier_obliquity_deg,
+        ) in search_tiers:
+            relax["any_branch"] = tier_any_branch
+            for key in ("probed", "no_ik", "keepout", "arm_blocked", "clear"):
+                ik_stats[key] = 0
+            ik_stats["best_worst_joint_rad"] = math.inf
+            ik_records.clear()
+            view_settings = self._survey_view_settings(survey_target)
+            if tier_clearance_px is not None:
+                view_settings["min_required_clearance_px"] = tier_clearance_px
+            if tier_obliquity_deg is not None:
+                if view_settings.get("cross_rail_tilt_band_rad") is not None:
+                    # SC: the tilt band *is* the depth measurement.  There is
+                    # no meaningful "slightly worse angle" here, so this tier
+                    # has nothing to offer and would only repeat tier 3.
+                    continue
+                # Only ever widen.  SFP already allows 20 deg, so these tiers
+                # are a no-op there and bite only on NIC's 2 deg cap.
+                view_settings["max_obliquity_rad"] = max(
+                    view_settings.get(
+                        "max_obliquity_rad", math.radians(20.0)
+                    ),
+                    math.radians(tier_obliquity_deg),
+                )
+            tier_started_at = time.monotonic()
+            candidate, search_reason = self._search_survey_pose_tier(
+                board_pose,
+                tcp_T_cam,
+                camera_models,
+                grippers,
+                base_T_tcp,
+                survey_target,
+                view_settings,
+                view_quality_fn,
+                min_view_quality,
+                view_quality_motion_tolerance,
+                joint_motion_fn,
+                tier_joint_cap,
+                tier_total_cap,
+                joint_motion_preference_fn,
+            )
+            tier_summary = (
+                "tier='%s' joint_cap=%.0fdeg total_cap=%s any_branch=%s "
+                "clearance=%.1fpx -> %s | probed=%d unreachable=%d "
+                "camera_keepout=%d arm_in_view=%d arm_clear=%d "
+                "best_worst_joint=%s took=%.2fs"
+                % (
+                    tier_label,
+                    math.degrees(tier_joint_cap),
+                    (
+                        f"{math.degrees(tier_total_cap):.0f}deg"
+                        if math.isfinite(tier_total_cap)
+                        else "none"
+                    ),
+                    tier_any_branch,
+                    view_settings.get("min_required_clearance_px", math.nan),
+                    "FOUND" if candidate is not None else "none",
+                    ik_stats["probed"],
+                    ik_stats["no_ik"],
+                    ik_stats["keepout"],
+                    ik_stats["arm_blocked"],
+                    ik_stats["clear"],
+                    (
+                        f"{math.degrees(ik_stats['best_worst_joint_rad']):.1f}deg"
+                        if math.isfinite(ik_stats["best_worst_joint_rad"])
+                        else "n/a"
+                    ),
+                    time.monotonic() - tier_started_at,
+                )
+            )
+            tier_reports.append(tier_summary)
+            logging.info("survey search %s", tier_summary)
+            if candidate is not None:
+                search_tier = tier_label
+                if tier_obliquity_deg is not None:
+                    # The one relaxation that genuinely degrades the picture.
+                    logging.warning(
+                        "survey pose required an ANGLED view (tier '%s'): no "
+                        "pose within the sector's normal-view cap was "
+                        "reachable at this board placement. The bores are read "
+                        "down their own axis, so expect fewer than all ports "
+                        "to resolve -- offline this recovered 5 of 10 where "
+                        "the straight-down view had none. Moving the board "
+                        "closer to the base restores the full view. "
+                        "Strict tier said: %s",
+                        tier_label,
+                        tier_reports[0],
+                    )
+                elif tier_label != "strict":
+                    logging.warning(
+                        "survey pose required relaxation tier '%s'; the view "
+                        "requirements and the %.0fmm collision keep-out were "
+                        "NOT relaxed. Reason the strict tier failed: %s",
+                        tier_label,
+                        (ik_arm.min_self_clearance_m if ik_arm else 0.0) * 1000.0,
+                        tier_reports[0],
+                    )
+                break
+            if joint_motion_fn is None:
+                # Without a live IK model the tiers differ in nothing that
+                # matters; do not sweep the same search four times.
+                break
         if candidate is None:
+            search_reason = (
+                f"{search_reason} (all {len(search_tiers)} relaxation tiers "
+                "exhausted; view requirements and the collision keep-out are "
+                "never relaxed)"
+            )
+        if candidate is None:
+            # Full attribution: every tier that was tried and what consumed its
+            # candidates.  Read top-down -- if `probed` is 0 the search never
+            # reached IK and the loss is framing/clearance/obliquity; if
+            # `unreachable` dominates the board is simply too far for the
+            # standoff this sector needs; if `arm_in_view` or `camera_keepout`
+            # dominate the pose was reachable and something else refused it.
+            for line in tier_reports:
+                logging.error("survey search exhausted %s", line)
             best_worst = ik_stats["best_worst_joint_rad"]
             cap_deg = math.degrees(joint_motion_limit_rad)
             logging.error(
                 "survey IK rejection breakdown: probed=%d unreachable=%d "
+                "camera_keepout=%d "
                 "arm_in_view=%d arm_clear=%d best_worst_joint=%s cap=%.1fdeg",
                 ik_stats["probed"],
                 ik_stats["no_ik"],
+                ik_stats["keepout"],
                 ik_stats["arm_blocked"],
                 ik_stats["clear"],
                 (
@@ -1507,11 +2121,29 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     f"{math.degrees(best_worst):.1f}deg against a "
                     f"{cap_deg:.1f}deg cap"
                 )
-            elif ik_stats["arm_blocked"] >= ik_stats["no_ik"]:
+            # Rank the gates by what is *actionable*, not by raw count.
+            #
+            # ``no_ik`` dominates almost every refusal simply because the grid
+            # sweeps standoffs the arm was never going to reach -- NIC probes
+            # the farthest rungs first by design, so it racks up hundreds of
+            # unreachable poses on the way to the ones that matter.  Reporting
+            # that as the binding gate sent the 2026-07-28 NIC failure after the
+            # workspace when all eight of its near-misses were `arm_in_view`
+            # with 2-4 valid IK branches.  Among candidates the arm *can* reach,
+            # whichever gate refused them is the one worth naming.
+            elif ik_stats["arm_blocked"] >= max(1, ik_stats["keepout"]):
                 verdict = (
                     f"BINDING GATE = arm-in-view: {ik_stats['arm_blocked']} "
                     "pose(s) had valid IK but the arm sat in a wrist camera "
                     "on every branch"
+                )
+            elif ik_stats["keepout"] > 0:
+                verdict = (
+                    f"BINDING GATE = wrist-camera keep-out: "
+                    f"{ik_stats['keepout']} pose(s) were kinematically "
+                    "reachable but every branch put a wrist camera inside the "
+                    f"{(ik_arm.min_self_clearance_m if ik_arm else 0.0) * 1000:.0f}"
+                    "mm forearm keep-out"
                 )
             else:
                 verdict = (
@@ -1691,11 +2323,14 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         result.dy = float(displacement[1])
         result.dz = float(displacement[2])
         logging.info(
-            "SFP Stage 2 published survey pose source=%s reprojection=%.2fpx "
+            "Stage 2 published survey pose target=%d tier='%s' source=%s "
+            "reprojection=%.2fpx "
             "target=(%.4f,%.4f,%.4f)m standoff=%.3fm yaw=%+.3frad "
             "min_clearance=%.1fpx view_quality=%+.3f move=%.3fm "
             "obliquity=%.1fdeg cross_tilt=%.1fdeg along_tilt=%.1fdeg "
             "joint_max=%.1fdeg joint_total=%.1fdeg",
+            int(survey_target),
+            search_tier,
             source_camera,
             board_pose.reprojection_error_px,
             target.translation[0],

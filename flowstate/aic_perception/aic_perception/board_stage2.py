@@ -1564,6 +1564,13 @@ def search_survey_pose(
     # contorted targets before handing a Cartesian pose to Move Robot.
     joint_motion: Callable[[Transform], Sequence[float] | None] | None = None,
     max_joint_motion_rad: float = math.radians(170.0),
+    # Cap on the *sum* of |delta| over all six joints, not just the worst one.
+    # The worst-joint cap alone let a 561.8 deg total through on hardware
+    # (delta=[-163.7,-16.0,147.5,33.7,166.0,-34.9]: worst 166 deg against a
+    # 225 deg cap, but three joints swinging ~150-166 deg at once).  That is a
+    # contorted whole-arm reconfiguration, not a survey move.  ``total_motion``
+    # was already computed for ranking and simply never gated.
+    max_total_joint_motion_rad: float = math.inf,
     # Optional secondary joint-space constraint/ranking.  The callback receives
     # the physical unwrapped joint delta selected for a Cartesian candidate and
     # returns a non-negative error (lower is better).  SC uses it to keep wrist
@@ -1820,7 +1827,21 @@ def search_survey_pose(
                         # real IK model is supplied; otherwise keep a generous
                         # absolute prune and let ``reachable`` be the authority.
                         reach = float(np.linalg.norm(base_T_tcp.translation))
-                        reach_cap = max_reach_m if reachable is None else 1.15
+                        # ``joint_motion`` is a real IK gate just as much as
+                        # ``reachable`` is, and production supplies only the
+                        # former -- so testing ``reachable`` alone left the
+                        # 0.85 m sphere live in the deployed path, contrary to
+                        # the comment above.  A base-origin sphere is the wrong
+                        # shape for a tool that extends ~0.197 m past the
+                        # flange: a TCP 0.95 m out on a near-horizontal tool
+                        # sits on a flange only 0.78 m out, well inside the
+                        # envelope.  Keep the generous absolute prune whenever
+                        # either kinematic gate is present.
+                        reach_cap = (
+                            max_reach_m
+                            if (reachable is None and joint_motion is None)
+                            else 1.15
+                        )
                         if reach > reach_cap:
                             continue
                         if not np.all(np.isfinite(base_T_tcp.rotation)):
@@ -2038,6 +2059,8 @@ def search_survey_pose(
                     if max_motion > max_joint_motion_rad + 1e-9:
                         continue
                     total_motion = float(np.abs(delta).sum())
+                    if total_motion > max_total_joint_motion_rad + 1e-9:
+                        continue
                     preference_error = (
                         float(joint_motion_preference(delta))
                         if joint_motion_preference is not None
