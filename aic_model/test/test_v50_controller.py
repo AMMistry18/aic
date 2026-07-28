@@ -21,13 +21,17 @@ from aic_model.v50_controller import (  # noqa: E402
     WEDGED,
     WallProgressWatch,
     _normalize_event,
+    deep_wedge_recovery_probes,
     next_persistent_depth,
     next_retract_depth,
     prime_v50_plug_pose,
+    shift_wrench_moment_to_point,
     solve_tip_in_tcp,
     tcp_for_tip_transform,
     tip_from_tcp_transform,
+    transverse_wrench_score,
 )
+import aic_model.v50_controller as v50_controller_module  # noqa: E402
 from aic_model.rl_insert_contract import port_frame  # noqa: E402
 import patch_v49_plug_relative_v50 as overlay  # noqa: E402
 
@@ -44,6 +48,10 @@ def test_v50_config_bounds_force_and_seating():
     assert np.isclose(config.seat_mouth_speed_scale, 0.5)
     assert np.isclose(config.seat_align_release_decay, 0.7)
     assert np.isclose(config.seat_stall_grace_s, 3.0)
+    assert config.wedge_recovery_enable is True
+    assert config.wedge_recovery_max_local_attempts == 2
+    assert np.isclose(config.wedge_recovery_unload_m, 0.001)
+    assert np.isclose(config.wedge_recovery_probe_max_lat_m, 0.0002)
 
     with pytest.raises(ValueError, match="hard abort"):
         V50Config(force_abort_n=19.0).validated()
@@ -56,6 +64,87 @@ def test_v50_config_bounds_force_and_seating():
         V50Config(seat_align_max_lat_m=0.0015).validated()
     with pytest.raises(ValueError, match="slew"):
         V50Config(seat_align_max_step_m=0.0).validated()
+    with pytest.raises(ValueError, match="progress"):
+        V50Config(
+            wedge_recovery_probe_depth_m=0.0002,
+            wedge_recovery_min_progress_m=0.0003,
+        ).validated()
+    with pytest.raises(ValueError, match="envelope"):
+        V50Config(wedge_recovery_max_lat_m=0.0011).validated()
+
+
+def test_tip_wrench_reference_shift_removes_a_pure_lever_arm_moment():
+    # A lateral force applied through the plug tip produces a torque at the
+    # sensor, but no residual torque when referenced back to that contact tip.
+    sensor_to_tip = np.array([0.0, 0.0, 0.22])
+    force = np.array([5.0, -2.0, 0.0])
+    sensor_moment = np.cross(sensor_to_tip, force)
+
+    tip_moment = shift_wrench_moment_to_point(
+        force, sensor_moment, sensor_to_tip
+    )
+
+    np.testing.assert_allclose(tip_moment, np.zeros(3), atol=1e-12)
+
+
+def test_controller_wrench_uses_the_documented_sensor_frame_and_tip_lever_arm():
+    sensor_to_tip = np.array([0.0, 0.0, 0.22])
+    tcp_to_tip = sensor_to_tip - np.array([0.0, 0.0, 0.172])
+    force = np.array([5.0, -2.0, 0.0])
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.Rp = np.eye(3)
+    controller.policy = SimpleNamespace(
+        _wrench_vector=lambda _obs: np.concatenate(
+            [force, np.cross(sensor_to_tip, force)]
+        ),
+        _wrench_baseline=np.zeros(6),
+        _tcp=lambda: (np.zeros(3), np.array([1.0, 0.0, 0.0, 0.0])),
+        _tip_from_tcp=lambda _tcp_pos, _tcp_quat: (tcp_to_tip, np.eye(3)),
+    )
+    observation = SimpleNamespace(
+        wrist_wrench=SimpleNamespace(
+            header=SimpleNamespace(frame_id="ati/tool_link")
+        )
+    )
+
+    force_port, moment_port = controller._wrench_plug_frame(observation)
+
+    np.testing.assert_allclose(force_port, force)
+    np.testing.assert_allclose(moment_port, np.zeros(3), atol=1e-12)
+
+
+def test_deep_wedge_probes_are_bounded_and_include_a_measured_fallback_sign():
+    config = V50Config().validated()
+    probes = deep_wedge_recovery_probes(
+        np.array([4.0, -3.0, -7.0]),
+        np.array([0.4, -0.25, 0.0]),
+        config,
+    )
+
+    assert len(probes) == 2
+    primary_lat, primary_tilt = probes[0]
+    mirrored_lat, mirrored_tilt = probes[1]
+    assert np.linalg.norm(primary_lat) <= config.wedge_recovery_probe_max_lat_m
+    assert np.linalg.norm(primary_tilt) <= config.wedge_recovery_probe_max_tilt_rad
+    np.testing.assert_allclose(mirrored_lat, -primary_lat)
+    np.testing.assert_allclose(mirrored_tilt, -primary_tilt)
+    # First probe keeps the established force/moment correction convention.
+    assert np.dot(primary_lat, np.array([4.0, -3.0])) < 0.0
+    assert np.dot(primary_tilt, np.array([0.4, -0.25])) < 0.0
+
+
+def test_deep_wedge_force_only_probe_and_score_fall_back_safely():
+    config = V50Config().validated()
+    force = np.array([3.0, 0.0, -7.0])
+    probes = deep_wedge_recovery_probes(force, np.full(3, np.nan), config)
+
+    assert len(probes) == 2
+    assert np.allclose(probes[0][1], np.zeros(2))
+    assert np.isfinite(transverse_wrench_score(force, np.full(3, np.nan), config))
+    # Axial-only force is not evidence that side-wall correction is safe.
+    assert deep_wedge_recovery_probes(
+        np.array([0.0, 0.0, -9.0]), np.full(3, np.nan), config
+    ) == ()
 
 
 def test_event_normalization_strips_the_cable_instance_prefix():
@@ -375,14 +464,38 @@ def test_priming_failure_clears_stale_grasp_and_fails_closed():
 
 
 class _Log:
+    def __init__(self):
+        self.infos = []
+        self.warns = []
+        self.errors = []
+
     def info(self, _message):
-        pass
+        self.infos.append(str(_message))
 
     def warn(self, _message):
-        pass
+        self.warns.append(str(_message))
 
     def error(self, _message):
-        pass
+        self.errors.append(str(_message))
+
+
+def test_any_fresh_insertion_event_is_success_even_for_an_alternate_port():
+    controller = object.__new__(PlugRelativeV50Controller)
+    node = SimpleNamespace(
+        _insertion_event_generation=1,
+        _insertion_event_value="cable_2#0#nic_card_mount_0/sfp_port_1",
+    )
+    controller.policy = SimpleNamespace(_parent_node=node)
+    controller.event_generation = 0
+    controller.expected_event = "nic_card_mount_0/sfp_port_0"
+    controller.log = _Log()
+
+    assert controller._event_status() == SEATED
+    assert controller.log.errors == []
+    assert any(
+        "accepting insertion event for alternate port" in message
+        for message in controller.log.warns
+    )
 
 
 class _SequenceHarness(PlugRelativeV50Controller):
@@ -549,6 +662,145 @@ class _AlignHarness(PlugRelativeV50Controller):
 
     def _wrench_plug_frame(self, observation):
         return self._f, self._m
+
+
+def test_verified_recovery_and_live_wrench_correction_share_one_clearance_cap():
+    harness = object.__new__(PlugRelativeV50Controller)
+    harness.config = V50Config().validated()
+    lat, tilt = harness._combined_seat_correction(
+        np.array([0.0007, 0.0]),
+        np.array([0.0122, 0.0]),
+        np.array([0.0002, 0.0]),
+        np.array([0.003, 0.0]),
+    )
+
+    assert np.linalg.norm(lat) <= harness.config.seat_align_max_lat_m + 1e-12
+    assert np.linalg.norm(tilt) <= harness.config.seat_align_max_tilt_rad + 1e-12
+
+
+def test_force_guided_deep_recovery_accepts_only_a_measured_improvement(monkeypatch):
+    config = V50Config(
+        wedge_recovery_probe_speed_m_s=0.01,
+        wedge_recovery_probe_timeout_wall_s=1.0,
+    ).validated()
+    clock = [0.0]
+    state = SimpleNamespace(depth=0.036)
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.config = config
+    controller.Rp = np.eye(3)
+    controller.port_pos = np.zeros(3)
+    controller.log = _Log()
+    controller.move_robot = None
+    controller.get_observation = lambda: object()
+    controller._event_status = lambda: None
+    controller._force_magnitude = lambda _observation: 6.0
+    controller._wrench_plug_frame = lambda _observation: (
+        np.array([1.0, 0.0, -6.0]),
+        np.zeros(3),
+    )
+    controller._errors = lambda: (
+        state.depth,
+        np.zeros(2),
+        np.zeros(3),
+        np.array([0.0, 0.0, state.depth]),
+        np.eye(3),
+    )
+    controller._unload_deep_wedge = lambda _depth: (
+        "deep_recovery_accepted",
+        (state.depth, np.array([0.0, 0.0, state.depth]), np.eye(3)),
+    )
+    controller.policy = SimpleNamespace(
+        _enforce_action_deadline=lambda _move: None,
+        _tcp_target_for_tip=lambda tip, rotation: (tip, rotation),
+        set_pose_target=lambda _move, target, **_kwargs: setattr(
+            state, "depth", float(target[0][2])
+        ),
+        sleep_for=lambda duration: clock.__setitem__(0, clock[0] + duration),
+    )
+    monkeypatch.setattr(v50_controller_module.time, "monotonic", lambda: clock[0])
+
+    outcome, recovery_lat, recovery_tilt, recovered_depth = (
+        controller._attempt_force_guided_deep_recovery(
+            depth=0.037,
+            force=7.0,
+            force_port=np.array([4.0, 0.0, -6.0]),
+            moment_port=np.zeros(3),
+            current_lat=np.zeros(2),
+            current_tilt=np.zeros(2),
+        )
+    )
+
+    assert outcome == "deep_recovery_accepted"
+    assert recovered_depth >= 0.037 + config.wedge_recovery_min_progress_m
+    assert recovery_lat[0] < 0.0
+    np.testing.assert_allclose(recovery_tilt, np.zeros(2))
+
+
+def test_force_guided_deep_recovery_measures_the_mirrored_probe_too(monkeypatch):
+    config = V50Config(
+        wedge_recovery_probe_speed_m_s=0.01,
+        wedge_recovery_probe_timeout_wall_s=0.35,
+    ).validated()
+    clock = [0.0]
+    state = SimpleNamespace(depth=0.036, lateral_x=0.0)
+    controller = object.__new__(PlugRelativeV50Controller)
+    controller.config = config
+    controller.Rp = np.eye(3)
+    controller.port_pos = np.zeros(3)
+    controller.log = _Log()
+    controller.move_robot = None
+    controller.get_observation = lambda: object()
+    controller._event_status = lambda: None
+    controller._force_magnitude = lambda _observation: 6.0
+    controller._wrench_plug_frame = lambda _observation: (
+        np.array(
+            [1.0 if state.lateral_x > 0.0 else 4.0, 0.0, -6.0]
+        ),
+        np.zeros(3),
+    )
+    controller._errors = lambda: (
+        state.depth,
+        np.zeros(2),
+        np.zeros(3),
+        np.array([state.lateral_x, 0.0, state.depth]),
+        np.eye(3),
+    )
+
+    def unload(_depth):
+        state.depth = 0.036
+        return (
+            "deep_recovery_accepted",
+            (state.depth, np.array([state.lateral_x, 0.0, state.depth]), np.eye(3)),
+        )
+
+    controller._unload_deep_wedge = unload
+
+    def set_pose(_move, target, **_kwargs):
+        state.lateral_x = float(target[0][0])
+        state.depth = float(target[0][2])
+
+    controller.policy = SimpleNamespace(
+        _enforce_action_deadline=lambda _move: None,
+        _tcp_target_for_tip=lambda tip, rotation: (tip, rotation),
+        set_pose_target=set_pose,
+        sleep_for=lambda duration: clock.__setitem__(0, clock[0] + duration),
+    )
+    monkeypatch.setattr(v50_controller_module.time, "monotonic", lambda: clock[0])
+
+    outcome, recovery_lat, _recovery_tilt, _recovered_depth = (
+        controller._attempt_force_guided_deep_recovery(
+            depth=0.037,
+            force=7.0,
+            force_port=np.array([4.0, 0.0, -6.0]),
+            moment_port=np.zeros(3),
+            current_lat=np.zeros(2),
+            current_tilt=np.zeros(2),
+        )
+    )
+
+    assert outcome == "deep_recovery_accepted"
+    # The primary -F trial did not improve; the mirrored +F trial did.
+    assert recovery_lat[0] > 0.0
 
 
 def test_seat_target_pose_presses_past_the_seat_frame_during_event_dwell():
@@ -845,6 +1097,21 @@ def test_overlay_rewrites_v49_dispatch_and_truthful_result():
     # Strict reporting stays reachable via the env override.
     assert "goal_handle.abort()" in patched_model
     assert "Cable insertion failed: no correct-port event" in patched_model
+
+
+def test_v50_controller_overlay_matches_the_source_controller():
+    source = REPO_ROOT / "aic_model" / "aic_model" / "v50_controller.py"
+    overlay_source = (
+        REPO_ROOT
+        / "docker"
+        / "aic_model"
+        / "v50_overlay"
+        / "aic_model"
+        / "v50_controller.py"
+    )
+    assert overlay_source.read_text(encoding="utf-8") == source.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_overlay_path_rejects_any_non_v49_input(tmp_path):

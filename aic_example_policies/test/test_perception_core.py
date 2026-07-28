@@ -62,7 +62,16 @@ class _FailOnRefineYolo(_FakeYolo):
 
 
 def _quad(x, y):
-    return np.array([[x, y], [x + 4, y], [x + 4, y + 3], [x, y + 3]], dtype=float)
+    return np.array(
+        [
+            [x, y],
+            [x + 4, y],
+            [x + 4, y + 3],
+            [x, y + 3],
+            [x + 2, y + 1.5],
+        ],
+        dtype=float,
+    )
 
 
 def _core(model):
@@ -88,6 +97,9 @@ def test_sc_crop_refine_uses_native_crop_and_translates_keypoints():
     assert model.calls[1][0][0].shape == (40, 40, 3)
     assert detections[0]["bbox"] == (40, 30, 20, 20)
     np.testing.assert_allclose(detections[0]["kps"], full_kps)
+    np.testing.assert_allclose(detections[0]["mouth_center"], full_kps[4])
+    assert detections[0]["centroid"] == tuple(full_kps[4])
+    assert detections[0]["area"] == 400
 
 
 def test_sc_crop_refine_keeps_each_port_identity_over_higher_conf_distractor():
@@ -118,11 +130,11 @@ def test_sc_crop_refine_keeps_each_port_identity_over_higher_conf_distractor():
     assert len(model.calls) == 2
     assert len(model.calls[1][0]) == 2, "all coarse ports get their own crop"
     by_centre_x = {round(det["centroid"][0]): det for det in detections}
-    assert set(by_centre_x) == {30, 130}
-    assert by_centre_x[30]["conf"] == 0.4
-    assert by_centre_x[130]["conf"] == 0.5
-    np.testing.assert_allclose(by_centre_x[30]["kps"], first_kps)
-    np.testing.assert_allclose(by_centre_x[130]["kps"], second_kps)
+    assert set(by_centre_x) == {27, 127}
+    assert by_centre_x[27]["conf"] == 0.4
+    assert by_centre_x[127]["conf"] == 0.5
+    np.testing.assert_allclose(by_centre_x[27]["kps"], first_kps)
+    np.testing.assert_allclose(by_centre_x[127]["kps"], second_kps)
 
 
 def test_sc_crop_refine_falls_back_when_no_crop_candidate_associates():

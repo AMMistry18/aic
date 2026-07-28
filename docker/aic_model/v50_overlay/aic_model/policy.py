@@ -67,6 +67,49 @@ class MoveRobotCallback(Protocol):
 SendFeedbackCallback = Callable[[str], None]
 
 
+def _cartesian_impedance_matrix(values, name: str) -> list[float]:
+    """Serialize legacy Cartesian gains or a full 6x6 impedance matrix.
+
+    Existing callers provide six diagonal gains.  A 6x6 nested sequence or
+    NumPy array (and its 36-element row-major form) is also accepted so a
+    caller can express directional compliance in a rotated insertion frame.
+    The controller applies the matrix to a base-frame Cartesian error, so a
+    full matrix must already be expressed in that frame; ``frame_id`` only
+    controls the target pose.
+    """
+    try:
+        matrix = np.asarray(values, dtype=float)
+    except (TypeError, ValueError) as ex:
+        raise ValueError(
+            f"{name} must be six diagonal gains or a 6x6 Cartesian matrix"
+        ) from ex
+
+    if matrix.shape == (6,):
+        matrix = np.diag(matrix)
+    elif matrix.shape == (36,):
+        matrix = matrix.reshape(6, 6)
+    elif matrix.shape != (6, 6):
+        raise ValueError(
+            f"{name} must have shape (6,), (36,), or (6, 6); got {matrix.shape}"
+        )
+
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError(f"{name} must contain only finite values")
+    if not np.allclose(matrix, matrix.T, rtol=1e-8, atol=1e-10):
+        raise ValueError(f"{name} matrix must be symmetric")
+
+    # Cartesian stiffness and damping must not inject energy.  Scale the
+    # tolerance to permit the tiny roundoff introduced by R @ K @ R.T.
+    eigenvalues = np.linalg.eigvalsh(matrix)
+    tolerance = 1e-9 * max(1.0, float(np.max(np.abs(eigenvalues))))
+    if float(np.min(eigenvalues)) < -tolerance:
+        raise ValueError(f"{name} matrix must be positive semidefinite")
+
+    # MotionUpdate declares float64[36] in row-major order.  A Python list is
+    # accepted by generated ROS messages on all supported rclpy versions.
+    return np.ascontiguousarray(matrix).reshape(36).tolist()
+
+
 class Policy(ABC):
     def __init__(self, parent_node):
         self._parent_node = parent_node
@@ -115,14 +158,16 @@ class Policy(ABC):
         are only intended to provide a starting point, and can be adjusted as
         desired.
         """
+        target_stiffness = _cartesian_impedance_matrix(stiffness, "stiffness")
+        target_damping = _cartesian_impedance_matrix(damping, "damping")
         motion_update = MotionUpdate(
             header=Header(
                 frame_id=frame_id,
                 stamp=self._parent_node.get_clock().now().to_msg(),
             ),
             pose=pose,
-            target_stiffness=np.diag(stiffness).flatten(),
-            target_damping=np.diag(damping).flatten(),
+            target_stiffness=target_stiffness,
+            target_damping=target_damping,
             feedforward_wrench_at_tip=Wrench(
                 force=Vector3(x=0.0, y=0.0, z=0.0),
                 torque=Vector3(x=0.0, y=0.0, z=0.0),

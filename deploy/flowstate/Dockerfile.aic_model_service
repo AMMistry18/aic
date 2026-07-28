@@ -5,18 +5,3 @@ ENV RMW_IMPLEMENTATION=rmw_zenoh_cpp
 ENV ZENOH_ROUTER_CHECK_ATTEMPTS=-1
 ENV AIC_ROUTER_ADDR=zenoh-router.app-intrinsic-base.svc.cluster.local:7447
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/nvidia/bin
-
-# --- SC grasp calibration (6c) -------------------------------------------
-# Flowstate has no runtime env knobs, so this has to be baked in. The SC path
-# reads it at call time (_sc_calib_dump_enabled), not import time, so a plain
-# ENV is enough. Emits the [sc-calib] block before perception and before both
-# handoff gates, so the run still yields a sample even when it is refused.
-#
-# DEBUG SCAFFOLD ONLY -- the shipped tip pose must come from the SC plug-pose
-# model, not from a constant. Remove both of these before final submission.
-ENV RL_INSERT_CALIB_DUMP=1
-
-# After harvesting ~10 re-grasps, uncomment with the median to clear the depth
-# gate and unblock alignment/seat debugging while the plug-pose model trains.
-# ENV RL_INSERT_SC_TIP_IN_TCP_POS="[x, y, z]"
-# ENV RL_INSERT_SC_TIP_IN_TCP_QUAT="[w, x, y, z]"

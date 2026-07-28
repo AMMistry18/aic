@@ -155,10 +155,15 @@ class PerceptionCore:
                 int(round(x2 - x1)), int(round(y2 - y1)),
             ),
             "conf": float(conf),
+            "area": int(round(max(0.0, x2 - x1) * max(0.0, y2 - y1))),
         }
         if kps is not None:
             kps = np.asarray(kps, dtype=np.float32)
             det["kps"] = kps
+            if kps.shape[0] >= 5 and np.all(np.isfinite(kps[4, :2])):
+                mouth_center = tuple(map(float, kps[4, :2]))
+                det["centroid"] = mouth_center
+                det["mouth_center"] = mouth_center
             if kps.shape[0] >= 4:
                 corners = PerceptionCore._order_quad_points(kps[:4, :2])
                 tl, tr, br, bl = corners
@@ -521,7 +526,10 @@ def draw_sc(bgr, detections):
         if "major_axis" in d:
             (x0, y0), (x1, y1) = d["major_axis"]
             cv2.line(out, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 255), 2)
-        cv2.putText(out, f"a={d['area']}", (x, y - 5),
+        cv2.putText(
+            out,
+            f"sc_mouth {d.get('conf', 0.0):.2f} a={d.get('area', w * h)}",
+            (x, y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     return out
 

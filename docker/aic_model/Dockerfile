@@ -34,9 +34,9 @@ RUN cd /ws_aic/src/aic && \
     SITE_PACKAGES="$(.pixi/envs/default/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
     cp /tmp/v50_overlay/aic_model/*.py /ws_aic/src/aic/aic_model/aic_model/ && \
     cp /tmp/v50_overlay/aic_model/*.py "$SITE_PACKAGES/aic_model/" && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/perception_core.py \
+    cp /tmp/v50_overlay/aic_example_policies/ros/*.py \
        /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/ && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/perception_core.py \
+    cp /tmp/v50_overlay/aic_example_policies/ros/*.py \
        "$SITE_PACKAGES/aic_example_policies/ros/" && \
     mkdir -p \
        /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights \
@@ -55,10 +55,18 @@ RUN cd /ws_aic/src/aic && \
        /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
        /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
     .pixi/envs/default/bin/python -c \
-       "import cv2, ultralytics; from aic_model.RLInsert import RLInsert; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_perception.gripper_masks import GripperMaskBank; GripperMaskBank(); print('SFP V50 + SC visual imports OK')"
+       "import cv2; from ultralytics import YOLO; from aic_model.RLInsert import RLInsert, SC_WEIGHTS; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP V50 + five-keypoint SC mouth imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
 ENV RL_INSERT_ACTION_TIME_BUDGET_S=150
+# SC alignment closes lateral error at ~0.19 mm/s (1.5 mm segments, ~6.3 s each),
+# so the 15 s default caps convergence at ~2.9 mm while SC_MAX_HANDOFF_LATERAL_M
+# admits 10 mm.  The 2026-07-27 03:33 run started 4.90 mm out, was still
+# converging (4.89 -> 3.27 -> 2.00 mm) when the timer fired, and seated 2 mm
+# off-centre with 115 s of budget unused.  60 s covers the full admissible
+# handoff range; _enforce_action_deadline inside the align loop remains the
+# real bound, so this cannot overrun the 150 s budget.
+ENV RL_INSERT_SC_ALIGN_TIMEOUT_S=60
 ENV RL_INSERT_VISUAL_GAP_WEDGE_ENABLE=1
 ENV RL_INSERT_VISUAL_GAP_DEBUG=1
 ENV RL_INSERT_V50_TARGET_FORCE_N=10.0

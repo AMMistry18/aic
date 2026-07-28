@@ -58,6 +58,14 @@ SEAT_WRENCH_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_LOG_PERIOD_S = 0.2
 SEAT_SLOPE_WINDOW_S = 0.5
 MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
+# The force/torque sensor is fixed at ``ati/tool_link``.  ``gripper/tcp`` is
+# +172 mm along the same axes (the only participant TF the policy may request).
+# The per-run visual TCP->tip transform supplies the remaining lever arm.
+WRENCH_SENSOR_TO_TCP_POS_M = np.array([0.0, 0.0, 0.172], dtype=np.float64)
+
+_DEEP_RECOVERY_ACCEPTED = "deep_recovery_accepted"
+_DEEP_RECOVERY_FAILED = "deep_recovery_failed"
+_DEEP_RECOVERY_SKIPPED = "deep_recovery_skipped"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -129,6 +137,30 @@ class V50Config:
     wedge_retry_enable: bool = True
     max_wedge_retries: int = 0
     wedge_retry_on_wall_stall: bool = True
+    # A deep wall-stall is normally a side-wall/tilt bind, not a reason to
+    # discard the whole insertion.  Before the legacy visual/full-retract
+    # fallback, unload slightly and verify one force-guided micro-correction.
+    # Every motion here is deliberately smaller than the port clearance and
+    # bounded by a finite local budget.
+    wedge_recovery_enable: bool = True
+    wedge_recovery_min_depth_m: float = 0.030
+    wedge_recovery_max_local_attempts: int = 2
+    wedge_recovery_unload_m: float = 0.0010
+    wedge_recovery_min_unload_m: float = 0.0005
+    wedge_recovery_unload_timeout_wall_s: float = 1.5
+    wedge_recovery_probe_depth_m: float = 0.00075
+    wedge_recovery_probe_speed_m_s: float = 0.002
+    wedge_recovery_probe_timeout_wall_s: float = 1.5
+    wedge_recovery_min_progress_m: float = 0.00025
+    wedge_recovery_force_gain_m_per_n: float = 0.00005
+    wedge_recovery_moment_gain_rad_per_nm: float = 0.003
+    wedge_recovery_probe_max_lat_m: float = 0.00020
+    wedge_recovery_probe_max_tilt_rad: float = np.deg2rad(0.25)
+    wedge_recovery_max_lat_m: float = 0.00070
+    wedge_recovery_max_tilt_rad: float = 0.0122
+    wedge_recovery_min_lat_force_n: float = 1.0
+    wedge_recovery_min_moment_nm: float = 0.10
+    wedge_recovery_score_improvement_fraction: float = 0.10
     retract_clear_depth_m: float = -0.003
     retract_step_m: float = 0.0015
     retract_free_step_m: float = 0.004
@@ -193,6 +225,65 @@ class V50Config:
             wedge_retry_on_wall_stall=_env_bool(
                 "RL_INSERT_V50_WEDGE_RETRY_ON_WALL_STALL", True
             ),
+            wedge_recovery_enable=_env_bool(
+                "RL_INSERT_V50_WEDGE_RECOVERY_ENABLE", True
+            ),
+            wedge_recovery_min_depth_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MIN_DEPTH_M", 0.030
+            ),
+            wedge_recovery_max_local_attempts=_env_int(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MAX_LOCAL_ATTEMPTS", 2
+            ),
+            wedge_recovery_unload_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_UNLOAD_M", 0.0010
+            ),
+            wedge_recovery_min_unload_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MIN_UNLOAD_M", 0.0005
+            ),
+            wedge_recovery_unload_timeout_wall_s=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_UNLOAD_TIMEOUT_S", 1.5
+            ),
+            wedge_recovery_probe_depth_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_PROBE_DEPTH_M", 0.00075
+            ),
+            wedge_recovery_probe_speed_m_s=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_PROBE_SPEED_M_S", 0.002
+            ),
+            wedge_recovery_probe_timeout_wall_s=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_PROBE_TIMEOUT_S", 1.5
+            ),
+            wedge_recovery_min_progress_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MIN_PROGRESS_M", 0.00025
+            ),
+            wedge_recovery_force_gain_m_per_n=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_FORCE_GAIN_M_PER_N", 0.00005
+            ),
+            wedge_recovery_moment_gain_rad_per_nm=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MOMENT_GAIN_RAD_PER_NM", 0.003
+            ),
+            wedge_recovery_probe_max_lat_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_PROBE_MAX_LAT_M", 0.00020
+            ),
+            wedge_recovery_probe_max_tilt_rad=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_PROBE_MAX_TILT_RAD",
+                float(np.deg2rad(0.25)),
+            ),
+            wedge_recovery_max_lat_m=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MAX_LAT_M", 0.00070
+            ),
+            wedge_recovery_max_tilt_rad=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MAX_TILT_RAD",
+                0.0122,
+            ),
+            wedge_recovery_min_lat_force_n=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MIN_LAT_FORCE_N", 1.0
+            ),
+            wedge_recovery_min_moment_nm=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_MIN_MOMENT_NM", 0.10
+            ),
+            wedge_recovery_score_improvement_fraction=_env_float(
+                "RL_INSERT_V50_WEDGE_RECOVERY_SCORE_IMPROVEMENT", 0.10
+            ),
             retract_clear_depth_m=_env_float(
                 "RL_INSERT_V50_RETRACT_CLEAR_DEPTH_M", -0.003
             ),
@@ -231,6 +322,51 @@ class V50Config:
             raise ValueError("v50 seat alignment slew limits must be positive")
         if self.max_wedge_retries < 0:
             raise ValueError("v50 max wedge retries must be >= 0 (0 means unlimited)")
+        if not 0.0 <= self.wedge_recovery_min_depth_m < self.seat_candidate_depth_m:
+            raise ValueError(
+                "v50 deep wedge recovery depth must be inside the pre-seat bore"
+            )
+        if self.wedge_recovery_max_local_attempts < 0:
+            raise ValueError("v50 deep wedge recovery attempt budget must be >= 0")
+        if (
+            self.wedge_recovery_unload_m <= 0.0
+            or self.wedge_recovery_min_unload_m <= 0.0
+            or self.wedge_recovery_min_unload_m > self.wedge_recovery_unload_m
+            or self.wedge_recovery_unload_timeout_wall_s <= 0.0
+            or self.wedge_recovery_probe_depth_m <= 0.0
+            or self.wedge_recovery_probe_speed_m_s <= 0.0
+            or self.wedge_recovery_probe_timeout_wall_s <= 0.0
+            or self.wedge_recovery_min_progress_m <= 0.0
+        ):
+            raise ValueError("v50 deep wedge recovery distances and times must be positive")
+        if self.wedge_recovery_min_progress_m > self.wedge_recovery_probe_depth_m:
+            raise ValueError(
+                "v50 deep wedge recovery progress must fit inside its probe"
+            )
+        if (
+            self.wedge_recovery_force_gain_m_per_n < 0.0
+            or self.wedge_recovery_moment_gain_rad_per_nm < 0.0
+            or self.wedge_recovery_min_lat_force_n < 0.0
+            or self.wedge_recovery_min_moment_nm < 0.0
+        ):
+            raise ValueError("v50 deep wedge recovery wrench settings must be non-negative")
+        if (
+            self.wedge_recovery_probe_max_lat_m <= 0.0
+            or self.wedge_recovery_probe_max_tilt_rad <= 0.0
+            or self.wedge_recovery_max_lat_m <= 0.0
+            or self.wedge_recovery_max_tilt_rad <= 0.0
+            or self.wedge_recovery_probe_max_lat_m > self.wedge_recovery_max_lat_m
+            or self.wedge_recovery_probe_max_tilt_rad > self.wedge_recovery_max_tilt_rad
+            or self.wedge_recovery_max_lat_m > self.seat_align_max_lat_m
+            or self.wedge_recovery_max_tilt_rad > self.seat_align_max_tilt_rad
+        ):
+            raise ValueError(
+                "v50 deep wedge recovery must stay inside the seat-alignment envelope"
+            )
+        if not 0.0 < self.wedge_recovery_score_improvement_fraction < 1.0:
+            raise ValueError(
+                "v50 deep wedge recovery score improvement must be within (0, 1)"
+            )
         if self.retract_clear_depth_m > 0.0:
             raise ValueError(
                 "v50 retract clear depth must be at or outside the port mouth"
@@ -357,6 +493,91 @@ def clamp_vector_norm(vector, max_norm: float) -> np.ndarray:
     if norm > max_norm:
         return value * (max_norm / norm)
     return value
+
+
+def shift_wrench_moment_to_point(force, moment_at_source, source_to_point) -> np.ndarray:
+    """Express a wrench moment at a point displaced from its source.
+
+    ``source_to_point`` points from the origin at which the wrench was measured
+    to the point at which the returned moment is wanted.  This is the standard
+    spatial-wrench reference shift: ``M_point = M_source - r x F``.
+    """
+
+    force = np.asarray(force, dtype=np.float64).reshape(3)
+    moment = np.asarray(moment_at_source, dtype=np.float64).reshape(3)
+    lever = np.asarray(source_to_point, dtype=np.float64).reshape(3)
+    if not (
+        np.all(np.isfinite(force))
+        and np.all(np.isfinite(moment))
+        and np.all(np.isfinite(lever))
+    ):
+        return np.full(3, np.nan, dtype=np.float64)
+    return moment - np.cross(lever, force)
+
+
+def transverse_wrench_score(
+    force_port,
+    moment_port,
+    config: V50Config,
+) -> float:
+    """Dimensionless side-contact score used to accept a recovery probe."""
+
+    force = np.asarray(force_port, dtype=np.float64).reshape(3)
+    moment = np.asarray(moment_port, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(force[:2])):
+        return float("inf")
+    score = float(np.linalg.norm(force[:2])) / max(
+        config.wedge_recovery_min_lat_force_n, 1e-9
+    )
+    # A missing/untrusted moment must not disable the force-only fallback.
+    if np.all(np.isfinite(moment[:2])):
+        score += float(np.linalg.norm(moment[:2])) / max(
+            config.wedge_recovery_min_moment_nm, 1e-9
+        )
+    return score
+
+
+def deep_wedge_recovery_probes(
+    force_port,
+    moment_port,
+    config: V50Config,
+) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+    """Return bounded signed recovery probes in the port/action frame.
+
+    The first probe follows the controller's established ``-F``/``-M`` sign
+    convention.  A compliant cable or residual calibration error can invert
+    that intuition, so callers measure the result and try the mirrored probe
+    once rather than treating force direction as ground truth.
+    """
+
+    force = np.asarray(force_port, dtype=np.float64).reshape(3)
+    moment = np.asarray(moment_port, dtype=np.float64).reshape(3)
+    if not np.all(np.isfinite(force[:2])):
+        return ()
+    lateral_force = float(np.linalg.norm(force[:2]))
+    moment_valid = bool(np.all(np.isfinite(moment[:2])))
+    lateral_moment = float(np.linalg.norm(moment[:2])) if moment_valid else 0.0
+    if (
+        lateral_force < config.wedge_recovery_min_lat_force_n
+        and lateral_moment < config.wedge_recovery_min_moment_nm
+    ):
+        # Axial-only loading can be a bottom stop or hard obstruction.  Do not
+        # scrub sideways without evidence of a side-wall/tilt contact.
+        return ()
+
+    lateral = clamp_vector_norm(
+        -config.wedge_recovery_force_gain_m_per_n * force[:2],
+        config.wedge_recovery_probe_max_lat_m,
+    )
+    tilt = np.zeros(2, dtype=np.float64)
+    if moment_valid:
+        tilt = clamp_vector_norm(
+            -config.wedge_recovery_moment_gain_rad_per_nm * moment[:2],
+            config.wedge_recovery_probe_max_tilt_rad,
+        )
+    if not np.any(lateral) and not np.any(tilt):
+        return ()
+    return ((lateral, tilt), (-lateral, -tilt))
 
 
 def solve_tip_in_tcp(tcp_pos, tcp_quat, tip_pos, tip_rotation):
@@ -761,13 +982,17 @@ class PlugRelativeV50Controller:
         value = self._event()
         if value is None:
             return None
-        if value == self.expected_event:
-            return SEATED
-        self.log.error(
-            f"[v50] insertion event was for wrong port '{value}', expected "
-            f"'{self.expected_event}'"
-        )
-        return HARD_FAILURE
+        # Deployment policy: any fresh scoring insertion event is success.
+        # Flowstate owns task/port bookkeeping, while this controller only
+        # needs to confirm that the held cable physically seated.  Rejecting a
+        # valid event because its port name differs aborts the whole process
+        # after a successful insertion.
+        if value != self.expected_event:
+            self.log.warn(
+                f"[v50] accepting insertion event for alternate port '{value}' "
+                f"(requested '{self.expected_event}')"
+            )
+        return SEATED
 
     def _force_magnitude(self, observation) -> float:
         if observation is None:
@@ -776,16 +1001,42 @@ class PlugRelativeV50Controller:
         return float(np.linalg.norm(wrench[:3]))
 
     def _wrench_plug_frame(self, observation):
+        """Tared wrench at the plug tip, expressed in the port/action frame.
+
+        The historical method name is retained for callers, but its axes are
+        the port frame because corrections are commanded along ``Rp``.  The
+        source topic is measured at ``ati/tool_link``; torque is shifted to the
+        current visual plug tip before rotating into those axes.  If the input
+        frame is not the documented sensor frame, force remains available for
+        bounded recovery but torque is deliberately marked invalid.
+        """
         if observation is None:
             nan3 = np.full(3, np.nan, dtype=np.float64)
             return nan3, nan3.copy()
-        wrench_wrist = (
+        wrench_sensor = (
             self.policy._wrench_vector(observation) - self.policy._wrench_baseline
         )
-        _, tcp_quat = self.policy._tcp()
+        tcp_pos, tcp_quat = self.policy._tcp()
         R_tcp = quaternion_to_matrix(tcp_quat)
-        wrist_to_plug = self.Rp.T @ R_tcp
-        return wrist_to_plug @ wrench_wrist[:3], wrist_to_plug @ wrench_wrist[3:]
+        force_base = R_tcp @ wrench_sensor[:3]
+        moment_base_sensor = R_tcp @ wrench_sensor[3:]
+
+        header = getattr(getattr(observation, "wrist_wrench", None), "header", None)
+        frame_id = str(getattr(header, "frame_id", "") or "").strip().lstrip("/")
+        if frame_id == "ati/tool_link":
+            tip_pos, _ = self.policy._tip_from_tcp(tcp_pos, tcp_quat)
+            sensor_pos = tcp_pos - R_tcp @ WRENCH_SENSOR_TO_TCP_POS_M
+            moment_base_tip = shift_wrench_moment_to_point(
+                force_base,
+                moment_base_sensor,
+                np.asarray(tip_pos, dtype=np.float64).reshape(3) - sensor_pos,
+            )
+        else:
+            # No silent use of a torque origin we cannot prove.  A force-only
+            # probe remains safe and lets the recovery fall back cleanly.
+            moment_base_tip = np.full(3, np.nan, dtype=np.float64)
+        base_to_port = self.Rp.T
+        return base_to_port @ force_base, base_to_port @ moment_base_tip
 
     def _seat_alignment_sample(self, observation, depth, force, acc_lat, acc_tilt):
         """Low-passed *proportional* wrench correction, not an accumulator.
@@ -804,8 +1055,9 @@ class PlugRelativeV50Controller:
         """
         f_plug, m_plug = self._wrench_plug_frame(observation)
         contact = bool(np.isfinite(force) and force >= self.config.contact_force_n)
-        finite_wrench = bool(np.all(np.isfinite(f_plug[:2])) and np.all(np.isfinite(m_plug[:2])))
-        if contact and finite_wrench:
+        finite_force = bool(np.all(np.isfinite(f_plug[:2])))
+        finite_moment = bool(np.all(np.isfinite(m_plug[:2])))
+        if contact and finite_force:
             log_force_gain = (
                 self.config.seat_align_force_gain
                 if self.config.seat_align_force_gain != 0.0
@@ -817,15 +1069,19 @@ class PlugRelativeV50Controller:
                 else SEAT_ALIGN_OBSERVE_MOMENT_GAIN
             )
             d_lat_would = -log_force_gain * f_plug[:2]
-            d_tilt_would = -log_moment_gain * m_plug[:2]
             target_lat = clamp_vector_norm(
                 -self.config.seat_align_force_gain * f_plug[:2],
                 self.config.seat_align_max_lat_m,
             )
-            target_tilt = clamp_vector_norm(
-                -self.config.seat_align_moment_gain * m_plug[:2],
-                self.config.seat_align_max_tilt_rad,
-            )
+            if finite_moment:
+                d_tilt_would = -log_moment_gain * m_plug[:2]
+                target_tilt = clamp_vector_norm(
+                    -self.config.seat_align_moment_gain * m_plug[:2],
+                    self.config.seat_align_max_tilt_rad,
+                )
+            else:
+                d_tilt_would = np.zeros(2, dtype=np.float64)
+                target_tilt = np.zeros(2, dtype=np.float64)
         else:
             d_lat_would = np.zeros(2, dtype=np.float64)
             d_tilt_would = np.zeros(2, dtype=np.float64)
@@ -884,6 +1140,30 @@ class PlugRelativeV50Controller:
                 np.array([acc_tilt[0], acc_tilt[1], 0.0], dtype=np.float64)
             )
         return target_tip, target_rotation
+
+    def _combined_seat_correction(
+        self, acc_lat, acc_tilt, recovery_lat, recovery_tilt
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Combine ordinary wrench following with a verified local recovery.
+
+        The force follower is intentionally transient; a recovery correction
+        must persist through the subsequent slow seat and final event dwell.
+        Clamping the sum, rather than each component independently, guarantees
+        that a recovery never exceeds the same port-clearance envelope.
+        """
+
+        return (
+            clamp_vector_norm(
+                np.asarray(acc_lat, dtype=np.float64).reshape(2)
+                + np.asarray(recovery_lat, dtype=np.float64).reshape(2),
+                self.config.seat_align_max_lat_m,
+            ),
+            clamp_vector_norm(
+                np.asarray(acc_tilt, dtype=np.float64).reshape(2)
+                + np.asarray(recovery_tilt, dtype=np.float64).reshape(2),
+                self.config.seat_align_max_tilt_rad,
+            ),
+        )
 
     def _hold_tip(self, tip_pos, tip_rotation) -> None:
         self.policy.set_pose_target(
@@ -1071,6 +1351,244 @@ class PlugRelativeV50Controller:
         self.log.warn("[v50] seated geometry produced no matching insertion event")
         return STALLED
 
+    def _unload_deep_wedge(self, start_depth: float):
+        """Back out only enough to remove side load before a local probe."""
+
+        target_depth = max(0.0, float(start_depth) - self.config.wedge_recovery_unload_m)
+        deadline = time.monotonic() + self.config.wedge_recovery_unload_timeout_wall_s
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            event_status = self._event_status()
+            if event_status is not None:
+                return event_status, None
+            observation = self.get_observation()
+            depth, _, _, tip_pos, tip_rotation = self._errors()
+            force = self._force_magnitude(observation)
+            if np.isfinite(force) and force > self.config.force_abort_n:
+                self._hold_tip(tip_pos, tip_rotation)
+                self.log.error(
+                    f"[v50] >{self.config.force_abort_n:.1f}N while unloading a deep wedge"
+                )
+                return HARD_FAILURE, None
+            if float(start_depth) - depth >= self.config.wedge_recovery_min_unload_m:
+                return _DEEP_RECOVERY_ACCEPTED, (depth, tip_pos, tip_rotation)
+            # Keep the observed lateral position and orientation while backing
+            # out; correcting a cocked plug under side load can cam it harder
+            # into the cage wall.
+            target_tip = tip_pos + self.Rp[:, 2] * (target_depth - depth)
+            self.policy.set_pose_target(
+                self.move_robot,
+                self.policy._tcp_target_for_tip(target_tip, tip_rotation),
+                stiffness=self.STIFFNESS,
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+        self.log.warn(
+            f"[v50] deep wedge could not unload {self.config.wedge_recovery_min_unload_m*1000.0:.1f}mm"
+        )
+        return _DEEP_RECOVERY_FAILED, None
+
+    def _attempt_force_guided_deep_recovery(
+        self,
+        *,
+        depth: float,
+        force: float,
+        force_port,
+        moment_port,
+        current_lat,
+        current_tilt,
+    ):
+        """Test tiny signed wrench-guided probes before a full retrace.
+
+        A force/torque sensor provides a resultant wrench rather than a unique
+        contact point.  We therefore use it to seed a primary and mirrored
+        correction, then accept only the correction that both gets past the
+        prior stall and lowers the measured transverse wrench.
+        """
+
+        if (
+            not self.config.wedge_recovery_enable
+            or depth < self.config.wedge_recovery_min_depth_m
+        ):
+            return _DEEP_RECOVERY_SKIPPED, None, None, depth
+        if np.isfinite(force) and force >= self.config.seat_force_cap_n:
+            self.log.warn(
+                f"[v50] deep wedge force={force:.2f}N is at the seat cap; "
+                "skipping local probe"
+            )
+            return _DEEP_RECOVERY_SKIPPED, None, None, depth
+
+        probes = deep_wedge_recovery_probes(force_port, moment_port, self.config)
+        baseline_score = transverse_wrench_score(force_port, moment_port, self.config)
+        if not probes or not np.isfinite(baseline_score):
+            return _DEEP_RECOVERY_SKIPPED, None, None, depth
+
+        force_port = np.asarray(force_port, dtype=np.float64).reshape(3)
+        moment_port = np.asarray(moment_port, dtype=np.float64).reshape(3)
+        moment_text = (
+            f"{np.round(moment_port[:2], 3).tolist()}"
+            if np.all(np.isfinite(moment_port[:2]))
+            else "unavailable"
+        )
+        self.log.warn(
+            "[v50] deep wedge force-guided recovery: "
+            f"depth={depth*1000.0:.1f}mm lat_N={np.round(force_port[:2], 2).tolist()} "
+            f"moment_Nm={moment_text} score={baseline_score:.2f}"
+        )
+
+        base_lat = clamp_vector_norm(
+            np.asarray(current_lat, dtype=np.float64).reshape(2),
+            self.config.wedge_recovery_max_lat_m,
+        )
+        base_tilt = clamp_vector_norm(
+            np.asarray(current_tilt, dtype=np.float64).reshape(2),
+            self.config.wedge_recovery_max_tilt_rad,
+        )
+        for probe_index, (delta_lat, delta_tilt) in enumerate(probes, start=1):
+            unload_status, unloaded = self._unload_deep_wedge(depth)
+            if unload_status in (SEATED, HARD_FAILURE):
+                return unload_status, None, None, depth
+            if unload_status != _DEEP_RECOVERY_ACCEPTED or unloaded is None:
+                return _DEEP_RECOVERY_FAILED, None, None, depth
+            unloaded_depth, _, _ = unloaded
+            recovery_lat = clamp_vector_norm(
+                base_lat + np.asarray(delta_lat, dtype=np.float64).reshape(2),
+                self.config.wedge_recovery_max_lat_m,
+            )
+            recovery_tilt = clamp_vector_norm(
+                base_tilt + np.asarray(delta_tilt, dtype=np.float64).reshape(2),
+                self.config.wedge_recovery_max_tilt_rad,
+            )
+            total_lat, total_tilt = self._combined_seat_correction(
+                np.zeros(2, dtype=np.float64),
+                np.zeros(2, dtype=np.float64),
+                recovery_lat,
+                recovery_tilt,
+            )
+
+            # Let the tiny XY/tilt adjustment settle at the unloaded depth
+            # before asking the plug to move forward again.  Returning to the
+            # pre-probe correction first means a mirrored trial never jumps
+            # directly across both sides of the bore.
+            transition_corrections = (
+                (base_lat, base_tilt),
+                (recovery_lat, recovery_tilt),
+                (recovery_lat, recovery_tilt),
+            )
+            for transition_lat, transition_tilt in transition_corrections:
+                self.policy._enforce_action_deadline(self.move_robot)
+                event_status = self._event_status()
+                if event_status is not None:
+                    return event_status, None, None, unloaded_depth
+                current_observation = self.get_observation()
+                current_depth, _, _, current_tip, _ = self._errors()
+                current_force = self._force_magnitude(current_observation)
+                if np.isfinite(current_force) and current_force > self.config.force_abort_n:
+                    self._hold_tip(current_tip, self.Rp)
+                    return HARD_FAILURE, None, None, current_depth
+                phase_lat, phase_tilt = self._combined_seat_correction(
+                    np.zeros(2, dtype=np.float64),
+                    np.zeros(2, dtype=np.float64),
+                    transition_lat,
+                    transition_tilt,
+                )
+                target_tip, target_rotation = self._seat_target_pose(
+                    unloaded_depth, phase_lat, phase_tilt
+                )
+                self.policy.set_pose_target(
+                    self.move_robot,
+                    self.policy._tcp_target_for_tip(target_tip, target_rotation),
+                    stiffness=self.STIFFNESS,
+                    damping=self.DAMPING,
+                )
+                self.policy.sleep_for(self.config.command_dt_sim_s)
+
+            probe_goal = min(
+                INSERT_DEPTH_M + self.config.seat_overtravel_m,
+                float(depth) + self.config.wedge_recovery_probe_depth_m,
+            )
+            command_depth = float(unloaded_depth)
+            last_command_time = time.monotonic()
+            deadline = time.monotonic() + self.config.wedge_recovery_probe_timeout_wall_s
+            improved_samples = 0
+            while time.monotonic() < deadline:
+                self.policy._enforce_action_deadline(self.move_robot)
+                event_status = self._event_status()
+                if event_status is not None:
+                    return event_status, None, None, command_depth
+                observation = self.get_observation()
+                current_depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
+                current_force = self._force_magnitude(observation)
+                if np.isfinite(current_force) and current_force > self.config.force_abort_n:
+                    self._hold_tip(tip_pos, self.Rp)
+                    return HARD_FAILURE, None, None, current_depth
+                if (
+                    np.isfinite(current_force)
+                    and current_force >= self.config.seat_force_cap_n
+                ):
+                    break
+                if (
+                    float(np.linalg.norm(lateral_xy)) > self.config.lateral_safety_m
+                    or float(np.linalg.norm(rotation_error)) > self.config.rotation_safety_rad
+                ):
+                    break
+
+                current_force_port, current_moment_port = self._wrench_plug_frame(
+                    observation
+                )
+                current_score = transverse_wrench_score(
+                    current_force_port, current_moment_port, self.config
+                )
+                if (
+                    current_depth >= depth + self.config.wedge_recovery_min_progress_m
+                    and np.isfinite(current_score)
+                    and current_score
+                    <= baseline_score
+                    * (1.0 - self.config.wedge_recovery_score_improvement_fraction)
+                ):
+                    improved_samples += 1
+                    if improved_samples >= 2:
+                        self.log.info(
+                            "[v50] deep wedge probe accepted: "
+                            f"probe={probe_index}/{len(probes)} "
+                            f"depth_gain_mm={(current_depth-depth)*1000.0:.2f} "
+                            f"score={current_score:.2f}/{baseline_score:.2f} "
+                            f"lat_mm={np.round(recovery_lat*1000.0, 3).tolist()} "
+                            f"tilt_deg={np.degrees(np.linalg.norm(recovery_tilt)):.3f}"
+                        )
+                        return (
+                            _DEEP_RECOVERY_ACCEPTED,
+                            recovery_lat,
+                            recovery_tilt,
+                            current_depth,
+                        )
+                else:
+                    improved_samples = 0
+
+                now = time.monotonic()
+                elapsed = max(self.config.command_dt_sim_s, now - last_command_time)
+                command_depth = min(
+                    probe_goal,
+                    command_depth + self.config.wedge_recovery_probe_speed_m_s * elapsed,
+                )
+                last_command_time = now
+                target_tip, target_rotation = self._seat_target_pose(
+                    command_depth, total_lat, total_tilt
+                )
+                self.policy.set_pose_target(
+                    self.move_robot,
+                    self.policy._tcp_target_for_tip(target_tip, target_rotation),
+                    stiffness=self.STIFFNESS,
+                    damping=self.DAMPING,
+                )
+                self.policy.sleep_for(self.config.command_dt_sim_s)
+
+            self.log.warn(
+                "[v50] deep wedge probe did not improve; "
+                f"probe={probe_index}/{len(probes)}"
+            )
+        return _DEEP_RECOVERY_FAILED, None, None, depth
+
     def _seat(self) -> str:
         depth, _, _, _, _ = self._errors()
         command_depth = depth
@@ -1080,6 +1598,9 @@ class PlugRelativeV50Controller:
         hard_force_since = None
         acc_lat = np.zeros(2, dtype=np.float64)
         acc_tilt = np.zeros(2, dtype=np.float64)
+        recovery_lat = np.zeros(2, dtype=np.float64)
+        recovery_tilt = np.zeros(2, dtype=np.float64)
+        local_recovery_attempts = 0
         last_wrench_log_time = 0.0
         slope_samples = []
         last_slope_log_time = 0.0
@@ -1106,6 +1627,59 @@ class PlugRelativeV50Controller:
                 f"{suffix}"
             )
 
+        def try_deep_recovery(depth, force, force_port, moment_port):
+            """Return True when seating can continue, else an outcome or False."""
+
+            nonlocal acc_lat
+            nonlocal acc_tilt
+            nonlocal recovery_lat
+            nonlocal recovery_tilt
+            nonlocal local_recovery_attempts
+            nonlocal progress
+            nonlocal command_depth
+            nonlocal last_command_time
+            nonlocal stall_grace_deadline
+            if (
+                local_recovery_attempts >= self.config.wedge_recovery_max_local_attempts
+                or depth < self.config.wedge_recovery_min_depth_m
+                or not self.config.wedge_recovery_enable
+            ):
+                return False
+            current_lat, current_tilt = self._combined_seat_correction(
+                acc_lat, acc_tilt, recovery_lat, recovery_tilt
+            )
+            recovery_status, next_lat, next_tilt, recovered_depth = (
+                self._attempt_force_guided_deep_recovery(
+                    depth=depth,
+                    force=force,
+                    force_port=force_port,
+                    moment_port=moment_port,
+                    current_lat=current_lat,
+                    current_tilt=current_tilt,
+                )
+            )
+            if recovery_status == _DEEP_RECOVERY_SKIPPED:
+                return False
+            local_recovery_attempts += 1
+            if recovery_status in (SEATED, HARD_FAILURE):
+                return recovery_status
+            if recovery_status != _DEEP_RECOVERY_ACCEPTED:
+                return False
+            # The verified correction becomes persistent; reset the ordinary
+            # low-pass follower so the combined target cannot double-count it.
+            recovery_lat = np.asarray(next_lat, dtype=np.float64).reshape(2)
+            recovery_tilt = np.asarray(next_tilt, dtype=np.float64).reshape(2)
+            acc_lat = np.zeros(2, dtype=np.float64)
+            acc_tilt = np.zeros(2, dtype=np.float64)
+            recovered_now = time.monotonic()
+            progress = WallProgressWatch.start(recovered_depth, recovered_now, self.config)
+            command_depth = recovered_depth
+            last_command_time = recovered_now
+            stall_grace_deadline = None
+            slope_samples.clear()
+            self.send_feedback("deep wedge micro-recovery accepted; resuming seat")
+            return True
+
         while True:
             self.policy._enforce_action_deadline(self.move_robot)
             event_status = self._event_status()
@@ -1126,10 +1700,12 @@ class PlugRelativeV50Controller:
                     self._log_seat_wrench(seat_wrench_sample, acc_lat, acc_tilt)
                     last_wrench_log_time = now
             if seat_wrench_sample is not None:
-                axial_force = float(seat_wrench_sample[1][2])
+                force_port = np.asarray(seat_wrench_sample[1], dtype=np.float64)
+                moment_port = np.asarray(seat_wrench_sample[2], dtype=np.float64)
+                axial_force = float(force_port[2])
             else:
-                f_plug, _ = self._wrench_plug_frame(observation)
-                axial_force = float(f_plug[2])
+                force_port, moment_port = self._wrench_plug_frame(observation)
+                axial_force = float(force_port[2])
             slope_samples.append((now, depth, axial_force))
             while slope_samples and now - slope_samples[0][0] > SEAT_SLOPE_WINDOW_S:
                 slope_samples.pop(0)
@@ -1163,8 +1739,13 @@ class PlugRelativeV50Controller:
                 return WEDGED
 
             if depth >= self.config.seat_candidate_depth_m:
+                total_lat, total_tilt = self._combined_seat_correction(
+                    acc_lat, acc_tilt, recovery_lat, recovery_tilt
+                )
                 fixed_tip, fixed_rotation = self._seat_target_pose(
-                    INSERT_DEPTH_M + self.config.seat_overtravel_m, acc_lat, acc_tilt
+                    INSERT_DEPTH_M + self.config.seat_overtravel_m,
+                    total_lat,
+                    total_tilt,
                 )
                 return self._wait_for_insertion_event(fixed_tip, fixed_rotation)
 
@@ -1194,6 +1775,13 @@ class PlugRelativeV50Controller:
                                 seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
                             )
                         log_seat_slope(summary="stall")
+                        recovery_result = try_deep_recovery(
+                            depth, force, force_port, moment_port
+                        )
+                        if recovery_result is True:
+                            continue
+                        if recovery_result in (SEATED, HARD_FAILURE):
+                            return recovery_result
                         return self._wall_stall_outcome()
                 else:
                     self.log.warn(
@@ -1205,6 +1793,13 @@ class PlugRelativeV50Controller:
                             seat_wrench_sample, acc_lat, acc_tilt, summary="stall"
                         )
                     log_seat_slope(summary="stall")
+                    recovery_result = try_deep_recovery(
+                        depth, force, force_port, moment_port
+                    )
+                    if recovery_result is True:
+                        continue
+                    if recovery_result in (SEATED, HARD_FAILURE):
+                        return recovery_result
                     return self._wall_stall_outcome()
 
             depth_config = self.config
@@ -1232,8 +1827,11 @@ class PlugRelativeV50Controller:
                 axial_force,
             )
             last_command_time = now
+            total_lat, total_tilt = self._combined_seat_correction(
+                acc_lat, acc_tilt, recovery_lat, recovery_tilt
+            )
             target_tip, target_rotation = self._seat_target_pose(
-                command_depth, acc_lat, acc_tilt
+                command_depth, total_lat, total_tilt
             )
             self.policy.set_pose_target(
                 self.move_robot,

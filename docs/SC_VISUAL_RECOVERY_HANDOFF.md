@@ -1,27 +1,65 @@
 # SC camera-guided seating recovery handoff
 
-Updated: 2026-07-26
+Updated: 2026-07-27
 
 ## Status
 
-This handoff describes the next SC insertion change. It is **not implemented**
-at this revision.
+The canonical runtime now uses the five-keypoint physical-front-mouth model.
+Absolute blue/dark-bore prealignment is therefore disabled by default
+(`RL_INSERT_SC_VISUAL_ALIGN_ENABLE=0`) instead of correcting a target that
+already names the physical mouth. It remains available for controlled A/B
+evaluation. Stall-only relative recovery remains gated and opt-in configurable;
+the latest diagnostic produced no recovery motion because only one camera was
+usable after contact.
 
-The current controller has:
+The recovery is **implemented and unit-tested in the current worktree**. It
+still requires the simulator completion gate at the end of this document before
+it can be called field-validated.
+
+The controller now has:
 
 - multi-camera SC plug pose estimation;
 - seven-sample SC port-pose consensus;
 - a stationary, one-time visual opening refinement before alignment;
 - a 0.30 mm lateral alignment tolerance;
 - force/moment-based seating nudges; and
-- bounded wall-time stall detection.
+- bounded wall-time stall detection;
+- a clean pre-contact blue-housing side-band reference for each camera;
+- paired baseline/current support masks, so a stable calibrated gripper mask is
+  allowed but a new or changed occlusion still aborts recovery safely;
+- rectified blue-side occlusion measurement after a shallow stall;
+- two-camera directional agreement before each 0.25 mm recovery step;
+- independent 2.0 mm cumulative-path and radial-excursion caps;
+- light-contact force and projected-resolution safety gates;
+- recovery-offset persistence through resumed seating and event dwell; and
+- depth-gated insertion-event confirmation.
 
-The current controller does **not** inspect the relative blue-port/gray-plug
-margins after seating stalls. A shallow stall therefore ends the SC attempt
-without a camera-directed lateral recovery.
+The 2026-07-27 reliability update also makes the commanded impedance match the
+SC force model: seating/recovery use 90 N/m in the two port-frame lateral axes
+and 500 N/m on the port insertion axis.  Thus the 2 mm recovery hold is
+actually a 1 N hold, rather than the former 0.18 N produced by a 90 N/m
+all-axis command.  In free-space pre-contact alignment, a bounded 1.5 mm
+lateral segment is now retained until reached and uses a modestly stronger
+isotropic 200 N/m impedance; this removes the prior per-cycle force cap that
+made multi-millimetre handoff residuals crawl into the 15 s alignment timeout.
 
-Start from current `main`. The SC visual-alignment baseline first landed in
-commit `2bf6715` (`Add SC visual alignment and crop-refined pose evaluation`).
+`SC_TIMING`, `SC_PERCEPTION_TIMING`, `SC_ALIGN_TIMEOUT`,
+`SC_VISUAL_RECOVERY_SUPPORT`, and `ACTION_DEADLINE_*` now expose phase wall
+time, simulation time, remaining action budget, final alignment residuals,
+image-frame age, and paired-mask support state.  Use these before changing any
+timeout or speed default.
+
+The recovery uses 10 px and 12 px canonical side bands.  Both band widths and
+at least two fresh camera views must agree.  Missing gripper masks, stale
+frames, weak references, *new or changed* side support, or disagreement all
+result in no lateral command.  A stable partial gripper mask is paired with its
+own pre-contact reference instead of being rejected wholesale.
+
+The SC visual-alignment baseline first landed in commit `2bf6715` (`Add SC
+visual alignment and crop-refined pose evaluation`).  The current focused SC
+recovery/policy suite and broader explicit regression suite are listed under
+the test contract below; do not quote a global test count when unrelated test
+modules have collection prerequisites.
 
 ## Latest field evidence
 
@@ -56,6 +94,25 @@ A matching simulator insertion event arrived after the shallow stall while the
 geometry was still phasing. Therefore an event by itself is not sufficient
 evidence of SC seating at shallow depth.
 
+## Native-fixture audit of the recovery cue
+
+The original gray-plug/nearest-blue-gap detector was not usable at contact:
+all 176 controlled shifted-plug cases from the native SC-pose images became
+zero-gap/balanced at the moment the plug touched the blue housing.
+
+The replacement was checked against 51 labelled native empty-port captures in
+`/home/rschnurr/aic_perception_data/pose_sc` by rendering the measured
+20.0 x 6.4 mm plug into the real images.  The 14 px projected-edge gate kept
+48 usable views.  It produced the correct signed recovery direction in all of
+the following controlled offline cases:
+
+- 192 four-direction shifts (left, right, high, and low); and
+- 1,536 shifts with an additional 0.30 mm common expected-port bias swept
+  through eight directions.
+
+This is evidence that the cue is robust to the observed common-centre pose
+bias; it is not a substitute for the simulator completion gate below.
+
 ## Diagnosis
 
 The 0.30 mm alignment gate was satisfied relative to the estimated port pose,
@@ -71,8 +128,10 @@ Do not address this by:
 - treating the late insertion event as success.
 
 The prealignment target must remain stationary/frozen. The missing behavior is
-a **relative, stall-time image measurement** that can determine which port-local
-direction has physical clearance.
+a **relative, stall-time image measurement** that can determine which
+port-local direction has physical clearance.  The key insight is to compare
+each camera to its own clean view before approach: overlap removes blue pixels,
+so the signal remains informative when geometric clearance is exactly zero.
 
 ## Required recovery behavior
 
@@ -83,15 +142,15 @@ while the plug is held at light contact.
 2. Acquire fresh usable wrist-camera frames.
 3. Project the known SC bore geometry into each image and rectify the ROI into
    the two port-local lateral axes.
-4. Use the high color contrast to identify:
-   - blue adapter/housing pixels; and
-   - the occluding gray/white plug silhouette.
-5. Measure signed blue clearance or overlap on the left, right, top, and bottom
-   of the plug silhouette.
-6. Move toward the side with more visible blue clearance and away from the
+4. Before approach motion, capture a fresh masked blue-housing reference for
+   each usable camera after the final target is frozen.
+5. At the stall, measure current blue coverage in 10 px and 12 px left, right,
+   top, and bottom bands, normalized by that camera's clean reference.
+6. Move toward the side with more retained blue coverage and away from the
    covered/overlapped edge. In the captured failure, this must produce a
    port-local upward correction.
-7. Fuse signed evidence from usable cameras. Contradictory or weak views must
+7. Require the two band widths to agree, then fuse signed evidence from usable
+   cameras. Contradictory or weak views must
    result in no lateral command, not an arbitrary search direction.
 8. Apply one approximately 0.25 mm port-local lateral step, reacquire imagery,
    and repeat.
@@ -100,7 +159,7 @@ while the plug is held at light contact.
 10. Stop recovery immediately when depth advances meaningfully, reset the
     progress watch, and resume normal seating from the corrected position.
 
-This is deliberately a **relative margin** measurement. The existing
+This is deliberately a **relative visibility** measurement. The existing
 `ray_to_plane` absolute point estimates disagreed across views in the field run;
 loosening that gate would hide the calibration error rather than solve it.
 
@@ -126,7 +185,7 @@ Deployment mirrors that must remain byte-for-byte consistent:
 - camera projection and port-plane helpers; and
 - bounded lateral target updates.
 
-Keep the new image-only margin estimator ROS-free and deterministic in that
+Keep the new image-only side-visibility estimator ROS-free and deterministic in that
 module. Keep camera acquisition, force/depth state, port-frame transforms,
 commands, and logging in `SCController`.
 
@@ -148,6 +207,8 @@ step=0.00025 m
 max_total=0.0020 m
 max_axial_force=1.5 N
 meaningful_depth_advance=0.0005 m
+baseline_samples=3
+baseline_min_samples=2
 ```
 
 Do not lower the general 2.0 N force-nudge threshold merely to make this case
@@ -178,12 +239,14 @@ Add tests that prove:
    rectification.
 4. Agreeing views fuse; contradictory views command no motion.
 5. Weak blue association or an occluded ROI commands no motion.
-6. Each step is capped near 0.25 mm and cumulative recovery near 2.0 mm.
-7. Recovery activates only after a shallow seating stall, not during ordinary
+6. Missing, stale, masked, or weak pre-contact side references command no
+   motion.
+7. Each step is capped near 0.25 mm and cumulative recovery near 2.0 mm.
+8. Recovery activates only after a shallow seating stall, not during ordinary
    approach or frozen prealignment.
-8. Meaningful depth advance exits recovery immediately and resumes seating.
-9. A shallow matching insertion event does not report `SEATED`.
-10. A credible-depth matching event still reports `SEATED`.
+9. Meaningful depth advance exits recovery immediately and resumes seating.
+10. A shallow matching insertion event does not report `SEATED`.
+11. A credible-depth matching event still reports `SEATED`.
 
 Run at minimum:
 
@@ -209,4 +272,3 @@ show:
 - no phasing through the blue housing;
 - seating reaching credible depth; and
 - the correct insertion event occurring at credible seating geometry.
-

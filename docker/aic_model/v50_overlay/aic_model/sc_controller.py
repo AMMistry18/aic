@@ -66,12 +66,11 @@ CALIBRATION NOTES:
    still almost certainly wrong for SC) no longer steer the robot.  They remain
    for ``RL_INSERT_CALIB_DUMP=1`` diagnostics and for camera-less unit tests;
    ``run_sc_insertion`` aborts before any motion if the measurement fails.
-2. The keypoint convention of the legacy ``best_sc_pose.pt`` model is not
-   recorded anywhere in this repo, and ``sc_plug_pose_geometry`` states its
-   keypoints are "unrelated" to it.  Rather than guess, this module *measures*
-   the triangulated keypoint rectangle at runtime and logs which convention it
-   matches (see ``classify_opening``).  Read one run's ``SC_OPENING`` lines
-   before trusting any pose it produces.
+2. The deployed port model is ``best_sc_mouth_pose.pt``.  It predicts the four
+   physical front-mouth corners plus an explicit centre using the single
+   geometry contract in ``aic_example_policies.ros.sc_mouth_pose_geometry``.
+   The controller rejects legacy four-keypoint detections rather than silently
+   reinterpreting their virtual 8.8 x 6.0 mm rectangle as a physical mouth.
 """
 
 from __future__ import annotations
@@ -85,6 +84,12 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
+from aic_example_policies.ros.sc_mouth_pose_geometry import (
+    LOCAL_SC_FRONT_MOUTH_KPS_M,
+    SC_FRONT_MOUTH_HEIGHT_M,
+    SC_FRONT_MOUTH_WIDTH_M,
+    SC_MOUTH_KEYPOINT_COUNT,
+)
 
 try:
     from scipy.optimize import least_squares
@@ -99,9 +104,15 @@ from .rl_insert_contract import (
     quat_to_matrix,
 )
 from .sc_visual_alignment import (
+    ScBlueSideSignature,
+    aggregate_sc_blue_side_signatures,
+    bounded_recovery_offset_update,
     bounded_visual_port_update,
     detect_sc_duplex_opening,
+    detect_sc_recovery_direction,
     fuse_sc_opening_hits,
+    fuse_sc_recovery_evidence,
+    measure_sc_blue_side_signature,
     project_point_px as project_sc_visual_point_px,
     ray_to_plane as sc_visual_ray_to_plane,
 )
@@ -116,6 +127,17 @@ from .v50_controller import (
     solve_tip_in_tcp,
     tip_from_tcp_transform,
 )
+
+# Distinct from both True and False: `ScInsertionController._align` returns
+# this when the alignment timeout fires but `SC_STRICT_PERCEPTION` is off, so
+# `run()` proceeds to seating instead of throwing the pose away.  Aborting
+# before an attempt scores proximity only (~25 max); attempting -- even from
+# an unconverged pose -- can still score a partial insertion (38-50), so
+# discarding it is strictly worse (docs/scoring.md:106-114).  `_seat()`
+# remains the safety net for a genuinely bad pose: it trips
+# `lateral_safety_m` / `rotation_safety_rad` and returns STALLED rather than
+# driving a wedge deeper.
+ALIGN_TIMED_OUT = "align_timed_out"
 
 
 # Deliberately local rather than imported from v50_controller: these are that
@@ -141,6 +163,230 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _sc_camera_frame_stamps(observation) -> dict[str, float]:
+    """Extract finite ROS-domain image stamps without decoding the images."""
+
+    from .sfp_plug_pose import stamp_to_seconds
+
+    stamps = {}
+    messages = {
+        "left_camera": getattr(observation, "left_image", None),
+        "center_camera": getattr(observation, "center_image", None),
+        "right_camera": getattr(observation, "right_image", None),
+    }
+    for camera, message in messages.items():
+        stamp = getattr(getattr(message, "header", None), "stamp", None)
+        try:
+            stamp_s = float(stamp_to_seconds(stamp))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(stamp_s):
+            stamps[camera] = stamp_s
+    return stamps
+
+
+def _sc_time_seconds(value) -> float:
+    """Best-effort conversion of ROS, rclpy, or test-clock time to seconds."""
+
+    if value is None:
+        return float("nan")
+    try:
+        nanoseconds = getattr(value, "nanoseconds")
+        if nanoseconds is not None:
+            seconds = float(nanoseconds) * 1e-9
+            if np.isfinite(seconds):
+                return seconds
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        seconds = float(getattr(value, "sec")) + 1e-9 * float(
+            getattr(value, "nanosec", 0.0)
+        )
+        if np.isfinite(seconds):
+            return seconds
+    except (AttributeError, TypeError, ValueError):
+        pass
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return seconds if np.isfinite(seconds) else float("nan")
+
+
+def _sc_sim_time_seconds(policy) -> float:
+    """Return the policy's simulation-clock time without making it mandatory."""
+
+    for getter in (
+        lambda: policy.time_now(),
+        lambda: policy.get_clock().now(),
+    ):
+        try:
+            seconds = _sc_time_seconds(getter())
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if np.isfinite(seconds):
+            return seconds
+    return float("nan")
+
+
+def _sc_action_budget_remaining_s(policy, *, now_wall_s: float | None = None) -> float:
+    """Expose the deployed policy deadline when present, otherwise NaN."""
+
+    try:
+        deadline = float(getattr(policy, "_action_deadline_wall"))
+    except (AttributeError, TypeError, ValueError):
+        return float("nan")
+    now = time.monotonic() if now_wall_s is None else float(now_wall_s)
+    remaining = deadline - now
+    return remaining if np.isfinite(remaining) else float("nan")
+
+
+def _sc_enforce_action_deadline(policy, move_robot) -> None:
+    """Check the deployment deadline from long-running SC perception loops."""
+
+    enforce = getattr(policy, "_enforce_action_deadline", None)
+    if callable(enforce):
+        enforce(move_robot)
+
+
+def _sc_format_time_map(values: dict[str, float]) -> str:
+    """Render a compact, stable map for operator-facing SC timing logs."""
+
+    pieces = []
+    for camera in sorted(values):
+        try:
+            value = float(values[camera])
+        except (TypeError, ValueError):
+            value = float("nan")
+        pieces.append(
+            f"{camera}:{value:.3f}" if np.isfinite(value) else f"{camera}:na"
+        )
+    return "{" + ",".join(pieces) + "}"
+
+
+def _sc_frame_timing_fields(policy, frame_stamps: dict[str, float]) -> str:
+    """Describe image header age in its ROS/simulation clock domain."""
+
+    now_sim_s = _sc_sim_time_seconds(policy)
+    ages = {
+        camera: now_sim_s - float(stamp_s)
+        if np.isfinite(now_sim_s) and np.isfinite(float(stamp_s))
+        else float("nan")
+        for camera, stamp_s in frame_stamps.items()
+    }
+    return (
+        f"frame_stamps_s={_sc_format_time_map(frame_stamps)} "
+        f"frame_age_s={_sc_format_time_map(ages)}"
+    )
+
+
+def _sc_recovery_support_summary(diagnostics: dict) -> str:
+    """Keep paired-mask diagnostics readable in one live log line."""
+
+    def values(name: str) -> str:
+        try:
+            array = np.asarray(diagnostics[name], dtype=np.float64).reshape(-1)
+        except (KeyError, TypeError, ValueError):
+            return "na"
+        return np.round(array, 3).tolist().__repr__()
+
+    pieces = []
+    mode = diagnostics.get("support_mode")
+    if mode is not None:
+        pieces.append(f"mode={mode}")
+    for name, label in (
+        ("baseline_support_fractions", "baseline"),
+        ("current_support_fractions", "current"),
+        ("common_support_fractions", "common"),
+        ("new_occlusion_fractions", "new_occlusion"),
+        ("support_change_fractions", "changed"),
+    ):
+        if name in diagnostics:
+            pieces.append(f"{label}={values(name)}")
+    for name, label in (
+        ("baseline_corridor_support_fraction", "corridor_baseline"),
+        ("current_corridor_support_fraction", "corridor_current"),
+        ("common_corridor_support_fraction", "corridor_common"),
+        ("new_corridor_occlusion_fraction", "corridor_new_occlusion"),
+        ("corridor_support_change_fraction", "corridor_changed"),
+    ):
+        if name in diagnostics:
+            try:
+                pieces.append(f"{label}={float(diagnostics[name]):.3f}")
+            except (TypeError, ValueError):
+                pieces.append(f"{label}=na")
+    direct_summary = " ".join(pieces) if pieces else "unavailable"
+    by_band = diagnostics.get("support_by_band")
+    if isinstance(by_band, dict):
+        band_summaries = []
+        for band, band_diagnostics in sorted(by_band.items()):
+            if isinstance(band_diagnostics, dict):
+                band_summaries.append(
+                    f"band{band}[{_sc_recovery_support_summary(band_diagnostics)}]"
+                )
+        if band_summaries:
+            return ";".join(band_summaries)
+    return direct_summary
+
+
+class _ScTiming:
+    """Small, wall-clock truthful trace shared by the SC insertion phases."""
+
+    def __init__(self, policy, log):
+        self.policy = policy
+        self.log = log
+        self.start_wall_s = time.monotonic()
+        self.start_sim_s = _sc_sim_time_seconds(policy)
+        self.phase_start_wall_s = self.start_wall_s
+        self.phase = "start"
+
+    @staticmethod
+    def _number(value: float) -> str:
+        return f"{value:.3f}" if np.isfinite(value) else "na"
+
+    def mark(self, phase: str, **fields) -> None:
+        now_wall_s = time.monotonic()
+        now_sim_s = _sc_sim_time_seconds(self.policy)
+        phase_elapsed_s = now_wall_s - self.phase_start_wall_s
+        total_elapsed_s = now_wall_s - self.start_wall_s
+        sim_elapsed_s = (
+            now_sim_s - self.start_sim_s
+            if np.isfinite(now_sim_s) and np.isfinite(self.start_sim_s)
+            else float("nan")
+        )
+        budget_remaining_s = _sc_action_budget_remaining_s(
+            self.policy, now_wall_s=now_wall_s
+        )
+        details = " ".join(f"{key}={value}" for key, value in fields.items())
+        suffix = f" {details}" if details else ""
+        self.log.info(
+            f"[sc] SC_TIMING phase={phase} previous_phase={self.phase} "
+            f"phase_wall_s={self._number(phase_elapsed_s)} "
+            f"total_wall_s={self._number(total_elapsed_s)} "
+            f"sim_elapsed_s={self._number(sim_elapsed_s)} "
+            f"action_budget_remaining_s={self._number(budget_remaining_s)}"
+            f"{suffix}"
+        )
+        self.phase = str(phase)
+        self.phase_start_wall_s = now_wall_s
+
+    def summary(self, outcome: bool, *, reason: str) -> None:
+        now_wall_s = time.monotonic()
+        now_sim_s = _sc_sim_time_seconds(self.policy)
+        sim_elapsed_s = (
+            now_sim_s - self.start_sim_s
+            if np.isfinite(now_sim_s) and np.isfinite(self.start_sim_s)
+            else float("nan")
+        )
+        self.log.info(
+            f"[sc] SC_TIMING_SUMMARY outcome={bool(outcome)} reason={reason} "
+            f"total_wall_s={self._number(now_wall_s - self.start_wall_s)} "
+            f"sim_elapsed_s={self._number(sim_elapsed_s)} "
+            "action_budget_remaining_s="
+            f"{self._number(_sc_action_budget_remaining_s(self.policy, now_wall_s=now_wall_s))}"
+        )
+
+
 def _normalize_event(value: object) -> str:
     """Reduce an insertion-event name to its trailing ``module/port``.
 
@@ -148,9 +394,17 @@ def _normalize_event(value: object) -> str:
     while the task names only ``nic_card_mount_0/sfp_port_0``.  v50's normaliser
     strips whitespace and slashes but not the ``cable_N#0#`` prefix, so its
     equality test cannot match even on a correct port; strip the prefix here.
+
+    Order matters.  SC publishes ``cable_0#1#/sc_port_0/sc_port_base`` -- the
+    prefix is followed by a *slash*.  Stripping slashes before splitting on
+    ``#`` leaves the one the split then exposes, so the result kept a leading
+    ``/`` and compared unequal to the task's ``sc_port_0/sc_port_base``.  The
+    2026-07-27 03:33 run seated the correct port and was logged as "SEATED IN A
+    DIFFERENT PORT"; under ``RL_INSERT_SC_STRICT_PORT_EVENT=1`` that same run
+    would have been a HARD_FAILURE.  Strip slashes *after* the split.
     """
-    text = str(value or "").strip().strip("/")
-    return text.rsplit("#", 1)[-1]
+    text = str(value or "").strip()
+    return text.rsplit("#", 1)[-1].strip("/")
 
 
 def _env_vector(name: str, default: np.ndarray) -> np.ndarray:
@@ -206,74 +460,29 @@ SC_BORE_PITCH_M = 0.01270            # standard SC duplex pitch
 SC_PLUG_WIDTH_M = 0.02000            # from sc_plug_pose_geometry keypoints
 SC_PLUG_HEIGHT_M = 0.00640
 
-# The model does not outline any physical feature, so the hypotheses must be the
-# LABEL CONVENTIONS the two collectors in this repo project, not SDF geometry.
-# There are exactly two, and they disagree:
-#
-#   DataCollectorScPoseGT.py   SC_HALF_WIDTH_M 0.0044 / SC_HALF_HEIGHT_M 0.0030
-#                              ->  8.8  x 6.00 mm   (aspect 1.467)
-#   DataCollectorPoseSC.py     SC_FULL_WIDTH_M 0.02578 / SC_FULL_LENGTH_M 0.00927
-#                              -> 25.78 x 9.27 mm   (aspect 2.781)
-#
-# The shipped best_sc_pose.pt follows the FIRST.  Measured, not assumed: running
-# the weights over testing/check_sc_previews and scaling by the SC duplex bore
-# pitch (12.70 mm, a fixed mechanical dimension and so independent of segmenting
-# anything) gives 9.00 x 5.94 and 8.73 x 6.01 mm -- 8.8 x 6.0 to about 1%.  The
-# quad's diagonals agree to 1-3% while adjacent sides differ 1.44-1.51, so it is
-# a rectangle and not a diamond with those diagonals.  Its centroid sits on the
-# DUPLEX CENTRE (1.2-1.9 mm from the bore-pair midpoint, against 5.3-5.4 mm from
-# either bore), which is why both conventions carry a zero bore offset below.
-#
-# Note train_sc.py's --data default points at pose_sc, which is the SECOND
-# collector's output directory -- so the shipped weights were not produced by the
-# default invocation.  Keep both entries: classify_opening then reports which
-# model is actually loaded, and one build works with the current weights and any
-# retrain, A/B-able through AIC_SC_POSE_WEIGHTS without a code change.
-#
-# The SDF-derived guesses that used to live here (duplex 22.41 x 8.10, bore
-# 9.71 x 8.10) matched neither, and cost two field runs: they made every genuine
-# detection classify as "single_bore" and emit a warning claiming the pose needed
-# a 6.35 mm correction it does not need.
-SC_GT_LABEL_WIDTH_M = 0.0088         # DataCollectorScPoseGT, 2 * SC_HALF_WIDTH_M
-SC_GT_LABEL_HEIGHT_M = 0.0060        # DataCollectorScPoseGT, 2 * SC_HALF_HEIGHT_M
-SC_FACE_LABEL_WIDTH_M = 0.02578      # DataCollectorPoseSC, outer face
-SC_FACE_LABEL_HEIGHT_M = 0.00927     # DataCollectorPoseSC, outer face
-SC_OPENING_HYPOTHESES = (
-    ("gt_label", SC_GT_LABEL_WIDTH_M, SC_GT_LABEL_HEIGHT_M),
-    ("outer_face", SC_FACE_LABEL_WIDTH_M, SC_FACE_LABEL_HEIGHT_M),
-)
-
-# Local rectangle for the single-view PnP fallback, in the same corner order the
-# SFP estimator uses (KP0 top-left, KP1 top-right, KP2 bottom-right, KP3
-# bottom-left).  This MUST be the convention the loaded weights emit, not the
-# port's physical opening: PnP scales the pose by the ratio between this
-# rectangle and the observed one, so the old 22.41 mm entry would have placed the
-# port ~2.5x too far away.  The joint multiview fit below uses this label geometry
-# after raw DLT has classified the convention; it must never be replaced by the
-# physical opening dimensions.
-LOCAL_SC_PORT_KPS = np.array(
-    [
-        [+SC_GT_LABEL_WIDTH_M / 2.0, +SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
-        [-SC_GT_LABEL_WIDTH_M / 2.0, +SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
-        [-SC_GT_LABEL_WIDTH_M / 2.0, -SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
-        [+SC_GT_LABEL_WIDTH_M / 2.0, -SC_GT_LABEL_HEIGHT_M / 2.0, 0.0],
-    ],
-    dtype=np.float64,
-)
+# Port-pose model contract.  These are the externally visible FRONT-mouth
+# dimensions (22.407 x 8.10 mm), not the 7.85 mm binding clearance used by the
+# seating safety calculations above.  Keeping model geometry in the collector's
+# module makes checkpoint, labels, multiview fit, and deployment share one source
+# of truth.
+SC_POSE_WIDTH_M = SC_FRONT_MOUTH_WIDTH_M
+SC_POSE_HEIGHT_M = SC_FRONT_MOUTH_HEIGHT_M
+SC_POSE_LOCAL_KPS_M = LOCAL_SC_FRONT_MOUTH_KPS_M
+SC_POSE_CONVENTION = "physical_front_mouth"
 
 # UNCALIBRATED -- see module docstring item 1.
 SC_TIP_IN_TCP_POS = _env_vector("RL_INSERT_SC_TIP_IN_TCP_POS", SFP_TIP_IN_TCP_POS)
 SC_TIP_IN_TCP_QUAT = _env_vector("RL_INSERT_SC_TIP_IN_TCP_QUAT", SFP_TIP_IN_TCP_QUAT)
 SC_TIP_CALIBRATED = _env_bool("RL_INSERT_SC_TIP_CALIBRATED", False)
 
-# Port SELECTION is deliberately nearest-to-tip: this controller inserts into
-# whatever port the macro parked it over, and steering to the *requested* port is
-# the macro's job, not ours.  The seat check used to contradict that -- it
-# demanded the task's named port and returned HARD_FAILURE otherwise, so a
-# physically correct insertion into the nearest port read as a failure and the
-# seating path could never be shown to work.  Accept any port's event, but say
-# loudly which one it was, because scoring still credits only the requested port.
-# Flip this on once the macro reliably parks over the right port.
+# Deployment policy (docs/INSERTION_EVENT_POLICY.md): any fresh scoring
+# insertion event is a successful insertion, even when it names a different
+# cable or port than the task asked for.  Flowstate owns task/port bookkeeping;
+# this controller only confirms that the held cable physically seated.
+# Nearest-to-tip remains the perception association rule, so a port-ID mismatch
+# is expected behaviour rather than an anomaly, and rejecting the event aborts
+# the process *after* a successful insertion.  Opt in to the old strict
+# behaviour with RL_INSERT_SC_STRICT_PORT_EVENT=1; do not change this default.
 SC_STRICT_PORT_EVENT = _env_bool("RL_INSERT_SC_STRICT_PORT_EVENT", False)
 
 # Take the insertion axis from perception but keep the twist the macro handed us,
@@ -353,6 +562,24 @@ def sc_calib_frame_candidates(task) -> list[str]:
     return list(dict.fromkeys(c for c in candidates if c))
 
 SC_WRENCH_LOG_PERIOD_S = _env_float("RL_INSERT_SC_WRENCH_LOG_PERIOD_S", 0.25)
+# 2026-07-27: an SC run aborted in 8.6s of a 144s budget having never moved
+# toward the port, because all 7 perception frames landed 5.30-5.38px against
+# the 5.0px SC_MAX_SELECT_REPROJ_PX gate -- measured as the 5-keypoint mean,
+# which the near-symmetric, viewpoint-ambiguous corners dominate. Position
+# comes solely from KP4 (the explicit mouth centre), which is roll-invariant
+# and triangulated independently of the corners, so a noisy corner mean says
+# nothing about whether the centre -- the actual motion target -- is right.
+# Aborting before an attempt scores proximity only (~25 max); attempting and
+# reaching even 1.39mm of insertion scores partial credit (38-50), so
+# perception gates below default to RANKING candidates (by the trustworthy
+# centre-only reprojection) rather than rejecting the frame outright when
+# nothing clears the strict gate. Set this to restore the old reject-on-
+# gate-miss behaviour everywhere it applies (select gate, consensus
+# fallback, and the alignment-timeout-proceeds-to-seating below). The
+# SC_MAX_HANDOFF_LATERAL_M wrong-port gate is NOT affected by this flag --
+# it stays fatal regardless (a wrong-port insertion scores -12, far worse
+# than aborting).
+SC_STRICT_PERCEPTION = _env_bool("RL_INSERT_SC_STRICT_PERCEPTION", False)
 SC_PERCEPT_SAMPLES = _env_int("RL_INSERT_SC_PERCEPT_SAMPLES", 7)
 SC_PERCEPT_MIN_AGREE = _env_int("RL_INSERT_SC_PERCEPT_MIN_AGREE", 3)
 SC_PERCEPT_SAMPLE_DT = _env_float("RL_INSERT_SC_PERCEPT_SAMPLE_DT", 0.10)
@@ -375,38 +602,13 @@ SC_HANDOFF_MAX_DIST_M = _env_float("RL_INSERT_SC_HANDOFF_MAX_DIST_M", 0.120)
 # in -- so this is pure tolerance for perception noise and a macro that hands off
 # right at the mouth, not a licence to start partly inserted.
 SC_MAX_HANDOFF_DEPTH_M = _env_float("RL_INSERT_SC_MAX_HANDOFF_DEPTH_M", 0.002)
-# Dimensional gate on the triangulated rectangle.  The floor is deliberately NOT
-# the port's physical size, and NOT the label size either -- see below.
-#
-# The quad spans 0.25-0.26 of the adapter in every preview frame, but read that
-# fraction carefully: it is 0.25 of the FULL VISIBLE BODY, which is the 34.67 mm
-# FOA-005A including its mounting flanges (sc_port_visual.glb node 16, extents
-# 34.671 x 27.432 x 9.271 mm), NOT of the 25.78 mm outer face.  0.256 x 34.671 =
-# 8.88 mm, which is the label.  Against 25.78 mm the same fraction computes to
-# 6.6 mm and sends you looking for a convention that does not exist.  Two
-# separate sessions made exactly that substitution before the bore-pitch ruler
-# settled it; the absolute numbers are in SC_OPENING_HYPOTHESES above.
-#
-# The floor must clear the TRIANGULATED size, which is materially smaller than
-# the label: the 2026-07-25 field runs measured 7.09-7.40 mm x 3.95-4.07 mm
-# against a 8.8 x 6.0 mm label, because the target port is detected at only
-# ~0.32-0.45 confidence in the left and right cameras (a different adapter wins
-# 0.91 there) and weak corners pull the triangulated quad in towards its own
-# centroid.  A ~4.0 mm short axis is a full 1 mm BELOW the old 0.005 floor, so
-# that gate was rejecting every genuine candidate deterministically, not
-# marginally -- which is why the failure reproduced exactly x7.
-#
-# Derive any future raise from the *matched* hypothesis and the observed
-# shrinkage, never from the label or the SDF alone.
+# Broad corruption gate. Candidate scoring below compares against the one active
+# 22.407 x 8.10 mm model contract; these bounds only reject degenerate DLT.
 SC_MIN_OPENING_M = _env_float("RL_INSERT_SC_MIN_OPENING_M", 0.002)
 SC_MAX_OPENING_M = _env_float("RL_INSERT_SC_MAX_OPENING_M", 0.030)
 
-# Warn when the triangulated rectangle is this far from its closest known label
-# convention.  The 2026-07-25 field runs sat at ~3.65 mm (7.09x4.06 against the
-# 8.8x6.0 gt_label) purely from weak outer-camera detections, so a threshold at
-# or below that would fire every single frame and train people to ignore it.
-# Matching NEITHER convention looks like ~19-24 mm, so 6 mm separates "known
-# shrinkage" from "the loaded weights are not one of the two we know about".
+# Warn when the triangulated corners drift materially from the active physical
+# mouth geometry. The explicit KP4 centre remains the motion target.
 SC_OPENING_RESIDUAL_WARN_M = _env_float("RL_INSERT_SC_OPENING_RESIDUAL_WARN_M", 0.006)
 
 # Search cyclic relabellings of each camera's four keypoints before triangulating
@@ -433,13 +635,15 @@ class SCConfig:
     # TF/noise floor while preserving 0.425 mm of binding-axis margin.
     align_lateral_tol_m: float = 0.0003
     align_rotation_tol_rad: float = np.deg2rad(2.0)
-    align_max_lateral_step_m: float = 0.0015
+    align_max_lateral_step_m: float = 0.005
+    align_mouth_max_lateral_step_m: float = 0.0015
     align_max_rotation_step_rad: float = np.deg2rad(1.5)
 
-    # Camera-directed correction of the common-centre bias in the SC port pose.
-    # The blue housing only associates the ROI; the actual target is the midpoint
-    # of the two dark physical bores.  Missing imagery is always fail-soft.
-    visual_align_enable: bool = True
+    # Legacy absolute colour correction.  This compensated for the virtual
+    # 8.8 x 6.0 mm model's common-centre bias.  The active model directly
+    # predicts the physical mouth and its centre, so the extra correction is
+    # disabled by default but remains available for a controlled A/B.
+    visual_align_enable: bool = False
     visual_align_interval_wall_s: float = 0.15
     visual_align_max_step_m: float = 0.0005
     visual_align_single_view_scale: float = 0.5
@@ -452,11 +656,30 @@ class SCConfig:
     visual_align_consensus_spread_m: float = 0.00075
     visual_align_sample_dt_s: float = 0.10
 
+    # Stall-only relative visual servo.  Unlike visual_align above, this never
+    # replaces the frozen YOLO-derived target.  It compares blue side-band
+    # occlusion against a pre-contact reference from the same camera and carries
+    # a separate bounded offset through seating.  Motion requires two agreeing
+    # cameras and light contact; weak or contradictory evidence stops recovery.
+    visual_recovery_enable: bool = True
+    visual_recovery_step_m: float = 0.00025
+    visual_recovery_max_total_m: float = 0.002
+    visual_recovery_min_force_n: float = 0.4
+    visual_recovery_max_force_n: float = 1.5
+    visual_recovery_force_n: float = 1.0
+    visual_recovery_settle_wall_s: float = 0.20
+    visual_recovery_frame_timeout_wall_s: float = 0.75
+    visual_recovery_contact_timeout_wall_s: float = 1.0
+    visual_recovery_meaningful_depth_m: float = 0.0005
+    visual_recovery_min_views: int = 2
+    visual_recovery_baseline_samples: int = 3
+    visual_recovery_baseline_min_samples: int = 2
+
     # 0.8 mm on a 45.8 mm bore is 1.7%; the same fraction here is 0.27 mm, which
     # is near TF noise, so this sits above the proportional value deliberately.
     stall_progress_m: float = 0.0005
-    stall_timeout_wall_s: float = 2.5
-    seat_stall_grace_s: float = 1.5
+    stall_timeout_wall_s: float = 5.0
+    seat_stall_grace_s: float = 3.0
 
     # SC has a lighter spring latch than the SFP cage, and the whole insertion is
     # a third as deep, so the force ladder is scaled down across the board.
@@ -497,6 +720,12 @@ class SCConfig:
     seat_candidate_depth_m: float = 0.0152    # 97% of bore, as SFP's 44.5 mm is
     insertion_event_timeout_wall_s: float = 6.0
 
+    # Field evidence 2026-07-27 19:31: the scoring event fired 0.66 s AFTER
+    # _seat() had already returned STALLED for the same run.  The plug seats
+    # when the push stops, so bailing out of the stall path the instant
+    # progress halts can discard a success that is only a beat away.
+    stall_event_dwell_wall_s: float = 3.0
+
     @property
     def force_lead_m(self) -> float:
         return min(
@@ -512,7 +741,10 @@ class SCConfig:
             align_lateral_tol_m=_env_float(
                 "RL_INSERT_SC_ALIGN_LATERAL_TOL_M", 0.0003
             ),
-            visual_align_enable=_env_bool("RL_INSERT_SC_VISUAL_ALIGN_ENABLE", True),
+            align_max_lateral_step_m=_env_float(
+                "RL_INSERT_SC_ALIGN_MAX_LATERAL_STEP_M", 0.005
+            ),
+            visual_align_enable=_env_bool("RL_INSERT_SC_VISUAL_ALIGN_ENABLE", False),
             visual_align_interval_wall_s=_env_float(
                 "RL_INSERT_SC_VISUAL_ALIGN_INTERVAL_S", 0.15
             ),
@@ -546,7 +778,46 @@ class SCConfig:
             visual_align_sample_dt_s=_env_float(
                 "RL_INSERT_SC_VISUAL_ALIGN_SAMPLE_DT_S", 0.10
             ),
-            stall_timeout_wall_s=_env_float("RL_INSERT_SC_STALL_TIMEOUT_S", 2.5),
+            visual_recovery_enable=_env_bool(
+                "RL_INSERT_SC_VISUAL_RECOVERY_ENABLE", True
+            ),
+            visual_recovery_step_m=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_STEP_M", 0.00025
+            ),
+            visual_recovery_max_total_m=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_MAX_TOTAL_M", 0.002
+            ),
+            visual_recovery_min_force_n=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_MIN_FORCE_N", 0.4
+            ),
+            visual_recovery_max_force_n=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_MAX_FORCE_N", 1.5
+            ),
+            visual_recovery_force_n=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_FORCE_N", 1.0
+            ),
+            visual_recovery_settle_wall_s=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_SETTLE_S", 0.20
+            ),
+            visual_recovery_frame_timeout_wall_s=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_FRAME_TIMEOUT_S", 0.75
+            ),
+            visual_recovery_contact_timeout_wall_s=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_CONTACT_TIMEOUT_S", 1.0
+            ),
+            visual_recovery_meaningful_depth_m=_env_float(
+                "RL_INSERT_SC_VISUAL_RECOVERY_DEPTH_GAIN_M", 0.0005
+            ),
+            visual_recovery_min_views=_env_int(
+                "RL_INSERT_SC_VISUAL_RECOVERY_MIN_VIEWS", 2
+            ),
+            visual_recovery_baseline_samples=_env_int(
+                "RL_INSERT_SC_VISUAL_RECOVERY_BASELINE_SAMPLES", 3
+            ),
+            visual_recovery_baseline_min_samples=_env_int(
+                "RL_INSERT_SC_VISUAL_RECOVERY_BASELINE_MIN_SAMPLES", 2
+            ),
+            stall_timeout_wall_s=_env_float("RL_INSERT_SC_STALL_TIMEOUT_S", 5.0),
             stall_progress_m=_env_float("RL_INSERT_SC_STALL_PROGRESS_M", 0.0005),
             free_speed_m_s=_env_float("RL_INSERT_SC_FREE_SPEED_M_S", 0.008),
             contact_speed_m_s=_env_float("RL_INSERT_SC_CONTACT_SPEED_M_S", 0.004),
@@ -564,10 +835,13 @@ class SCConfig:
             seat_align_release_decay=_env_float("RL_INSERT_SC_SEAT_ALIGN_RELEASE_DECAY", 0.7),
             seat_mouth_zone_m=_env_float("RL_INSERT_SC_SEAT_MOUTH_ZONE_M", 0.002),
             seat_mouth_speed_scale=_env_float("RL_INSERT_SC_SEAT_MOUTH_SPEED_SCALE", 0.25),
-            seat_stall_grace_s=_env_float("RL_INSERT_SC_SEAT_STALL_GRACE_S", 1.5),
+            seat_stall_grace_s=_env_float("RL_INSERT_SC_SEAT_STALL_GRACE_S", 3.0),
             seat_overtravel_m=_env_float("RL_INSERT_SC_SEAT_OVERTRAVEL_M", 0.0015),
             seat_candidate_depth_m=_env_float("RL_INSERT_SC_SEAT_CANDIDATE_DEPTH_M", 0.0152),
             insertion_event_timeout_wall_s=_env_float("RL_INSERT_SC_EVENT_TIMEOUT_S", 6.0),
+            stall_event_dwell_wall_s=_env_float(
+                "RL_INSERT_SC_STALL_EVENT_DWELL_WALL_S", 3.0
+            ),
         ).validated()
 
     def validated(self) -> "SCConfig":
@@ -594,6 +868,10 @@ class SCConfig:
                 "sc align tolerance must be positive and no larger than the "
                 f"{binding_half_clearance*1000:.3f}mm binding half-clearance"
             )
+        if self.align_max_lateral_step_m <= 0.0:
+            raise ValueError("sc precontact align step must be positive")
+        if self.align_mouth_max_lateral_step_m <= 0.0:
+            raise ValueError("sc at-mouth align step must be positive")
         if self.visual_align_interval_wall_s < 0.0:
             raise ValueError("sc visual alignment interval must be non-negative")
         if not 0.0 < self.visual_align_max_step_m <= self.visual_align_max_total_m:
@@ -620,6 +898,53 @@ class SCConfig:
             raise ValueError("sc visual consensus spread must be positive")
         if self.visual_align_sample_dt_s < 0.0:
             raise ValueError("sc visual sample interval must be non-negative")
+        if not (
+            0.0
+            < self.visual_recovery_step_m
+            <= self.visual_recovery_max_total_m
+        ):
+            raise ValueError(
+                "sc visual recovery step must be positive and within its total cap"
+            )
+        if not (
+            0.0
+            < self.visual_recovery_max_total_m
+            + self.seat_align_max_lat_m
+            <= self.lateral_safety_m
+        ):
+            raise ValueError(
+                "sc visual recovery plus wrench correction must fit lateral safety"
+            )
+        if not (
+            0.0
+            <= self.visual_recovery_min_force_n
+            < self.visual_recovery_force_n
+            <= self.visual_recovery_max_force_n
+            < self.force_abort_n
+        ):
+            raise ValueError(
+                "sc visual recovery force must lie between its contact gates"
+            )
+        if (
+            self.visual_recovery_settle_wall_s < 0.0
+            or self.visual_recovery_frame_timeout_wall_s <= 0.0
+            or self.visual_recovery_contact_timeout_wall_s <= 0.0
+        ):
+            raise ValueError("sc visual recovery timing must be non-negative")
+        if self.visual_recovery_meaningful_depth_m <= 0.0:
+            raise ValueError("sc visual recovery depth gain must be positive")
+        if self.visual_recovery_min_views < 2:
+            raise ValueError("sc visual recovery requires at least two views")
+        if self.visual_recovery_baseline_samples < 1:
+            raise ValueError("sc visual recovery baseline needs at least one sample")
+        if not (
+            1
+            <= self.visual_recovery_baseline_min_samples
+            <= self.visual_recovery_baseline_samples
+        ):
+            raise ValueError(
+                "sc visual recovery baseline min samples must fit its sample count"
+            )
         if self.seat_align_max_lat_m < 0.0 or self.seat_align_max_tilt_rad < 0.0:
             raise ValueError("sc alignment correction caps must be non-negative")
         if not 0.0 <= self.seat_align_release_decay <= 1.0:
@@ -721,32 +1046,6 @@ def next_sc_depth(
         candidate,
         current_depth + config.force_lead_m,
     )
-
-
-def classify_opening(width_m: float, height_m: float):
-    """Name the label convention a triangulated rectangle matches.
-
-    Returns ``(label, residual_m, lateral_offset_m)``.
-
-    ``lateral_offset_m`` is always 0.0 and is kept only so callers and logs do
-    not have to change.  Both collectors project their rectangle from
-    ``sc_port_base_link_entrance`` -- the duplex centre -- so a detection is
-    never half a bore off, whichever convention produced it.  Measurement backs
-    this: the predicted quad's centroid sits 1.2-1.9 mm from the bore-pair
-    midpoint against 5.3-5.4 mm from either individual bore.  The SC port also
-    declares ONE TouchPlugin where the NIC declares two, and the duplex plug
-    enters as a single unit, so there is no bore to choose.
-
-    This exists because the keypoint convention of ``best_sc_pose.pt`` is not
-    recorded anywhere; measuring it beats guessing it.
-    """
-    best = None
-    for label, expect_w, expect_h in SC_OPENING_HYPOTHESES:
-        residual = abs(width_m - expect_w) + abs(height_m - expect_h)
-        if best is None or residual < best[1]:
-            best = (label, residual)
-    label, residual = best
-    return label, float(residual), 0.0
 
 
 def _sc_calib_dump_enabled() -> bool:
@@ -1000,13 +1299,51 @@ def seat_frame(Rp, R_tip):
 class ScInsertionController:
     """Align to the perceived SC opening, then force-regulate to the seat."""
 
+    MAX_SEAT_ATTEMPTS = 3
+    RETRY_UNLOAD_M = 0.0015
+    RETRY_UNLOAD_HOLD_WALL_S = 2.0
+    # Port re-perception cost, measured: the 2026-07-28 log spent 9.58 s wall on
+    # a 7-sample consensus.  Budgeted explicitly so a full retry cannot start
+    # without room for it.
+    RETRY_REPERCEIVE_BUDGET_S = 12.0
+    # Rejects a mid-retry jump to the neighbouring port -- see
+    # _retry_reperceive_port.
+    RETRY_REPERCEIVE_MAX_SHIFT_M = 0.010
+    # Alignment reservation for a retry.  NOT align_timeout_wall_s: that is 60 s
+    # deployed, while post-ba01eda alignment converges in 2-6 s of wall time, so
+    # reserving the timeout would refuse retries that comfortably fit.  Under-
+    # reserving is the safe direction here -- _align calls
+    # _enforce_action_deadline every iteration, so the global budget still hard-
+    # bounds it, and a retry cut short scores no worse than one never started.
+    RETRY_ALIGN_BUDGET_S = 15.0
+
     STIFFNESS = [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
     DAMPING = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
+    # Precontact alignment is still free-space motion, so it can use a stiffer
+    # translational impedance to overcome the cable bias. Seating and recovery
+    # use separate contact-phase stiffness values below.
+    SEAT_LATERAL_STIFFNESS_N_M = 90.0
+    PRECONTACT_ALIGN_STIFFNESS = [
+        _env_float("RL_INSERT_SC_PRECONTACT_STIFFNESS_N_M", 800.0),
+        _env_float("RL_INSERT_SC_PRECONTACT_STIFFNESS_N_M", 800.0),
+        _env_float("RL_INSERT_SC_PRECONTACT_STIFFNESS_N_M", 800.0),
+        80.0,
+        80.0,
+        80.0,
+    ]
+    PRECONTACT_ALIGN_DAMPING = [
+        _env_float("RL_INSERT_SC_PRECONTACT_DAMPING_N_S_M", 160.0),
+        _env_float("RL_INSERT_SC_PRECONTACT_DAMPING_N_S_M", 160.0),
+        _env_float("RL_INSERT_SC_PRECONTACT_DAMPING_N_S_M", 160.0),
+        30.0,
+        30.0,
+        30.0,
+    ]
     HOLD_STIFFNESS = [200.0, 200.0, 200.0, 80.0, 80.0, 80.0]
     HOLD_DAMPING = [80.0, 80.0, 80.0, 30.0, 30.0, 30.0]
 
     def __init__(self, policy, task, get_observation, move_robot, send_feedback,
-                 *, port_pos, port_quat, Rp, Rs=None, config=None):
+                 *, port_pos, port_quat, Rp, Rs=None, config=None, timing=None):
         self.policy = policy
         self.task = task
         self.get_observation = get_observation
@@ -1039,6 +1376,47 @@ class ScInsertionController:
         self._visual_last_correction_xy = np.zeros(2, dtype=np.float64)
         self._visual_samples_xy = []
         self._visual_target_locked = False
+        self._visual_recovery_last_frame_stamps = {}
+        self._visual_recovery_last_failure_reason = None
+        # Frozen only after the visual target is frozen, so recovery rectifies
+        # both the clean reference and the stall frame in exactly one port frame.
+        self._visual_recovery_baseline = {}
+        self._visual_recovery_baseline_last_frame_stamps = {}
+        self.timing = timing
+        # A pre-contact segment remains fixed until the arm reaches it.
+        # Recomputing a target from the current tip every 50 ms caps steady
+        # lateral force at 90 N/m * 1.5 mm and made large handoff errors crawl
+        # into the 15 s alignment timeout.
+        self._align_segment_lateral_xy = None
+
+    def _seating_stiffness(self) -> np.ndarray:
+        """Return a base-frame matrix with 500 N/m along the port axis.
+
+        The policy serializes full 6x6 matrices directly.  Rotating only the
+        translational block preserves 90 N/m lateral compliance while matching
+        SCConfig's axial force-lead model.
+        """
+
+        translation_port = np.diag(
+            [
+                self.SEAT_LATERAL_STIFFNESS_N_M,
+                self.SEAT_LATERAL_STIFFNESS_N_M,
+                self.config.axial_stiffness_n_m,
+            ]
+        )
+        translation_base = self.Rp @ translation_port @ self.Rp.T
+        translation_base = 0.5 * (translation_base + translation_base.T)
+        stiffness = np.zeros((6, 6), dtype=np.float64)
+        stiffness[:3, :3] = translation_base
+        stiffness[3:, 3:] = np.diag(self.STIFFNESS[3:])
+        return stiffness
+
+    def _seating_axial_stiffness_n_m(self) -> float:
+        """Return the scalar stiffness seen along the insertion axis."""
+
+        stiffness = self._seating_stiffness()
+        axis = self.Rp[:, 2]
+        return float(axis @ stiffness[:3, :3] @ axis)
 
     # --------------------------------------------------------- visual target
     def _visual_due(self, now: Optional[float] = None) -> bool:
@@ -1218,6 +1596,306 @@ class ScInsertionController:
         )
         return True
 
+    def _prime_visual_recovery_baseline(self) -> bool:
+        """Freeze per-camera blue side-band references before approach motion.
+
+        This deliberately runs after ``_finalize_visual_target`` while the arm
+        is still stationary.  A baseline from the raw YOLO pose would be
+        rectified in a different frame when visual pre-alignment corrects the
+        target, which can itself look like a plug offset at the later stall.
+        """
+
+        self._visual_recovery_baseline = {}
+        self._visual_recovery_baseline_last_frame_stamps = {}
+        if (
+            not self.config.visual_recovery_enable
+            or not hasattr(self, "get_observation")
+        ):
+            return False
+
+        # Keep the immutable, rectified support masks as well as the scalar
+        # fractions.  A baseline made from fractions alone cannot distinguish a
+        # stable calibrated gripper mask from a newly occluded side band at a
+        # later stall.  The detector pairs this frozen support with the current
+        # frame and fails closed if it changed.
+        samples: dict[str, dict[int, list[ScBlueSideSignature]]] = {}
+        last_stamps: dict[str, float] = {}
+        for index in range(self.config.visual_recovery_baseline_samples):
+            self.policy._enforce_action_deadline(self.move_robot)
+            observation = self.get_observation()
+            rejections = {}
+            accepted = []
+            if observation is None:
+                rejections["observation"] = "missing"
+            else:
+                try:
+                    views = self.policy._build_views(observation)
+                except Exception as exc:
+                    views = {}
+                    rejections["views"] = f"build_{type(exc).__name__}"
+                if views:
+                    frame_stamps = _sc_camera_frame_stamps(observation)
+                    bore_world = self._visual_bore_quads_world()
+                    for camera, (bgr, K, T_cam_from_world) in views.items():
+                        try:
+                            stamp_s = frame_stamps.get(camera)
+                            if stamp_s is None:
+                                rejections[camera] = "missing_frame_stamp"
+                                continue
+                            if stamp_s <= last_stamps.get(camera, float("-inf")) + 1e-9:
+                                rejections[camera] = "stale_frame"
+                                continue
+                            projection = self.policy._pc.build_projection_matrix(
+                                K, T_cam_from_world
+                            )
+                            projected = [
+                                project_sc_visual_point_px(projection, point)
+                                for point in bore_world.reshape(-1, 3)
+                            ]
+                            if any(uv is None for uv in projected):
+                                rejections[camera] = "projection"
+                                continue
+                            bore_quads_uv = np.asarray(
+                                projected, dtype=np.float64
+                            ).reshape(2, 4, 2)
+                            ignored = self._visual_ignored_pixels(camera, bgr.shape)
+                            if ignored is None:
+                                rejections[camera] = "gripper_mask_unavailable"
+                                continue
+                            signatures = {}
+                            for band in (10, 12):
+                                diagnostics = {}
+                                signature = measure_sc_blue_side_signature(
+                                    bgr,
+                                    bore_quads_uv,
+                                    ignored,
+                                    band_half_width_px=band,
+                                    diagnostics=diagnostics,
+                                )
+                                if signature is None:
+                                    rejections[camera] = diagnostics.get(
+                                        "reason", "side_measurement_failed"
+                                    )
+                                    break
+                                signatures[band] = signature
+                            if len(signatures) != 2:
+                                continue
+                            camera_samples = samples.setdefault(
+                                camera, {10: [], 12: []}
+                            )
+                            for band, signature in signatures.items():
+                                camera_samples[band].append(signature)
+                            last_stamps[camera] = stamp_s
+                            accepted.append(camera)
+                        except Exception as exc:
+                            rejections[camera] = f"exception_{type(exc).__name__}"
+            self.log.info(
+                f"[sc] SC_VISUAL_RECOVERY_BASELINE_SAMPLE "
+                f"sample={index + 1}/{self.config.visual_recovery_baseline_samples} "
+                f"accepted={accepted} rejected={rejections}"
+            )
+            if (
+                index + 1 < self.config.visual_recovery_baseline_samples
+                and self.config.visual_align_sample_dt_s > 0.0
+            ):
+                self.policy.sleep_for(self.config.visual_align_sample_dt_s)
+
+        baseline = {}
+        insufficient = {}
+        for camera, per_band in samples.items():
+            counts = {band: len(values) for band, values in per_band.items()}
+            if any(
+                count < self.config.visual_recovery_baseline_min_samples
+                for count in counts.values()
+            ):
+                insufficient[camera] = f"samples={counts}"
+                continue
+            aggregate = {
+                band: aggregate_sc_blue_side_signatures(values)
+                for band, values in per_band.items()
+            }
+            if any(signature is None for signature in aggregate.values()):
+                insufficient[camera] = "incompatible_or_missing_support"
+                continue
+            # The downstream detector also checks this.  Reject early so the
+            # operator can see that the reference itself was not blue enough.
+            if any(
+                np.any(signature.blue_fractions < 0.50)
+                for signature in aggregate.values()
+            ):
+                insufficient[camera] = "weak_blue_side_reference"
+                continue
+            baseline[camera] = aggregate
+            self.log.info(
+                f"[sc] SC_VISUAL_RECOVERY_BASELINE camera={camera} "
+                f"samples={counts} side_visibility="
+                f"{{10: {np.round(aggregate[10].blue_fractions, 3).tolist()}, "
+                f"12: {np.round(aggregate[12].blue_fractions, 3).tolist()}}}"
+            )
+
+        self._visual_recovery_baseline_last_frame_stamps = last_stamps
+        if len(baseline) < self.config.visual_recovery_min_views:
+            self.log.warn(
+                f"[sc] SC_VISUAL_RECOVERY_BASELINE_UNAVAILABLE "
+                f"usable_views={len(baseline)} "
+                f"need={self.config.visual_recovery_min_views} "
+                f"rejected={insufficient} action=disable_recovery_only"
+            )
+            return False
+        self._visual_recovery_baseline = baseline
+        self.log.info(
+            f"[sc] SC_VISUAL_RECOVERY_BASELINE_READY "
+            f"cameras={list(baseline)}"
+        )
+        return True
+
+    def _visual_recovery_estimate(self, observation):
+        """Return a relative port-frame escape direction from agreeing views."""
+
+        self._visual_recovery_last_failure_reason = None
+        if observation is None:
+            self.log.warn(
+                "[sc] SC_VISUAL_RECOVERY_NO_MOTION reason=no_observation"
+            )
+            return None
+        try:
+            views = self.policy._build_views(observation)
+        except Exception as exc:
+            self.log.warn(
+                f"[sc] SC_VISUAL_RECOVERY_NO_MOTION "
+                f"reason=build_views_{type(exc).__name__}"
+            )
+            return None
+        if not views:
+            self.log.warn(
+                "[sc] SC_VISUAL_RECOVERY_NO_MOTION reason=no_camera_views"
+            )
+            return None
+
+        # port_pos is the frozen pre-alignment target.  Recovery never mutates
+        # it, so each image is rectified in one stable physical frame.
+        frame_stamps = _sc_camera_frame_stamps(observation)
+        frame_timing = _sc_frame_timing_fields(self.policy, frame_stamps)
+        last_frame_stamps = dict(
+            getattr(self, "_visual_recovery_last_frame_stamps", {})
+        )
+        baseline_by_camera = dict(
+            getattr(self, "_visual_recovery_baseline", {})
+        )
+        bore_world = self._visual_bore_quads_world()
+        evidence_by_view = []
+        rejection_reasons = {}
+        fresh_cameras = []
+        for camera, (bgr, K, T_cam_from_world) in views.items():
+            try:
+                stamp_s = frame_stamps.get(camera)
+                if stamp_s is None:
+                    rejection_reasons[camera] = "missing_frame_stamp"
+                    continue
+                previous_stamp_s = last_frame_stamps.get(camera)
+                if (
+                    previous_stamp_s is not None
+                    and stamp_s <= previous_stamp_s + 1e-9
+                ):
+                    rejection_reasons[camera] = "stale_frame"
+                    continue
+                fresh_cameras.append(camera)
+                projection = self.policy._pc.build_projection_matrix(
+                    K, T_cam_from_world
+                )
+                projected = [
+                    project_sc_visual_point_px(projection, point)
+                    for point in bore_world.reshape(-1, 3)
+                ]
+                if any(uv is None for uv in projected):
+                    rejection_reasons[camera] = "projection"
+                    continue
+                bore_quads_uv = np.asarray(
+                    projected, dtype=np.float64
+                ).reshape(2, 4, 2)
+                diagnostics = {}
+                ignored = self._visual_ignored_pixels(camera, bgr.shape)
+                if ignored is None:
+                    rejection_reasons[camera] = "gripper_mask_unavailable"
+                    continue
+                baseline = baseline_by_camera.get(camera)
+                if baseline is None:
+                    rejection_reasons[camera] = "baseline_unavailable"
+                    continue
+                evidence = detect_sc_recovery_direction(
+                    bgr,
+                    bore_quads_uv,
+                    ignored,
+                    baseline_blue_fractions=baseline,
+                    diagnostics=diagnostics,
+                )
+                self.log.info(
+                    f"[sc] SC_VISUAL_RECOVERY_SUPPORT camera={camera} "
+                    f"reason={diagnostics.get('reason', 'unknown')} "
+                    f"{_sc_recovery_support_summary(diagnostics)}"
+                )
+                if evidence is None:
+                    rejection_reasons[camera] = diagnostics.get(
+                        "reason", "not_found"
+                    )
+                    continue
+                evidence_by_view.append(
+                    {"camera": camera, "evidence": evidence}
+                )
+                self.log.info(
+                    f"[sc] SC_VISUAL_RECOVERY_VIEW camera={camera} "
+                    f"direction={np.round(evidence.direction_xy, 3).tolist()} "
+                    f"side_visibility_ratio="
+                    f"{np.round(evidence.margins, 3).tolist()} "
+                    f"confidence={evidence.confidence:.2f} "
+                    f"balanced={evidence.balanced}"
+                )
+            except Exception as exc:
+                rejection_reasons[camera] = f"exception_{type(exc).__name__}"
+
+        self.log.info(
+            f"[sc] SC_VISUAL_RECOVERY_VIEWS "
+            f"accepted={[item['camera'] for item in evidence_by_view]} "
+            f"rejected={rejection_reasons} {frame_timing} "
+            "action_budget_remaining_s="
+            f"{_sc_action_budget_remaining_s(self.policy):.3f}"
+        )
+        estimate = fuse_sc_recovery_evidence(
+            evidence_by_view,
+            min_views=self.config.visual_recovery_min_views,
+        )
+        if estimate is None:
+            if (
+                len(fresh_cameras) < self.config.visual_recovery_min_views
+                and rejection_reasons
+                and all(
+                    reason == "stale_frame"
+                    for reason in rejection_reasons.values()
+                )
+            ):
+                self._visual_recovery_last_failure_reason = "stale_frames"
+            else:
+                self._visual_recovery_last_failure_reason = "weak_evidence"
+            self.log.warn(
+                f"[sc] SC_VISUAL_RECOVERY_NO_MOTION "
+                f"reason={self._visual_recovery_last_failure_reason} "
+                f"accepted_views={len(evidence_by_view)} "
+                f"rejections={rejection_reasons}"
+            )
+            return None
+        for camera, stamp_s in frame_stamps.items():
+            if camera in views:
+                last_frame_stamps[camera] = stamp_s
+        self._visual_recovery_last_frame_stamps = last_frame_stamps
+        self.log.info(
+            f"[sc] SC_VISUAL_RECOVERY_FUSED cameras={list(estimate.cameras)} "
+            f"direction={np.round(estimate.direction_xy, 3).tolist()} "
+            f"confidence={estimate.confidence:.2f} "
+            f"resultant={estimate.resultant:.2f} balanced={estimate.balanced} "
+            f"{frame_timing}"
+        )
+        return estimate
+
     def _finalize_visual_target(self, *, phase: str) -> bool:
         """Robustly choose one target, then freeze it for this insertion."""
 
@@ -1286,30 +1964,36 @@ class ScInsertionController:
     def _prime_visual_target(self) -> bool:
         """Collect a stationary temporal batch and lock one visual target."""
 
-        if (
-            not self.config.visual_align_enable
-            or not hasattr(self, "get_observation")
-        ):
+        if not hasattr(self, "get_observation"):
             self._visual_target_locked = True
             return False
         if getattr(self, "_visual_target_locked", False):
             return bool(np.any(getattr(
                 self, "_visual_last_correction_xy", np.zeros(2, dtype=np.float64)
             )))
-        self._visual_samples_xy = []
-        for index in range(self.config.visual_align_consensus_samples):
-            self.policy._enforce_action_deadline(self.move_robot)
-            self._visual_refine_port(
-                self.get_observation(),
-                phase="prealign",
-                force_sample=True,
-            )
-            if (
-                index + 1 < self.config.visual_align_consensus_samples
-                and self.config.visual_align_sample_dt_s > 0.0
-            ):
-                self.policy.sleep_for(self.config.visual_align_sample_dt_s)
-        return self._finalize_visual_target(phase="prealign")
+        corrected = False
+        if self.config.visual_align_enable:
+            self._visual_samples_xy = []
+            for index in range(self.config.visual_align_consensus_samples):
+                self.policy._enforce_action_deadline(self.move_robot)
+                self._visual_refine_port(
+                    self.get_observation(),
+                    phase="prealign",
+                    force_sample=True,
+                )
+                if (
+                    index + 1 < self.config.visual_align_consensus_samples
+                    and self.config.visual_align_sample_dt_s > 0.0
+                ):
+                    self.policy.sleep_for(self.config.visual_align_sample_dt_s)
+            corrected = self._finalize_visual_target(phase="prealign")
+        else:
+            # Recovery remains useful when absolute visual pre-alignment is
+            # disabled for an experiment, but it still needs one immutable
+            # rectification frame for its own clean reference.
+            self._visual_target_locked = True
+        self._prime_visual_recovery_baseline()
+        return corrected
 
     # ------------------------------------------------------------- geometry
     def _tip_pose(self):
@@ -1417,40 +2101,64 @@ class ScInsertionController:
         )
 
     # ---------------------------------------------------------------- event
-    def _event_status(self):
+    def _event_status(self, depth_m: float):
+        """Accept any fresh matching insertion event as seated.
+
+        ``/scoring/insertion_event`` is a ~1 mm tip-proximity trigger, not a
+        full-bore contact signal -- true since the 2026-07-09 assets
+        (aic#593) and field-confirmed on 2026-07-27 19:31, when an SC run
+        stalled at 1.39 mm depth and the event still fired 0.66 s later. This
+        method used to defer any event below ``seat_candidate_depth_m``
+        (15.2 mm, "97% of the bore"): that was correct reasoning for a
+        contact-sensor trigger and is wrong for a proximity trigger, so it
+        was rejecting successes the robot had already earned. Do not
+        reinstate a depth gate here. ``depth_m`` is retained purely so the
+        acceptance log below is the permanent record of depth-at-event;
+        ``seat_candidate_depth_m`` still separately governs when ``_seat()``
+        stops driving (see ``SCConfig.seat_candidate_depth_m``).
+        """
+
         parent = self.policy._parent_node
         generation = int(getattr(parent, "_insertion_event_generation", 0))
         if generation <= self.event_generation:
             return None
         value = _normalize_event(getattr(parent, "_insertion_event_value", ""))
-        if value == self.expected_event:
-            return SEATED
-        if not SC_STRICT_PORT_EVENT:
+        matching = value == self.expected_event
+        if not matching and SC_STRICT_PORT_EVENT:
             self.log.error(
-                f"[sc] SEATED IN A DIFFERENT PORT: event '{value}', task asked for "
-                f"'{self.expected_event}'. Counting it as seated because port "
-                f"selection is nearest-to-tip by design -- but scoring credits only "
-                f"the requested port, so the macro parked over the wrong one. "
-                f"RL_INSERT_SC_STRICT_PORT_EVENT=1 to treat this as a failure."
+                f"[sc] insertion event was for wrong port '{value}', expected "
+                f"'{self.expected_event}'"
+            )
+            return HARD_FAILURE
+
+        depth = float(depth_m)
+        depth_text = f"{depth * 1000.0:.2f}" if np.isfinite(depth) else "nonfinite"
+        if matching:
+            self.log.info(
+                f"[sc] SC_EVENT_ACCEPTED generation={generation} "
+                f"event='{value}' depth_mm={depth_text}"
             )
             return SEATED
         self.log.error(
-            f"[sc] insertion event was for wrong port '{value}', expected "
-            f"'{self.expected_event}'"
+            f"[sc] SEATED IN A DIFFERENT PORT: event '{value}', task asked for "
+            f"'{self.expected_event}'. Counting it as seated because port "
+            f"selection is nearest-to-tip by design -- but scoring credits only "
+            f"the requested port, so the macro parked over the wrong one. "
+            f"RL_INSERT_SC_STRICT_PORT_EVENT=1 to treat this as a failure."
         )
-        return HARD_FAILURE
+        return SEATED
 
     def _wait_for_insertion_event(self, fixed_tip) -> str:
         deadline = time.monotonic() + self.config.insertion_event_timeout_wall_s
         hard_force_since = None
         while time.monotonic() < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
-            status = self._event_status()
-            if status is not None:
-                return status
             observation = self.get_observation()
             force = self._force_magnitude(observation)
-            tip_pos, _ = self._tip_pose()
+            depth, _, _, tip_pos, _ = self._errors()
+            status = self._event_status(depth)
+            if status is not None:
+                return status
             if np.isfinite(force) and force > self.config.force_abort_n:
                 self._hold_tip(tip_pos, self.Rs)
                 hard_force_since = hard_force_since or time.monotonic()
@@ -1464,28 +2172,97 @@ class ScInsertionController:
                 self.policy.set_pose_target(
                     self.move_robot,
                     self._tcp_target(fixed_tip, self.Rs),
-                    stiffness=self.STIFFNESS,
+                    stiffness=self._seating_stiffness(),
                     damping=self.DAMPING,
                 )
             self.policy.sleep_for(self.config.command_dt_sim_s)
         self.log.warn("[sc] seated geometry produced no matching insertion event")
         return STALLED
 
+    def _stall_event_dwell(self, tip_pos, tip_rotation, depth) -> Optional[str]:
+        """Hold position briefly after a stall in case a late event lands.
+
+        Field evidence 2026-07-27 19:31: the scoring event fired 0.66 s AFTER
+        ``_seat()`` had already returned STALLED for the same run.  Since
+        ``/scoring/insertion_event`` is a ~1 mm tip-proximity trigger
+        (aic#593), not full-bore contact, a push that just stalled can still
+        be a beat away from a credited event.  This does not drive the arm
+        any deeper -- it holds the tip at ``(tip_pos, tip_rotation)`` and
+        gives ``stall_event_dwell_wall_s`` for the event to arrive before the
+        caller concedes STALLED.
+        """
+        dwell_s = self.config.stall_event_dwell_wall_s
+        if dwell_s <= 0.0:
+            return None
+        depth_text = f"{depth * 1000.0:.2f}" if np.isfinite(depth) else "nonfinite"
+        self.log.info(
+            f"[sc] SC_STALL_EVENT_DWELL_START depth_mm={depth_text} "
+            f"dwell_s={dwell_s:.2f}"
+        )
+        deadline = time.monotonic() + dwell_s
+        hard_force_since = None
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            self._hold_tip(tip_pos, tip_rotation)
+            observation = self.get_observation()
+            depth, _, _, _, _ = self._errors()
+            status = self._event_status(depth)
+            if status is not None:
+                return status
+            force = self._force_magnitude(observation)
+            if np.isfinite(force) and force > self.config.force_abort_n:
+                hard_force_since = hard_force_since or time.monotonic()
+                if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
+                    self.log.error(
+                        f"[sc] >{self.config.force_abort_n:.1f}N during stall-event dwell"
+                    )
+                    return HARD_FAILURE
+            else:
+                hard_force_since = None
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+        depth_text = f"{depth * 1000.0:.2f}" if np.isfinite(depth) else "nonfinite"
+        self.log.warn(
+            f"[sc] SC_STALL_EVENT_DWELL_TIMEOUT depth_mm={depth_text} "
+            f"dwell_s={dwell_s:.2f}"
+        )
+        return None
+
     # ----------------------------------------------------------------- run
-    def _align(self) -> bool:
+    def _align(self):
+        """Drive to the perceived opening.  Returns ``True``, ``False``, or ``ALIGN_TIMED_OUT``.
+
+        ``True`` means converged within tolerance.  ``False`` means the
+        caller must abort -- returned on timeout only when
+        ``SC_STRICT_PERCEPTION`` is set.  ``ALIGN_TIMED_OUT`` (the default
+        timeout outcome) tells ``run()`` to proceed to seating anyway; see the
+        comment at the ``return ALIGN_TIMED_OUT`` site below for why that is
+        safe.
+        """
         # The cameras are wrist-mounted, so gather the complete temporal batch
         # before commanding motion.  Once selected, this target is immutable:
         # the field run showed per-frame target replacement oscillating by
         # 1.45 x 0.94 mm and making a 0.3 mm convergence gate impossible.
+        timing = getattr(self, "timing", None)
+        if timing is not None:
+            timing.mark("visual_prealign_start")
         self._prime_visual_target()
+        if timing is not None:
+            timing.mark("alignment_start")
         start = time.monotonic()
-        depth, _, _, _, _ = self._errors()
+        depth, lateral_xy, rotation_error, _, _ = self._errors()
         align_depth = depth
+        last_depth = depth
+        last_lateral = float(np.linalg.norm(lateral_xy))
+        last_rotation = float(np.linalg.norm(rotation_error))
+        command_count = 0
         while time.monotonic() - start < self.config.align_timeout_wall_s:
             self.policy._enforce_action_deadline(self.move_robot)
             depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
             lateral = float(np.linalg.norm(lateral_xy))
             rotation = float(np.linalg.norm(rotation_error))
+            last_depth = depth
+            last_lateral = lateral
+            last_rotation = rotation
             if (
                 lateral <= self.config.align_lateral_tol_m
                 and rotation <= self.config.align_rotation_tol_rad
@@ -1494,20 +2271,72 @@ class ScInsertionController:
                     f"[sc] aligned: lateral={lateral*1000:.2f}mm "
                     f"rot={np.degrees(rotation):.2f}deg depth={depth*1000:.2f}mm"
                 )
+                if timing is not None:
+                    timing.mark(
+                        "alignment_converged",
+                        lateral_mm=f"{lateral * 1000.0:.3f}",
+                        rotation_deg=f"{np.degrees(rotation):.3f}",
+                        depth_mm=f"{depth * 1000.0:.3f}",
+                        commands=command_count,
+                    )
                 return True
-            # Bounded increments from the CURRENT tip, as v50 does. Commanding
-            # the corrected pose outright is a large uncommanded motion at the
-            # mouth of an 8 mm opening.
-            lateral_step = -lateral_xy
-            lateral_norm = float(np.linalg.norm(lateral_step))
-            if lateral_norm > self.config.align_max_lateral_step_m:
-                lateral_step *= self.config.align_max_lateral_step_m / lateral_norm
-            target_tip = (
-                tip_pos
-                + self.Rp[:, 0] * lateral_step[0]
-                + self.Rp[:, 1] * lateral_step[1]
-                + self.Rp[:, 2] * float(np.clip(align_depth - depth, -0.001, 0.001))
-            )
+            # Farther than the mouth zone the plug is in free space.  Use a
+            # *persistent*, still-bounded segment there: replacing the
+            # target from the current tip every loop capped force at 0.135 N
+            # and made 4-6 mm handoff errors crawl into the alignment timeout.
+            # At the mouth preserve the former compliant current-tip increments.
+            precontact = depth < -self.config.seat_mouth_zone_m
+            segment_xy = getattr(self, "_align_segment_lateral_xy", None)
+            if precontact:
+                if (
+                    segment_xy is None
+                    or float(np.linalg.norm(lateral_xy - segment_xy))
+                    <= self.config.align_lateral_tol_m
+                ):
+                    lateral_step = -lateral_xy
+                    lateral_norm = float(np.linalg.norm(lateral_step))
+                    if lateral_norm > self.config.align_max_lateral_step_m:
+                        lateral_step *= (
+                            self.config.align_max_lateral_step_m / lateral_norm
+                        )
+                    segment_xy = np.asarray(
+                        lateral_xy + lateral_step, dtype=np.float64
+                    )
+                    self._align_segment_lateral_xy = segment_xy
+                    self.log.info(
+                        f"[sc] SC_ALIGN_SEGMENT mode=precontact "
+                        f"goal_lateral_mm="
+                        f"{np.round(segment_xy * 1000.0, 3).tolist()} "
+                        f"remaining_mm={lateral * 1000.0:.3f} "
+                        f"stiffness_axial_N_m="
+                        f"{self.PRECONTACT_ALIGN_STIFFNESS[2]:.1f}"
+                    )
+                target_tip = (
+                    self.port_pos
+                    + self.Rp[:, 0] * segment_xy[0]
+                    + self.Rp[:, 1] * segment_xy[1]
+                    + self.Rp[:, 2]
+                    * float(np.clip(align_depth, depth - 0.001, depth + 0.001))
+                )
+                stiffness = self.PRECONTACT_ALIGN_STIFFNESS
+                damping = self.PRECONTACT_ALIGN_DAMPING
+            else:
+                self._align_segment_lateral_xy = None
+                lateral_step = -lateral_xy
+                lateral_norm = float(np.linalg.norm(lateral_step))
+                if lateral_norm > self.config.align_mouth_max_lateral_step_m:
+                    lateral_step *= (
+                        self.config.align_mouth_max_lateral_step_m / lateral_norm
+                    )
+                target_tip = (
+                    tip_pos
+                    + self.Rp[:, 0] * lateral_step[0]
+                    + self.Rp[:, 1] * lateral_step[1]
+                    + self.Rp[:, 2]
+                    * float(np.clip(align_depth - depth, -0.001, 0.001))
+                )
+                stiffness = self.STIFFNESS
+                damping = self.DAMPING
             if rotation > self.config.align_max_rotation_step_rad:
                 remaining = 1.0 - self.config.align_max_rotation_step_rad / rotation
                 target_rotation = self.Rs @ rotation_from_axis_angle(remaining * rotation_error)
@@ -1516,18 +2345,61 @@ class ScInsertionController:
             self.policy.set_pose_target(
                 self.move_robot,
                 self._tcp_target(target_tip, target_rotation),
-                stiffness=self.STIFFNESS,
-                damping=self.DAMPING,
+                stiffness=stiffness,
+                damping=damping,
             )
+            command_count += 1
             self.policy.sleep_for(self.config.command_dt_sim_s)
         self.log.error(
-            f"[sc] alignment did not converge in {self.config.align_timeout_wall_s:.1f}s"
+            f"[sc] alignment did not converge in {self.config.align_timeout_wall_s:.1f}s "
+            f"SC_ALIGN_TIMEOUT final_depth_mm={last_depth * 1000.0:.3f} "
+            f"final_lateral_mm={last_lateral * 1000.0:.3f} "
+            f"final_rotation_deg={np.degrees(last_rotation):.3f} "
+            f"commands={command_count} action_budget_remaining_s="
+            f"{_sc_action_budget_remaining_s(self.policy):.3f}"
         )
-        return False
+        if timing is not None:
+            timing.mark(
+                "alignment_timeout",
+                lateral_mm=f"{last_lateral * 1000.0:.3f}",
+                rotation_deg=f"{np.degrees(last_rotation):.3f}",
+                depth_mm=f"{last_depth * 1000.0:.3f}",
+                commands=command_count,
+            )
+        if SC_STRICT_PERCEPTION:
+            return False
+        # Do not abort here: aborting before an attempt scores proximity only
+        # (~25 max), while attempting -- even from this unconverged pose --
+        # can still land a partial insertion (38-50), so throwing the pose
+        # away is strictly worse (docs/scoring.md:106-114).  This is safe
+        # because _seat() is the backstop for a genuinely bad pose: it trips
+        # lateral_safety_m (3mm) / rotation_safety_rad and returns STALLED
+        # rather than driving a wedge deeper.  ALIGN_TIMED_OUT keeps this
+        # outcome distinguishable from a converged alignment for both the
+        # caller and the logs.
+        self.log.warn(
+            "[sc] SC_ALIGN_TIMEOUT_PROCEEDING seating despite the unconverged "
+            "alignment above; RL_INSERT_SC_STRICT_PERCEPTION=1 restores the "
+            "old abort-on-timeout behaviour"
+        )
+        return ALIGN_TIMED_OUT
 
     def _seat(self) -> str:
         depth, _, _, _, _ = self._errors()
         command_depth = depth
+        seat_stiffness = self._seating_stiffness()
+        seat_axial_stiffness = self._seating_axial_stiffness_n_m()
+        self.log.info(
+            f"[sc] SC_SEAT_IMPEDANCE lateral_N_m="
+            f"{self.SEAT_LATERAL_STIFFNESS_N_M:.1f} "
+            f"axial_N_m={seat_axial_stiffness:.1f} "
+            f"force_lead_mm={self.config.force_lead_m * 1000.0:.3f} "
+            f"nominal_force_N="
+            f"{seat_axial_stiffness * self.config.force_lead_m:.3f} "
+            f"recovery_lead_mm="
+            f"{self.config.visual_recovery_force_n / seat_axial_stiffness * 1000.0:.3f} "
+            f"recovery_nominal_force_N={self.config.visual_recovery_force_n:.3f}"
+        )
         now = time.monotonic()
         last_command_time = now
         progress = WallProgressWatch.start(depth, now, self.config)
@@ -1536,27 +2408,26 @@ class ScInsertionController:
         acc_tilt = np.zeros(2, dtype=np.float64)
         last_wrench_log_time = 0.0
         stall_grace_deadline = None
+        recovery_offset_xy = np.zeros(2, dtype=np.float64)
+        recovery_path_m = 0.0
+        recovery_active = False
+        recovery_start_depth = float("nan")
+        recovery_next_step_wall_s = float("inf")
+        recovery_low_force_since = None
+        recovery_frame_wait_since = None
+        recovery_steps_this_episode = 0
 
         while True:
             self.policy._enforce_action_deadline(self.move_robot)
-            status = self._event_status()
-            if status is not None:
-                return status
             observation = self.get_observation()
-            depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
+            depth, lateral_xy, rotation_error, tip_pos, tip_rotation = self._errors()
             lateral = float(np.linalg.norm(lateral_xy))
             rotation = float(np.linalg.norm(rotation_error))
             force = self._force_magnitude(observation)
             now = time.monotonic()
-
-            sample = None
-            if self.config.seat_align_enable:
-                acc_lat, acc_tilt, sample = self._alignment_sample(
-                    observation, depth, force, acc_lat, acc_tilt
-                )
-                if now - last_wrench_log_time >= SC_WRENCH_LOG_PERIOD_S:
-                    self._log_wrench(sample, acc_lat, acc_tilt)
-                    last_wrench_log_time = now
+            status = self._event_status(depth)
+            if status is not None:
+                return status
 
             if np.isfinite(force) and force > self.config.force_abort_n:
                 self._hold_tip(tip_pos, self.Rs)
@@ -1576,13 +2447,191 @@ class ScInsertionController:
                     f"[sc] wedge geometry: lateral={lateral*1000:.2f}mm "
                     f"rotation={np.degrees(rotation):.1f}deg"
                 )
-                if sample is not None:
-                    self._log_wrench(sample, acc_lat, acc_tilt, summary="stall")
                 return STALLED
 
             if depth >= self.config.seat_candidate_depth_m:
-                fixed_tip = self.port_pos + self.Rp[:, 2] * SC_INSERT_DEPTH_M
+                fixed_tip = (
+                    self.port_pos
+                    + self.Rp[:, 0] * recovery_offset_xy[0]
+                    + self.Rp[:, 1] * recovery_offset_xy[1]
+                    + self.Rp[:, 2] * SC_INSERT_DEPTH_M
+                )
                 return self._wait_for_insertion_event(fixed_tip)
+
+            if recovery_active:
+                depth_gain = depth - recovery_start_depth
+                if depth_gain >= self.config.visual_recovery_meaningful_depth_m:
+                    self.log.info(
+                        f"[sc] SC_VISUAL_RECOVERY_EXIT reason=depth_advanced "
+                        f"gain_mm={depth_gain * 1000.0:.2f} "
+                        f"offset_mm="
+                        f"{np.round(recovery_offset_xy * 1000.0, 3).tolist()} "
+                        f"path_mm={recovery_path_m * 1000.0:.2f}"
+                    )
+                    recovery_active = False
+                    recovery_low_force_since = None
+                    recovery_frame_wait_since = None
+                    command_depth = max(command_depth, depth)
+                    last_command_time = now
+                    progress = WallProgressWatch.start(depth, now, self.config)
+                    stall_grace_deadline = None
+                else:
+                    if (
+                        not np.isfinite(force)
+                        or force > self.config.visual_recovery_max_force_n
+                    ):
+                        self._hold_tip(tip_pos, tip_rotation)
+                        self.log.warn(
+                            f"[sc] SC_VISUAL_RECOVERY_EXIT reason=force_gate "
+                            f"force_N={force:.2f} "
+                            f"max_N={self.config.visual_recovery_max_force_n:.2f}"
+                        )
+                        return STALLED
+
+                    if force < self.config.visual_recovery_min_force_n:
+                        if recovery_low_force_since is None:
+                            recovery_low_force_since = now
+                        if (
+                            now - recovery_low_force_since
+                            >= self.config.visual_recovery_contact_timeout_wall_s
+                        ):
+                            self._hold_tip(tip_pos, tip_rotation)
+                            self.log.warn(
+                                f"[sc] SC_VISUAL_RECOVERY_EXIT reason=contact_lost "
+                                f"force_N={force:.2f}"
+                            )
+                            return STALLED
+                    else:
+                        recovery_low_force_since = None
+                        if now >= recovery_next_step_wall_s:
+                            estimate = self._visual_recovery_estimate(observation)
+                            if estimate is None:
+                                if (
+                                    getattr(
+                                        self,
+                                        "_visual_recovery_last_failure_reason",
+                                        None,
+                                    )
+                                    == "stale_frames"
+                                ):
+                                    if recovery_frame_wait_since is None:
+                                        recovery_frame_wait_since = now
+                                        self.log.warn(
+                                            "[sc] SC_VISUAL_RECOVERY_WAIT "
+                                            "reason=stale_frames "
+                                            "action=hold_without_lateral_step"
+                                        )
+                                    if (
+                                        now - recovery_frame_wait_since
+                                        >= self.config.visual_recovery_frame_timeout_wall_s
+                                    ):
+                                        self._hold_tip(tip_pos, tip_rotation)
+                                        self.log.warn(
+                                            "[sc] SC_VISUAL_RECOVERY_EXIT "
+                                            "reason=fresh_frame_timeout"
+                                        )
+                                        return STALLED
+                                else:
+                                    self._hold_tip(tip_pos, tip_rotation)
+                                    self.log.warn(
+                                        "[sc] SC_VISUAL_RECOVERY_EXIT "
+                                        "reason=weak_or_conflicting_vision"
+                                    )
+                                    return STALLED
+                            elif estimate.balanced:
+                                recovery_frame_wait_since = None
+                                if recovery_steps_this_episode == 0:
+                                    self._hold_tip(tip_pos, tip_rotation)
+                                    self.log.warn(
+                                        "[sc] SC_VISUAL_RECOVERY_EXIT "
+                                        "reason=clearances_already_balanced"
+                                    )
+                                    return STALLED
+                                self.log.info(
+                                    "[sc] SC_VISUAL_RECOVERY_EXIT "
+                                    "reason=clearances_balanced_after_step "
+                                    "action=resume_seating"
+                                )
+                                recovery_active = False
+                                recovery_low_force_since = None
+                                recovery_frame_wait_since = None
+                                command_depth = depth
+                                last_command_time = now
+                                progress = WallProgressWatch.start(
+                                    depth, now, self.config
+                                )
+                                stall_grace_deadline = None
+                            else:
+                                recovery_frame_wait_since = None
+                                update = bounded_recovery_offset_update(
+                                    recovery_offset_xy,
+                                    estimate.direction_xy,
+                                    recovery_path_m,
+                                    max_step_m=(
+                                        self.config.visual_recovery_step_m
+                                    ),
+                                    max_total_m=(
+                                        self.config.visual_recovery_max_total_m
+                                    ),
+                                )
+                                if update is None:
+                                    self._hold_tip(tip_pos, tip_rotation)
+                                    self.log.warn(
+                                        "[sc] SC_VISUAL_RECOVERY_EXIT "
+                                        "reason=travel_cap_reached"
+                                    )
+                                    return STALLED
+                                (
+                                    recovery_offset_xy,
+                                    applied_step_xy,
+                                    recovery_path_m,
+                                ) = update
+                                recovery_steps_this_episode += 1
+                                recovery_next_step_wall_s = (
+                                    now
+                                    + self.config.visual_recovery_settle_wall_s
+                                )
+                                self.log.info(
+                                    f"[sc] SC_VISUAL_RECOVERY_STEP "
+                                    f"step_mm="
+                                    f"{np.round(applied_step_xy * 1000.0, 3).tolist()} "
+                                    f"offset_mm="
+                                    f"{np.round(recovery_offset_xy * 1000.0, 3).tolist()} "
+                                    f"path_mm={recovery_path_m * 1000.0:.2f} "
+                                    f"force_N={force:.2f}"
+                                )
+
+                    if recovery_active:
+                        recovery_command_depth = min(
+                            SC_INSERT_DEPTH_M
+                            + self.config.seat_overtravel_m,
+                            recovery_start_depth
+                            + self.config.visual_recovery_force_n
+                            / self.config.axial_stiffness_n_m,
+                        )
+                        target_tip = (
+                            self.port_pos
+                            + self.Rp[:, 0] * recovery_offset_xy[0]
+                            + self.Rp[:, 1] * recovery_offset_xy[1]
+                            + self.Rp[:, 2] * recovery_command_depth
+                        )
+                        self.policy.set_pose_target(
+                            self.move_robot,
+                            self._tcp_target(target_tip, self.Rs),
+                            stiffness=seat_stiffness,
+                            damping=self.DAMPING,
+                        )
+                        self.policy.sleep_for(self.config.command_dt_sim_s)
+                        continue
+
+            sample = None
+            if self.config.seat_align_enable:
+                acc_lat, acc_tilt, sample = self._alignment_sample(
+                    observation, depth, force, acc_lat, acc_tilt
+                )
+                if now - last_wrench_log_time >= SC_WRENCH_LOG_PERIOD_S:
+                    self._log_wrench(sample, acc_lat, acc_tilt)
+                    last_wrench_log_time = now
 
             stalled_now = progress.stalled(depth, now)
             if stall_grace_deadline is not None and not stalled_now:
@@ -1608,6 +2657,103 @@ class ScInsertionController:
                     )
                     if sample is not None:
                         self._log_wrench(sample, acc_lat, acc_tilt, summary="stall")
+                    recovery_contact = bool(
+                        np.isfinite(force)
+                        and self.config.visual_recovery_min_force_n
+                        <= force
+                        <= self.config.visual_recovery_max_force_n
+                    )
+                    recovery_depth = bool(
+                        -self.config.stall_progress_m
+                        <= depth
+                        <= self.config.seat_mouth_zone_m
+                    )
+                    recovery_budget = bool(
+                        recovery_path_m
+                        < self.config.visual_recovery_max_total_m - 1e-12
+                    )
+                    activation_frame_stamps = _sc_camera_frame_stamps(
+                        observation
+                    )
+                    activation_frame_timing = _sc_frame_timing_fields(
+                        self.policy, activation_frame_stamps
+                    )
+                    recovery_timestamped = bool(
+                        len(activation_frame_stamps)
+                        >= self.config.visual_recovery_min_views
+                    )
+                    recovery_baselined = bool(
+                        len(getattr(self, "_visual_recovery_baseline", {}))
+                        >= self.config.visual_recovery_min_views
+                    )
+                    if (
+                        self.config.visual_recovery_enable
+                        and recovery_contact
+                        and recovery_depth
+                        and recovery_budget
+                        and recovery_timestamped
+                        and recovery_baselined
+                    ):
+                        last_frame_stamps = dict(
+                            getattr(
+                                self,
+                                "_visual_recovery_last_frame_stamps",
+                                {},
+                            )
+                        )
+                        for camera, stamp_s in activation_frame_stamps.items():
+                            last_frame_stamps[camera] = max(
+                                stamp_s,
+                                last_frame_stamps.get(
+                                    camera, float("-inf")
+                                ),
+                            )
+                        self._visual_recovery_last_frame_stamps = (
+                            last_frame_stamps
+                        )
+                        recovery_active = True
+                        recovery_start_depth = depth
+                        recovery_next_step_wall_s = now
+                        recovery_low_force_since = None
+                        recovery_frame_wait_since = None
+                        recovery_steps_this_episode = 0
+                        acc_lat = np.zeros(2, dtype=np.float64)
+                        acc_tilt = np.zeros(2, dtype=np.float64)
+                        command_depth = depth
+                        last_command_time = now
+                        progress = WallProgressWatch.start(
+                            depth, now, self.config
+                        )
+                        stall_grace_deadline = None
+                        self.log.warn(
+                            f"[sc] SC_VISUAL_RECOVERY_ACTIVATE "
+                            f"depth_mm={depth * 1000.0:.2f} "
+                            f"force_N={force:.2f} "
+                            f"timestamped_views="
+                            f"{len(activation_frame_stamps)} "
+                            f"existing_offset_mm="
+                            f"{np.round(recovery_offset_xy * 1000.0, 3).tolist()} "
+                            f"{activation_frame_timing} "
+                            "action_budget_remaining_s="
+                            f"{_sc_action_budget_remaining_s(self.policy):.3f} "
+                            "wrench_nudge_reset=true"
+                        )
+                        continue
+                    self.log.warn(
+                        f"[sc] SC_VISUAL_RECOVERY_SKIPPED "
+                        f"enabled={self.config.visual_recovery_enable} "
+                        f"light_contact={recovery_contact} "
+                        f"mouth_depth={recovery_depth} "
+                        f"budget={recovery_budget}"
+                        f" timestamped_views={recovery_timestamped}"
+                        f" baseline_views={recovery_baselined} "
+                        f"{activation_frame_timing}"
+                    )
+                    dwell_status = self._stall_event_dwell(
+                        tip_pos, tip_rotation, depth
+                    )
+                    if dwell_status is not None:
+                        return dwell_status
                     return STALLED
 
             depth_config = self.config
@@ -1625,7 +2771,12 @@ class ScInsertionController:
             )
             last_command_time = now
 
-            target_tip = self.port_pos + self.Rp[:, 2] * command_depth
+            target_tip = (
+                self.port_pos
+                + self.Rp[:, 0] * recovery_offset_xy[0]
+                + self.Rp[:, 1] * recovery_offset_xy[1]
+                + self.Rp[:, 2] * command_depth
+            )
             target_rotation = self.Rs
             if self.config.seat_align_enable and (
                 np.any(acc_lat != 0.0) or np.any(acc_tilt != 0.0)
@@ -1644,10 +2795,147 @@ class ScInsertionController:
             self.policy.set_pose_target(
                 self.move_robot,
                 self._tcp_target(target_tip, target_rotation),
-                stiffness=self.STIFFNESS,
+                stiffness=seat_stiffness,
                 damping=self.DAMPING,
             )
             self.policy.sleep_for(self.config.command_dt_sim_s)
+
+    def _retry_snapshot(self):
+        observation = self.get_observation()
+        depth, _lateral_xy, _rotation_error, tip_pos, tip_rotation = self._errors()
+        force = self._force_magnitude(observation)
+        return depth, force, tip_pos, tip_rotation
+
+    def _seat_attempt_budget_required_s(
+        self, *, full_retry: bool, retry_prep: bool = False
+    ) -> float:
+        required = (
+            self.config.stall_timeout_wall_s
+            + self.config.seat_stall_grace_s
+            + self.config.stall_event_dwell_wall_s
+            + self.config.command_dt_sim_s
+        )
+        if retry_prep:
+            required += self.RETRY_UNLOAD_HOLD_WALL_S
+        if full_retry:
+            required += (
+                min(self.config.align_timeout_wall_s, self.RETRY_ALIGN_BUDGET_S)
+                + self.RETRY_REPERCEIVE_BUDGET_S
+                + 2.0
+            )
+        return required
+
+    def _seat_attempt_has_budget(
+        self, *, full_retry: bool, retry_prep: bool = False
+    ) -> bool:
+        remaining = _sc_action_budget_remaining_s(self.policy)
+        if not np.isfinite(remaining):
+            return True
+        return remaining >= self._seat_attempt_budget_required_s(
+            full_retry=full_retry,
+            retry_prep=retry_prep,
+        )
+
+    def _retry_command_depth(self, target_depth: float, *, hold_wall_s: float) -> None:
+        depth, _force, tip_pos, _tip_rotation = self._retry_snapshot()
+        target_depth = min(float(target_depth), depth)
+        target_tip = tip_pos + self.Rp[:, 2] * (target_depth - depth)
+        self.log.info(
+            f"[sc] SC_RETRY_UNLOAD from_mm={depth * 1000.0:.2f} "
+            f"to_mm={target_depth * 1000.0:.2f}"
+        )
+        deadline = time.monotonic() + max(0.0, float(hold_wall_s))
+        while time.monotonic() < deadline:
+            self.policy._enforce_action_deadline(self.move_robot)
+            self.policy.set_pose_target(
+                self.move_robot,
+                self._tcp_target(target_tip, self.Rs),
+                stiffness=self._seating_stiffness(),
+                damping=self.DAMPING,
+            )
+            self.policy.sleep_for(self.config.command_dt_sim_s)
+
+    def _retry_reprime_grasp(self) -> bool:
+        before = sc_grasp_transform(self.policy)
+        before_tip = None
+        if before is not None:
+            before_tip = np.asarray(before[0], dtype=np.float64).reshape(3)
+        if not prime_sc_plug_pose(self.policy, self.get_observation, self.move_robot):
+            self.log.error("[sc] SC_REPRIME_FAILED")
+            return False
+        after = sc_grasp_transform(self.policy)
+        if before_tip is not None and after is not None:
+            after_tip = np.asarray(after[0], dtype=np.float64).reshape(3)
+            delta_mm = (after_tip - before_tip) * 1000.0
+            self.log.info(
+                f"[sc] SC_REPRIME_DELTA dx_mm={delta_mm[0]:.3f} "
+                f"dy_mm={delta_mm[1]:.3f} dz_mm={delta_mm[2]:.3f}"
+            )
+        else:
+            self.log.info("[sc] SC_REPRIME_DELTA dx_mm=nan dy_mm=nan dz_mm=nan")
+        return True
+
+    def _retry_reperceive_port(self) -> bool:
+        """Refresh the cached port pose.  Never fatal -- falls back to cached.
+
+        Runs *after* the grasp re-prime, because the candidate selection inside
+        ``perceive_sc_port_pose_consensus`` is nearest-to-tip and the tip comes
+        from the grasp transform: re-priming first makes the port choice better,
+        not just fresher.
+
+        Every failure path keeps the cached pose and returns False rather than
+        aborting.  The cached pose already produced a converged alignment, so
+        falling back to it is strictly better than conceding the run --
+        docs/scoring.md:106-114, the same argument the perception gates use.
+        """
+        try:
+            perceived = perceive_sc_port_pose_consensus(
+                self.policy, self.task, self.get_observation, self.move_robot
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail a retry on vision
+            self.log.warn(
+                f"[sc] SC_REPERCEIVE_FAILED reason={exc!r} action=keep_cached"
+            )
+            return False
+        if perceived is None:
+            self.log.warn(
+                "[sc] SC_REPERCEIVE_FAILED reason=no_consensus action=keep_cached"
+            )
+            return False
+        port_pos, port_quat, reproj_px = perceived
+        port_pos = np.asarray(port_pos, dtype=np.float64).reshape(3)
+        shift = port_pos - self.port_pos
+        shift_norm = float(np.linalg.norm(shift))
+        # A retry re-perceives with the plug already sitting in a mouth.  3 of
+        # the 6 runs on 2026-07-28 selected the neighbouring port 40 mm away;
+        # accepting that jump here would command the arm sideways with the plug
+        # still engaged.  Port pose was repeatable to 30 um across those runs,
+        # so a genuine refresh is sub-millimetre -- this gate only ever rejects
+        # a port swap, never a real correction.
+        if shift_norm > self.RETRY_REPERCEIVE_MAX_SHIFT_M:
+            self.log.error(
+                f"[sc] SC_REPERCEIVE_REJECTED shift_mm={shift_norm * 1000.0:.2f} "
+                f"gate_mm={self.RETRY_REPERCEIVE_MAX_SHIFT_M * 1000.0:.1f} "
+                "action=keep_cached -- a shift this large is a different port, "
+                "not a refresh"
+            )
+            return False
+        shift_mm = shift * 1000.0
+        self.port_pos = port_pos
+        self._visual_origin_port_pos = self.port_pos.copy()
+        self.port_quat = np.asarray(port_quat, dtype=np.float64).reshape(4)
+        self.Rp = port_frame(self.port_quat)
+        _, R_tip = self._tip_pose()
+        self.Rs = (
+            seat_frame(self.Rp, R_tip) if SC_PRESERVE_HANDOFF_YAW else self.Rp.copy()
+        )
+        self.R_yaw = self.Rp.T @ self.Rs
+        self.log.info(
+            f"[sc] SC_REPERCEIVE_DELTA dx_mm={shift_mm[0]:.3f} "
+            f"dy_mm={shift_mm[1]:.3f} dz_mm={shift_mm[2]:.3f} "
+            f"shift_mm={shift_norm * 1000.0:.3f} reproj_px={reproj_px:.2f}"
+        )
+        return True
 
     def run(self) -> bool:
         if sc_grasp_transform(self.policy) is None:
@@ -1659,25 +2947,111 @@ class ScInsertionController:
                 "camera-less tests; field runs must prime_sc_plug_pose first"
             )
         self.send_feedback("sc align to perceived opening")
-        if not self._align():
+        align_status = self._align()
+        if align_status is False:
             return False
+        if align_status is not True:
+            # ALIGN_TIMED_OUT: _align() already logged SC_ALIGN_TIMEOUT and
+            # SC_ALIGN_TIMEOUT_PROCEEDING.  Seat anyway -- see _align's
+            # docstring for why this cannot score worse than the abort it
+            # replaces.
+            self.log.warn(
+                f"[sc] seating despite an unconverged alignment (status={align_status})"
+            )
+        depth, _, _, _, _ = self._errors()
+        standoff_depth = depth
         self.send_feedback("sc force-regulated seating")
-        outcome = self._seat()
-        if outcome == SEATED:
-            self.log.info(f"[sc] insertion event confirmed for {self.expected_event}")
-            return True
-        self.log.warn(f"[sc] seating ended without confirmation: {outcome}")
-        return False
+        timing = getattr(self, "timing", None)
+        attempt = 1
+        while attempt <= self.MAX_SEAT_ATTEMPTS:
+            if not self._seat_attempt_has_budget(full_retry=False):
+                depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
+                self.log.warn(
+                    f"[sc] SC_RETRY_EXHAUSTED attempts={attempt - 1} "
+                    f"final_depth_mm={depth * 1000.0:.2f}"
+                )
+                return False
+            if timing is not None:
+                timing.mark("seating_start", attempt=attempt)
+            outcome = self._seat()
+            if timing is not None:
+                timing.mark("seating_end", attempt=attempt, outcome=outcome)
+            if outcome == SEATED:
+                self.log.info(
+                    f"[sc] insertion event confirmed for {self.expected_event}"
+                )
+                return True
+            if outcome != STALLED:
+                self.log.warn(f"[sc] seating ended without confirmation: {outcome}")
+                return False
+            if attempt >= self.MAX_SEAT_ATTEMPTS:
+                depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
+                self.log.warn(
+                    f"[sc] SC_RETRY_EXHAUSTED attempts={attempt} "
+                    f"final_depth_mm={depth * 1000.0:.2f}"
+                )
+                self.log.warn(f"[sc] seating ended without confirmation: {outcome}")
+                return False
+
+            next_attempt = attempt + 1
+            full_retry = next_attempt >= 3
+            if not self._seat_attempt_has_budget(
+                full_retry=full_retry,
+                retry_prep=True,
+            ):
+                depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
+                self.log.warn(
+                    f"[sc] SC_RETRY_EXHAUSTED attempts={attempt} "
+                    f"final_depth_mm={depth * 1000.0:.2f}"
+                )
+                return False
+
+            depth, force, _tip_pos, _tip_rotation = self._retry_snapshot()
+            budget = _sc_action_budget_remaining_s(self.policy)
+            self.log.warn(
+                f"[sc] SC_RETRY_START attempt={next_attempt}/{self.MAX_SEAT_ATTEMPTS} "
+                f"reason=stalled depth_mm={depth * 1000.0:.2f} "
+                f"force_N={force:.2f} budget_s={budget:.3f}"
+            )
+            if next_attempt == 2:
+                self._retry_command_depth(
+                    depth - self.RETRY_UNLOAD_M,
+                    hold_wall_s=self.RETRY_UNLOAD_HOLD_WALL_S,
+                )
+            else:
+                self._retry_command_depth(
+                    standoff_depth,
+                    hold_wall_s=self.RETRY_UNLOAD_HOLD_WALL_S,
+                )
+                if not self._retry_reprime_grasp():
+                    return False
+                # Grasp first, then port: candidate selection is nearest-to-tip,
+                # so the fresh tip improves which port gets chosen.  Failure
+                # here is non-fatal and keeps the cached pose.
+                self._retry_reperceive_port()
+                self.send_feedback("sc retry align to perceived opening")
+                align_status = self._align()
+                if align_status is False:
+                    return False
+                if align_status is not True:
+                    self.log.warn(
+                        "[sc] retry seating despite an unconverged alignment "
+                        f"(status={align_status})"
+                    )
+                depth, _, _, _, _ = self._errors()
+                standoff_depth = depth
+            self.send_feedback("sc retry force-regulated seating")
+            attempt = next_attempt
 
 
 # --------------------------------------------------------------------------
-# Perception: SC opening pose from the legacy best_sc_pose.pt keypoints.
+# Perception: physical SC front-mouth pose (four corners plus centre).
 # --------------------------------------------------------------------------
 def _sc_detection_centroid(det):
     kps = np.asarray(det.get("kps"), dtype=np.float64)
-    if kps.shape[0] < 4:
+    if kps.ndim != 2 or kps.shape[0] < SC_MOUTH_KEYPOINT_COUNT:
         return np.array([np.nan, np.nan], dtype=np.float64)
-    return np.mean(kps[:4, :2], axis=0)
+    return np.asarray(kps[4, :2], dtype=np.float64)
 
 
 def _project_point_px(P, X):
@@ -1806,8 +3180,12 @@ def _log_sc_best_candidate(log, candidate):
     )
     log.info(
         f"[sc] SC_PERCEPT_BEST score={candidate['score']:.2f} "
-        f"reproj={candidate['reproj_px']:.2f}px "
+        f"centre_reproj="
+        f"{candidate.get('centre_reproj_px', float('nan')):.2f}px "
+        f"mean5_reproj={candidate['reproj_px']:.2f}px "
         f"fit_reproj={fit_reproj_text}px fit_shift={fit_shift_mm:.2f}mm "
+        f"center_vs_corners="
+        f"{candidate.get('center_disagreement_m', float('nan')) * 1000.0:.2f}mm "
         f"width={candidate['width']*1000:.2f}mm height={candidate['height']*1000:.2f}mm "
         f"fit_model={candidate.get('fit_width', candidate['width'])*1000:.2f}x"
         f"{candidate.get('fit_height', candidate['height'])*1000:.2f}mm "
@@ -1836,15 +3214,24 @@ def _log_sc_rejections(log, rejects, limit=8):
 
 
 def _rolled_kps(kps, roll: int) -> np.ndarray:
-    """The same four corners, relabelled by a cyclic shift."""
-    return np.roll(np.asarray(kps, dtype=np.float64)[:4], -roll, axis=0)
+    """Cyclically relabel the four corners while preserving explicit KP4."""
+
+    points = np.asarray(kps, dtype=np.float64)
+    if points.ndim != 2 or points.shape[0] < SC_MOUTH_KEYPOINT_COUNT:
+        raise ValueError("SC mouth pose requires four corners plus centre")
+    reordered = points[:SC_MOUTH_KEYPOINT_COUNT].copy()
+    reordered[:4] = np.roll(reordered[:4], -roll, axis=0)
+    return reordered
 
 
-def _triangulate_quad(policy, picks, rolls) -> np.ndarray:
+def _triangulate_mouth_keypoints(policy, picks, rolls) -> np.ndarray:
     Ps = [pick["P"] for pick in picks]
     rolled = [_rolled_kps(pick["kps"], r) for pick, r in zip(picks, rolls)]
     return np.array(
-        [policy._pc.triangulate([tuple(k[i]) for k in rolled], Ps) for i in range(4)],
+        [
+            policy._pc.triangulate([tuple(k[i]) for k in rolled], Ps)
+            for i in range(SC_MOUTH_KEYPOINT_COUNT)
+        ],
         dtype=np.float64,
     )
 
@@ -1853,21 +3240,43 @@ def _mean_reproj_px(policy, picks, rolls, kp_3d):
     errors = []
     for pick, roll in zip(picks, rolls):
         kps = _rolled_kps(pick["kps"], roll)
-        for i in range(4):
+        for i in range(SC_MOUTH_KEYPOINT_COUNT):
             err = policy._reproject_error_px(kp_3d[i], pick["K"], pick["T"], kps[i])
             if err is not None:
                 errors.append(err)
     return float(np.mean(errors)) if errors else None
 
 
+def _centre_reproj_px(policy, picks, kp_3d):
+    """Mean reprojection error of KP4 -- the explicit mouth centre -- alone.
+
+    Deliberately no ``rolls`` argument.  ``_rolled_kps`` only permutes indices
+    0-3, so ``pick["kps"][4]`` and therefore ``kp_3d[4]`` are IDENTICAL under
+    every one of the 4^(n-1) roll assignments ``_best_keypoint_correspondence``
+    searches: KP4 is roll-invariant.  That is precisely why this is a
+    trustworthy ranking key and ``_mean_reproj_px`` is not -- the four corners
+    are near-symmetric and ambiguous between viewpoints (that ambiguity is the
+    whole reason the roll search exists), so their reprojection error is partly
+    a measure of correspondence-search noise, not of centre quality.  KP4 is
+    also the sole source of the commanded position (``sc_multiview_candidates``
+    sets ``X = kp_3d[4]``), so this is a direct measurement of the number that
+    actually drives the plug.
+    """
+    errors = []
+    for pick in picks:
+        kps = np.asarray(pick["kps"], dtype=np.float64)
+        err = policy._reproject_error_px(kp_3d[4], pick["K"], pick["T"], kps[4])
+        if err is not None:
+            errors.append(err)
+    return float(np.mean(errors)) if errors else None
+
+
 def _best_keypoint_correspondence(policy, picks):
     """Resolve which camera's corner 0 is which physical corner.
 
-    ``detect_sc_pose`` returns four keypoints per detection, but their starting
-    corner is not stable between viewpoints -- a weakly-detected port can come
-    back labelled from a different corner than the same port in another camera.
-    Triangulating index-to-index then pairs corner 0 with corner 2 and produces a
-    quad that is not the port at all.
+    ``detect_sc_pose`` returns four corners plus an explicit centre.  A cyclic
+    corner ambiguity can still occur between viewpoints, so the corner labels
+    are resolved by reprojection while KP4 remains fixed.
 
     2026-07-25 18:46 is the worked example: the left camera saw the same physical
     port as the centre camera (centroids within 1.1 px) but labelled it rotated
@@ -1888,7 +3297,7 @@ def _best_keypoint_correspondence(policy, picks):
     best = None
     for rolls in itertools.product((0,), *([options] * (len(picks) - 1))):
         try:
-            kp_3d = _triangulate_quad(policy, picks, rolls)
+            kp_3d = _triangulate_mouth_keypoints(policy, picks, rolls)
         except Exception:
             continue
         mean_px = _mean_reproj_px(policy, picks, rolls, kp_3d)
@@ -1901,16 +3310,17 @@ def _best_keypoint_correspondence(policy, picks):
 
     # A roll applied to EVERY camera leaves the triangulated points and the
     # reprojection untouched and only renames the corners, so it is free to
-    # normalise the convention: the label rectangle is 8.8 wide x 6.0 tall, so
-    # `width` must come out as the long axis.  Without this, a reference camera
+    # normalise the convention: the mouth is wider than it is tall, so `width`
+    # must come out as the long axis.  Without this, a reference camera
     # that happens to start a quarter-turn round transposes width and height,
-    # which classify_opening and the candidate score both read.
+    # which the geometry residual and candidate score both read.
     kp_3d, rolls, mean_px = best
     width = float(np.linalg.norm(((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)))
     height = float(np.linalg.norm(((kp_3d[0] + kp_3d[1]) * 0.5) - ((kp_3d[2] + kp_3d[3]) * 0.5)))
     if height > width:
         rolls = tuple((r + 1) % 4 for r in rolls)
-        kp_3d = np.roll(kp_3d, -1, axis=0)
+        kp_3d = kp_3d.copy()
+        kp_3d[:4] = np.roll(kp_3d[:4], -1, axis=0)
     return kp_3d, rolls, mean_px
 
 
@@ -2011,14 +3421,12 @@ def _joint_sc_rectangle_fit(picks, local_kps, raw_kp_3d):
 
 
 def sc_multiview_candidates(policy, per_cam):
-    """Resolve associations and triangulate the raw label centre.
+    """Resolve associations and triangulate the physical mouth centre.
 
-    The known-size rigid fit remains a valuable consistency diagnostic, but a
-    common shift of every keypoint cannot be corrected by enforcing rectangle
-    size.  Field data proved that using the rigid fit as a hard gate rejected all
-    seven otherwise-consistent frames (raw ~3.4 px, forced fit ~5.4 px).  Motion
-    therefore starts from the raw DLT centre and the physical-mouth visual servo
-    corrects it; rigid fit disagreement is logged, never an insertion gate.
+    KP4 is the model's explicit mouth centre and is the motion target.  The
+    corners determine the plane orientation and provide a known-size consistency
+    diagnostic.  The rigid fit remains diagnostic-only because held-out
+    single-view PnP is not accurate enough to override the multiview centre.
     """
     log = policy.get_logger()
     per_cam = _select_sc_detections_for_triangulation(policy, per_cam, log=log)
@@ -2047,7 +3455,13 @@ def sc_multiview_candidates(policy, per_cam):
             dict(pick, kps=_rolled_kps(pick["kps"], roll))
             for pick, roll in zip(picks, rolls)
         )
-        raw_X = kp_3d.mean(axis=0)
+        raw_X = np.asarray(kp_3d[4], dtype=np.float64)
+        # KP4 is roll-invariant (see _centre_reproj_px), so this is safe to
+        # compute once here regardless of which relabelling `rolls` picked.
+        centre_reproj = _centre_reproj_px(policy, picks, kp_3d)
+        centre_reproj_px = centre_reproj if centre_reproj is not None else float("inf")
+        corner_X = np.mean(kp_3d[:4], axis=0)
+        center_disagreement = float(np.linalg.norm(raw_X - corner_X))
         if raw_X[2] < -0.05 or raw_X[2] > 0.25:
             rejects.append(("depth", f"z={raw_X[2] * 1000:.0f}mm"))
             continue
@@ -2060,15 +3474,19 @@ def sc_multiview_candidates(policy, per_cam):
             rejects.append(("size", f"{width * 1000:.1f}x{height * 1000:.1f}mm"))
             continue
 
-        label, residual, offset = classify_opening(width, height)
+        residual = abs(width - SC_POSE_WIDTH_M) + abs(height - SC_POSE_HEIGHT_M)
         raw_score = raw_reproj + residual * 250.0 - 0.02 * float(
             np.mean([pick.get("conf", 0.0) for pick in picks])
         )
         raw_candidates.append({
             "picks": picks, "kp_3d": kp_3d, "raw_X": raw_X,
-            "width": width, "height": height, "opening": label,
-            "opening_residual_m": residual, "bore_offset_m": offset,
+            "corner_X": corner_X,
+            "center_disagreement_m": center_disagreement,
+            "width": width, "height": height,
+            "opening": SC_POSE_CONVENTION,
+            "opening_residual_m": residual,
             "raw_reproj_px": raw_reproj, "raw_score": raw_score,
+            "centre_reproj_px": centre_reproj_px,
         })
 
     # Bundle adjustment is several orders of magnitude dearer than DLT. Run it
@@ -2082,12 +3500,10 @@ def sc_multiview_candidates(policy, per_cam):
         raw_X = raw_candidate["raw_X"]
         width = raw_candidate["width"]
         height = raw_candidate["height"]
-        label = raw_candidate["opening"]
         residual = raw_candidate["opening_residual_m"]
-        offset = raw_candidate["bore_offset_m"]
-        expected = dict((name, (w, h)) for name, w, h in SC_OPENING_HYPOTHESES)
-        expected_width, expected_height = expected[label]
-        q_wxyz, yaw = policy._estimate_sfp_port_orientation(kp_3d)
+        expected_width = SC_POSE_WIDTH_M
+        expected_height = SC_POSE_HEIGHT_M
+        q_wxyz, yaw = policy._estimate_sfp_port_orientation(kp_3d[:4])
         if q_wxyz is None:
             rejects.append(("degenerate_axis", "raw in-plane axis invalid"))
             continue
@@ -2096,16 +3512,9 @@ def sc_multiview_candidates(policy, per_cam):
         fit_X = None
         fit_reproj = None
         if candidate_index < SC_JOINT_FIT_TOP_K:
-            local_kps = np.array(
-                [
-                    [+expected_width / 2.0, +expected_height / 2.0, 0.0],
-                    [-expected_width / 2.0, +expected_height / 2.0, 0.0],
-                    [-expected_width / 2.0, -expected_height / 2.0, 0.0],
-                    [+expected_width / 2.0, -expected_height / 2.0, 0.0],
-                ],
-                dtype=np.float64,
+            fitted = _joint_sc_rectangle_fit(
+                picks, SC_POSE_LOCAL_KPS_M[:4], kp_3d[:4]
             )
-            fitted = _joint_sc_rectangle_fit(picks, local_kps, kp_3d)
             if fitted is not None:
                 fit_kp_3d, fit_X, fit_reproj = fitted
 
@@ -2113,7 +3522,7 @@ def sc_multiview_candidates(policy, per_cam):
         camera_diagnostics = []
         for cam, pick in zip(cams, picks):
             reproj_px = []
-            for i in range(4):
+            for i in range(SC_MOUTH_KEYPOINT_COUNT):
                 err = policy._reproject_error_px(
                     kp_3d[i], pick["K"], pick["T"], pick["kps"][i]
                 )
@@ -2126,7 +3535,9 @@ def sc_multiview_candidates(policy, per_cam):
                 "cam": cam,
                 "conf": float(pick.get("conf", 0.0)),
                 "centroid": _sc_detection_centroid(pick),
-                "kps": np.asarray(pick["kps"][:4], dtype=np.float64),
+                "kps": np.asarray(
+                    pick["kps"][:SC_MOUTH_KEYPOINT_COUNT], dtype=np.float64
+                ),
                 "reproj_px": reproj_px,
             })
         if not errors:
@@ -2135,16 +3546,19 @@ def sc_multiview_candidates(policy, per_cam):
         candidates.append({
             "X": raw_X, "kp_3d": kp_3d, "raw_kp_3d": kp_3d,
             "raw_X": raw_X, "q_wxyz": q_wxyz, "yaw": yaw,
+            "corner_X": raw_candidate["corner_X"],
+            "center_disagreement_m": raw_candidate["center_disagreement_m"],
             "score": float(raw_candidate["raw_score"]),
             "reproj_px": raw_candidate["raw_reproj_px"],
             "raw_reproj_px": raw_candidate["raw_reproj_px"],
+            "centre_reproj_px": raw_candidate["centre_reproj_px"],
             "fit_kp_3d": fit_kp_3d,
             "fit_X": fit_X,
             "fit_reproj_px": fit_reproj,
             "width": width, "height": height,
             "fit_width": expected_width, "fit_height": expected_height,
-            "opening": label, "opening_residual_m": residual,
-            "bore_offset_m": offset,
+            "opening": SC_POSE_CONVENTION,
+            "opening_residual_m": residual,
             "camera_diagnostics": camera_diagnostics,
         })
 
@@ -2175,7 +3589,19 @@ def _sc_candidate_lateral_distance(candidate, tip_pos):
 
 
 def perceive_sc_port_pose(policy, task, obs):
-    """One-frame SC opening pose: ``(pos, quat_wxyz, reproj_px)`` or ``None``."""
+    """One-frame SC opening pose: ``(pos, quat_wxyz, centre_reproj_px)`` or ``None``.
+
+    Ranks and selects by ``centre_reproj_px`` -- KP4 alone, roll-invariant --
+    not the 5-keypoint ``reproj_px`` mean the ambiguous corners dominate (see
+    ``_centre_reproj_px`` and ``SC_STRICT_PERCEPTION`` above).  When nothing
+    clears ``SC_MAX_SELECT_REPROJ_PX`` this DEGRADES to ranking every
+    candidate instead of rejecting the frame, because refusing to attempt
+    scores worse than attempting with a mediocre estimate
+    (docs/scoring.md:106-114).  ``RL_INSERT_SC_STRICT_PERCEPTION=1`` restores
+    the old reject-on-gate-miss behaviour.  The fatal
+    ``SC_MAX_HANDOFF_LATERAL_M`` wrong-port gate below is unaffected either
+    way -- it still returns ``None`` when nothing is within reach of the tip.
+    """
     log = policy.get_logger()
     views = policy._build_views(obs)
     if len(views) < 2:
@@ -2192,12 +3618,27 @@ def perceive_sc_port_pose(policy, task, obs):
         usable = []
         for det in dets:
             kps = np.asarray(det.get("kps"), dtype=np.float64)
-            if kps.shape[0] < 4:
+            if (
+                kps.ndim != 2
+                or kps.shape[0] != SC_MOUTH_KEYPOINT_COUNT
+                or kps.shape[1] < 2
+                or not np.all(np.isfinite(kps[:, :2]))
+            ):
                 continue
             usable.append({
-                "kps": kps[:4], "conf": det.get("conf", 0.0), "K": K, "T": T,
+                "kps": kps[:, :2],
+                "conf": det.get("conf", 0.0),
+                "K": K,
+                "T": T,
                 "P": policy._pc.build_projection_matrix(K, T),
             })
+        if dets and not usable:
+            shapes = [np.asarray(det.get("kps")).shape for det in dets]
+            log.error(
+                f"[sc] {cam}: rejected SC pose detections with keypoint shapes "
+                f"{shapes}; runtime requires exactly {SC_MOUTH_KEYPOINT_COUNT} "
+                "keypoints from best_sc_mouth_pose.pt"
+            )
         if usable:
             per_cam[cam] = usable
 
@@ -2208,19 +3649,38 @@ def perceive_sc_port_pose(policy, task, obs):
 
     # Diagnose the same candidate the select gate reports on. candidates[0] is
     # best by *score* (reproj + shape residual - confidence bonus), which is not
-    # necessarily best by reproj, and logging two different candidates under the
-    # word "best" is how a log costs you a field run to interpret.
-    best_by_reproj = min(candidates, key=lambda c: c["reproj_px"])
-    _log_sc_best_candidate(log, best_by_reproj)
+    # necessarily best by centre reproj, and logging two different candidates
+    # under the word "best" is how a log costs you a field run to interpret.
+    def _centre_key(c):
+        return c.get("centre_reproj_px", c["reproj_px"])
 
-    clean = [c for c in candidates if c["reproj_px"] <= SC_MAX_SELECT_REPROJ_PX]
+    best_by_centre = min(candidates, key=_centre_key)
+    _log_sc_best_candidate(log, best_by_centre)
+
+    clean = [c for c in candidates if _centre_key(c) <= SC_MAX_SELECT_REPROJ_PX]
     if not clean:
+        best_centre_px = _centre_key(best_by_centre)
+        if SC_STRICT_PERCEPTION:
+            log.warn(
+                f"[sc] no candidate under {SC_MAX_SELECT_REPROJ_PX:.1f}px centre "
+                f"select gate (best centre {best_centre_px:.1f}px, "
+                f"{len(candidates)} candidates) -- rejecting frame "
+                "(RL_INSERT_SC_STRICT_PERCEPTION=1)"
+            )
+            return None
+        # Degrade rather than reject: the corners' ambiguity says nothing
+        # about KP4's own correctness (see docstring above), and refusing to
+        # attempt scores strictly worse than attempting with a mediocre
+        # estimate.  Every candidate becomes eligible for the lateral-distance
+        # tie-break below; SC_MAX_HANDOFF_LATERAL_M remains fatal.
         log.warn(
-            f"[sc] no candidate under {SC_MAX_SELECT_REPROJ_PX:.1f}px select gate "
-            f"(best {best_by_reproj['reproj_px']:.1f}px, {len(candidates)} candidates) "
-            "-- rejecting frame"
+            "[sc] SC_PERCEPT_DEGRADED reason=no_candidate_under_select_gate "
+            f"best_centre_reproj_px={best_centre_px:.2f} "
+            f"best_mean5_reproj_px={best_by_centre['reproj_px']:.2f} "
+            f"candidates={len(candidates)} gate_px={SC_MAX_SELECT_REPROJ_PX:.1f} "
+            "action=rank_all_candidates_by_centre_reproj"
         )
-        return None
+        clean = candidates
 
     try:
         tcp_pos, tcp_quat = policy._tcp()
@@ -2244,57 +3704,162 @@ def perceive_sc_port_pose(policy, task, obs):
             return None
         chosen = min(in_range, key=lambda c: _sc_candidate_lateral_distance(c, tip_pos))
 
-    expected = dict((label, (w, h)) for label, w, h in SC_OPENING_HYPOTHESES)
-    exp_w, exp_h = expected[chosen["opening"]]
+    exp_w, exp_h = SC_POSE_WIDTH_M, SC_POSE_HEIGHT_M
+    chosen_centre_px = _centre_key(chosen)
     log.info(
         f"[sc] SC_OPENING convention={chosen['opening']} "
         f"width={chosen['width']*1000:.2f}mm height={chosen['height']*1000:.2f}mm "
         f"expected={exp_w*1000:.2f}x{exp_h*1000:.2f}mm "
         f"residual={chosen['opening_residual_m']*1000:.2f}mm "
-        f"reproj={chosen['reproj_px']:.1f}px"
+        f"center_vs_corners={chosen['center_disagreement_m']*1000:.2f}mm "
+        f"centre_reproj={chosen_centre_px:.1f}px "
+        f"mean5_reproj={chosen['reproj_px']:.1f}px"
     )
-    # Both conventions project from the duplex centre, so there is no bore to
-    # choose and no offset to apply -- the old warning here claimed a 6.35 mm
-    # correction that would have pushed the plug half a bore off-centre.  What is
-    # worth warning about is a rectangle that matches NEITHER convention, which
-    # means the loaded weights are not one of the two this repo knows how to
-    # label, or triangulation has degraded badly.
     if chosen["opening_residual_m"] > SC_OPENING_RESIDUAL_WARN_M:
         log.warn(
             f"[sc] triangulated opening {chosen['width']*1000:.2f}x"
             f"{chosen['height']*1000:.2f}mm is {chosen['opening_residual_m']*1000:.2f}mm "
-            f"from its closest known label convention ({chosen['opening']}, "
-            f"{exp_w*1000:.2f}x{exp_h*1000:.2f}mm). Expect shrinkage when the "
-            "outer cameras detect the target weakly; check the SC_PERCEPT_BEST "
-            "per-camera confidences before trusting the scale."
+            f"from the physical mouth contract "
+            f"({exp_w*1000:.2f}x{exp_h*1000:.2f}mm). Check the "
+            "SC_PERCEPT_BEST per-camera confidences before trusting the pose."
         )
+    # centre_reproj_px -- KP4 alone -- is the returned/ranking number; the
+    # 5-keypoint mean stays visible above (SC_OPENING/SC_PERCEPT_BEST) purely
+    # for corner-health monitoring, never as a gate.
     return (
         np.asarray(chosen["X"], dtype=np.float64),
         np.asarray(chosen["q_wxyz"], dtype=np.float64),
-        float(chosen["reproj_px"]),
+        float(chosen_centre_px),
     )
 
 
-def perceive_sc_port_pose_consensus(policy, task, get_observation):
-    """Median of an agreeing cluster of single-frame SC poses."""
+def perceive_sc_port_pose_consensus(policy, task, get_observation, move_robot=None):
+    """Median of an agreeing cluster of single-frame SC poses.
+
+    The detector is expensive enough to consume a material part of the action
+    budget. Check the policy deadline on both sides of each inference rather
+    than discovering it only after all seven frames have been processed.
+
+    Both failure modes below (too few usable frames, or too much disagreement
+    between them) used to return ``None``.  They now DEGRADE to the single
+    best-measured sample -- lowest ``centre_reproj_px`` -- instead, because
+    refusing to attempt an insertion scores strictly worse than attempting
+    with a mediocre estimate (docs/scoring.md:106-114; see the module
+    docstring and ``SC_STRICT_PERCEPTION`` above).
+    ``RL_INSERT_SC_STRICT_PERCEPTION=1`` restores the old ``None`` returns.
+    There is one case with no fallback available at all: zero usable samples,
+    where there is nothing to degrade to.
+
+    ``perceive_sc_port_pose`` itself now degrades (see its docstring), so a
+    frame it returns can legitimately carry a ``centre_reproj_px`` above
+    ``SC_MAX_PORT_REPROJ_PX``.  Under ``SC_STRICT_PERCEPTION`` off, EVERY
+    non-None, finite-reprojection frame is collected here; frames under the
+    gate are preferred for the consensus computation below, and only when
+    NONE of them clear the gate does this fall back to the full pool (logging
+    ``SC_PERCEPT_DEGRADED reason=no_sample_under_port_reproj_gate``).
+    Filtering every returned frame at collection time -- silently dropping
+    the ones perceive_sc_port_pose already degraded to produce -- would
+    re-introduce, one level up, exactly the reject-on-gate-miss veto the
+    select-gate degrade above exists to remove.  Under ``SC_STRICT_PERCEPTION``
+    the collection loop filters at the gate exactly as before.
+    """
+
     log = policy.get_logger()
-    samples = []
+    start_wall_s = time.monotonic()
+    start_sim_s = _sc_sim_time_seconds(policy)
+
+    def log_timing(outcome: str, *, usable_samples: int) -> None:
+        now_wall_s = time.monotonic()
+        now_sim_s = _sc_sim_time_seconds(policy)
+        sim_elapsed_s = (
+            now_sim_s - start_sim_s
+            if np.isfinite(now_sim_s) and np.isfinite(start_sim_s)
+            else float("nan")
+        )
+        log.info(
+            f"[sc] SC_PERCEPTION_TIMING outcome={outcome} "
+            f"samples={usable_samples}/{SC_PERCEPT_SAMPLES} "
+            f"wall_s={now_wall_s - start_wall_s:.3f} "
+            f"sim_s={sim_elapsed_s:.3f} "
+            f"action_budget_remaining_s="
+            f"{_sc_action_budget_remaining_s(policy, now_wall_s=now_wall_s):.3f}"
+        )
+
+    def best_sample(pool):
+        """Single lowest-centre-reprojection sample -- the degrade fallback."""
+        return min(pool, key=lambda s: s[2])
+
+    # Under SC_STRICT_PERCEPTION, filter at the gate right here at collection
+    # time -- identical to the pre-degrade behaviour.  Otherwise collect every
+    # non-None, finite-reprojection frame; the gate becomes a preference
+    # applied below, not a veto applied here.
+    all_samples = []
     for _ in range(SC_PERCEPT_SAMPLES):
+        _sc_enforce_action_deadline(policy, move_robot)
         obs = get_observation()
         if obs is not None:
             res = perceive_sc_port_pose(policy, task, obs)
             if res is not None:
                 X, q, reproj = res
-                if np.isfinite(reproj) and reproj <= SC_MAX_PORT_REPROJ_PX:
-                    samples.append((np.asarray(X, float), np.asarray(q, float), float(reproj)))
+                if np.isfinite(reproj) and (
+                    not SC_STRICT_PERCEPTION or reproj <= SC_MAX_PORT_REPROJ_PX
+                ):
+                    all_samples.append(
+                        (np.asarray(X, float), np.asarray(q, float), float(reproj))
+                    )
+        _sc_enforce_action_deadline(policy, move_robot)
         policy.sleep_for(SC_PERCEPT_SAMPLE_DT)
+        _sc_enforce_action_deadline(policy, move_robot)
+
+    if not all_samples:
+        # Nothing to fall back to -- this is the one case SC_STRICT_PERCEPTION
+        # cannot change.  Under SC_STRICT_PERCEPTION this means "zero frames
+        # cleared the reproj gate" (as before); otherwise it means perception
+        # produced nothing at all across every frame.
+        log.error(
+            f"[sc] perception consensus failed: 0/{SC_PERCEPT_SAMPLES} frames "
+            "passed reproj -- no sample to fall back to"
+        )
+        log_timing("no_samples", usable_samples=0)
+        return None
+
+    if SC_STRICT_PERCEPTION:
+        samples = all_samples
+    else:
+        under_gate = [s for s in all_samples if s[2] <= SC_MAX_PORT_REPROJ_PX]
+        if under_gate:
+            samples = under_gate
+        else:
+            worst_pool_best = best_sample(all_samples)
+            log.warn(
+                "[sc] SC_PERCEPT_DEGRADED reason=no_sample_under_port_reproj_gate "
+                f"frames={len(all_samples)}/{SC_PERCEPT_SAMPLES} "
+                f"best_centre_reproj_px={worst_pool_best[2]:.2f} "
+                f"gate_px={SC_MAX_PORT_REPROJ_PX:.1f} action=use_full_pool"
+            )
+            samples = all_samples
 
     if len(samples) < SC_PERCEPT_MIN_AGREE:
-        log.error(
-            f"[sc] perception consensus failed: only {len(samples)}/{SC_PERCEPT_SAMPLES} "
-            f"frames passed reproj (need {SC_PERCEPT_MIN_AGREE})"
+        positions = np.array([s[0] for s in samples])
+        spread_mm = float(
+            np.max(np.linalg.norm(positions - np.median(positions, axis=0), axis=1))
+        ) * 1000.0
+        if SC_STRICT_PERCEPTION:
+            log.error(
+                f"[sc] perception consensus failed: only {len(samples)}/{SC_PERCEPT_SAMPLES} "
+                f"frames passed reproj (need {SC_PERCEPT_MIN_AGREE})"
+            )
+            log_timing("insufficient_samples", usable_samples=len(samples))
+            return None
+        chosen = best_sample(samples)
+        log.warn(
+            "[sc] SC_PERCEPT_DEGRADED reason=insufficient_samples "
+            f"samples={len(samples)}/{SC_PERCEPT_SAMPLES} "
+            f"need={SC_PERCEPT_MIN_AGREE} spread_mm={spread_mm:.2f} "
+            f"best_centre_reproj_px={chosen[2]:.2f} action=use_single_best_sample"
         )
-        return None
+        log_timing("degraded_insufficient_samples", usable_samples=len(samples))
+        return chosen
 
     positions = np.array([s[0] for s in samples])
     med = np.median(positions, axis=0)
@@ -2302,11 +3867,22 @@ def perceive_sc_port_pose_consensus(policy, task, get_observation):
             if float(np.linalg.norm(s[0] - med)) <= SC_PERCEPT_AGREE_TOL_M]
     if len(keep) < SC_PERCEPT_MIN_AGREE:
         spread = float(np.max(np.linalg.norm(positions - med, axis=1))) * 1000
-        log.error(
-            f"[sc] perception consensus failed: {len(keep)}/{len(samples)} agree within "
-            f"{SC_PERCEPT_AGREE_TOL_M*1000:.1f}mm (spread={spread:.1f}mm)"
+        if SC_STRICT_PERCEPTION:
+            log.error(
+                f"[sc] perception consensus failed: {len(keep)}/{len(samples)} agree within "
+                f"{SC_PERCEPT_AGREE_TOL_M*1000:.1f}mm (spread={spread:.1f}mm)"
+            )
+            log_timing("disagreement", usable_samples=len(samples))
+            return None
+        chosen = best_sample(samples)
+        log.warn(
+            "[sc] SC_PERCEPT_DEGRADED reason=disagreement "
+            f"agree={len(keep)}/{len(samples)} "
+            f"tol_mm={SC_PERCEPT_AGREE_TOL_M*1000:.1f} spread_mm={spread:.2f} "
+            f"best_centre_reproj_px={chosen[2]:.2f} action=use_single_best_sample"
         )
-        return None
+        log_timing("degraded_disagreement", usable_samples=len(samples))
+        return chosen
 
     port_pos = np.median(np.array([s[0] for s in keep]), axis=0)
     reproj = float(np.median([s[2] for s in keep]))
@@ -2315,6 +3891,7 @@ def perceive_sc_port_pose_consensus(policy, task, get_observation):
         f"[sc] perception consensus: {len(keep)}/{len(samples)} agree, "
         f"port={np.round(port_pos, 5).tolist()} reproj={reproj:.2f}px"
     )
+    log_timing("accepted", usable_samples=len(samples))
     return port_pos, best[1], reproj
 
 
@@ -2489,6 +4066,12 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     from .rl_insert_contract import port_frame
 
     log = policy.get_logger()
+    timing = _ScTiming(policy, log)
+    timing.mark("sc_start")
+
+    def finish(outcome: bool, reason: str) -> bool:
+        timing.summary(outcome, reason=reason)
+        return bool(outcome)
 
     # FIRST, before perception even runs.  The grasp calibration needs only the
     # TCP and the plug's ground-truth TF frame -- it does not depend on the port
@@ -2504,19 +4087,26 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     # selection should use measured plug geometry.  The robot is stationary
     # here, so the transform stays valid through the perception dwell.
     send_feedback("sc plug-pose priming")
+    timing.mark("plug_pose_start")
+    _sc_enforce_action_deadline(policy, move_robot)
     if not prime_sc_plug_pose(policy, get_observation, move_robot):
         log.error(
             "[sc] plug-pose priming failed -- refusing to insert without a "
             "measured tip (no fixed-grasp fallback)"
         )
-        return False
+        return finish(False, "plug_pose_failed")
+    _sc_enforce_action_deadline(policy, move_robot)
+    timing.mark("plug_pose_ready")
 
     send_feedback("sc opening perception")
+    timing.mark("port_perception_start")
 
-    perceived = perceive_sc_port_pose_consensus(policy, task, get_observation)
+    perceived = perceive_sc_port_pose_consensus(
+        policy, task, get_observation, move_robot
+    )
     if perceived is None:
         log.error("[sc] perception failed to produce an SC port pose")
-        return False
+        return finish(False, "port_perception_failed")
     port_pos, port_quat, reproj_px = perceived
     port_quat = np.asarray(port_quat, dtype=np.float64)
     port_quat /= max(float(np.linalg.norm(port_quat)), 1e-12)
@@ -2524,11 +4114,12 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         f"[sc] perceived port p={np.round(port_pos, 5).tolist()} "
         f"q_wxyz={np.round(port_quat, 5).tolist()} reproj={reproj_px:.2f}px"
     )
+    timing.mark("port_perceived", reproj_px=f"{reproj_px:.3f}")
 
     obs = get_observation()
     if obs is None:
         log.error("[sc] no observation available for the wrench baseline")
-        return False
+        return finish(False, "wrench_baseline_missing")
     policy._wrench_baseline = policy._wrench_vector(obs)
 
     Rp = port_frame(port_quat)
@@ -2547,7 +4138,7 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
             f"[sc] tip is {dist*1000:.0f}mm from the mouth -- outside the "
             "last-inch envelope; the upstream macro must hand off closer"
         )
-        return False
+        return finish(False, "handoff_distance")
 
     # The plug cannot already be inside a port it has not been pushed into, so a
     # positive handoff depth is physically impossible and means the computed tip
@@ -2580,7 +4171,7 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
             f"impossible (gate {SC_MAX_HANDOFF_DEPTH_M*1000:.1f}mm). "
             f"{cause} Refusing to seat against a tip position this wrong."
         )
-        return False
+        return finish(False, "handoff_depth")
 
     Rs = seat_frame(Rp, R_tip) if SC_PRESERVE_HANDOFF_YAW else Rp
     # Rp.T @ Rs is a pure rotation about the insertion axis, so this is the
@@ -2595,23 +4186,30 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         f"twist_vs_perceived_yaw_deg={twist:.2f} "
         f"(rotation the controller is NOT commanding)"
     )
-
-    return ScInsertionController(
+    timing.mark(
+        "handoff_validated",
+        lateral_mm=f"{np.linalg.norm(handoff_delta[:2]) * 1000.0:.3f}",
+        depth_mm=f"{handoff_delta[2] * 1000.0:.3f}",
+    )
+    outcome = ScInsertionController(
         policy, task, get_observation, move_robot, send_feedback,
-        port_pos=port_pos, port_quat=port_quat, Rp=Rp, Rs=Rs,
+        port_pos=port_pos, port_quat=port_quat, Rp=Rp, Rs=Rs, timing=timing,
     ).run()
+    return finish(outcome, "seated" if outcome else "controller_failed")
 
 
 __all__ = [
-    "LOCAL_SC_PORT_KPS",
     "SCConfig",
     "SC_BORE_PITCH_M",
     "SC_INSERT_DEPTH_M",
     "SC_OPENING_HEIGHT_M",
     "SC_OPENING_WIDTH_M",
+    "SC_POSE_CONVENTION",
+    "SC_POSE_HEIGHT_M",
+    "SC_POSE_LOCAL_KPS_M",
+    "SC_POSE_WIDTH_M",
     "SC_PRESERVE_HANDOFF_YAW",
     "ScInsertionController",
-    "classify_opening",
     "configure_sc_plug_pose",
     "next_sc_depth",
     "perceive_sc_port_pose",

@@ -322,8 +322,22 @@ class AicModel(LifecycleNode):
                 result = InsertCable.Result()
                 confirmed = bool(self._action_thread_result)
                 report_miss_as_success = os.environ.get(
-                    "RL_INSERT_REPORT_MISS_AS_SUCCESS", "1"
+                    "RL_INSERT_REPORT_MISS_AS_SUCCESS", "0"
                 ).strip().lower() not in ("0", "false", "no")
+                # An SC miss must never terminate the enclosing process.  The
+                # run has already stopped and held the robot safely, so
+                # aborting the skill forfeits every later node -- and every
+                # point they were worth -- for one connector.  Moving on to the
+                # next node is strictly better than taking the process down.
+                # Set RL_INSERT_SC_MISS_ABORTS=1 to restore the old behaviour.
+                plug_type = str(
+                    getattr(goal_handle.request.task, "plug_type", "") or ""
+                ).strip().lower()
+                sc_miss_aborts = os.environ.get(
+                    "RL_INSERT_SC_MISS_ABORTS", "0"
+                ).strip().lower() not in ("0", "false", "no")
+                if plug_type == "sc" and not sc_miss_aborts:
+                    report_miss_as_success = True
                 if confirmed:
                     goal_handle.succeed()
                     result.success = True
@@ -334,8 +348,9 @@ class AicModel(LifecycleNode):
                     # terminate the enclosing process on a recoverable insertion
                     # miss.  The miss is still logged and named in the message.
                     self.get_logger().warn(
-                        "[aic] insertion NOT confirmed; reporting success so the "
-                        "process continues (RL_INSERT_REPORT_MISS_AS_SUCCESS=1)"
+                        f"[aic] insertion NOT confirmed (plug_type='{plug_type}'); "
+                        "reporting success so the process continues to the next "
+                        "node instead of terminating"
                     )
                     goal_handle.succeed()
                     result.success = True

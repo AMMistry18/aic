@@ -18,7 +18,7 @@
 # Module path for aic_model:  -p policy:=aic_model.RLInsert
 #
 # The only imports outside this file are:
-#   * PerceptionCore  -- the raw YOLO wrapper (weights load: best.pt / best_sc_pose.pt)
+#   * PerceptionCore  -- the raw YOLO wrapper (best.pt / best_sc_mouth_pose.pt)
 #   * rl_insert_contract -- the 69-dim obs + action math SHARED WITH TRAINING
 #     (must stay identical to the MuJoCo side; do not fork it here).
 #
@@ -58,9 +58,9 @@ from .sfp_plug_pose import triangulate_dlt
 MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_flowstate_v1.ts")
 
 # Perception weights.  best.pt = SFP YOLO-pose keypoints (the one loaded "in the
-# form"); best_sc_pose.pt = SC pose (kept wired for later, not used for SFP).
+# form"); best_sc_mouth_pose.pt = physical SC front-mouth pose.
 # Default to the weights dir that ships next to PerceptionCore -- the base image
-# already bakes best.pt / best_sc_pose.pt there, so this resolves correctly both
+# already bakes both deployed pose weights there, so this resolves correctly both
 # in the repo and inside the installed site-packages layout.
 import aic_example_policies.ros.perception_core as _pc_mod
 _WEIGHTS_DIR = Path(
@@ -70,7 +70,9 @@ _WEIGHTS_DIR = Path(
     )
 )
 NIC_WEIGHTS = os.environ.get("AIC_NIC_WEIGHTS", str(_WEIGHTS_DIR / "best.pt"))
-SC_WEIGHTS = os.environ.get("AIC_SC_POSE_WEIGHTS", str(_WEIGHTS_DIR / "best_sc_pose.pt"))
+SC_WEIGHTS = os.environ.get(
+    "AIC_SC_POSE_WEIGHTS", str(_WEIGHTS_DIR / "best_sc_mouth_pose.pt")
+)
 
 CAMERA_NAMES = ["left_camera", "center_camera", "right_camera"]
 MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
@@ -435,7 +437,7 @@ class RLInsert(Policy):
         self._last_port_quat_wxyz = None
         self._last_port_reproj_px = None
 
-        # ---- perception weights (best.pt / best_sc_pose.pt) ----
+        # ---- perception weights (SFP + physical SC mouth) ----
         sc_weights = SC_WEIGHTS if os.path.exists(SC_WEIGHTS) else None
         if not os.path.exists(NIC_WEIGHTS):
             raise FileNotFoundError(

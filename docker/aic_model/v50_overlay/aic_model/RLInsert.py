@@ -18,7 +18,7 @@
 # Module path for aic_model:  -p policy:=aic_model.RLInsert
 #
 # The only imports outside this file are:
-#   * PerceptionCore  -- the raw YOLO wrapper (weights load: best.pt / best_sc_pose.pt)
+#   * PerceptionCore  -- the raw YOLO wrapper (best.pt / best_sc_mouth_pose.pt)
 #   * rl_insert_contract -- the 69-dim obs + action math SHARED WITH TRAINING
 #     (must stay identical to the MuJoCo side; do not fork it here).
 #
@@ -66,9 +66,9 @@ from .sfp_plug_pose import triangulate_dlt
 MODEL_PATH = os.environ.get("RL_INSERT_MODEL", "/models/final_insert_sfp_flowstate_v1.ts")
 
 # Perception weights.  best.pt = SFP YOLO-pose keypoints (the one loaded "in the
-# form"); best_sc_pose.pt = SC pose (kept wired for later, not used for SFP).
+# form"); best_sc_mouth_pose.pt = physical SC front-mouth pose.
 # Default to the weights dir that ships next to PerceptionCore -- the base image
-# already bakes best.pt / best_sc_pose.pt there, so this resolves correctly both
+# already bakes both deployed pose weights there, so this resolves correctly both
 # in the repo and inside the installed site-packages layout.
 import aic_example_policies.ros.perception_core as _pc_mod
 _WEIGHTS_DIR = Path(
@@ -78,7 +78,9 @@ _WEIGHTS_DIR = Path(
     )
 )
 NIC_WEIGHTS = os.environ.get("AIC_NIC_WEIGHTS", str(_WEIGHTS_DIR / "best.pt"))
-SC_WEIGHTS = os.environ.get("AIC_SC_POSE_WEIGHTS", str(_WEIGHTS_DIR / "best_sc_pose.pt"))
+SC_WEIGHTS = os.environ.get(
+    "AIC_SC_POSE_WEIGHTS", str(_WEIGHTS_DIR / "best_sc_mouth_pose.pt")
+)
 
 CAMERA_NAMES = ["left_camera", "center_camera", "right_camera"]
 MAX_PORT_REPROJ_PX = float(os.environ.get("RL_INSERT_MAX_REPROJ_PX", "25.0"))
@@ -452,7 +454,7 @@ class RLInsert(VisualGapRecoveryMixin, Policy):
         self._last_port_quat_wxyz = None
         self._last_port_reproj_px = None
 
-        # ---- perception weights (best.pt / best_sc_pose.pt) ----
+        # ---- perception weights (SFP + physical SC mouth) ----
         sc_weights = SC_WEIGHTS if os.path.exists(SC_WEIGHTS) else None
         if not os.path.exists(NIC_WEIGHTS):
             raise FileNotFoundError(
@@ -1071,19 +1073,41 @@ class RLInsert(VisualGapRecoveryMixin, Policy):
     # ----------------------------------------------------------------- main
     def insert_cable(self, task: Task, get_observation, move_robot, send_feedback):
         log = self.get_logger()
-        self._action_deadline_wall = time.monotonic() + ACTION_TIME_BUDGET_S
+        deadline_start_wall = time.monotonic()
+        self._action_deadline_wall = deadline_start_wall + ACTION_TIME_BUDGET_S
+        self._action_deadline_start_wall = deadline_start_wall
+        log.info(
+            f"[rl] ACTION_DEADLINE_START budget_s={ACTION_TIME_BUDGET_S:.1f} "
+            "clock=wall"
+        )
         try:
             return self._run(task, get_observation, move_robot, send_feedback)
+        except TimeoutError as exc:
+            # A timeout is an expected bounded-safety outcome, not a controller
+            # crash.  Name it separately so SC phase timing can be correlated
+            # with the outer action deadline in one log search.
+            log.error(f"[rl] INSERTION_ABORT reason=action_deadline detail={exc}")
+            send_feedback("insert_cable timed out -- holding current pose")
+            return False
         except Exception:
             log.error("[rl] insert_cable crashed:\n" + traceback.format_exc())
             send_feedback("insert_cable crashed -- see model log")
             return False
 
     def _enforce_action_deadline(self, move_robot):
-        """Stop V50 motion once its bounded wall-clock budget is exhausted."""
+        """Hold the TCP and stop any insertion once its wall budget expires."""
         deadline = getattr(self, "_action_deadline_wall", None)
         if deadline is None or time.monotonic() <= deadline:
             return
+        now_wall = time.monotonic()
+        start_wall = float(getattr(self, "_action_deadline_start_wall", deadline))
+        task = getattr(self, "_task", None)
+        plug_type = getattr(task, "plug_type", "unknown") if task is not None else "unknown"
+        self.get_logger().error(
+            f"[rl] ACTION_DEADLINE_EXCEEDED plug_type={plug_type} "
+            f"elapsed_wall_s={now_wall - start_wall:.3f} "
+            f"budget_s={ACTION_TIME_BUDGET_S:.3f} action=hold_current_tcp"
+        )
         try:
             tcp_pos, tcp_quat = self._tcp()
             self.set_pose_target(
@@ -1106,7 +1130,7 @@ class RLInsert(VisualGapRecoveryMixin, Policy):
             )
         finally:
             raise TimeoutError(
-                f"V50 insertion exceeded {ACTION_TIME_BUDGET_S:.1f}s wall-clock budget"
+                f"insertion exceeded {ACTION_TIME_BUDGET_S:.1f}s wall-clock budget"
             )
 
     def _run(self, task, get_observation, move_robot, send_feedback):
