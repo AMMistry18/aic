@@ -1993,6 +1993,58 @@ Strict-tier numbers: a "no pose" here is recovered by the relaxation ladder, so
 138/144 is a floor. **SC and NIC sweeps were not re-run** — their policy is
 untouched, but that is an assumption, not a measurement.
 
+### 23.8b An unusable insignia was reported as success (fixed)
+
+Field run 2026-07-28 19:28. The mask gate admitted a triplet, Stage 2 then refused
+it, and the skill returned **`success=True done=False`**:
+
+```text
+W  no camera holds a fully-framed insignia; accepting one clipped by up to 12 px
+I  board visibility: success=True seen=True done=False target=False
+   msg=... needs 1 accepted insignia pose estimates and has 0;
+       rejected: center_camera=board reprojection error 18.91px exceeds 8.00px
+```
+
+`purple_area` was 0.0003/0.0019/0.0000 — the bracket held 0.19% of the centre
+image, against the 0.45% that §21.4 already called too weak a range measurement.
+
+**The bug was classification, not detection.** Two Stage-2 failures need opposite
+responses from the caller and both went through `_stage2_not_done()`:
+
+| Failure | Means | Caller must |
+| --- | --- | --- |
+| geometric refusal | board located, no safe view exists | retry or branch |
+| localization failure | no board pose at all | **move the arm** |
+
+Because the second returned `success=True`, a process branching on `success` saw a
+healthy skill, never ran its reposition-and-retry fallback, and re-invoked from the
+same unusable pose indefinitely. The 18:07 log shows the fallback working correctly
+when the *mask* gate raises — two raises, then a successful third invocation — so
+the mechanism was already there and this path simply was not wired into it.
+
+Both localization failures now raise `InsigniaNotExposedError`, the same signal the
+mask gate uses, with the remedy in the message:
+
+- no accepted insignia pose estimate (PnP reprojection / ambiguity / centroid);
+- accepted estimates that do not agree within 5 cm / 8°.
+
+Geometric refusals are untouched and still return `success=True, done=False`.
+
+Note this is the limit of what §22.5's shared `_cameras_with_usable_landmark` can
+do. The gate and Stage 2 agree about *edge clipping* because they share that rule,
+but the gate cannot know a PnP quality it has not run — reprojection, ambiguity
+ratio and centroid error are only knowable after the solve. The two can therefore
+always disagree about pose quality; what matters is that the disagreement is
+classified by its remedy, which is what this change does.
+
+Two tests pin it: the raise sites and their remedy text, and that nothing between
+the raise and `execute` swallows it (`execute` orders
+`except InsigniaNotExposedError` ahead of `except Exception`, holds it until the
+controller handoff is published, then re-raises as `SkillError(9, ...)`).
+
+**§18 item 1 is now more urgent, not less.** Raising still aborts the BT before
+`Switch To Default Controller`, and this change makes the raise fire more often.
+
 ### 23.9 What is still open
 
 1. **Contortion is not fixed by any cap, and cannot be.** The skill publishes a

@@ -132,7 +132,22 @@ JOINT_SETTLE_ALLOWANCE_SEC = 2.0
 
 
 class InsigniaNotExposedError(RuntimeError):
-    """The start pose does not expose the insignia to any calibrated camera.
+    """The start pose does not let the board be localized.
+
+    Covers both halves of that, because they have the same remedy -- move the
+    arm -- and the caller can only act on the remedy:
+
+    * no calibrated camera holds a usable insignia mask at all;
+    * a mask was found but its PnP is not a usable board pose (reprojection,
+      ambiguity or centroid error over threshold, or two accepted estimates that
+      contradict each other).
+
+    The second case used to return ``success=True, done=False`` through
+    ``_stage2_not_done``, which reads as a healthy skill and suppressed the
+    caller's reposition-and-retry fallback entirely -- so it re-invoked from the
+    same bad pose indefinitely. A geometric refusal means "the board is here and
+    no safe view of it exists"; this means "I do not know where the board is".
+    Only the latter is fixed by moving.
 
     Raised out of ``execute`` as a real skill error so the Flowstate process
     fails loudly instead of quietly branching on a result field.  It is
@@ -287,9 +302,10 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
             "board visibility returning normally; "
             "controller_handoff=Switch To Default Controller required"
         )
-        # A missing insignia is a real skill error, not a result field: with
-        # Stage 1 removed there is nothing for the process to retry, so it
-        # should fail loudly rather than be silently branched around.
+        # A board that cannot be localized is a real skill error, not a result
+        # field: with Stage 1 removed the skill cannot fix it, so it must fail
+        # loudly rather than be silently branched around.  This covers the mask
+        # gate *and* an unusable PnP -- see ``InsigniaNotExposedError``.
         #
         # It is raised *here*, after the ``finally`` above has published the
         # measured-state handoff, precisely because raising before that
@@ -299,7 +315,8 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # run ``Switch To Default Controller`` after this skill; that node
         # releases the bridge lease and is unaffected by the raise.
         #
-        # Sensor failures and Stage-2 rejections still come back as results.
+        # Sensor failures and *geometric* Stage-2 refusals -- board localized, no
+        # safe survey pose -- still come back as results.
         if pending_error is not None:
             # SkillError takes (status_code, message) -- two positional args.
             # 9 is FAILED_PRECONDITION, which is what this is: the caller was
@@ -1593,8 +1610,28 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                 pose_estimates.append(estimate)
         if len(pose_estimates) < REQUIRED_INSIGNIA_CAMERAS:
             accepted = sorted(item.camera_name for item in pose_estimates)
-            self._stage2_not_done(
-                result,
+            # **The board could not be localized at all.  That is the Stage-1
+            # gate's failure, not a geometric refusal**, and it must produce the
+            # Stage-1 gate's signal so the caller repositions the arm.
+            #
+            # It used to go through ``_stage2_not_done``, which returns
+            # ``success=True, done=False``.  A process branching on ``success``
+            # therefore saw a healthy skill, never ran its reposition-and-retry
+            # fallback, and re-invoked from the same bad pose forever.  Observed
+            # 2026-07-28 19:28: the mask gate admitted a 12 px-clipped bracket
+            # holding 0.19% of the centre image, PnP came back at 18.91 px
+            # reprojection against an 8 px threshold, and the skill reported
+            # success.
+            #
+            # The mask gate and Stage 2 share ``_cameras_with_usable_landmark``,
+            # so they agree about *edge clipping* -- but the gate cannot know a
+            # PnP quality it has not run, and reprojection, ambiguity ratio and
+            # centroid error are only knowable after the solve.  The two can
+            # therefore always disagree about pose quality; what matters is that
+            # a disagreement is classified by its remedy.  Both cases have the
+            # same one: the arm is looking at the insignia too obliquely, too far
+            # away, or too near an image edge, and it has to move.
+            raise InsigniaNotExposedError(
                 f"board reconstruction needs {REQUIRED_INSIGNIA_CAMERAS} "
                 f"accepted insignia pose estimates and has {len(accepted)}"
                 + (f" ({','.join(accepted)})" if accepted else "")
@@ -1606,9 +1643,11 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
                     )
                     if pose_failures
                     else ""
-                ),
+                )
+                + ". The insignia was found but is not a usable range "
+                "measurement from here. Move the arm to a start pose that sees "
+                "it more squarely, larger, and clear of the image edges."
             )
-            return
         # Use all accepted cameras as a consistency check. A rejected center
         # hypothesis does not hide a valid side-camera estimate, but two
         # mutually contradictory accepted estimates may not be guessed
@@ -1652,12 +1691,16 @@ class CheckBoardVisibilitySkill(skill_interface.Skill):
         # estimate is its own cluster and passes, which is what keeps the
         # one-camera start poses usable.
         if len(pose_estimates) > 1 and len(consistent) < 2:
-            self._stage2_not_done(
-                result,
+            # Also a localization failure, for the same reason and with the same
+            # remedy: two accepted estimates that contradict each other leave no
+            # board pose worth surveying against, and the only fix is a viewpoint
+            # where the bracket resolves unambiguously.  Signal it like the gate.
+            raise InsigniaNotExposedError(
                 f"{len(pose_estimates)} accepted camera pose estimates but "
-                f"only {len(consistent)} agree within 5 cm / 8 degrees",
+                f"only {len(consistent)} agree within 5 cm / 8 degrees; the "
+                "board pose is ambiguous from here. Move the arm to a start "
+                "pose that sees the insignia more squarely and larger."
             )
-            return
         board_pose = next(
             (
                 item

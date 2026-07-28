@@ -299,6 +299,82 @@ def test_stage2_rejection_is_a_normal_not_done_result():
     assert "raise" not in method_source
 
 
+def test_failing_to_localize_the_board_is_an_error_not_a_not_done_result():
+    """A board that cannot be localized must not report ``success=True``.
+
+    The two Stage-2 failure classes need opposite responses from the caller:
+
+    * *geometric refusal* -- the board is located and no safe survey view of it
+      exists. ``_stage2_not_done``: ``success=True, done=False``.
+    * *localization failure* -- the insignia was found but its PnP is unusable, so
+      there is no board pose at all. Only moving the arm fixes this, so it must
+      raise, exactly as the mask gate does.
+
+    Collapsing the second into the first is a real field bug (2026-07-28 19:28): a
+    12 px-clipped bracket holding 0.19% of the centre image gave 18.91 px
+    reprojection against an 8 px threshold, the skill returned ``success=True``,
+    and the caller's reposition-and-retry fallback never fired -- so it re-invoked
+    from the same unusable pose indefinitely.
+    """
+    stage2 = _stage2_source()
+
+    # Both localization failures raise, and neither returns a not-done result.
+    for fragment in (
+        "raise InsigniaNotExposedError(\n"
+        "                f\"board reconstruction needs {REQUIRED_INSIGNIA_CAMERAS} \"",
+        "raise InsigniaNotExposedError(\n"
+        "                f\"{len(pose_estimates)} accepted camera pose estimates but \"",
+    ):
+        assert fragment in stage2, fragment
+
+    # Each names the remedy, because the message is the only thing an operator
+    # reading a failed run actually gets.  Matched short: the phrase is split
+    # across string literals by line wrapping.
+    assert stage2.count("Move the arm to a start") >= 2
+
+    # The geometric refusals must NOT have been swept up with them: the survey
+    # search's own "no safe pose" verdict stays a result the process can branch on.
+    survey_refusal = stage2[stage2.index("if candidate is None:"):]
+    assert "_stage2_not_done(" in survey_refusal
+    assert "InsigniaNotExposedError" not in survey_refusal
+
+
+def test_the_localization_error_reaches_the_caller_uncaught():
+    """Nothing between the raise and ``execute`` may swallow it.
+
+    ``execute`` catches ``InsigniaNotExposedError`` ahead of its bare
+    ``except Exception``, holds it until the controller handoff is published, then
+    re-raises as ``SkillError(9, ...)``.  A broad ``except`` around the Stage-2
+    call would silently turn the error back into a crash result.
+    """
+    source, skill = _source_and_class()
+    inner = next(
+        node
+        for node in skill.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_execute_inner"
+    )
+    for node in ast.walk(inner):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        # A bare `except:` or `except Exception:` anywhere on the Stage-2 path
+        # would capture the localization error along with everything else.
+        if node.type is None or (
+            isinstance(node.type, ast.Name) and node.type.id == "Exception"
+        ):
+            handler = ast.get_source_segment(source, node) or ""
+            assert "InsigniaNotExposedError" in handler or "raise" in handler, (
+                "_execute_inner swallows Exception on the Stage-2 path, which "
+                "would suppress the localization error"
+            )
+
+    # And execute() must order the handlers so the specific one wins.
+    execute_source = ast.get_source_segment(source, _method("execute")) or ""
+    assert execute_source.index("except InsigniaNotExposedError") < execute_source.index(
+        "except Exception"
+    )
+    assert "skill_interface.SkillError(9," in execute_source
+
+
 def test_every_deployed_target_mode_uses_the_geometric_survey():
     # Execute the extracted policy helper rather than checking source strings.
     # All three deployed enum values now take the geometric sector survey; the
