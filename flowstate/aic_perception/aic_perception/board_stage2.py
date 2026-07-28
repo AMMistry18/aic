@@ -211,6 +211,47 @@ def sfp_module_detail_boxes() -> tuple[np.ndarray, ...]:
     return tuple(boxes)
 
 
+# Board X of a *seated* module's protruding tip.  ``SFP_RAIL_X`` is the CAD mount
+# origin; the transceiver sticks out from it and hardware decoded the detected
+# bodies at board X ~0.0862 (handoff 8.2).
+SFP_DETECTED_BODY_X = 0.0862
+SFP_SEAT_HALF_X = 0.025
+
+
+def sfp_seat_bodies() -> tuple[np.ndarray, ...]:
+    """The six legal staged-module bodies: mount origin *through* protruding tip.
+
+    This is the geometry that must actually end up visible, and it is what both
+    the survey's seat gate and the offline sweep's audit score.  It exists as one
+    function because the two used to carry separate copies and disagreed:
+    ``sfp_module_detail_boxes`` centres each seat on the CAD mount origin
+    (board X 0.030..0.080), which is a region ~31 mm *behind* the thing the camera
+    sees, so an audit against it can report >100 px of margin while the field
+    clips or hides an end module.
+
+    Spanning both -- from the mount origin's near edge to the detected body's far
+    edge -- is the physical extent of a seated module and the conservative choice:
+    it can only report less margin than either box alone, never more.
+    """
+    x_min = SFP_RAIL_X - SFP_SEAT_HALF_X
+    x_max = SFP_DETECTED_BODY_X + SFP_SEAT_HALF_X
+    boxes: list[np.ndarray] = []
+    for box in sfp_module_detail_boxes():
+        y = float(box[:, 1].mean())
+        boxes.append(
+            np.asarray(
+                [
+                    (x, yy, z)
+                    for x in (x_min, x_max)
+                    for yy in (y - SFP_SEAT_HALF_Y, y + SFP_SEAT_HALF_Y)
+                    for z in (SFP_ENVELOPE_Z_MIN, SFP_ENVELOPE_Z_MAX)
+                ],
+                dtype=float,
+            )
+        )
+    return tuple(boxes)
+
+
 # LC / SFP / SC mount-rail board-X positions (task_board.urdf.xacro).  The module
 # region spans all three rail families on both Y sides over their full travel.
 LC_RAIL_X = 0.0275
@@ -314,50 +355,78 @@ SFP_SEAT_Y_ABS = 0.15625
 SFP_SEAT_HALF_Y = 0.022
 
 
-# Board-Y half-span of the staged-SFP coverage box.  Deliberately the *same*
-# 0.225 m extent as the superseded one-rail sector -- only its placement moves.
+# Board-Y half-span of the staged-SFP coverage box.
 #
-# It does not itself contain the outermost seats (+/-0.15625).  It does not need
-# to: the box sets what the survey aims at and how far it stands off, and the
-# resulting view then holds every seat with 119-158 px of image margin, measured
-# over the full 144-case board/placement/live-start sweep.  Growing it past this
-# is a bad trade -- it buys ~30 px of seat margin nobody needs and pushes the
-# selected standoff from 0.64 m out to 0.85-0.90 m, shrinking every module in
-# the image.  See ``test/sfp_sweep_runner.py`` for the frontier:
+# **It must be wide enough that the outer seats clear the tool silhouette, and
+# that is the only thing that sizes it.**  The box used to be 0.1125 -- the same
+# 0.225 m extent as the superseded one-rail sector, only re-centred -- on the
+# argument that it need not contain the outermost seats (+/-0.15625) because the
+# resulting view held every seat with 119-158 px of *image* margin.  That
+# argument was measured against the wrong obstacle.  Image margin was never the
+# binding constraint: reconstructed from the 2026-07-28 17:03 field run, the
+# outer seats sit 122-159 px inside the frame and the +Y one is nonetheless
+# invisible, because it lands **behind the centre camera's gripper silhouette**.
+# The tool occupies the bottom of that image, the module column runs down into
+# it, and everything past the coverage box is unchecked -- so the search sees
+# nothing wrong with a pose that hides a module.
 #
-#   y_half   found/144   all-5 framed   standoff
-#   0.1125      92           92         0.64-0.85
-#   0.1450      58           58         0.80-0.85
-#   0.1600      35           35         0.85-0.90
-#   0.1783       0            -         infeasible
-SFP_COVERAGE_HALF_Y = 0.1125
+# Same class of bug as the one-rail sector this replaced (see below): the box is
+# the only region the search checks, so a seat outside it is on faith.  There the
+# placement was wrong; here the size was.
+#
+# Measured over 81 cases (9 board yaws x 3 placements x 3 live starts) at the
+# hardware board distance, auditing all six legal seats for image margin *and*
+# gripper occlusion in all three cameras:
+#
+#   y_half    found   all 6 framed   all 6 unoccluded   standoff
+#   0.11250   81/81       81/81            0/81         0.64-0.66
+#   0.14500   81/81       81/81           81/81         0.80
+#   0.15625   81/81       81/81           81/81         0.85
+#   0.16000   78/81       78/81           78/81         0.85-0.90
+#   0.17000   45/81       45/81           45/81         0.90
+#   0.17825    0/81         -                -          infeasible
+#
+# 0.145 is the frontier: the narrowest span that clears the tool at every swept
+# placement, and therefore the *closest* standoff that shows all six seats.
+# Wider only costs standoff and availability.  0.17825 -- the outer seat centre
+# padded by the module body half-extent, i.e. strict geometric containment of the
+# seats -- cannot be framed and gripper-cleared at any reachable pose.
+#
+# The cost is honest and was paid deliberately: 0.64 m -> 0.80 m of standoff, so
+# every module is ~20% smaller in the image.  A module rendered smaller is a
+# worse measurement; a module behind the tool is no measurement at all.
+SFP_COVERAGE_HALF_Y = 0.145
+# Last-resort rung.  This is the span that shipped, and it is known to hide an
+# outer seat behind the tool -- it exists only so a board placement that cannot
+# afford the correct box keeps the availability it has today instead of refusing
+# outright.  Its use is logged as a warning by the skill, not treated as normal.
+SFP_FALLBACK_COVERAGE_HALF_Y = 0.1125
 
 
-def sfp_module_strip_corners() -> np.ndarray:
+def sfp_module_strip_corners(half_y_m: float | None = None) -> np.ndarray:
     """The staged-SFP coverage target: the module strip, centred (board frame).
 
-    This is the ``STAGED_SFP_MODULE`` survey target.  It has the same size as
-    the superseded ``sfp_sector_corners`` and sits in a different place, and
-    that placement is the entire fix.
+    This is the ``STAGED_SFP_MODULE`` survey target.  Two separate hardware
+    failures shaped it, and both were "a seat outside the box is unchecked".
 
-    The old box covered the +Y rail alone (Y 0.0 .. 0.225), so the point the
-    survey aimed at sat 112.5 mm off the middle of the staged modules.  The
-    modules run Y -0.15625 .. +0.15625 across both rails, so every bit of the
-    search's framing slack was banked on the +Y side -- one sweep case puts the
-    -Y end 57 px outside the image while the +Y end carries 318-387 px of
-    margin.  That asymmetry is the 4-of-5 hardware failure.
+    **Placement.**  The old ``sfp_sector_corners`` covered the +Y rail alone
+    (Y 0.0 .. 0.225), so the point the survey aimed at sat 112.5 mm off the
+    middle of the staged modules.  The modules run Y -0.15625 .. +0.15625 across
+    both rails, so every bit of the search's framing slack was banked on the +Y
+    side -- one sweep case puts the -Y end 57 px outside the image while the +Y
+    end carries 318-387 px of margin.  That asymmetry is the 4-of-5 hardware
+    failure.  Straddling Y=0 spreads the same slack evenly over both ends.
 
-    Straddling Y=0 spreads the same slack evenly over both ends of the strip.
-    Measured over the 144-case sweep at identical search settings: the old box
-    clips a module in **96 of its 96** found poses (35 of them showing only
-    four of the six seats, worst seat 123.9 px outside frame); this one frames
-    every module in **all 92** of its found poses, with 118.5 px to spare.
+    **Size.**  Straddling Y=0 was necessary and not sufficient: at half-span
+    0.1125 the outer seats stay comfortably inside every image and the +Y one
+    still disappears behind the centre camera's gripper silhouette, which is the
+    2026-07-28 17:03 "doesn't even see the bottom sfp port" run.  See
+    ``SFP_COVERAGE_HALF_Y`` for the 81-case frontier that sizes it now.
+
+    ``half_y_m`` overrides the span for the fallback rung and for sweeps.
     """
-    return _sector_box_corners(
-        SFP_SPAN_X,
-        (-SFP_COVERAGE_HALF_Y, SFP_COVERAGE_HALF_Y),
-        SFP_SPAN_Z,
-    )
+    half_y = SFP_COVERAGE_HALF_Y if half_y_m is None else float(half_y_m)
+    return _sector_box_corners(SFP_SPAN_X, (-half_y, half_y), SFP_SPAN_Z)
 
 
 def sc_sector_corners() -> np.ndarray:
@@ -1517,6 +1586,26 @@ def search_survey_pose(
     # Restrict the cross-rail tilt to one side of the board: -1 keeps the camera
     # on the sector's -cross side, +1 the +cross side, 0 searches both.
     cross_rail_sign: float = 0.0,
+    # Standoff dominates the objective lexicographically, and **letting joint
+    # travel outrank it instead was measured and rejected** (2026-07-28).
+    #
+    # The theory was sound: at the closest feasible standoff any IK-valid candidate
+    # wins however far the arm has to fold, because a cheaper pose one rung out sits
+    # in a different plateau group and is never compared -- which is how staged SFP
+    # published `total=363.7deg` and `total=616.5deg` under a passing worst-joint
+    # cap.  Collapsing the whole band into one plateau so travel decides is a
+    # four-line change.
+    #
+    # It buys nothing.  Over 144 cases: worst-joint median 69.4 -> 66.7 deg, p90
+    # 141.9 -> 136.7, worst 167.9 -> 167.0, and the 8 cases above 150 deg are the
+    # same 8.  Meanwhile the median standoff goes 0.80 -> 0.85 m, so every module
+    # gets smaller to save three degrees.  Once the coverage box reaches the outer
+    # seats the feasible band is only 0.76-0.90 m wide and there is no travel left
+    # to win by crossing it; the >150 deg cases need a large base rotation at that
+    # board placement no matter which rung is chosen.
+    #
+    # Endpoint ranking is simply the wrong lever for contortion -- see the motion
+    # path limitation in the handoff.  Keep standoff dominant.
     # When False only the reference camera must fully frame the sector; the
     # splayed side cameras are not required to.  The three wrist cameras cannot
     # hold all five NIC cards in frame together nearer than ~0.65 m, so a

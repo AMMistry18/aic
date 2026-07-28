@@ -907,22 +907,34 @@ def test_one_rail_sector_misses_half_the_legal_staged_seats():
     assert abs(0.5 * (y_lo + y_hi)) == pytest.approx(0.1125)
 
 
-def test_staged_sfp_coverage_straddles_the_module_strip_at_the_same_size():
-    """Centring is the whole fix -- the box must not grow to get it.
+def test_staged_sfp_coverage_straddles_and_reaches_past_the_outer_seats():
+    """Centred *and* wide enough that the outer seats clear the tool.
 
-    Growing it was measured and rejected: it pushes the selected standoff from
-    0.64 m to 0.85-0.90 m, shrinking every module in the image for ~30 px of
-    seat margin that is already comfortable.
+    Two hardware failures, one property.  Centring fixed the +Y-rail bias that
+    cropped a module out of the image.  It was not sufficient: at the previously
+    shipped +/-0.1125 the outer seats sit 122-159 px *inside* every image and the
+    +Y one still vanishes behind the centre camera's gripper silhouette, because
+    the coverage box is the only region the search checks for tool clearance.
+    Measured over 81 cases, +/-0.1125 hid a seat in 81 of 81 and +/-0.145 in none.
     """
     corners = sfp_module_strip_corners()
     ys = corners[:, 1]
     assert float(ys.mean()) == pytest.approx(0.0, abs=1e-12)
     assert float(ys.max()) == pytest.approx(-float(ys.min()))
 
+    # Wider than the superseded one-rail sector: that box was the right size for
+    # the wrong obstacle.
     old = sfp_sector_corners()
     old_extent = float(old[:, 1].max()) - float(old[:, 1].min())
-    new_extent = float(ys.max()) - float(ys.min())
-    assert new_extent == pytest.approx(old_extent)
+    assert float(ys.max()) - float(ys.min()) > old_extent
+
+    # It must reach past the outermost legal seat centres, which is what pushes
+    # them off the tool silhouette...
+    seat_ys = sorted(float(box[:, 1].mean()) for box in sfp_module_detail_boxes())
+    assert float(ys.max()) > seat_ys[-1] - 0.012
+    # ...but must not demand strict containment of the seat *bodies*
+    # (+/-0.17825), which is infeasible at every reachable pose: 0/81 swept cases.
+    assert float(ys.max()) < 0.17825
 
     # Board X must clear the detected module bodies with real margin.  The
     # hardware detections sat at board X 0.0862, only 3.8 mm inside the old
@@ -933,16 +945,37 @@ def test_staged_sfp_coverage_straddles_the_module_strip_at_the_same_size():
 
 
 def test_staged_sfp_coverage_is_symmetric_about_every_legal_seat():
-    """The box need not contain the outer seats, but must not favour a rail.
-
-    The sweep's seat audit is what certifies coverage; this pins the property
-    that made the old box fail -- its slack was one-sided.
-    """
+    """Neither rail may be favoured: the old box's slack was one-sided."""
     corners = sfp_module_strip_corners()
     seat_ys = sorted(float(box[:, 1].mean()) for box in sfp_module_detail_boxes())
     y_lo, y_hi = float(corners[:, 1].min()), float(corners[:, 1].max())
     # Equal reach past the outermost seat at both ends.
     assert (seat_ys[0] - y_lo) == pytest.approx(y_hi - seat_ys[-1])
+
+
+def test_staged_sfp_fallback_coverage_is_the_superseded_span():
+    """The fallback rung must be exactly what shipped, and strictly narrower.
+
+    It exists only so a board placement that cannot afford the correct box keeps
+    today's availability.  If it ever grew to match the primary span the ladder
+    would silently become a single rung and the warning path would go dead.
+    """
+    from aic_perception.board_stage2 import (
+        SFP_COVERAGE_HALF_Y,
+        SFP_FALLBACK_COVERAGE_HALF_Y,
+    )
+
+    assert SFP_FALLBACK_COVERAGE_HALF_Y == pytest.approx(0.1125)
+    assert SFP_FALLBACK_COVERAGE_HALF_Y < SFP_COVERAGE_HALF_Y
+    fallback = sfp_module_strip_corners(SFP_FALLBACK_COVERAGE_HALF_Y)
+    assert float(fallback[:, 1].max()) == pytest.approx(0.1125)
+    # Same board-X/Z strip: only the span under test changes.
+    assert np.allclose(
+        np.unique(fallback[:, 0]), np.unique(sfp_module_strip_corners()[:, 0])
+    )
+    assert np.allclose(
+        np.unique(fallback[:, 2]), np.unique(sfp_module_strip_corners()[:, 2])
+    )
 
 
 def test_sector_survey_takes_the_closest_standoff_not_the_roomiest():

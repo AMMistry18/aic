@@ -1,6 +1,14 @@
 # Check Board Visibility v4 — complete next-session handoff
 
-Updated: 2026-07-27 (late)
+Updated: 2026-07-28 (evening)
+
+> **Start at §23,** then §22. §23 is the staged-SFP tool-occlusion fix and
+> supersedes the coverage box in §8.2/§8.3 **and** §22.4. §22 describes the rest of
+> the system and supersedes any earlier section it contradicts — the roll counts,
+> the reorientation caps (§8.3/§9.2), and the "do not gate/do not widen" entries
+> in §17 that were measured under the old 90° cap, 7-roll family and legacy
+> harness board position. §21 records the debugging that got there. Everything in
+> §22 and §23 is **uncommitted and not deployed.**
 
 > **Read this first.** **Stage 1 no longer exists.** The skill is pure
 > perception: it observes once and either runs Stage 2 or fails. Three
@@ -257,7 +265,8 @@ triplet, and:
 - otherwise it fails, naming which cameras saw a *partial* insignia so the
   operator can tell "nothing there" from "nearly framed".
 
-**Two cameras are required** (`REQUIRED_INSIGNIA_CAMERAS = 2`, 2026-07-28).
+**One camera is enough** (`REQUIRED_INSIGNIA_CAMERAS = 1`). Two was tried on
+2026-07-28 and reverted the same day -- see §22.5.
 One was enough until a single-view PnP of one small quad was shown to be too
 weak a *range* measurement -- see §6.2 and §21. One `full=True` alongside two
 `full=False` is now a refusal, and the message names how many complete views
@@ -329,7 +338,7 @@ and tilt directions are expressed in the board frame and therefore rotate and
 translate with the board. No SC or NIC camera displacement is a fixed world X/Y
 offset.
 
-**Two accepted estimates are required, and they must agree** (2026-07-28).
+**One accepted estimate is enough; two or more must agree** (§22.5).
 Estimates from multiple cameras must form a cluster within 5 cm and 8 degrees;
 Stage 2 now refuses unless at least `REQUIRED_INSIGNIA_CAMERAS` of them land in
 that cluster, rather than applying the check only when a second view happened to
@@ -588,7 +597,7 @@ SFP uses the general near-overhead search:
 - total reference-camera obliquity at most the general 20-degree cap;
 - additional all-camera clearance: **25 px** (was 40);
 - Cartesian reorientation cap: **180 degrees** (was 90, was 45 -- see §21);
-- **24** optical-roll samples at 15-degree intervals (was seven);
+- **12** optical-roll samples at 30-degree intervals (24 was tried and cost 160 s of search; see 22.6);
 - live IK ranking when available, sphere fallback otherwise.
 
 The 25 px / 90 deg values are NIC's already-proven ones, adopted for
@@ -1054,7 +1063,7 @@ regression before it can be treated as hardware-representative.
 | `long_ratio=1.00` with `long_axis_error=+0.0deg` | Degenerate frame-aligned `minAreaRect` from a clipped mask; the orientation is not a measurement |
 | `total` joint travel huge while `max` passes | Only the worst joint is capped; total is ungated (§18 item 2) |
 | `BINDING GATE = reachability` on a pose you know the arm can reach | Believe it only since 2026-07-28. Before that `solve_ranked` filtered the 140 mm wrist-camera keep-out *before* returning and the empty list was reported as "no analytic IK solution at all"; at the real board distance 231 of 926 such verdicts were keep-out rejections. The log now says `camera_keepout=` and can name `BINDING GATE = wrist-camera keep-out` |
-| Two invocations at the *same* arm pose disagree | Single-view board range jitter crossing the 25 px clearance floor. Fixed by requiring two agreeing insignia views (§6.2); if it recurs, log `origin_spread` from the `board pose fused over N agreeing cameras` line |
+| Two invocations at the *same* arm pose disagree | Single-view board range jitter crossing the 25 px clearance floor. Damped by averaging the origin whenever two or more views agree (§22.5); read `origin_spread` on the `board pose fused over N agreeing cameras` line. Requiring two views was tried and reverted |
 
 ## 14. Tests and validation
 
@@ -1282,13 +1291,15 @@ Also capture:
 9. Do not add an along-board-Y tilt to the SC view to buy depth. The long-face
    board-X direction is hardware-proven; the wide axis measured better and was
    still rejected (§10.2).
-10. Do not enlarge the staged-SFP coverage box along board Y to "guarantee" the
-    outer seats. It pushes the standoff out, shrinks every module, and full
-    containment is unreachable anyway (§8.2).
+10. ~~Do not enlarge the staged-SFP coverage box along board Y.~~ **Superseded
+    by §22.4.** Fixtures mount on any rail with +/-0.09425 m of travel, so
+    the +/-0.1125 box covered half the legal range; coverage is now a
+    widest-first ladder, and the old frontier table used the old policy.
 11. Do not rebuild a Stage-1 acquisition search without reading §20. Three
     designs have failed on hardware for three different reasons.
-12. Do not gate summed joint travel on SFP/NIC. It costs 26 of 144 staged-SFP
-    placements and neither sector has reported contortion (§7.1).
+12. ~~Do not gate summed joint travel on SFP/NIC.~~ **Re-open this.** The
+    26-of-144 cost was measured under the old policy, and a 2026-07-28 field
+    run published `total=616.5 deg` on SFP (§22.9 item 1).
 13. Do not accept a survey pose because *one* IK branch is arm-clear. Move
     Robot picks the branch, not this skill (§7.1).
 14. Do not trust a board `minAreaRect` orientation when the mask is clipped on
@@ -1614,3 +1625,395 @@ The SFP jump is the headline, but note what it means about the *previous*
 number: 92/144 was measured on geometry the robot never sees, and this handoff
 then blamed the 52 misses on Stage 1. A sweep that does not sit where the
 hardware sits will keep producing confident, wrong conclusions.
+
+## 22. Current system (2026-07-28, end of session)
+
+Everything below is **uncommitted working tree** and **not deployed**. The last
+build hardware ran predates the coverage ladder, the roll reduction and the
+insignia-tier fixes. `board_stage2.py` is unchanged since the `reach_cap` fix,
+so `EXPECTED_STAGE2_SHA` is
+`765038043ab15e01c7c2eecd9e75995dc2b558d3c96e1e0937e62555ea8c604e`.
+
+### 22.1 The two invariants
+
+Stage 2 is organised around two things no fallback may touch:
+
+1. **The view.** Per sector: SFP near-overhead strip view, NIC <=2 deg
+   straight-down look into the cages, SC 16-20 deg long-face band and
+   two-camera bore gate. Coverage boxes, all-three-camera framing, the
+   obliquity/tilt bands and `min_view_quality` are fixed.
+2. **Collisions.** The `UR5eArm.self_clearance` 140 mm wrist-camera keep-out,
+   applied inside `solve_ranked`. **Never relaxed by anything.** The field
+   instruction was explicit: collisions are a hard no.
+
+The gripper is *allowed* in frame -- that is what the calibrated silhouette is
+for. What must stay clear of the sector is the gripper keep-out and the arm
+limbs.
+
+### 22.2 The relaxation ladder
+
+`_run_sfp_geometric_stage2` runs `search_survey_pose` once per tier and returns
+on the first that yields a pose. Everything varied is comfort, not correctness.
+
+```text
+0  strict + insignia kept in view   sector caps + insignia readable in >=1 camera
+1  strict                           exactly the previously deployed behaviour
+2  joint-travel caps lifted         225/185 -> 360 deg, total cap off
+3  any arm-clear IK branch          instead of every branch clear
+4  reduced clearance margin         25 px -> 12 px
+5  angled view (8 deg off normal)   isotropic-obliquity sectors only, NOT SC
+6  angled view (15 deg off normal)  as above
+```
+
+Tier 0 sits **in front of** the old strict tier rather than modifying it, so a
+board where the insignia cannot be kept in view falls through to exactly what
+shipped. A test pins the four original tier definitions verbatim plus the
+break-on-first-success.
+
+Only tiers 5-6 degrade the picture; they log a distinct warning. **Tier 0
+success is not a relaxation** -- an earlier build warned on every first-tier
+success because the tier had been renamed, and that noise made healthy runs look
+like fallbacks.
+
+### 22.3 Per-sector settings
+
+| | SFP (0/1) | NIC (2) | SC (3) |
+| --- | --- | --- | --- |
+| reorientation cap | `math.pi` | `math.pi` | `math.pi` |
+| optical rolls | **12** (30 deg) | 24 (15 deg) | 24 (15 deg) |
+| standoffs | default 0.30-1.25 | **floored at 0.66** | 0.55-0.62 |
+| clearance floor | 25 px | 25 px | 25 px |
+| coverage | **3-rung ladder** (22.4) | `nic_sector_corners` | `sc_sector_corners` |
+
+The 90 deg reorientation cap is gone everywhere (see 21.2). The NIC 0.66 m floor
+exists because below it the outer ports leave the 7.46 deg bore cone while still
+framing -- 21 of 126 poses published a ~6-of-10 view before it.
+
+### 22.4 SFP coverage is a ladder
+
+Zones 3/4 are a **high-mix supply area**: LC/SC/SFP fixtures mount on *any* rail
+in *any* order, translation limits +/-0.09425 m, orientation +/-60 deg. There is
+no seat list to aim at. Legal fixture origins span board Y +/-0.2005, and
+`sfp_module_strip_corners` (+/-0.1125) covers about half of it -- a fixture
+parked at the end of its rail falls outside the only box the search checked.
+
+`_coverage_targets_for_target` now returns widest-first:
+
+```text
+module_coverage_corners   X -0.0275..0.1535   Y +/-0.2575   all rail families
+sfp_envelope_corners      X  0.0000..0.1100   Y +/-0.2575   SFP rail X
+sfp_module_strip_corners  X  0.0300..0.1150   Y +/-0.1125   what ships today
+```
+
+A wider box cannot be framed close, so it forces a farther standoff -- that *is*
+"move the arm up" expressed as geometry. Measured at the real board distance:
+8/8 board yaws at +/-0.1125 and 0.64-0.70 m, 7/8 at +/-0.145 and 0.80-0.85 m,
+3/8 at +/-0.160, 0/8 at +/-0.178. The last rung is the deployed box, so an
+unreachable placement keeps current behaviour.
+
+**The 8.2 frontier table is obsolete** -- measured at cap 90 deg, 7 rolls and the
+legacy board position, and it declared `y_half 0.1783` infeasible on evidence
+that no longer holds.
+
+### 22.5 Insignia contract
+
+`REQUIRED_INSIGNIA_CAMERAS = 1`. Requiring two complete views was tried on
+hardware on 2026-07-28 and **reverted the same day**: it refused five
+consecutive invocations with "0 have one" at poses where the board was plainly
+in view. With Stage 1 gone, each of those is a dead stop.
+
+Kept is the free half: when two or more cameras accept an estimate they must
+agree within 5 cm / 8 deg, and their board **origins are averaged** (rotation
+stays with the preferred view -- an orientation mean over a near-square landmark
+can interpolate between mirror hypotheses). Field evidence:
+`fused over 3 agreeing cameras origin_spread=0.0059m shift_from_source=0.0017m`.
+
+`SLIVER_EDGE_MARGIN_PX = 12.0`: when *no* camera holds a fully-framed insignia,
+one clipped by up to 12 px is accepted, with a warning. The landmark is the
+bracket bounding rectangle, so a clipped extreme biases the recovered range; the
+agreement check still applies. The Stage 1 gate and Stage 2 share this two-pass
+rule (`_cameras_with_usable_landmark`) -- previously they could disagree and the
+gate admitted a triplet Stage 2 then rejected.
+
+### 22.6 Performance: where the time goes
+
+A field SFP tier measured **160.31 s**. Causes, in order:
+
+1. `view_quality` is evaluated on **every** candidate surviving the cheap prunes
+   (~10k), while only the framed handful reaches the IK gate (`probed=68` in the
+   same trace). An insignia check placed there cost ~100 s. It now runs inside
+   the IK gate.
+2. The grid is `21 standoffs x 25 offsets x rolls`, so each roll is ~500
+   candidates of full-resolution gripper-mask work. 24 -> 12 rolls halves it.
+
+The coverage ladder is **not** a cost: `_best_for_target` is lazy and returns on
+the first target that yields a pose.
+
+**Rule: never put per-candidate work in `view_quality` unless it is cheap. Put
+it in the `joint_motion` gate, which sees ~100x fewer poses.**
+
+### 22.7 Diagnostics
+
+```text
+survey policy target=N sector_boxes=N coverage_x=[..] coverage_y=[..] ...
+survey inputs board_origin=(..) board_normal=(..) source=.. reprojection=..
+  tcp=(..) seed_deg=[..] live_ik=..
+survey search tier=... joint_cap=.. total_cap=.. any_branch=.. clearance=..
+  -> FOUND/none | probed=.. unreachable=.. camera_keepout=.. insignia_lost=..
+  arm_in_view=.. arm_clear=.. best_worst_joint=.. took=..s
+```
+
+On total failure every tier line repeats at ERROR. Reading guide: `probed=0`
+means nothing reached IK (framing/clearance/obliquity); `unreachable` dominant
+means the board is too far for that sector standoff; `camera_keepout` or
+`arm_in_view` dominant means the pose was reachable and something else refused.
+
+`unreachable` no longer masks the binding gate in the verdict -- NIC probes
+hundreds of unreachable far poses by design, and that used to report
+`BINDING GATE = reachability` while every near-miss was `arm_in_view`.
+
+### 22.8 Test and sweep status
+
+```text
+unit suite:  266 passed
+SFP sweep:   144 / 144        <- measured BEFORE the coverage ladder
+SC sweep:    144 / 144        <- measured BEFORE the tiers
+NIC sweep:   105 found / 105 passed / 39 honest refusals (new harness)
+```
+
+`test/nic_sweep_runner.py` is new: NIC had shipped on three hardware
+orientations and no offline matrix while SC and SFP each had 144 cases. Its port
+audit checks all ten mouths framed in all three cameras **and** each inside the
+7.46 deg cone -- framing is not sufficiency.
+
+**The harnesses do not exercise the relaxation ladder or the coverage ladder.**
+They call `search_survey_pose` directly with a single box and their own copy of
+the arm-in-view rule, now stricter than the skill. Their numbers are a
+conservative lower bound and do not validate tier behaviour. Closing that is the
+highest-value harness work.
+
+### 22.9 Open items
+
+1. **SFP total joint travel is still ungated.** A field run published
+   `joint_max=175.5 total=616.5 deg` -- three joints swinging ~175 deg at once,
+   the exact contortion `TOTAL_JOINT_MOTION_LIMIT_RAD` exists to stop, but the
+   cap is SC-only. Section 17 item 12 ("costs 26 of 144") was measured under the
+   old policy and needs re-measuring.
+2. **The exhaustion message counts all tiers** even for SC, which skips the two
+   angled ones. Cosmetic, wrong in an SC log.
+3. **Parallel invocation is impossible by construction**:
+   `_execute_lock.acquire(blocking=False)` returns a failure immediately, so
+   concurrent Flowstate nodes bail rather than queue. Sequential-immediate works
+   and is what the field uses. Making it concurrent means scoping the lock to
+   the snapshot grab and `prepare_controller_handoff()`, which publishes to a
+   live actuator interface.
+4. **Staged-object geometry is not grounded.** The task-board URDF models two
+   SFP and two SC mount *fixtures* (`sfp_mount_rail_0/1` etc). The five pick
+   objects in the field are `sfp_sc_cable` SDF models -- separate spawned
+   entities with `lc_plug_link`/`sc_plug_link` ends, attached by `CablePlugin` --
+   and their staged poses are **not** in the board URDF. Every coverage constant
+   in `board_stage2.py` describes the rails, not the cables. Find where cables
+   are spawned before trusting any coverage number.
+5. The 140 mm keep-out is calibrated from a single planner rejection at 111 mm
+   and measured to a capsule *centreline* (~90 mm real clearance). Relaxing to
+   110 mm recovered cases offline. **Do not touch it without checking against
+   the workcell planner mesh test** -- publishing a pose the planner refuses is a
+   hard move failure, and the field instruction on collisions is absolute.
+
+## 23. Staged SFP: the outer module was behind the tool (2026-07-28, late)
+
+Field report: *"at the edges it doesn't even see the bottom sfp port"*, on a run
+that looked healthy — `tier='strict + insignia kept in view' -> FOUND`,
+`standoff=0.660m`, `min_clearance=27.0px`, `obliquity=5.8deg`, all six seats
+comfortably framed. Uncommitted and **not deployed.**
+
+### 23.1 It was tool occlusion, not clipping
+
+FK on the logged `target_deg` under the logged calibration reproduces the
+published `target=(-0.3940,0.3293,0.4518)` to **0.49 mm** and `move=0.266m` to
+0.1 mm, which turns the log into a measurable scene (§21.1's method — do this
+first, always). Projecting the six legal seats into all three cameras at that
+pose:
+
+```text
+center_camera  seat +156.2  edge=+159.2px  gripper mask 4/8 corners
+center_camera  seat +200.5  edge= +75.2px  gripper mask 8/8 corners
+```
+
+Every seat is 75–355 px *inside* every image. The +Y outer module is invisible
+because it lands **behind the centre camera's gripper silhouette**. Edge margin
+was never the binding constraint, so every number the policy was tuned against —
+and the sweep's whole seat audit — was measuring the wrong obstacle.
+
+Same class of bug as the one-rail sector in §8.2, one level up: **the coverage box
+is the only region anything checks**, so a seat outside it is on faith. There the
+box's placement was wrong; here its size was.
+
+### 23.2 The frontier, re-measured against the right obstacle
+
+81 cases (9 board yaws × 3 placements × 3 live starts) at the hardware board
+distance, auditing all six seats for image margin **and** gripper occlusion:
+
+```text
+y_half    found   all 6 framed   all 6 unoccluded   standoff
+0.11250   81/81       81/81            0/81         0.64-0.66   <- shipped
+0.14500   81/81       81/81           81/81         0.80
+0.15625   81/81       81/81           81/81         0.85
+0.16000   78/81       78/81           78/81         0.85-0.90
+0.17000   45/81       45/81           45/81         0.90
+0.17825    0/81         -                -          infeasible
+```
+
+`SFP_COVERAGE_HALF_Y` is now **0.145** — the narrowest span that clears the tool
+everywhere, and therefore the closest standoff that shows all six seats. Wider
+only costs standoff and availability. `0.17825` (outer seat centre + body
+half-extent, i.e. strict geometric containment) cannot be framed and
+gripper-cleared from any reachable pose.
+
+The cost is real and was accepted deliberately: **0.64 m → 0.80 m of standoff**,
+every module ~20% smaller. The field instruction was that a higher view is fine
+and probably preferred. A smaller module is a worse measurement; a hidden one is
+no measurement.
+
+### 23.3 Framing the box is necessary, not sufficient
+
+`_staged_seats_are_visible` gates every candidate on the six seat bodies
+themselves — inside the usable image and clear of the gripper mask, in all three
+cameras — exactly as the SC bore gate does for its mouths. It runs in the **IK
+gate** (~68 poses/search), never in `view_quality` (~10k); that rule is §22.6 and
+it still holds.
+
+`board_stage2.sfp_seat_bodies()` is now the single definition of a seat body
+(mount origin through protruding tip). The skill and `sfp_sweep_runner.py` had
+separate copies, which is how they came to disagree.
+
+With the gate active the ±0.1125 fallback box can no longer publish blind: it
+reaches 138/144 by stepping *back* until the seats are visible.
+
+### 23.4 The arm-in-view rule is now absolute for SFP — for free
+
+Field instruction: the arm getting between the cameras and the board **cannot**
+happen (the SC yaw-70 failure, §10.6). Staged SFP therefore passes
+`sector_regions=None` — no arm limb anywhere in any image, the strong rule §7.1
+had relaxed away.
+
+It costs nothing, which is the whole reason to take it. Over 144 cases, keep-out
+= coverage box, = rail column, = whole board face, = nowhere-in-any-image all
+select **138/144 with identical standoff and joint-travel ranges**. Moving the
+view up to 0.80–0.85 m removed the arm-occlusion problem structurally instead of
+trading anything for it. NIC and SC keep the region rule — they sit close to their
+bore cones and cannot afford it (§7.1's 29-of-435 measurement).
+
+### 23.5 Time: 154.86 s tier down to ~2.6 s of search work
+
+Three separate causes, all of them waste:
+
+1. **The coverage ladder ran a full grid per rung.** `_best_for_target` is lazy
+   about *success*, not failure, so §22.4's two wide rungs (±0.2575) — measured
+   here as infeasible in 81/81 — cost two complete standoff × offset × roll
+   searches on every invocation. §22.6's "the ladder is not a cost" was wrong.
+   Now two rungs, and the first one succeeds.
+2. **Nine standoff rungs below the frontier.** A ±0.145 box cannot be framed
+   nearer than ~0.75 m, and the default ladder opens at 0.30 m. Flooring SFP at
+   0.70 m (as NIC is at 0.66) halves the search and selects the **bit-identical**
+   TCP, standoff, clearance and roll at every yaw tested.
+3. **The insignia tier** — see §23.6.
+
+Measured on a reconstructed scene: 21.0 s → 2.6 s for the same search, and the new
+pose has all six seats visible where the old one did not.
+
+### 23.6 The Stage-2 insignia check is gone
+
+Field instruction, and it was right. `_insignia_visible_from`, tier 0
+(`"strict + insignia kept in view"`), `require_insignia` and the `insignia_lost`
+counter are deleted. Stage 1 already refuses the triplet unless a calibrated
+camera holds a complete insignia, so the board is localized before Stage 2 runs;
+re-checking it on the survey *endpoint* rejected **zero** candidates on the trace
+it was added for (`probed=68 = 4 unreachable + 50 keepout + 14 clear`) while
+costing a whole extra grid search — and ~90 s more in the deployed build, where it
+still sat in `view_quality`.
+
+If a chained NIC/SC call cannot find the insignia from where the previous survey
+left the arm, that belongs in how the process sequences its Move Robot poses, not
+in narrowing every survey view to protect a measurement already taken.
+
+### 23.7 Summed joint travel is now gated on SFP too
+
+§17 item 12 said not to; §22.9 item 1 said re-open it. Re-opened.
+`TOTAL_JOINT_MOTION_LIMIT_RAD` (400°) now applies to targets 0/1/3, not SC only.
+The old justification failed on both halves: a field SFP run published
+`total=616.5deg`, and the "costs 26 of 144" was measured under the 90° cap and
+one-rail coverage. Re-measured: 123/144 instead of 138 at the strict tier, worst
+summed travel 640° → 342°. **The 15 are not lost** — the next tier lifts the cap,
+so a placement with no civilised pose still gets the contorted one, logged as a
+relaxation instead of published as if it were normal.
+
+**This does not fully solve the contortion.** The 18:07 field run published
+`joint_max=108.4 total=363.7deg` and looked contorted in the viewport; 363.7° is
+*under* the 400° cap, so this gate would not have refused it. See §23.9 item 1.
+
+### 23.7b Letting joint travel outrank standoff — tried, measured, reverted
+
+The obvious next lever, and it does not work. Standoff dominates the objective
+lexicographically, so at the closest feasible rung *any* IK-valid candidate wins
+however far the arm folds — a cheaper pose one rung out is in a different plateau
+group and never compared. Collapsing the whole band into one plateau so travel
+decides is a four-line change (`standoff_ranks_first`).
+
+Measured over 144 cases:
+
+```text
+                        jmax med   jmax p90   jmax max   >150deg   standoff med
+standoff dominant          69.4      141.9      167.9       8          0.80
+joint travel ranks         66.7      136.7      167.0       8          0.85
+```
+
+Three degrees of median travel, and every module gets smaller to pay for it. Once
+the coverage box reaches the outer seats the feasible band is only 0.76–0.90 m
+wide, so there is no travel left to win by crossing it, and the eight >150° cases
+need a large base rotation at that placement regardless of rung. Standoff stays
+dominant; the parameter was removed rather than left as a dead knob.
+
+The lesson is §23.9 item 1: **endpoint ranking is the wrong lever for
+contortion.** The skill ranks where the arm ends up, and the complaint is about
+how it gets there.
+
+### 23.8 Current numbers
+
+```text
+unit suite:  269 passed
+SFP sweep (strict tier, 144 cases, per-seat gate active):
+    coverage   found     passed    standoff     joint max     joint total
+    sector      22/144    22/144   0.73-0.85     18-151deg      43-374deg
+    narrow     138/144   138/144   0.76-0.90      9-174deg      36-347deg
+    shipped    138/144   138/144   0.76-0.90      9-168deg      33-347deg
+```
+
+Strict-tier numbers: a "no pose" here is recovered by the relaxation ladder, so
+138/144 is a floor. **SC and NIC sweeps were not re-run** — their policy is
+untouched, but that is an assumption, not a measurement.
+
+### 23.9 What is still open
+
+1. **Contortion is not fixed by any cap, and cannot be.** The skill publishes a
+   *Cartesian* pose; Move Robot re-solves it and picks its own branch (§11). Every
+   gate here constrains the endpoint the skill predicts, not the path taken. The
+   field's own next step — driving the move natively from the selected six-joint
+   branch instead of handing a Cartesian TCP to Move Robot — is the actual fix, and
+   it also retires §7.1's all-branches-clear compromise, the "cannot cover a branch
+   outside `solve_ranked`'s set" limitation, and the 1193-point/29 s transits in
+   §11.
+2. **The 140 mm wrist-camera keep-out is now the dominant gate.** The 18:07 trace
+   reads `probed=68 unreachable=0 camera_keepout=61 arm_in_view=2 arm_clear=5` — it
+   is refusing 90% of reachable framed poses, so it is what limits how good a
+   branch the search can pick. §21.3 and §22.9 item 5 still apply: it was
+   calibrated from one planner rejection whose best branch sat at 111 mm, measured
+   to a capsule *centreline* (~90 mm real surface clearance), and 110 mm recovered
+   cases offline. Checking it against the workcell planner's mesh test is the
+   cheapest remaining win.
+3. **`sfp_sweep_runner.py` can no longer reproduce either regression**, because the
+   seat gate fixes them from inside. Add a `--no-seat-gate` switch before the next
+   policy change, or the harness stops being able to fail.
+4. The insignia removal means a survey pose may crop the insignia. Nothing observed
+   needs it, but a chained SFP → NIC → SC sequence has not been re-run on hardware
+   since.

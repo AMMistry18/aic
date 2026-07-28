@@ -350,14 +350,33 @@ def test_staged_sfp_coverage_straddles_both_rails():
     exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
     select = namespace["_coverage_targets_for_target"]
 
+    # The ladder is widest-first, and every rung must be one that can actually
+    # be framed.  It used to open at +/-0.2575, sized from the high-mix argument
+    # that fixtures mount on any rail over +/-0.09425 m of travel.  Measured over
+    # 81 cases at the hardware board distance, no span at or beyond +/-0.17825 is
+    # feasible from any reachable pose -- so those rungs failed every time while
+    # each costing a full standoff x offset x roll grid, about two thirds of the
+    # 154.86 s the field reported.  Aspirational rungs are latency, not coverage.
     for sfp_target in (0, 1):
         targets = select(sfp_target)
-        assert len(targets) == 1
-        ys = targets[0][:, 1]
-        assert abs(float(ys.mean())) < 1e-9
-        assert abs(float(ys.max()) + float(ys.min())) < 1e-9
-        # Same extent as the box it replaces -- placement is the fix, not size.
-        assert float(ys.max()) - float(ys.min()) == pytest.approx(0.225)
+        assert len(targets) >= 2, "coverage must be a widest-first ladder"
+        spans = []
+        for box in targets:
+            ys = box[:, 1]
+            # Every rung stays centred on board Y=0: the original bug was a box
+            # covering the +Y rail alone, banking all framing slack on one side.
+            assert abs(float(ys.mean())) < 1e-9
+            assert abs(float(ys.max()) + float(ys.min())) < 1e-9
+            spans.append(float(ys.max()) - float(ys.min()))
+        assert spans == sorted(spans, reverse=True), "must be widest-first"
+        # Every rung must be measurably feasible, not aspirational.
+        assert spans[0] < 2 * 0.17825, "widest rung is not framable anywhere"
+        # The widest rung must still reach past the outer seat centres, which is
+        # what lifts them off the tool silhouette.
+        assert spans[0] >= 2 * 0.145 - 1e-9
+        # The final rung is the previously deployed box, so nothing that works
+        # today can regress; the skill warns when it is the one that wins.
+        assert spans[-1] == pytest.approx(0.225)
 
     # NIC and SC remain single, already-validated sectors.
     assert len(select(2)) == 1
@@ -567,8 +586,11 @@ def test_every_sector_searches_the_full_roll_family_from_any_start_pose():
             f"target {target} reintroduced a reorientation cap that selects "
             "the candidate set instead of bounding motion"
         )
-        assert len(sector["yaws_rad"]) >= 20, (
-            f"target {target} lost the fine roll family"
+        # NIC and SC sample 15 deg; SFP uses 30 deg because its grid is far
+        # larger (21 standoffs x 25 offsets) and each roll cost real search
+        # time -- a field SFP tier measured 160 s at 15 deg steps.
+        assert len(sector["yaws_rad"]) >= 12, (
+            f"target {target} lost the roll family"
         )
 
 
@@ -691,11 +713,11 @@ def test_angled_view_is_the_last_resort_and_never_applies_to_sc():
 def test_a_reachable_normal_view_is_never_affected_by_the_angled_tiers():
     """The tiers that existed before the angled fallback must be untouched.
 
-    The deployed build searches four tiers and returns on the first that finds
-    a pose.  Appending angled-view tiers must not change any outcome that those
-    four already produced -- if tier 0 succeeds, nothing below it ever runs.
-    This pins both halves of that: the original four tiers carry no obliquity
-    relaxation, and the loop still breaks on the first candidate.
+    The deployed build searches four geometry-preserving tiers and returns on the
+    first that finds a pose.  Appending angled-view tiers must not change any
+    outcome those four already produced -- if the strict tier succeeds, nothing
+    below it ever runs.  This pins both halves: the original four carry no
+    obliquity relaxation, and the loop still breaks on the first candidate.
     """
     stage2 = _stage2_source()
 
@@ -713,9 +735,64 @@ def test_a_reachable_normal_view_is_never_affected_by_the_angled_tiers():
     ):
         assert tier in stage2, tier
 
-    # Tier 0 must still carry the *sector's own* caps, not a relaxed constant.
+    # Strict is first.  An insignia tier used to sit in front of it, requiring
+    # the published pose to keep the purple bracket readable for a chained
+    # NIC/SC call.  It is gone: Stage 1 already gates on a complete insignia, the
+    # field trace it was added for shows it never rejected a candidate, and each
+    # tier costs a full standoff x offset x roll grid.
+    assert "insignia" not in stage2.split("search_tiers = (")[1].split(")\n")[0]
+    assert stage2.index('("strict", joint_motion_limit_rad') < stage2.index(
+        '("joint-travel caps lifted"'
+    )
+
+    # The first tier must carry the *sector's own* caps, not a relaxed constant.
     assert "joint_motion_limit_rad, total_joint_motion_limit_rad" in stage2
     # And the search must stop at the first tier that yields a pose.
     assert "if candidate is not None:" in stage2
     body = stage2[stage2.index("if candidate is not None:"):]
     assert "break" in body[: body.index("if joint_motion_fn is None:")]
+
+
+def test_stage2_does_not_re_check_the_purple_insignia():
+    """Stage 2 must not carry its own insignia gate.
+
+    Stage 1 refuses the triplet unless a calibrated camera holds a complete
+    insignia, so the board is already localized by the time Stage 2 runs.  A
+    second check on the survey *endpoint* rejected nothing in the field
+    (`insignia_lost=0`) and cost a whole extra grid search, and when it lived in
+    ``view_quality`` it took one SFP tier from 64 s to 160 s.
+    """
+    source, _ = _source_and_class()
+
+    assert "_insignia_visible_from" not in source
+    assert "require_insignia" not in source
+    assert "insignia_lost" not in source
+    # The Stage-1 gate is the one that must stay.
+    assert "_stage2_has_complete_landmark" in source
+    assert "REQUIRED_INSIGNIA_CAMERAS" in source
+
+
+def test_staged_sfp_search_skips_standoffs_its_coverage_box_cannot_frame():
+    """SFP floors its standoff ladder, purely to cut search time.
+
+    The +/-0.145 coverage box cannot be framed and gripper-cleared in three
+    canted cameras nearer than ~0.75 m, and the sweep selects 0.80 m in every
+    case.  The default ladder opens at 0.30 m, so nine rungs below the floor each
+    ran a full 25-offset x 12-roll grid of full-resolution mask work that could
+    not produce a pose.  Removing them halves the search and selects the
+    bit-identical pose at every yaw tested.
+    """
+    helper = copy.deepcopy(_method("_survey_view_settings"))
+    helper.decorator_list = []
+    module = ast.fix_missing_locations(ast.Module(body=[helper], type_ignores=[]))
+    namespace: dict[str, object] = {"math": math}
+    exec(compile(module, str(SOURCE_PATH), "exec"), namespace)
+    settings = namespace["_survey_view_settings"]
+
+    for sfp_target in (0, 1):
+        standoffs = settings(sfp_target)["standoffs_m"]
+        assert min(standoffs) == pytest.approx(0.70)
+        # The measured selection must stay reachable, with a rung to spare below.
+        assert 0.80 in standoffs
+        # Closest-first is still the objective, so the ladder must stay ordered.
+        assert list(standoffs) == sorted(standoffs)

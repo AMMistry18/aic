@@ -21,24 +21,51 @@ legal staged-module seats at 50 mm pitch across two rails
 (``sfp_module_detail_boxes``); five are occupied, and which one is empty does
 not matter -- the outermost seats at board Y -0.15625 and +0.15625 are the ones
 that bind, and they are occupied.  The audit projects all six seat bodies into
-all three cameras and reports how many are fully inside the usable image.  A
-case passes only when a pose was found *and* every seat survives that audit --
-the property downstream IVM actually depends on, and the one the superseded
-``sfp_sector_corners`` target did not imply.
+all three cameras and asks whether each is **visible**: inside the usable image
+*and* not behind any camera's gripper silhouette.  A case passes only when a pose
+was found and every seat survives both halves.
+
+**Both halves, because each has already shipped a bug.**  The audit originally
+scored image edges only, and that is how the 2026-07-28 17:03 field run got
+through: at coverage half-span +/-0.1125 the outer seats sit 122-159 px *inside*
+every frame -- so the harness reported 144/144 with room to spare -- while the +Y
+one lands squarely behind the centre camera's tool silhouette and never reaches
+IVM.  Edge margin was not the binding constraint, so measuring only edge margin
+could not see it.
 
 Headline numbers (144 cases: 8 board yaws x 2 tilts x 3 placements x 3 live
-Stage-1 exits), both rows at the shipped 25 px / 90 deg settings:
+Stage-1 exits) at the current policy -- 25 px clearance, 180 deg reorientation,
+12 rolls, standoffs floored at 0.70, summed travel capped at 400 deg, and the
+per-seat gate active:
 
-    coverage      found   all-5 framed   clipped   standoff
-    sector          96          0          96      0.62-0.80
-    shipped         92         92           0      0.64-0.85
+    coverage   found     passed    standoff     joint max     joint total
+    sector      22/144    22/144   0.73-0.85     18-151deg      43-374deg
+    narrow     138/144   138/144   0.76-0.90      9-174deg      36-347deg
+    shipped    138/144   138/144   0.76-0.90      9-168deg      33-347deg
 
-The superseded box never frames the whole strip: 35 of its 96 poses hold only
-four of the six seats and the other 61 hold five, with the worst-placed seat
-123.9 px outside the image.  It "finds" four more poses than the fix only
-because it is grading itself against half the board.
+These are **strict-tier** numbers.  A case reported as no pose here is one the
+skill recovers on its next relaxation tier, so 138/144 is a floor on availability,
+not a prediction of failures.
 
-Reproduce the regression with ``--coverage sector``.
+Note what the seat gate does to the two regression rows: nothing passes with a
+hidden seat any more, because the gate rejects those candidates and the search
+simply steps back to a farther standoff until every seat is visible.  That is the
+point of it -- and it means ``--coverage narrow`` no longer *reproduces* the
+2026-07-28 17:03 failure, it fixes it a different way.  The regressions were
+measured before the gate existed:
+
+* the one-rail ``sector`` box clips a module in 96 of its 96 found poses, 35 of
+  them holding only four of the six seats, worst seat 123.9 px outside the image;
+* the +/-0.1125 ``narrow`` box frames all six seats -- 122-159 px inside every
+  image -- and hides the +Y outer one behind the centre camera's tool silhouette
+  in **81 of 81** swept placements, at 0.64-0.66 m standoff.
+
+Reproducing either now needs the gate switched off, which this harness cannot yet
+do; adding that switch is worth doing before the next policy change.
+
+The summary separates ``seat_outside_an_image`` from ``seat_behind_the_tool``
+because the fixes are opposite: framing wants a different standoff or aim,
+occlusion wants a wider coverage box.
 """
 
 from __future__ import annotations
@@ -65,11 +92,14 @@ from test_board_stage2 import (  # noqa: E402
 
 from aic_perception.arm_ik import UR5eArm, _rot_z  # noqa: E402
 from aic_perception.board_stage2 import (  # noqa: E402
+    SFP_COVERAGE_HALF_Y,
+    SFP_FALLBACK_COVERAGE_HALF_Y,
     BoardPoseEstimate,
     Transform,
     project_points,
     sfp_module_detail_boxes,
     sfp_module_strip_corners,
+    sfp_seat_bodies,
     sfp_sector_corners,
     search_survey_pose,
 )
@@ -94,14 +124,11 @@ PLACEMENTS_M = ((0.0, 0.0), (0.050, 0.030), (-0.050, -0.040))
 # any other position, and the legacy pin is kept for comparing recorded numbers.
 BOARD_CENTER_M = (-0.5189, 0.2054)
 LEGACY_BOARD_CENTER_M = (-0.3445, 0.2602)
-# Seat-body geometry for the audit.  ``SFP_RAIL_X`` is the CAD mount origin;
-# the transceiver protrudes forward from it and hardware decoded the bodies at
-# board X ~0.0862.  See ``_seat_bodies``.
-SFP_RAIL_X = 0.055
-SFP_DETECTED_BODY_X = 0.0862
-SFP_BODY_HALF_X = 0.025
-SFP_BODY_HALF_Y = 0.022
-SFP_SEAT_Y = (-0.15625, -0.10625, -0.05625, 0.05625, 0.10625, 0.15625)
+# Seat centres, for labelling audit output.  The bodies themselves come from
+# ``board_stage2.sfp_seat_bodies`` so the harness and the skill cannot diverge.
+SFP_SEAT_Y = tuple(
+    float(box[:, 1].mean()) for box in sfp_module_detail_boxes()
+)
 HOME_DEG = np.array([-9.15, -77.59, -95.39, -97.02, 90.01, 80.84])
 EXIT_JOINTS = (
     np.radians(HOME_DEG),
@@ -115,11 +142,21 @@ EXIT_JOINTS = (
 # that produced the 4-of-5 hardware failure and is kept so the regression stays
 # reproducible.
 COVERAGE_TARGETS = {
-    # Exactly what ``_coverage_targets_for_target`` ships for targets 0/1.
-    "shipped": lambda p: (sfp_module_strip_corners(),),
+    # Exactly what ``_coverage_targets_for_target`` ships for targets 0/1: the
+    # +/-0.145 box that clears the tool, then the +/-0.1125 box that shipped, kept
+    # only so availability cannot regress.
+    "shipped": lambda p: (
+        sfp_module_strip_corners(),
+        sfp_module_strip_corners(SFP_FALLBACK_COVERAGE_HALF_Y),
+    ),
     # The superseded single-rail box, kept so the 4-of-5 hardware regression
     # stays reproducible from this harness.
     "sector": lambda p: (sfp_sector_corners(),),
+    # The +/-0.1125 box alone -- the 2026-07-28 17:03 regression, where all six
+    # seats are framed and the outer one hides behind the tool.
+    "narrow": lambda p: (
+        sfp_module_strip_corners(SFP_FALLBACK_COVERAGE_HALF_Y),
+    ),
     # Free exploration of the frontier: centred strip with a caller-chosen
     # half-span and board-X range (``--y-half-mm``, ``--x-min-mm/--x-max-mm``).
     "centered": lambda p: (
@@ -127,9 +164,14 @@ COVERAGE_TARGETS = {
     ),
 }
 
+# Standoff ladder, matching the skill.  The +/-0.145 coverage box cannot be framed
+# and gripper-cleared nearer than ~0.75 m, so the default 0.30 m opening spent
+# nine rungs of full-resolution mask work on poses that cannot exist.
+STANDOFFS_M = (0.70, 0.73, 0.76, 0.80, 0.85, 0.90)
+
 DEFAULT_POLICY = {
     "coverage": "shipped",
-    "y_half_m": 0.1125,
+    "y_half_m": SFP_COVERAGE_HALF_Y,
     "max_obliquity_deg": 20.0,
     "min_clearance_px": 25.0,
     # Shipped values.  The cap is measured from the current TCP and therefore
@@ -138,10 +180,14 @@ DEFAULT_POLICY = {
     # rolls then recover the board yaws the 7-sample family skips.
     "max_angular_motion_deg": 180.0,
     "max_joint_motion_deg": 225.0,
+    "max_total_joint_motion_deg": 400.0,
     "seat_edge_margin_px": 12.0,
+    "seat_gate": True,
     "aim_x_m": 0.0,
     "aim_y_m": 0.0,
-    "roll_count": 24,
+    # 12, matching the skill: the grid is standoffs x 25 offsets x rolls, and 24
+    # was measured costing 160 s in the field for the last 1-of-8 board yaws.
+    "roll_count": 12,
     "board_center_m": BOARD_CENTER_M,
 }
 
@@ -158,7 +204,27 @@ def _centered_span_corners(y_half_m, x_range=None):
     return np.array(corners, dtype=float)
 
 
+def _seats_visible(
+    base_T_tcp, base_T_board, tcp_T_cam, cameras, grippers, edge_margin_px
+):
+    """The skill's ``_staged_seats_are_visible`` gate, for parity."""
+    margins, blockers = _seat_audit(
+        base_T_tcp, base_T_board, tcp_T_cam, cameras, grippers, edge_margin_px
+    )
+    return all(m >= 0.0 and not b for m, b in zip(margins, blockers))
+
+
 def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
+    """The skill's staged-SFP arm-in-view rule: no limb anywhere in any image.
+
+    Matching the deployed gate matters in both directions.  This harness applied
+    the whole-image rule while the skill had relaxed to a sector-region keep-out,
+    so its "N of 144" was a lower bound on a policy nobody was running.  Staged SFP
+    is now back on the whole-image rule in the skill, and it is free: at the
+    0.80-0.85 m standoff the wider coverage box forces, 144 swept cases select the
+    same poses whether the keep-out is the coverage box, the rail column, the whole
+    board face, or the entire image.  NIC and SC keep the region rule.
+    """
     for start, end, radius in arm.link_segments(joints):
         samples = np.array(
             [start + (end - start) * t for t in np.linspace(0.0, 1.0, 25)]
@@ -182,50 +248,37 @@ def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
 
 
 def _seat_bodies():
-    """Legal seat bodies spanning mount origin *through* protruding tip.
+    """The shared seat geometry -- ``board_stage2.sfp_seat_bodies``.
 
-    ``sfp_module_detail_boxes`` centres each seat on ``SFP_RAIL_X`` (0.055), so
-    it audits board X 0.030..0.080 -- the CAD *mount origins*.  The transceiver
-    protrudes from its mount, and the bodies decoded from hardware sit at board
-    X ~0.0862 (handoff 8.2), i.e. 0.061..0.111.  Auditing only the mount strip
-    checks a region ~31 mm behind the thing the camera actually sees, which is
-    how the sweep can report >100 px of margin while the field clips an end
-    module.
-
-    Span both: from the mount origin's near edge to the detected body's far
-    edge.  That is the physical extent of a seated module, and it is the
-    conservative choice -- it can only report *less* margin than either box
-    alone, never more.
+    This used to be a local copy, which is precisely how the harness and the skill
+    came to disagree about what a "seat" is.  The skill now gates on the same
+    function, so a change to the geometry moves both together or neither.
     """
-    x_min = SFP_RAIL_X - SFP_BODY_HALF_X
-    x_max = SFP_DETECTED_BODY_X + SFP_BODY_HALF_X
-    boxes = []
-    for y in SFP_SEAT_Y:
-        boxes.append(
-            np.asarray(
-                [
-                    (x, yy, z)
-                    for x in (x_min, x_max)
-                    for yy in (y - SFP_BODY_HALF_Y, y + SFP_BODY_HALF_Y)
-                    for z in (0.0, 0.06)
-                ],
-                dtype=float,
-            )
-        )
-    return tuple(boxes)
+    return sfp_seat_bodies()
 
 
-def _seat_audit(base_T_tcp, base_T_board, tcp_T_cam, cameras, edge_margin_px):
-    """Per-seat worst-camera image-boundary margin, in pixels.
+def _seat_audit(base_T_tcp, base_T_board, tcp_T_cam, cameras, grippers, edge_margin_px):
+    """Per-seat visibility: image-boundary margin **and** tool occlusion.
 
     Independent of whatever coverage target the search was given: this is the
-    physical question "would a module sitting in this seat be wholly inside
-    every camera image".  Returns one margin per legal seat; negative means the
-    seat body leaves at least one image.
+    physical question "would a module sitting in this seat be visible in every
+    camera".  Returns ``(margins, blockers)`` -- one image margin per legal seat,
+    negative when the seat body leaves an image, and the cameras in which the
+    gripper silhouette covers the seat.
+
+    **The gripper term is why this harness exists in its current form.**  It used
+    to score image edges only, and reported 144/144 with >100 px to spare while
+    the field lost the outer module every run.  Reconstructed from the 2026-07-28
+    17:03 pose, the +Y outer seat sits 122 px inside the frame and squarely behind
+    the centre camera's tool silhouette.  Edge margin was never the binding
+    constraint, so a harness that measured only edge margin could not see the bug
+    it was built to catch.  Score both, always.
     """
     margins = []
+    blockers = []
     for seat in _seat_bodies():
         worst = math.inf
+        blocked = []
         for name, camera in cameras.items():
             cam_from_board = (
                 base_T_tcp.compose(tcp_T_cam[name]).inverse().compose(base_T_board)
@@ -242,10 +295,19 @@ def _seat_audit(base_T_tcp, base_T_board, tcp_T_cam, cameras, edge_margin_px):
                 float(camera.width - 1 - u.max()),
                 float(camera.height - 1 - v.max()),
             )
+            mask = grippers[name].mask
+            if mask is not None and any(
+                0 <= int(round(float(vv))) < mask.shape[0]
+                and 0 <= int(round(float(uu))) < mask.shape[1]
+                and mask[int(round(float(vv))), int(round(float(uu)))]
+                for uu, vv in pixels
+            ):
+                blocked.append(name)
         margins.append(
             worst - edge_margin_px if math.isfinite(worst) else -math.inf
         )
-    return margins
+        blockers.append(sorted(blocked))
+    return margins, blockers
 
 
 def _run_case(case):
@@ -290,6 +352,20 @@ def _run_case(case):
     )
 
     def joint_motion(pose):
+        # The skill's seat gate: framing the coverage box is necessary and not
+        # sufficient, so every candidate is checked against the module seats
+        # themselves before any IK work.  ``--no-seat-gate`` removes it, which is
+        # how both shipped regressions stay reproducible from this harness -- with
+        # the gate on, the search simply steps back until the seats are visible.
+        if policy["seat_gate"] and not _seats_visible(
+            pose,
+            board_pose.base_T_board,
+            tcp_T_cam,
+            cameras,
+            grippers,
+            policy["seat_edge_margin_px"],
+        ):
+            return None
         solutions = arm.solve_ranked(pose, seed)
         clear = [
             target
@@ -335,8 +411,17 @@ def _run_case(case):
         ),
         joint_motion=joint_motion,
         max_joint_motion_rad=math.radians(policy["max_joint_motion_deg"]),
+        # Summed six-joint travel, now gated for SFP as well as SC: the worst-joint
+        # cap says nothing about three joints swinging 170 deg at once, which is
+        # the "arm contorts and gets between the cameras and the board" report.
+        # This harness measures the *strict* tier only, so a case it marks as no
+        # pose is one the skill would recover on its next relaxation tier.
+        max_total_joint_motion_rad=math.radians(
+            policy["max_total_joint_motion_deg"]
+        ),
         max_reach_m=0.85,
         min_height_m=0.02,
+        standoffs_m=STANDOFFS_M,
     )
     result = {
         "yaw_deg": yaw_deg,
@@ -348,14 +433,18 @@ def _run_case(case):
     }
     if candidate is not None:
         selected_delta = joint_motion(candidate.base_T_tcp)
-        margins = _seat_audit(
+        margins, blockers = _seat_audit(
             candidate.base_T_tcp,
             board_pose.base_T_board,
             tcp_T_cam,
             cameras,
+            grippers,
             policy["seat_edge_margin_px"],
         )
-        covered = [m for m in margins if m >= 0.0]
+        # A seat counts as covered only when it is inside every image *and* no
+        # camera's tool silhouette sits on it.
+        covered = [m for m, b in zip(margins, blockers) if m >= 0.0 and not b]
+        framed = [m for m in margins if m >= 0.0]
         result.update(
             standoff_m=candidate.standoff_m,
             clearance_px=candidate.min_clearance_px,
@@ -375,6 +464,7 @@ def _run_case(case):
                 )
             ),
             joint_max_deg=math.degrees(candidate.max_joint_motion_rad),
+            joint_total_deg=math.degrees(candidate.total_joint_motion_rad),
             # Per-joint target/seed, so the selected branch can be audited
             # against the *workcell's* real position limits rather than the
             # ones ``arm_ik.JOINT_LIMITS`` assumes.  A branch this model
@@ -388,17 +478,24 @@ def _run_case(case):
                 else None
             ),
             seats_covered=len(covered),
+            seats_framed=len(framed),
             seat_margin_min_px=(
                 min(margins) if all(math.isfinite(m) for m in margins) else None
             ),
             seat_margins_px=[
                 round(m, 1) if math.isfinite(m) else None for m in margins
             ],
+            seats_occluded_by_tool={
+                f"{y * 1000:+.0f}": b
+                for y, b in zip(SFP_SEAT_Y, blockers)
+                if b
+            },
         )
         result["pass"] = len(covered) == len(margins)
     else:
         result["pass"] = False
         result["seats_covered"] = None
+        result["seats_framed"] = None
     return result
 
 
@@ -411,9 +508,12 @@ def main():
         choices=sorted(COVERAGE_TARGETS),
         default=DEFAULT_POLICY["coverage"],
         help="'shipped' is the deployed ladder; 'sector' reproduces the "
-             "4-of-5 hardware regression.",
+             "4-of-5 one-rail regression; 'narrow' reproduces the 17:03 "
+             "tool-occlusion regression.",
     )
-    parser.add_argument("--y-half-mm", type=float, default=112.5)
+    parser.add_argument(
+        "--y-half-mm", type=float, default=SFP_COVERAGE_HALF_Y * 1000.0
+    )
     parser.add_argument("--x-min-mm", type=float, default=None)
     parser.add_argument("--x-max-mm", type=float, default=None)
     parser.add_argument("--max-obliquity-deg", type=float, default=20.0)
@@ -424,7 +524,22 @@ def main():
         default=DEFAULT_POLICY["max_angular_motion_deg"],
     )
     parser.add_argument("--max-joint-motion-deg", type=float, default=225.0)
+    parser.add_argument(
+        "--max-total-joint-motion-deg",
+        type=float,
+        default=DEFAULT_POLICY["max_total_joint_motion_deg"],
+        help="Summed six-joint travel cap. Pass a large value to measure the "
+             "un-gated behaviour the SC-only cap used to leave SFP with.",
+    )
     parser.add_argument("--seat-edge-margin-px", type=float, default=12.0)
+    parser.add_argument(
+        "--no-seat-gate",
+        action="store_true",
+        help="Drop the per-seat visibility gate, leaving only coverage-box "
+             "framing. Reproduces both shipped regressions: with '--coverage "
+             "sector' the one-rail crop, with '--coverage narrow' the 17:03 "
+             "tool-occlusion run.",
+    )
     parser.add_argument("--aim-x-mm", type=float, default=0.0)
     parser.add_argument("--aim-y-mm", type=float, default=0.0)
     parser.add_argument(
@@ -453,6 +568,7 @@ def main():
         "min_clearance_px": args.min_clearance_px,
         "max_angular_motion_deg": args.max_angular_motion_deg,
         "max_joint_motion_deg": args.max_joint_motion_deg,
+        "max_total_joint_motion_deg": args.max_total_joint_motion_deg,
         "seat_edge_margin_px": args.seat_edge_margin_px,
         "aim_x_m": args.aim_x_mm / 1000.0,
         "aim_y_m": args.aim_y_mm / 1000.0,
@@ -482,7 +598,19 @@ def main():
         "pose_found": len(found),
         "passed": len(passed),
         "no_pose": len(results) - len(found),
-        "clipped_a_seat": len(clipped),
+        "lost_a_seat": len(clipped),
+        # Split the two ways a seat is lost.  They look identical downstream --
+        # one module missing from IVM -- and need opposite fixes: framing wants a
+        # different standoff or aim, tool occlusion wants a wider coverage box.
+        "seat_outside_an_image": sum(
+            1 for r in found if r["seats_framed"] != len(SFP_SEAT_Y)
+        ),
+        "seat_behind_the_tool": sum(
+            1
+            for r in found
+            if r["seats_framed"] == len(SFP_SEAT_Y)
+            and r["seats_covered"] != len(SFP_SEAT_Y)
+        ),
         "standoff_range_m": (
             [min(r["standoff_m"] for r in found), max(r["standoff_m"] for r in found)]
             if found
@@ -507,6 +635,14 @@ def main():
             if found
             else None
         ),
+        "joint_total_range_deg": (
+            [
+                min(r["joint_total_deg"] for r in found),
+                max(r["joint_total_deg"] for r in found),
+            ]
+            if found
+            else None
+        ),
         "seats_covered_histogram": {
             str(n): sum(1 for r in found if r["seats_covered"] == n)
             for n in sorted({r["seats_covered"] for r in found})
@@ -522,7 +658,9 @@ def main():
                     "found",
                     "reason",
                     "seats_covered",
+                    "seats_framed",
                     "seat_margins_px",
+                    "seats_occluded_by_tool",
                 )
                 if k in r
             }
