@@ -768,7 +768,7 @@ def test_retry_starts_after_stall_dwell_times_out(monkeypatch):
     assert events.index("dwell_timeout") < events.index("command")
     assert controller.seat_calls == 2
     assert any(
-        "SC_RETRY_START attempt=2/3" in line
+        "SC_RETRY_START attempt=2/budget rung=unload" in line
         for line in controller.log.warn_lines
     )
 
@@ -920,15 +920,97 @@ def test_full_retry_budget_reserves_reperception_but_not_the_align_timeout():
     assert full < 60.0
 
 
-def test_retry_attempt_cap_holds(monkeypatch):
+def test_retry_ladder_is_not_capped_by_attempt_count(monkeypatch):
+    """A fourth attempt must run; only the deadline ends the ladder.
+
+    This used to stop at 3 and concede. With MAX_SEAT_ATTEMPTS=0 the same
+    outcome sequence has to reach the seat on attempt 4.
+    """
     controller = _run_retry_harness(monkeypatch, [STALLED, STALLED, STALLED, SEATED])
-    monkeypatch.setattr(sc_controller, "prime_sc_plug_pose", lambda *_args: True)
+    _patch_retry_perception(
+        monkeypatch,
+        controller,
+        port_pos=[0.0004, -0.0003, 0.0],
+        prime_calls=[],
+        port_calls=[],
+    )
+
+    assert controller.run() is True
+
+    assert controller.seat_calls == 4
+    assert not any(
+        "SC_RETRY_EXHAUSTED" in line for line in controller.log.warn_lines
+    )
+
+
+def test_retry_ladder_alternates_unload_and_full_retry(monkeypatch):
+    """unload, full, unload, full -- cheap rung first on every cycle.
+
+    A full retry re-primes the grasp and re-perceives the port, so the unload
+    that follows it is being tried against a different pose than the one before
+    it, which is why the cheap rung is worth repeating rather than escalating
+    to full-only after the first cycle.
+    """
+    prime_calls = []
+    port_calls = []
+    controller = _run_retry_harness(
+        monkeypatch, [STALLED, STALLED, STALLED, STALLED, STALLED, SEATED]
+    )
+    _patch_retry_perception(
+        monkeypatch,
+        controller,
+        port_pos=[0.0004, -0.0003, 0.0],
+        prime_calls=prime_calls,
+        port_calls=port_calls,
+    )
+
+    assert controller.run() is True
+
+    rungs = [
+        line.split("rung=")[1].split()[0]
+        for line in controller.log.warn_lines
+        if "SC_RETRY_START" in line
+    ]
+    assert rungs == ["unload", "full", "unload", "full", "unload"]
+    # Two full rungs, each refreshing both poses; the initial align plus two.
+    assert prime_calls == [True, True]
+    assert port_calls == [True, True]
+    assert controller.align_calls == 3
+    assert controller.seat_calls == 6
+
+
+def test_retry_ladder_ends_on_the_deadline_not_a_count(monkeypatch):
+    """With a budget that affords one cheap rung, the ladder stops there."""
+    config = SCConfig(
+        command_dt_sim_s=0.05,
+        align_timeout_wall_s=0.20,
+        stall_event_dwell_wall_s=0.10,
+    ).validated()
+    per_attempt = (
+        config.stall_timeout_wall_s
+        + config.seat_stall_grace_s
+        + config.stall_event_dwell_wall_s
+        + config.command_dt_sim_s
+    )
+    controller = _run_retry_harness(
+        monkeypatch,
+        [STALLED] * 8,
+        # Two seats plus the unload hold fit; a third does not.
+        budget_s=2.0 * per_attempt + 0.10 + 0.05,
+        seat_elapsed_s=per_attempt,
+    )
 
     assert controller.run() is False
 
-    assert controller.seat_calls == 3
+    assert controller.seat_calls == 2
+    rungs = [
+        line.split("rung=")[1].split()[0]
+        for line in controller.log.warn_lines
+        if "SC_RETRY_START" in line
+    ]
+    assert rungs == ["unload"]
     assert any(
-        "SC_RETRY_EXHAUSTED attempts=3" in line
+        "SC_RETRY_EXHAUSTED attempts=2" in line
         for line in controller.log.warn_lines
     )
 

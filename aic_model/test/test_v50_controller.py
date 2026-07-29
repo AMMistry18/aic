@@ -1135,11 +1135,22 @@ def test_release_dockerfile_disables_bias_and_pins_safety():
     assert "RL_INSERT_SCRIPT_BIAS_RX_RAD=0" in dockerfile
     assert "RL_INSERT_FORCE_ABORT_N=18.0" in dockerfile
     assert "best_sfp_plug_pose.pt" in dockerfile
-    # The budget must leave room for wedge retries but stay inside the engine's
-    # 180 s per-task time_limit; a run that never returns scores nothing at all.
+    # The budget must leave room for retries but stay inside the engine's
+    # per-task time_limit; a run that never returns scores nothing at all.
+    # Asserted against the shipped time_limit rather than a literal, because the
+    # two have to move together -- raising the budget alone just means the engine
+    # cuts the action off mid-ladder.
     budget = re.search(r"RL_INSERT_ACTION_TIME_BUDGET_S=(\d+)", dockerfile)
     assert budget is not None
-    assert 60 <= int(budget.group(1)) <= 170
+    time_limits = {
+        int(match)
+        for match in re.findall(
+            r'"time_limit":\s*(\d+)',
+            (REPO_ROOT / "generate_config.py").read_text(encoding="utf-8"),
+        )
+    }
+    assert time_limits, "generate_config.py must pin a per-task time_limit"
+    assert 60 <= int(budget.group(1)) <= min(time_limits) - 10
 
     # Baked ENV wins over source defaults, and Flowstate takes no runtime knobs,
     # so a seat-force retune in V50Config is a no-op in the image unless these

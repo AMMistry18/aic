@@ -1299,7 +1299,15 @@ def seat_frame(Rp, R_tip):
 class ScInsertionController:
     """Align to the perceived SC opening, then force-regulate to the seat."""
 
-    MAX_SEAT_ATTEMPTS = 3
+    # 0 means "bounded by the action deadline alone", matching the SFP ladder
+    # (v50_controller.max_wedge_retries).  The ladder alternates cheap and full
+    # recovery -- unload, full retry, unload, full retry, ... -- for as long as
+    # the remaining budget can afford the next rung, so the attempt count is a
+    # consequence of ACTION_TIME_BUDGET_S rather than a separate cap.
+    MAX_SEAT_ATTEMPTS = 0
+    # Relative back-off from the stalled depth, NOT a return to standoff: 1.5 mm
+    # is enough to unload the wedge in place while keeping the plug in the mouth.
+    # The full-retry rung is the one that goes all the way back to standoff.
     RETRY_UNLOAD_M = 0.0015
     RETRY_UNLOAD_HOLD_WALL_S = 2.0
     # Port re-perception cost, measured: the 2026-07-28 log spent 9.58 s wall on
@@ -2963,7 +2971,7 @@ class ScInsertionController:
         self.send_feedback("sc force-regulated seating")
         timing = getattr(self, "timing", None)
         attempt = 1
-        while attempt <= self.MAX_SEAT_ATTEMPTS:
+        while not self.MAX_SEAT_ATTEMPTS or attempt <= self.MAX_SEAT_ATTEMPTS:
             if not self._seat_attempt_has_budget(full_retry=False):
                 depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
                 self.log.warn(
@@ -2984,7 +2992,7 @@ class ScInsertionController:
             if outcome != STALLED:
                 self.log.warn(f"[sc] seating ended without confirmation: {outcome}")
                 return False
-            if attempt >= self.MAX_SEAT_ATTEMPTS:
+            if self.MAX_SEAT_ATTEMPTS and attempt >= self.MAX_SEAT_ATTEMPTS:
                 depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
                 self.log.warn(
                     f"[sc] SC_RETRY_EXHAUSTED attempts={attempt} "
@@ -2994,7 +3002,13 @@ class ScInsertionController:
                 return False
 
             next_attempt = attempt + 1
-            full_retry = next_attempt >= 3
+            # Alternate the two recovery rungs for as long as the budget lasts:
+            # attempt 2 unloads in place, 3 is a full retry, 4 unloads again, 5
+            # is another full retry, and so on.  Cheap-then-expensive is the
+            # right order every cycle, not just the first: a full retry re-primes
+            # the grasp and re-perceives the port, so the unload that follows it
+            # is being tried against a *different* pose than the one before it.
+            full_retry = next_attempt % 2 == 1
             if not self._seat_attempt_has_budget(
                 full_retry=full_retry,
                 retry_prep=True,
@@ -3008,12 +3022,14 @@ class ScInsertionController:
 
             depth, force, _tip_pos, _tip_rotation = self._retry_snapshot()
             budget = _sc_action_budget_remaining_s(self.policy)
+            cap = self.MAX_SEAT_ATTEMPTS if self.MAX_SEAT_ATTEMPTS else "budget"
             self.log.warn(
-                f"[sc] SC_RETRY_START attempt={next_attempt}/{self.MAX_SEAT_ATTEMPTS} "
+                f"[sc] SC_RETRY_START attempt={next_attempt}/{cap} "
+                f"rung={'full' if full_retry else 'unload'} "
                 f"reason=stalled depth_mm={depth * 1000.0:.2f} "
                 f"force_N={force:.2f} budget_s={budget:.3f}"
             )
-            if next_attempt == 2:
+            if not full_retry:
                 self._retry_command_depth(
                     depth - self.RETRY_UNLOAD_M,
                     hold_wall_s=self.RETRY_UNLOAD_HOLD_WALL_S,
