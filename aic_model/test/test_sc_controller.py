@@ -834,7 +834,10 @@ def test_attempt_b_reprimes_and_reperceives_the_port(monkeypatch):
     perceive_sc_port_pose_consensus is nearest-to-tip, and the tip comes from
     the grasp transform.
     """
-    controller = _run_retry_harness(monkeypatch, [STALLED, STALLED, SEATED])
+    # unload (2), spiral (3), full (4): the full rung is the third one now.
+    controller = _run_retry_harness(
+        monkeypatch, [STALLED, STALLED, STALLED, SEATED]
+    )
     prime_calls = []
     port_calls = []
     _patch_retry_perception(
@@ -864,7 +867,9 @@ def test_reperceive_rejects_a_jump_to_the_neighbouring_port(monkeypatch):
     3 of 6 runs on 2026-07-28 selected the neighbouring port. Adopting that
     mid-retry would command the arm sideways with the plug still in a mouth.
     """
-    controller = _run_retry_harness(monkeypatch, [STALLED, STALLED, SEATED])
+    controller = _run_retry_harness(
+        monkeypatch, [STALLED, STALLED, STALLED, SEATED]
+    )
     _patch_retry_perception(
         monkeypatch,
         controller,
@@ -882,7 +887,9 @@ def test_reperceive_rejects_a_jump_to_the_neighbouring_port(monkeypatch):
 
 
 def test_reperceive_failure_is_not_fatal_and_keeps_the_cached_pose(monkeypatch):
-    controller = _run_retry_harness(monkeypatch, [STALLED, STALLED, SEATED])
+    controller = _run_retry_harness(
+        monkeypatch, [STALLED, STALLED, STALLED, SEATED]
+    )
     _patch_retry_perception(
         monkeypatch,
         controller,
@@ -897,6 +904,54 @@ def test_reperceive_failure_is_not_fatal_and_keeps_the_cached_pose(monkeypatch):
     assert controller.align_calls == 2
     assert any(
         "SC_REPERCEIVE_FAILED" in line for line in controller.log.warn_lines
+    )
+
+
+def test_spiral_geometry_cannot_step_over_the_opening():
+    """Coverage, not motion, is what makes the sweep work.
+
+    The mouth is 22.407 x 8.10 mm and the plug 20.0 x 6.4 mm, so the smallest
+    half-clearance is 0.85 mm.  Both the radial growth per revolution and the
+    arc between samples at the outermost radius must stay under that, or the
+    spiral can pass either side of the opening without ever entering it.
+    """
+    cls = ScInsertionController
+    smallest_half_clearance_m = (0.00810 - 0.0064) / 2.0
+
+    assert cls.SPIRAL_PITCH_M < 2.0 * smallest_half_clearance_m
+    arc_at_max_radius = (
+        2.0 * np.pi * cls.SPIRAL_MAX_RADIUS_M / cls.SPIRAL_STEPS_PER_REV
+    )
+    assert arc_at_max_radius < smallest_half_clearance_m
+    # Must reach past the binding half-clearance, and stay far inside the
+    # 25.78 mm adapter pitch so it can never arrive at a neighbouring port.
+    assert cls.SPIRAL_MAX_RADIUS_M > 0.000725
+    assert cls.SPIRAL_MAX_RADIUS_M < 0.02578 / 2.0
+
+
+def test_spiral_stops_as_soon_as_the_plug_gains_depth(monkeypatch):
+    """Capture ends the sweep immediately; the caller then seats normally."""
+    controller = _run_retry_harness(monkeypatch, [SEATED])
+    controller.config = SCConfig(command_dt_sim_s=0.05).validated()
+    start_depth = 0.0012
+    controller.depth = start_depth
+    calls = {"n": 0}
+
+    def _snapshot():
+        calls["n"] += 1
+        # Third sample lands in the mouth.
+        depth = start_depth + (
+            controller.SPIRAL_CAPTURE_M if calls["n"] >= 4 else 0.0
+        )
+        controller.depth = depth
+        return depth, 1.0, np.array([0.0, 0.0, depth]), np.eye(3)
+
+    controller._retry_snapshot = _snapshot
+
+    assert controller._retry_spiral_search() is True
+    assert any("SC_SPIRAL_CAPTURED" in line for line in controller.log.warn_lines)
+    assert not any(
+        "SC_SPIRAL_EXHAUSTED" in line for line in controller.log.warn_lines
     )
 
 
@@ -943,13 +998,15 @@ def test_retry_ladder_is_not_capped_by_attempt_count(monkeypatch):
     )
 
 
-def test_retry_ladder_alternates_unload_and_full_retry(monkeypatch):
-    """unload, full, unload, full -- cheap rung first on every cycle.
+def test_retry_ladder_cycles_unload_spiral_then_full_retry(monkeypatch):
+    """unload, spiral, full -- cheapest first, repeating on every cycle.
 
     A full retry re-primes the grasp and re-perceives the port, so the unload
     that follows it is being tried against a different pose than the one before
     it, which is why the cheap rung is worth repeating rather than escalating
-    to full-only after the first cycle.
+    to full-only after the first cycle.  The spiral sits between them: dearer
+    than an unload, far cheaper than re-running both estimators, and the only
+    rung that does not depend on the perceived yaw being correct.
     """
     prime_calls = []
     port_calls = []
@@ -971,12 +1028,16 @@ def test_retry_ladder_alternates_unload_and_full_retry(monkeypatch):
         for line in controller.log.warn_lines
         if "SC_RETRY_START" in line
     ]
-    assert rungs == ["unload", "full", "unload", "full", "unload"]
-    # Two full rungs, each refreshing both poses; the initial align plus two.
-    assert prime_calls == [True, True]
-    assert port_calls == [True, True]
-    assert controller.align_calls == 3
+    assert rungs == ["unload", "spiral", "full", "unload", "spiral"]
+    # One full rung in six seats, refreshing both poses; initial align plus it.
+    assert prime_calls == [True]
+    assert port_calls == [True]
+    assert controller.align_calls == 2
     assert controller.seat_calls == 6
+    # Both spiral rungs actually swept.
+    assert (
+        sum("SC_SPIRAL_START" in line for line in controller.log.warn_lines) == 2
+    )
 
 
 def test_retry_ladder_ends_on_the_deadline_not_a_count(monkeypatch):

@@ -1325,6 +1325,33 @@ class ScInsertionController:
     # bounds it, and a retry cut short scores no worse than one never started.
     RETRY_ALIGN_BUDGET_S = 15.0
 
+    # --- Spiral search ----------------------------------------------------
+    # The 22.407 x 8.10 mm mouth against a 20.0 x 6.4 mm plug leaves 1.20 mm of
+    # lateral and 0.85 mm of vertical half-clearance, so a 2 mm sweep covers
+    # every misalignment the handoff gate admits while staying far inside the
+    # 25.78 mm adapter pitch -- it cannot wander onto a neighbouring port.
+    SPIRAL_MAX_RADIUS_M = _env_float("RL_INSERT_SC_SPIRAL_MAX_RADIUS_M", 0.0020)
+    # Radial growth per revolution.  Must stay under twice the SMALLEST
+    # half-clearance (0.85 mm) or consecutive turns step straight over the
+    # opening without ever touching it.
+    SPIRAL_PITCH_M = _env_float("RL_INSERT_SC_SPIRAL_PITCH_M", 0.0006)
+    # At the outermost radius the arc between samples is 2*pi*r/steps = 0.79 mm,
+    # still inside that 0.85 mm clearance.
+    SPIRAL_STEPS_PER_REV = _env_int("RL_INSERT_SC_SPIRAL_STEPS_PER_REV", 16)
+    # Forward bias held for the whole sweep: the plug has to stay loaded against
+    # the face so it drops in the instant the path crosses the mouth.
+    SPIRAL_PRESS_M = _env_float("RL_INSERT_SC_SPIRAL_PRESS_M", 0.0008)
+    SPIRAL_SETTLE_CYCLES = _env_int("RL_INSERT_SC_SPIRAL_SETTLE_CYCLES", 2)
+    # Depth gain that means captured rather than sensor noise.
+    SPIRAL_CAPTURE_M = _env_float("RL_INSERT_SC_SPIRAL_CAPTURE_M", 0.0015)
+    SPIRAL_MAX_WALL_S = _env_float("RL_INSERT_SC_SPIRAL_MAX_WALL_S", 25.0)
+    # Firmer than the 90 N/m seating lateral: at 90 N/m a 2 mm command is only
+    # 0.18 N, which cannot drag the plug across the face against friction, so
+    # the sweep would be commanded but never actually executed.
+    SPIRAL_LATERAL_STIFFNESS_N_M = _env_float(
+        "RL_INSERT_SC_SPIRAL_LATERAL_N_M", 400.0
+    )
+
     STIFFNESS = [90.0, 90.0, 90.0, 50.0, 50.0, 50.0]
     DAMPING = [50.0, 50.0, 50.0, 20.0, 20.0, 20.0]
     # Precontact alignment is still free-space motion, so it can use a stiffer
@@ -2815,7 +2842,7 @@ class ScInsertionController:
         return depth, force, tip_pos, tip_rotation
 
     def _seat_attempt_budget_required_s(
-        self, *, full_retry: bool, retry_prep: bool = False
+        self, *, full_retry: bool, retry_prep: bool = False, spiral: bool = False
     ) -> float:
         required = (
             self.config.stall_timeout_wall_s
@@ -2825,6 +2852,8 @@ class ScInsertionController:
         )
         if retry_prep:
             required += self.RETRY_UNLOAD_HOLD_WALL_S
+        if spiral:
+            required += self.SPIRAL_MAX_WALL_S
         if full_retry:
             required += (
                 min(self.config.align_timeout_wall_s, self.RETRY_ALIGN_BUDGET_S)
@@ -2834,7 +2863,7 @@ class ScInsertionController:
         return required
 
     def _seat_attempt_has_budget(
-        self, *, full_retry: bool, retry_prep: bool = False
+        self, *, full_retry: bool, retry_prep: bool = False, spiral: bool = False
     ) -> bool:
         remaining = _sc_action_budget_remaining_s(self.policy)
         if not np.isfinite(remaining):
@@ -2842,6 +2871,7 @@ class ScInsertionController:
         return remaining >= self._seat_attempt_budget_required_s(
             full_retry=full_retry,
             retry_prep=retry_prep,
+            spiral=spiral,
         )
 
     def _retry_command_depth(self, target_depth: float, *, hold_wall_s: float) -> None:
@@ -2862,6 +2892,106 @@ class ScInsertionController:
                 damping=self.DAMPING,
             )
             self.policy.sleep_for(self.config.command_dt_sim_s)
+
+    def _spiral_stiffness(self) -> np.ndarray:
+        """Seating axial stiffness with a firmer lateral block for the sweep."""
+
+        translation_port = np.diag(
+            [
+                self.SPIRAL_LATERAL_STIFFNESS_N_M,
+                self.SPIRAL_LATERAL_STIFFNESS_N_M,
+                self.config.axial_stiffness_n_m,
+            ]
+        )
+        translation_base = self.Rp @ translation_port @ self.Rp.T
+        translation_base = 0.5 * (translation_base + translation_base.T)
+        stiffness = np.zeros((6, 6), dtype=np.float64)
+        stiffness[:3, :3] = translation_base
+        stiffness[3:, 3:] = np.diag(self.STIFFNESS[3:])
+        return stiffness
+
+    def _retry_spiral_search(self) -> bool:
+        """Sweep an Archimedean spiral across the mouth under a light press.
+
+        Deliberately direction-agnostic.  A straight-line nudge is only ever as
+        good as the sign of the lateral axes it is expressed in, and the
+        perceived port yaw is not trustworthy: the 2026-07-29 run logged
+        ``twist_vs_perceived_yaw_deg=178.36`` -- a half-turn flip produced by
+        the near-symmetric mouth's corner ambiguity, which inverts BOTH lateral
+        axes and sends every nudge the same wrong way.  A spiral visits every
+        direction in turn, so it finds the opening whether or not that flip is
+        present, and needs no correct yaw to work.
+
+        Returns True when the plug gains depth (captured); the caller then
+        seats normally.  Never fatal: on exhaustion it leaves the tip where the
+        sweep ended and the next rung re-perceives.
+        """
+
+        start_depth, _force, start_tip, _rotation = self._retry_snapshot()
+        radial = self.Rp[:, 0]
+        tangential = self.Rp[:, 1]
+        axial = self.Rp[:, 2]
+        origin = start_tip + axial * self.SPIRAL_PRESS_M
+        stiffness = self._spiral_stiffness()
+        revolutions = max(
+            1.0, self.SPIRAL_MAX_RADIUS_M / max(self.SPIRAL_PITCH_M, 1e-9)
+        )
+        total_steps = max(1, int(round(revolutions * self.SPIRAL_STEPS_PER_REV)))
+        deadline = time.monotonic() + max(0.0, self.SPIRAL_MAX_WALL_S)
+        self.log.warn(
+            f"[sc] SC_SPIRAL_START depth_mm={start_depth * 1000.0:.2f} "
+            f"max_radius_mm={self.SPIRAL_MAX_RADIUS_M * 1000.0:.2f} "
+            f"pitch_mm={self.SPIRAL_PITCH_M * 1000.0:.2f} steps={total_steps}"
+        )
+        radius = 0.0
+        for step in range(1, total_steps + 1):
+            if time.monotonic() >= deadline:
+                self.log.warn(
+                    f"[sc] SC_SPIRAL_TIMEOUT step={step}/{total_steps} "
+                    f"radius_mm={radius * 1000.0:.2f}"
+                )
+                break
+            theta = 2.0 * np.pi * step / float(self.SPIRAL_STEPS_PER_REV)
+            radius = min(
+                self.SPIRAL_MAX_RADIUS_M,
+                self.SPIRAL_PITCH_M * theta / (2.0 * np.pi),
+            )
+            target = (
+                origin
+                + radial * (radius * float(np.cos(theta)))
+                + tangential * (radius * float(np.sin(theta)))
+            )
+            for _ in range(max(1, self.SPIRAL_SETTLE_CYCLES)):
+                self.policy._enforce_action_deadline(self.move_robot)
+                self.policy.set_pose_target(
+                    self.move_robot,
+                    self._tcp_target(target, self.Rs),
+                    stiffness=stiffness,
+                    damping=self.DAMPING,
+                )
+                self.policy.sleep_for(self.config.command_dt_sim_s)
+            depth, force, _tip, _rot = self._retry_snapshot()
+            if np.isfinite(force) and force > self.config.force_abort_n:
+                self.log.warn(
+                    f"[sc] SC_SPIRAL_ABORT step={step}/{total_steps} "
+                    f"force_N={force:.2f} limit_N={self.config.force_abort_n:.2f}"
+                )
+                return False
+            if depth - start_depth >= self.SPIRAL_CAPTURE_M:
+                self.log.warn(
+                    f"[sc] SC_SPIRAL_CAPTURED step={step}/{total_steps} "
+                    f"radius_mm={radius * 1000.0:.2f} "
+                    f"theta_deg={np.degrees(theta) % 360.0:.1f} "
+                    f"depth_mm={depth * 1000.0:.2f} "
+                    f"gain_mm={(depth - start_depth) * 1000.0:.2f}"
+                )
+                return True
+        depth, _force, _tip, _rot = self._retry_snapshot()
+        self.log.warn(
+            f"[sc] SC_SPIRAL_EXHAUSTED depth_mm={depth * 1000.0:.2f} "
+            f"gain_mm={(depth - start_depth) * 1000.0:.2f}"
+        )
+        return False
 
     def _retry_reprime_grasp(self) -> bool:
         before = sc_grasp_transform(self.policy)
@@ -3008,10 +3138,13 @@ class ScInsertionController:
             # right order every cycle, not just the first: a full retry re-primes
             # the grasp and re-perceives the port, so the unload that follows it
             # is being tried against a *different* pose than the one before it.
-            full_retry = next_attempt % 2 == 1
+            rung = next_attempt % 3
+            spiral = rung == 0
+            full_retry = rung == 1
             if not self._seat_attempt_has_budget(
                 full_retry=full_retry,
                 retry_prep=True,
+                spiral=spiral,
             ):
                 depth, _force, _tip_pos, _tip_rotation = self._retry_snapshot()
                 self.log.warn(
@@ -3025,11 +3158,19 @@ class ScInsertionController:
             cap = self.MAX_SEAT_ATTEMPTS if self.MAX_SEAT_ATTEMPTS else "budget"
             self.log.warn(
                 f"[sc] SC_RETRY_START attempt={next_attempt}/{cap} "
-                f"rung={'full' if full_retry else 'unload'} "
+                f"rung={'full' if full_retry else 'spiral' if spiral else 'unload'} "
                 f"reason=stalled depth_mm={depth * 1000.0:.2f} "
                 f"force_N={force:.2f} budget_s={budget:.3f}"
             )
-            if not full_retry:
+            if spiral:
+                # Unload onto the face first so the sweep slides across it
+                # instead of grinding at the wedged depth, then search.
+                self._retry_command_depth(
+                    depth - self.RETRY_UNLOAD_M,
+                    hold_wall_s=self.RETRY_UNLOAD_HOLD_WALL_S,
+                )
+                self._retry_spiral_search()
+            elif not full_retry:
                 self._retry_command_depth(
                     depth - self.RETRY_UNLOAD_M,
                     hold_wall_s=self.RETRY_UNLOAD_HOLD_WALL_S,
