@@ -1,0 +1,28 @@
+id {
+  package: "ai.tar2"
+  name: "pose_kv_store_skill_v1"
+}
+display_name: "Pose KV Store v1"
+vendor {
+  display_name: "TAR-2"
+}
+documentation {
+  description: "Stores and returns labelled AIC phase-1 module poses through the Flowstate key-value store. Write mode stores exactly five poses of one type under <key_prefix>/{sfp|nic|sc}/0..4, where the index is the module's official label. Read mode resolves a module name from the trial's process inputs, such as nic_card_mount_3, sc_port_1 or sfp_mount_2, into that same type and index and returns the one stored pose. Setting object_type to SFP on a NIC target name reads the SFP module whose index matches this trial's NIC card, which yields a distinct cable per trial without a counter. Object type HOME is the one type that holds a single pose: write it through the pose field and read it back with target_name home, at <key_prefix>/home."
+}
+options {
+  supports_cancellation: false
+  cc_config {
+    create_skill: "::PoseKvStoreSkill::CreateSkill"
+  }
+}
+dependencies {
+}
+parameter {
+  message_full_name: "ai.tar2.PoseKvStoreSkillParams"
+  default_value: {
+    type_url: "type.googleapis.com/ai.tar2.PoseKvStoreSkillParams"
+  }
+}
+return_type {
+  message_full_name: "ai.tar2.PoseKvStoreSkillResult"
+}

@@ -196,3 +196,148 @@ cleanup path to switch back to the default controller. `target`, `dx/dy/dz`, and
 as the deployed Cartesian handoff and diagnostics. Use `moves_executed`,
 `travel_m`, `force_abort`, `seen`, and
 `done` for process diagnostics.
+
+## Pose KV Store
+
+`ai.tar2.pose_kv_store_skill_v1` carries the five labelled module poses of each
+type from the one-time survey in Participant Initialize into every later trial,
+through the Flowstate key-value store. It is one skill with two modes over one
+key scheme:
+
+```text
+aic/phase1/sfp/0 .. /4
+aic/phase1/nic/0 .. /4
+aic/phase1/sc/0  .. /4
+aic/phase1/home
+```
+
+The last segment is the module's label, so the key index *is* the order and no
+separate order blob is stored. `poses[i]` is written to `.../{type}/{i}`, and a
+read resolves one index and returns that one `intrinsic_proto.Pose`. `home` is
+the one type that holds a single pose, so its key carries no index.
+
+This skill is C++ rather than Python like the two above. The key-value store is
+reached through `intrinsic::PubSub().KeyValueStore()`, and the ROS CMake SDK
+this repository builds against excludes `intrinsic/platform/pubsub/python/` from
+its build, so the Python `KeyValueStore` bindings do not exist inside a skill
+image. The zenoh session is created on the first invocation and reused.
+
+### Write mode
+
+```text
+mode         = MODE_WRITE
+object_type  = OBJECT_TYPE_SFP | OBJECT_TYPE_NIC | OBJECT_TYPE_SC
+poses        = exactly 5 poses, poses[i] is the module labelled i
+
+mode         = MODE_WRITE
+object_type  = OBJECT_TYPE_HOME
+pose         = the one home pose
+```
+
+For the three indexed types, anything other than five poses is rejected instead
+of written, because a partially filled type makes every later read by index
+meaningless; `home` takes exactly one pose instead. Each pose
+must also carry a set, finite, non-degenerate quaternion: an all-zero
+orientation reaching Move Robot is a crash rather than a bad move, and it is
+cheaper to reject it here than to debug it three skills later. Each key is set
+with `high_consistency`, and the result lists `keys_written`.
+
+Wire it once, in Participant Initialize, after the three IVM surveys:
+
+```text
+IVM x 3
+store_sfp -> kv write (object_type=SFP,  poses=sfp_modules)
+store_nic -> kv write (object_type=NIC,  poses=nic_cards)
+store_sc  -> kv write (object_type=SC,   poses=sc_ports)
+             kv write (object_type=HOME, pose=home_pose)
+```
+
+### Read mode
+
+```text
+mode         = MODE_READ
+target_name  = a module name from this trial's process inputs, or home
+object_type  = unset, or the type to read at that name's index
+```
+
+`target_name` supplies both the index and, by default, the type:
+`sfp_mount_2`, `nic_card_mount_3` and `sc_port_1` resolve to `sfp/2`, `nic/3`
+and `sc/1`. Matching tolerates case, hyphens, a leading path and a `rail` infix,
+but the trailing number and the type word are required, and the index must be
+0--4. `index` plus an explicit `object_type` is accepted when there is no name
+to parse.
+
+Setting `object_type = OBJECT_TYPE_SFP` together with a NIC `target_name` reads
+`aic/phase1/sfp/<nic index>`. That is how a trial picks its cable: the task
+needs an unused SFP module, not one specific module, so the NIC card number of
+the trial is used as the SFP index. This needs no counter, no initialisation, no
+increment-on-success, and no state that can desync when a trial fails halfway.
+The one thing it does assume is that a run does not repeat a NIC card number; if
+it does, that trial will be pointed at an SFP module the earlier trial already
+took. Storing a used-mask in the same key space is the fallback if that ever
+shows up, and it is deliberately not implemented yet.
+
+Per trial:
+
+```text
+process inputs (this trial's cable and ports)
+  -> kv read (target_name=sc_port_*)                        -> sc pose
+  -> kv read (target_name=nic_card_mount_*)                 -> nic pose
+  -> kv read (target_name=nic_card_mount_*, object_type=SFP) -> sfp pose
+  -> kv read (target_name=home)                             -> home pose
+  -> load_* offset scripts -> Move Robot
+```
+
+A read that finds no key fails the skill rather than returning an empty pose, so
+a missing Participant Initialize write stops the trial at the read instead of
+sending a zero pose to Move Robot. The message names the key and the write that
+is missing. `resolved_type`, `resolved_index` and `key` echo what was resolved,
+and the message records where the index came from, which is what makes a
+NIC-numbered SFP read readable in the logs.
+
+### Home pose
+
+`OBJECT_TYPE_HOME` stores one pose at `aic/phase1/home` instead of five. Write
+it by setting `object_type = OBJECT_TYPE_HOME` and filling the singular `pose`
+field --- a one-element `poses` list is accepted too, but setting both is
+rejected, as is the `pose` field on an indexed type, because either one means
+the parameters were wired to the wrong mode. Read it back with
+`target_name = home` or with `object_type = OBJECT_TYPE_HOME` and no name; the
+`index` parameter is ignored either way, and the result reports
+`resolved_type = "home"` with `resolved_index = -1` to say the key has no index.
+Everything else is shared with the indexed types: the same prefix, the same pose
+validation, the same "fail the read rather than return an empty pose" behaviour.
+
+Because SFP modules are selected by NIC number, the SFP write does not have to
+be rail-labelled the way NIC and SC already are: the five entries only have to
+be five distinct, real, unused modules, stable for the run. If `store_sfp`
+remains "top 5 by score", `aic/phase1/sfp/2` is simply "the third module that
+survey found", which is enough for cable selection but not enough to answer
+"give me `sfp_mount_2`". Label `store_sfp` like `store_nic` before relying on
+SFP reads by official name.
+
+### Build and install
+
+```bash
+cd ~/ws_aic_phase1
+bash src/aic/flowstate/scripts/build_pose_kv_store_skill.sh
+```
+
+Unlike the Python skills, a C++ skill cannot reach "listening" offline: the
+generated entrypoint blocks on the in-cluster world, geometry, motion-planner
+and skill-registry addresses before it serves. The cold-start check in the build
+script therefore proves the packaging instead --- every shared library resolves,
+and the binary starts and loads its own `pose_kv_store_skill_v1` config before
+it fails on those addresses.
+
+```bash
+inctl asset install \
+  --org tar-2@xfa-prod-aic-us \
+  --cluster "$CLUSTER" \
+  images/pose_kv_store_skill/pose_kv_store_skill.bundle.tar
+```
+
+Values live in the workcell's key-value store, so they outlive a process run but
+not a solution that is torn down: after a restart, run Participant Initialize
+again before any trial reads. `key_prefix` defaults to `aic/phase1` and can be
+pointed somewhere else to rehearse a write without touching the live keys.

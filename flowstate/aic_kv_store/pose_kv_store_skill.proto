@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package ai.tar2;
+
+import "intrinsic/math/proto/pose.proto";
+
+// One skill, two modes, over one fixed key scheme:
+//
+//   <key_prefix>/{sfp|nic|sc}/{0..4}
+//   <key_prefix>/home
+//
+// The index is always the official label of the module (the number the trial's
+// process inputs use), never the order in which the poses happened to be
+// detected or written. The key index is the order, so no separate order blob
+// is stored. Home is the one type that holds a single pose, so its key carries
+// no index.
+message PoseKvStoreSkillParams {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    // Store five poses under <key_prefix>/<type>/0 .. /4, or the one home pose
+    // under <key_prefix>/home.
+    MODE_WRITE = 1;
+    // Return the single pose stored for one resolved type and index.
+    MODE_READ = 2;
+  }
+
+  enum ObjectType {
+    OBJECT_TYPE_UNSPECIFIED = 0;
+    OBJECT_TYPE_SFP = 1;
+    OBJECT_TYPE_NIC = 2;
+    OBJECT_TYPE_SC = 3;
+    // One pose rather than five, stored at <key_prefix>/home.
+    OBJECT_TYPE_HOME = 4;
+  }
+
+  Mode mode = 1;
+
+  // WRITE: the type being stored. Required.
+  //
+  // READ: overrides the type parsed from target_name. Leave unspecified to read
+  // the type that target_name itself names. Set it to OBJECT_TYPE_SFP together
+  // with a NIC target_name to grab the SFP module whose index matches this
+  // trial's NIC card: any unused cable will do, so the NIC number is a source of
+  // a distinct SFP index that needs no counter and no cross-run state.
+  ObjectType object_type = 2;
+
+  // WRITE of an indexed type only. Exactly five poses; poses[i] is the module
+  // officially labelled i. A short, long, or empty list is rejected rather than
+  // written, because a partially filled type makes every later read by index
+  // meaningless.
+  repeated intrinsic_proto.Pose poses = 3;
+
+  // READ only. A module name taken from this trial's process inputs, for
+  // example "nic_card_mount_3", "sc_port_1", "sfp_mount_2" or "home". The
+  // trailing number is the index and the rest of the name selects the type
+  // unless object_type overrides it.
+  string target_name = 4;
+
+  // READ of an indexed type only. Used when target_name is empty, in which case
+  // object_type is required. Must be 0..4.
+  int32 index = 5;
+
+  // Key namespace shared by both modes. Empty -> "aic/phase1".
+  string key_prefix = 6;
+
+  // READ only. Key-value store query budget. 0 -> 10 seconds.
+  double timeout_seconds = 7;
+
+  // WRITE of home only: the single pose to store. A one-element poses list is
+  // accepted instead, but setting both is rejected as a wiring mistake.
+  intrinsic_proto.Pose pose = 8;
+}
+
+message PoseKvStoreSkillResult {
+  bool success = 1;
+  string message = 2;
+
+  // READ only: the stored pose, in whatever frame the writer used.
+  intrinsic_proto.Pose pose = 3;
+
+  // "sfp", "nic", "sc" or "home" -- the type actually used to build the key.
+  string resolved_type = 4;
+  // 0..4 -- the index actually used to build the key, or -1 for home, which
+  // has no index.
+  int32 resolved_index = 5;
+
+  // READ: the single key that was read.
+  string key = 6;
+  // WRITE: the keys that were written, in index order. One key for home.
+  repeated string keys_written = 7;
+}

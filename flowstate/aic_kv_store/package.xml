@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>aic_kv_store</name>
+  <version>0.1.0</version>
+  <description>Key-value store skill that carries labelled AIC phase-1 module poses from Participant Initialize into every trial.</description>
+  <maintainer email="tar2@example.invalid">TAR-2</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>intrinsic_sdk_cmake</buildtool_depend>
+  <buildtool_depend>protobuf</buildtool_depend>
+
+  <!-- The skill links the SDK library and reaches the key-value store through
+       its zenoh PubSub session at runtime. -->
+  <depend>intrinsic_sdk_cmake</depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
