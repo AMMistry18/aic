@@ -60,7 +60,11 @@ from test_board_stage2 import (  # noqa: E402
     axis_angle_rotation,
 )
 
-from aic_perception.arm_ik import UR5eArm, _rot_z  # noqa: E402
+from aic_perception.arm_ik import (  # noqa: E402
+    UR5eArm,
+    _rot_z,
+    capsule_intersects_camera_view,
+)
 from aic_perception.board_stage2 import (  # noqa: E402
     BoardPoseEstimate,
     Transform,
@@ -120,22 +124,71 @@ def port_mouths() -> tuple[np.ndarray, ...]:
     return tuple(mouths)
 
 
-def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
+def _sector_image_regions(
+    base_T_tcp,
+    base_T_board,
+    target_board,
+    tcp_T_cam,
+    cameras,
+):
+    """Project the NIC sector into each wrist camera."""
+    regions = {}
     for name, camera in cameras.items():
-        world_T_cam = base_T_tcp.compose(tcp_T_cam[name]).inverse()
+        camera_from_board = (
+            base_T_tcp.compose(tcp_T_cam[name])
+            .inverse()
+            .compose(base_T_board)
+        )
+        pixels, in_front = project_points(
+            camera_from_board.apply(target_board), camera
+        )
+        if np.all(in_front) and np.all(np.isfinite(pixels)):
+            regions[name] = (
+                float(pixels[:, 0].min()),
+                float(pixels[:, 1].min()),
+                float(pixels[:, 0].max()),
+                float(pixels[:, 1].max()),
+            )
+    return regions
+
+
+def _arm_clear_of_own_cameras(
+    base_T_tcp,
+    joints,
+    arm,
+    tcp_T_cam,
+    cameras,
+    sector_regions=None,
+    clearance_px=25.0,
+):
+    """Mirror production's exact, near-plane-safe link-capsule gate."""
+    for name, camera in cameras.items():
+        region = (
+            sector_regions.get(name)
+            if sector_regions is not None
+            else None
+        )
+        if sector_regions is not None and region is None:
+            continue
+        bounds = None
+        if region is not None:
+            u_min, v_min, u_max, v_max = region
+            bounds = (
+                u_min - clearance_px,
+                v_min - clearance_px,
+                u_max + clearance_px,
+                v_max + clearance_px,
+            )
+        camera_from_base = base_T_tcp.compose(tcp_T_cam[name]).inverse()
         for start, end, radius in arm.link_segments(joints):
-            for t in np.linspace(0.0, 1.0, 9):
-                point = world_T_cam.apply(start + t * (end - start))
-                if point[2] <= 1e-6:
-                    continue
-                u = camera.fx * point[0] / point[2] + camera.cx
-                v = camera.fy * point[1] / point[2] + camera.cy
-                pad = camera.fx * radius / point[2]
-                if (
-                    -pad <= u <= camera.width + pad
-                    and -pad <= v <= camera.height + pad
-                ):
-                    return False
+            if capsule_intersects_camera_view(
+                camera_from_base.apply(start),
+                camera_from_base.apply(end),
+                radius,
+                camera,
+                bounds,
+            ):
+                return False
     return True
 
 
@@ -194,6 +247,7 @@ def _run_case(case):
     arm = UR5eArm(
         flange_T_tcp=Transform(np.eye(3), np.array([0.0, 0.0, 0.1971])),
         base=Transform(_rot_z(math.pi), np.zeros(3)),
+        min_self_clearance_m=policy["keepout_mm"] / 1000.0,
     )
     arm = replace(
         arm,
@@ -203,22 +257,6 @@ def _run_case(case):
         ),
     )
     seed = EXIT_JOINTS[exit_index]
-
-    def joint_motion(pose):
-        solutions = arm.solve_ranked(pose, seed)
-        clear = [
-            target
-            for target in solutions
-            if _arm_clear_of_own_cameras(pose, target, arm, tcp_T_cam, cameras)
-        ]
-        # Every branch must be arm-clear: Move Robot re-solves the published
-        # Cartesian pose and may take any of them.
-        if not clear or len(clear) != len(solutions):
-            return None
-        return (
-            min(clear, key=lambda q: (float(np.max(np.abs(q - seed)))))
-            - seed
-        )
 
     rotation = axis_angle_rotation(
         [1, 0, 0], math.radians(tilt_deg)
@@ -240,6 +278,42 @@ def _run_case(case):
         0.0,
         "center_camera",
     )
+
+    def joint_motion(pose):
+        solutions = arm.solve_ranked(pose, seed)
+        sector_regions = (
+            _sector_image_regions(
+                pose,
+                board_pose.base_T_board,
+                nic_sector_corners(),
+                tcp_T_cam,
+                cameras,
+            )
+            if policy["arm_rule"] == "sector"
+            else None
+        )
+        clear = [
+            target
+            for target in solutions
+            if _arm_clear_of_own_cameras(
+                pose,
+                target,
+                arm,
+                tcp_T_cam,
+                cameras,
+                sector_regions,
+                policy["min_clearance_px"],
+            )
+        ]
+        # Production NIC checks every keep-out-valid ranked branch; the later
+        # relaxation tier may accept one clear branch, but strict certification
+        # should retain the all-ranked-branches rule.
+        if not clear or len(clear) != len(solutions):
+            return None
+        return min(
+            clear,
+            key=lambda q: float(np.max(np.abs(q - seed))),
+        ) - seed
 
     candidate, reason = search_survey_pose(
         board_pose,
@@ -295,12 +369,16 @@ def _run_case(case):
         cameras,
         policy["port_edge_margin_px"],
     )
+    selected_delta = joint_motion(candidate.base_T_tcp)
+    if selected_delta is None:  # Defensive: the accepted pose just passed it.
+        raise RuntimeError("selected NIC pose no longer passes its IK gate")
     framed = [m for m in frame_margins if m >= 0.0]
     in_cone = [a for a in cone_angles if a <= math.degrees(PORT_CONE_RAD)]
     result.update(
         standoff_m=candidate.standoff_m,
         clearance_px=candidate.min_clearance_px,
         joint_max_deg=math.degrees(candidate.max_joint_motion_rad),
+        joint_total_deg=math.degrees(float(np.abs(selected_delta).sum())),
         ports_framed=len(framed),
         ports_in_cone=len(in_cone),
         port_margin_min_px=(
@@ -322,12 +400,24 @@ def main():
     parser.add_argument("--min-clearance-px", type=float, default=25.0)
     parser.add_argument("--max-angular-motion-deg", type=float, default=180.0)
     parser.add_argument("--max-joint-motion-deg", type=float, default=225.0)
+    parser.add_argument(
+        "--arm-rule",
+        choices=("sector", "whole"),
+        default="sector",
+        help="Match production's NIC-sector rule or test whole-image exclusion.",
+    )
+    parser.add_argument(
+        "--keepout-mm",
+        type=float,
+        default=140.0,
+        help="Wrist-camera to forearm centreline keep-out.",
+    )
     parser.add_argument("--port-edge-margin-px", type=float, default=12.0)
     parser.add_argument("--roll-count", type=int, default=24)
     parser.add_argument(
         "--min-standoff-m",
         type=float,
-        default=0.0,
+        default=0.66,
         help="Drop ladder rungs below this. The measured good-view band "
              "starts at 0.66 m; shorter poses frame all ten ports but put "
              "the outer ones outside the 7.5 deg bore cone.",
@@ -347,6 +437,8 @@ def main():
         "min_clearance_px": args.min_clearance_px,
         "max_angular_motion_deg": args.max_angular_motion_deg,
         "max_joint_motion_deg": args.max_joint_motion_deg,
+        "arm_rule": args.arm_rule,
+        "keepout_mm": args.keepout_mm,
         "port_edge_margin_px": args.port_edge_margin_px,
         "roll_count": args.roll_count,
         "min_standoff_m": args.min_standoff_m,
@@ -370,6 +462,9 @@ def main():
     passed = [r for r in results if r["pass"]]
     summary = {
         "cases": len(results),
+        "arm_rule": policy["arm_rule"],
+        "keepout_mm": policy["keepout_mm"],
+        "min_standoff_m": policy["min_standoff_m"],
         "pose_found": len(found),
         "passed": len(passed),
         "no_pose": len(results) - len(found),
@@ -407,6 +502,14 @@ def main():
             [
                 min(r["joint_max_deg"] for r in found),
                 max(r["joint_max_deg"] for r in found),
+            ]
+            if found
+            else None
+        ),
+        "joint_total_range_deg": (
+            [
+                min(r["joint_total_deg"] for r in found),
+                max(r["joint_total_deg"] for r in found),
             ]
             if found
             else None

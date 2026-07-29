@@ -240,7 +240,9 @@ def test_stage2_searches_inside_the_ur5e_reach_for_the_sfp_sector():
     # frames exactly one sector, chosen from the target mode.
     assert "joint_motion=joint_motion_fn" in method_source
     assert "UR5eArm.autocalibrate(" in method_source
+    assert "all_solutions = _arm.solve_all(pose)" in method_source
     assert "_arm.solve_ranked(" in method_source
+    assert "solutions=all_solutions" in method_source
     assert "joint_limits=" not in method_source
     assert "joints - seed" in method_source
     assert "select_clear_ik_solution(target)" in method_source
@@ -318,19 +320,22 @@ def test_failing_to_localize_the_board_is_an_error_not_a_not_done_result():
     """
     stage2 = _stage2_source()
 
-    # Both localization failures raise, and neither returns a not-done result.
-    for fragment in (
+    # No individually accepted pose is still a localization failure.
+    fragment = (
         "raise InsigniaNotExposedError(\n"
-        "                f\"board reconstruction needs {REQUIRED_INSIGNIA_CAMERAS} \"",
-        "raise InsigniaNotExposedError(\n"
-        "                f\"{len(pose_estimates)} accepted camera pose estimates but \"",
-    ):
-        assert fragment in stage2, fragment
+        "                f\"board reconstruction needs {REQUIRED_INSIGNIA_CAMERAS} \""
+    )
+    assert fragment in stage2
 
     # Each names the remedy, because the message is the only thing an operator
     # reading a failed run actually gets.  Matched short: the phrase is split
     # across string literals by line wrapping.
-    assert stage2.count("Move the arm to a start") >= 2
+    assert stage2.count("Move the arm to a start") >= 1
+
+    # Individually accepted estimates are now always consumed. A disagreement
+    # between accepted cameras must never become a second status-9 gate.
+    assert "agree within 5 cm / 8 degrees" not in stage2
+    assert "board pose is ambiguous from here" not in stage2
 
     # The geometric refusals must NOT have been swept up with them: the survey
     # search's own "no safe pose" verdict stays a result the process can branch on.
@@ -574,11 +579,12 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     assert math.radians(15.0) <= low <= high <= math.radians(22.0)
     assert sc["directional_tilt_axis_board"] == (1.0, 0.0, 0.0)
     assert sc["max_along_rail_tilt_rad"] <= math.radians(2.0)
-    # A ladder, not a pin: closest-feasible wins and closer is also deeper.
+    # A ladder, not a pin: try 0.65 m first for more port pixels, then retain
+    # the raised 0.70+ survey-height band.  The 16-20 degree SC angle remains
+    # independent and preserves the long-face depth view.
     standoffs = sc["standoffs_m"]
     assert standoffs == tuple(sorted(standoffs))
-    assert min(standoffs) >= 0.55, "0.45 put the tool over the ports"
-    assert max(standoffs) <= 0.62
+    assert standoffs == (0.65, 0.70, 0.73, 0.76, 0.80, 0.85, 0.90)
 
     # The tool must clear the tallest thing standing on the board (the NIC card
     # tips), not merely the board plane -- the plane guard sits below them.
@@ -610,7 +616,17 @@ def test_sc_view_gets_close_enough_to_resolve_a_7mm_bore():
     assert method_source.count("relative joint-motion") >= 2
     assert "relative_origin=live_joints" in method_source
     assert "joint_motion_preference=joint_motion_preference_fn" in method_source
-    assert "joint_preference_motion_tolerance_rad=math.radians(30.0)" in method_source
+    assert "180.0 if int(survey_target) == 3 else 30.0" in method_source
+    assert "0.120" in method_source
+    assert "else arm.min_self_clearance_m" in method_source
+    assert "view_solutions = (" in method_source
+    assert "if int(survey_target) == 3" in method_source
+    assert "else solutions" in method_source
+    # J6 ranks first only after the branch satisfies the tier's authoritative
+    # worst-joint and summed-motion caps.
+    assert '<= relax["joint_cap"] + 1e-9' in method_source
+    assert '<= relax["total_cap"] + 1e-9' in method_source
+    assert "tier_any_branch and int(survey_target) != 3" in method_source
 
 
 def test_deployed_target_enum_and_compatibility_fields_are_preserved():
@@ -670,7 +686,7 @@ def test_every_sector_searches_the_full_roll_family_from_any_start_pose():
         )
 
 
-def test_one_insignia_view_is_enough_but_agreeing_views_are_fused():
+def test_one_insignia_view_is_enough_and_all_accepted_views_are_fused():
     """Requiring two complete views was tried on hardware and reverted.
 
     The motivation was sound -- a single-view PnP of one small quad is a weak
@@ -682,8 +698,8 @@ def test_one_insignia_view_is_enough_but_agreeing_views_are_fused():
     longer exists, so each of those is a dead stop rather than something the
     skill recovers from.
 
-    What survives is the half that costs nothing: when two or more cameras do
-    accept an estimate they must agree, and their origins are averaged.
+    When two or more cameras accept an estimate, all accepted origins are
+    averaged without a second cross-camera agreement refusal.
     """
     source, _ = _source_and_class()
     assert "REQUIRED_INSIGNIA_CAMERAS = 1" in source
@@ -692,10 +708,10 @@ def test_one_insignia_view_is_enough_but_agreeing_views_are_fused():
     assert ">= REQUIRED_INSIGNIA_CAMERAS" in gate
 
     stage2 = ast.get_source_segment(source, _method("_run_sfp_geometric_stage2"))
-    # A lone accepted estimate must still pass the agreement check.
-    assert "len(pose_estimates) > 1 and len(consistent) < 2" in stage2
-    # Opportunistic fusion: average the range whenever more than one view agrees.
-    assert "cluster_translations.mean(axis=0)" in stage2
+    assert "len(pose_estimates) > 1 and len(consistent) < 2" not in stage2
+    assert "agree within 5 cm / 8 degrees" not in stage2
+    assert "for item in pose_estimates" in stage2
+    assert "accepted_translations.mean(axis=0)" in stage2
     assert "base_T_board=Transform(" in stage2
     # Rotation stays with the preferred view -- averaging orientations over a
     # near-square landmark can interpolate between mirror hypotheses.
@@ -712,8 +728,9 @@ def test_unreachable_and_camera_keepout_are_reported_as_different_gates():
     stage2 = ast.get_source_segment(source, _method("_run_sfp_geometric_stage2"))
 
     assert '"keepout": 0,' in stage2
-    # Re-solved without the keep-out, and only on the failure path.
-    assert "if _arm.solve_all(pose):" in stage2
+    # The complete branch set is shared by the reachability and view gates.
+    assert "all_solutions = _arm.solve_all(pose)" in stage2
+    assert "if all_solutions:" in stage2
     assert 'record["gate"] = "camera_keepout"' in stage2
     assert 'record["gate"] = "unreachable"' in stage2
     assert "BINDING GATE = wrist-camera keep-out" in stage2

@@ -68,6 +68,88 @@ JOINT_LIMITS: np.ndarray = np.array(
     dtype=float,
 )
 
+
+def capsule_intersects_camera_view(
+    start_camera: Sequence[float],
+    end_camera: Sequence[float],
+    radius_m: float,
+    camera,
+    bounds_px: Sequence[float] | None = None,
+) -> bool:
+    """Conservatively test a link capsule against a camera view pyramid.
+
+    The segment is clipped against the near and four image planes after each
+    plane is expanded by ``radius_m``.  Expanding the near plane to
+    ``z >= -radius`` is important: a centreline may sit behind the camera while
+    its capsule still reaches into the visible half-space.  Projection-based
+    tests that discard every ``z <= 0`` centreline sample miss that case.
+
+    ``bounds_px`` is ``(u_min, v_min, u_max, v_max)``.  When omitted, the full
+    image is tested.  Expanded half-planes are conservative at image corners,
+    which is the safe direction for an arm-in-view gate.
+    """
+    start = np.asarray(start_camera, dtype=float)
+    end = np.asarray(end_camera, dtype=float)
+    radius = float(radius_m)
+    if (
+        start.shape != (3,)
+        or end.shape != (3,)
+        or not np.all(np.isfinite(start))
+        or not np.all(np.isfinite(end))
+        or not math.isfinite(radius)
+        or radius < 0.0
+    ):
+        return True
+
+    segment = end - start
+    length_sq = float(segment @ segment)
+    closest_t = 0.0
+    if length_sq > 1e-15:
+        closest_t = float(np.clip(-(start @ segment) / length_sq, 0.0, 1.0))
+    if float(np.linalg.norm(start + closest_t * segment)) <= radius + 1e-12:
+        # A camera origin inside a capsule has no meaningful projection.  It is
+        # an obstruction, not a behind-camera centreline sample to skip.
+        return True
+
+    if bounds_px is None:
+        u_min, v_min = 0.0, 0.0
+        u_max, v_max = float(camera.width), float(camera.height)
+    else:
+        u_min, v_min, u_max, v_max = map(float, bounds_px)
+
+    fx = float(camera.K[0, 0])
+    fy = float(camera.K[1, 1])
+    cx = float(camera.K[0, 2])
+    cy = float(camera.K[1, 2])
+    planes = (
+        np.array([0.0, 0.0, 1.0]),
+        np.array([fx, 0.0, cx - u_min]),
+        np.array([-fx, 0.0, u_max - cx]),
+        np.array([0.0, fy, cy - v_min]),
+        np.array([0.0, -fy, v_max - cy]),
+    )
+
+    # Clip t in [0, 1] against n.p(t) >= -radius*||n||.  This cannot step over
+    # a short near-plane crossing the way fixed centreline sampling can.
+    t_min, t_max = 0.0, 1.0
+    for normal in planes:
+        offset = radius * float(np.linalg.norm(normal))
+        at_start = float(normal @ start) + offset
+        slope = float(normal @ segment)
+        if abs(slope) <= 1e-15:
+            if at_start < 0.0:
+                return False
+            continue
+        crossing = -at_start / slope
+        if slope > 0.0:
+            t_min = max(t_min, crossing)
+        else:
+            t_max = min(t_max, crossing)
+        if t_min > t_max + 1e-12:
+            return False
+    return True
+
+
 # Denavit-Hartenberg parameters of the same chain, in the classical UR form
 #     T_i = Rz(theta_i) . Tz(d_i) . Tx(a_i) . Rx(alpha_i)
 # The MJCF chain above *is* this chain: ``fk_flange`` and the DH product agree to
@@ -292,11 +374,10 @@ class UR5eArm:
     # fails the move just as hard as an unreachable pose.  Empty (the default)
     # disables the check, keeping pure kinematics for callers without the rig.
     flange_T_probes: tuple[Transform, ...] = ()
-    # Calibrated against ground truth: for a survey pose the workcell planner
-    # rejected outright (robot.forearm_link vs left_camera.camera_link, all
-    # solutions), the best branch put a camera 111 mm from the forearm centreline.
-    # 140 mm keeps a 26% margin over that while retaining ~40% of framed NIC
-    # candidates, which is far more than the search needs.
+    # Default retained for the already-certified NIC/SFP policies. SC overrides
+    # this to 120 mm at its call site: hardware showed the workcell planner
+    # execute a 122 mm branch, but globally widening the branch set regresses
+    # NIC's all-branch availability.
     min_self_clearance_m: float = 0.140
 
     def _to_model(self, base_link_pose: Transform) -> Transform:
@@ -546,6 +627,7 @@ class UR5eArm:
         seed: Sequence[float] | None = None,
         *,
         joint_limits: np.ndarray | None = None,
+        solutions: Sequence[Sequence[float]] | None = None,
     ) -> list[np.ndarray]:
         """All forearm-clear IK branches in permitted finite coordinates.
 
@@ -558,11 +640,19 @@ class UR5eArm:
         branch is represented inside that absolute window instead of choosing
         the physical-limit winding nearest the seed. Production SC survey
         selection leaves it unset and ranks live-relative physical travel.
+        ``solutions`` may supply a branch set already returned by
+        :meth:`solve_all`, allowing callers that also audit every kinematic
+        branch to avoid solving the same pose twice.
         """
 
-        solutions = [
+        raw_solutions = (
+            self.solve_all(base_T_tcp)
+            if solutions is None
+            else [np.asarray(q, dtype=float) for q in solutions]
+        )
+        clear_solutions = [
             q
-            for q in self.solve_all(base_T_tcp)
+            for q in raw_solutions
             if self.self_clearance(q) >= self.min_self_clearance_m
         ]
         if seed is None:
@@ -570,11 +660,13 @@ class UR5eArm:
         else:
             reference = np.asarray(seed, dtype=float)
         if joint_limits is None:
-            lifted = [_lift_near_reference(q, reference) for q in solutions]
+            lifted = [
+                _lift_near_reference(q, reference) for q in clear_solutions
+            ]
         else:
             lifted = [
                 mapped
-                for q in solutions
+                for q in clear_solutions
                 if (
                     mapped := lift_into_joint_limits(
                         q, joint_limits, reference=reference

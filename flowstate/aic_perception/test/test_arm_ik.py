@@ -12,6 +12,7 @@ from aic_perception.arm_ik import (
     _DH_ALPHA,
     _DH_D,
     _dh_matrix,
+    capsule_intersects_camera_view,
     lift_into_joint_limits,
 )
 from aic_perception.board_stage2 import Transform
@@ -29,6 +30,53 @@ _TEST_JOINT_WINDOW_DEG = np.array(
     dtype=float,
 )
 _TEST_JOINT_WINDOW = np.radians(_TEST_JOINT_WINDOW_DEG)
+
+
+class _Camera:
+    K = np.array(
+        [
+            [100.0, 0.0, 50.0],
+            [0.0, 100.0, 50.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    width = 100
+    height = 100
+
+
+def test_capsule_view_gate_rejects_camera_origin_inside_capsule():
+    assert capsule_intersects_camera_view(
+        [-0.10, 0.0, -0.02],
+        [0.10, 0.0, -0.02],
+        0.03,
+        _Camera(),
+    )
+
+
+def test_capsule_view_gate_clips_crossing_segment_at_near_plane():
+    assert capsule_intersects_camera_view(
+        [0.02, 0.0, -0.20],
+        [0.02, 0.0, 0.20],
+        0.01,
+        _Camera(),
+    )
+    assert not capsule_intersects_camera_view(
+        [0.20, 0.0, -0.20],
+        [0.20, 0.0, 0.02],
+        0.01,
+        _Camera(),
+    )
+
+
+def test_capsule_view_gate_can_limit_the_test_to_a_sector():
+    segment = ([0.03, 0.0, 0.20], [0.03, 0.0, 0.30])
+    assert capsule_intersects_camera_view(*segment, 0.005, _Camera())
+    assert not capsule_intersects_camera_view(
+        *segment,
+        0.005,
+        _Camera(),
+        bounds_px=(45.0, 45.0, 55.0, 55.0),
+    )
 
 
 def _random_joints(rng, n):
@@ -156,6 +204,26 @@ def test_solve_ranked_exposes_every_forearm_clear_finite_branch():
     # At least the matching wrist branch must retain the +226-degree finite
     # representation rather than collapse to its -134-degree principal angle.
     assert ranked[0][5] == pytest.approx(seed[5])
+
+
+def test_solve_ranked_can_reuse_an_already_enumerated_branch_set():
+    arm = UR5eArm()
+    seed = np.array([0.4, -1.3, 1.5, -1.7, -1.5, math.radians(226.0)])
+    target = arm.fk(seed)
+    branches = arm.solve_all(target)
+
+    expected = arm.solve_ranked(target, seed)
+    reused = arm.solve_ranked(target, seed, solutions=branches)
+
+    assert len(reused) == len(expected)
+    for actual, wanted in zip(reused, expected):
+        assert actual == pytest.approx(wanted)
+
+
+def test_default_self_clearance_tracks_the_hardware_accepted_branch():
+    # Move Robot executed a branch measured at 122 mm.  The analytic gate keeps
+    # a small margin below it instead of hiding that branch at the old 140 mm.
+    assert UR5eArm().min_self_clearance_m == pytest.approx(0.140)
 
 
 def test_optional_joint_window_maps_coterminal_wrist_values():

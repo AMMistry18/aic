@@ -34,7 +34,12 @@ from test_board_stage2 import (  # noqa: E402
     axis_angle_rotation,
 )
 
-from aic_perception.arm_ik import JOINT_LIMITS, UR5eArm, _rot_z  # noqa: E402
+from aic_perception.arm_ik import (  # noqa: E402
+    JOINT_LIMITS,
+    UR5eArm,
+    _rot_z,
+    capsule_intersects_camera_view,
+)
 from aic_perception.board_stage2 import (  # noqa: E402
     BoardPoseEstimate,
     Transform,
@@ -53,9 +58,8 @@ PLACEMENTS_M = ((0.0, 0.0), (0.050, 0.030), (-0.050, -0.040))
 # Board origin in ``base_link``, recovered from the 2026-07-28 hardware run --
 # 0.558 m horizontally from the base against the 0.4317 m this harness had been
 # pinned at.  See ``sfp_sweep_runner.BOARD_CENTER_M`` for the derivation; both
-# sweeps must certify the same cell.  SC's standoff ladder is shorter than SFP's
-# (0.55-0.62 m), so it spends less of the envelope on height and is expected to
-# tolerate the extra distance better.
+# sweeps must certify the same cell.  SC starts at 0.65 m for useful port scale,
+# then retains the 0.70-0.90 m raised survey ladder.
 BOARD_CENTER_M = (-0.5189, 0.2054)
 LEGACY_BOARD_CENTER_M = (-0.3445, 0.2602)
 HOME_DEG = np.array([-9.15, -77.59, -95.39, -97.02, 90.01, 80.84])
@@ -72,8 +76,8 @@ DEFAULT_POLICY = {
     "tilt_min_deg": 16.0,
     "tilt_max_deg": 20.0,
     "aim_x_m": 0.0,
-    "min_standoff_m": 0.55,
-    "max_standoff_m": 0.62,
+    "min_standoff_m": 0.65,
+    "max_standoff_m": 0.90,
     "min_depth_cue_px": 3.0,
     "depth_cue_motion_tolerance_px": 0.10,
     "required_bore_cameras": 2,
@@ -84,30 +88,82 @@ DEFAULT_POLICY = {
     "bore_x_tolerance_m": 0.0076,
     "required_depth_cameras": 2,
     "max_joint_motion_deg": 185.0,
-    "j6_preference_motion_tolerance_deg": 30.0,
+    "j6_preference_motion_tolerance_deg": 180.0,
+    "keepout_mm": 120.0,
+    "arm_rule": "sector",
+    "arm_branches": "all",
+    "hard_j6_flip": False,
+    "prioritize_j6": True,
+    "max_j6_error_deg": 15.0,
 }
 
 
-def _arm_clear_of_own_cameras(base_T_tcp, joints, arm, tcp_T_cam, cameras):
-    for start, end, radius in arm.link_segments(joints):
-        samples = np.array(
-            [start + (end - start) * t for t in np.linspace(0.0, 1.0, 25)]
+def _sector_image_regions(
+    base_T_tcp,
+    base_T_board,
+    target_board,
+    tcp_T_cam,
+    cameras,
+):
+    regions = {}
+    for name, camera in cameras.items():
+        cam_from_board = (
+            base_T_tcp.compose(tcp_T_cam[name])
+            .inverse()
+            .compose(base_T_board)
         )
+        pixels, in_front = project_points(
+            cam_from_board.apply(target_board), camera
+        )
+        if not np.all(in_front) or not np.all(np.isfinite(pixels)):
+            continue
+        regions[name] = (
+            float(pixels[:, 0].min()),
+            float(pixels[:, 1].min()),
+            float(pixels[:, 0].max()),
+            float(pixels[:, 1].max()),
+        )
+    return regions
+
+
+def _arm_clear_of_own_cameras(
+    base_T_tcp,
+    joints,
+    arm,
+    tcp_T_cam,
+    cameras,
+    sector_regions=None,
+    clearance_px=25.0,
+):
+    for start, end, radius in arm.link_segments(joints):
         for name, camera in cameras.items():
-            camera_pose = base_T_tcp.compose(tcp_T_cam[name])
-            local = camera_pose.inverse().apply(samples)
-            pixels, in_front = project_points(local, camera)
-            for pixel, ahead, point in zip(pixels, in_front, local):
-                if not ahead or not np.all(np.isfinite(pixel)):
-                    continue
-                margin = radius * float(camera.K[0, 0]) / max(
-                    float(point[2]), 1e-6
+            region = (
+                sector_regions.get(name)
+                if sector_regions is not None
+                else None
+            )
+            if sector_regions is not None and region is None:
+                continue
+            bounds = None
+            if region is not None:
+                u_min, v_min, u_max, v_max = region
+                bounds = (
+                    u_min - clearance_px,
+                    v_min - clearance_px,
+                    u_max + clearance_px,
+                    v_max + clearance_px,
                 )
-                if (
-                    -margin <= pixel[0] <= camera.width + margin
-                    and -margin <= pixel[1] <= camera.height + margin
-                ):
-                    return False
+            camera_from_base = (
+                base_T_tcp.compose(tcp_T_cam[name]).inverse()
+            )
+            if capsule_intersects_camera_view(
+                camera_from_base.apply(start),
+                camera_from_base.apply(end),
+                radius,
+                camera,
+                bounds,
+            ):
+                return False
     return True
 
 
@@ -127,6 +183,7 @@ def _run_case(case):
             arm.flange_T_tcp.compose(extrinsic)
             for extrinsic in tcp_T_cam.values()
         ),
+        min_self_clearance_m=policy["keepout_mm"] / 1000.0,
     )
     seed = EXIT_JOINTS[exit_index]
     current_base_T_tcp = arm.fk(seed)
@@ -163,6 +220,7 @@ def _run_case(case):
         "center_camera",
     )
     sc_view_samples = sc_bore_sample_points()
+    sc_sector = sc_sector_corners()
 
     def view_quality(pose):
         bore_margin = rectangular_bore_visibility_margin(
@@ -189,34 +247,106 @@ def _run_case(case):
             required_camera_count=policy["required_depth_cameras"],
         )
 
-    ik_counts = {"solved": 0, "arm_clear": 0, "within_180": 0}
+    ik_counts = {
+        "solved": 0,
+        "arm_clear": 0,
+        "j6_rejected": 0,
+        "within_180": 0,
+    }
 
     def joint_motion(pose):
+        all_solutions = (
+            arm.solve_all(pose)
+            if policy["arm_branches"] == "all"
+            else None
+        )
         solutions = arm.solve_ranked(
             pose,
             seed,
+            solutions=all_solutions,
         )
         ik_counts["solved"] += len(solutions)
+        arm_keepout_regions = (
+            None
+            if policy["arm_rule"] == "whole"
+            else _sector_image_regions(
+                pose,
+                board_pose.base_T_board,
+                sc_sector,
+                tcp_T_cam,
+                cameras,
+            )
+        )
+        view_solutions = (
+            all_solutions
+            if policy["arm_branches"] == "all"
+            else solutions
+        )
         clear = [
             target
-            for target in solutions
+            for target in view_solutions
             if _arm_clear_of_own_cameras(
-                pose, target, arm, tcp_T_cam, cameras
+                pose,
+                target,
+                arm,
+                tcp_T_cam,
+                cameras,
+                arm_keepout_regions,
             )
         ]
         ik_counts["arm_clear"] += len(clear)
         # Hard stop: every branch must be arm-clear, because Move Robot
         # re-solves the published Cartesian pose and may take any of them.
-        if not clear or len(clear) != len(solutions):
+        if (
+            not solutions
+            or not clear
+            or len(clear) != len(view_solutions)
+        ):
             return None
-        target = min(
-            clear,
-            key=lambda joints: (
-                float(np.max(np.abs(joints - seed))),
-                abs(float(joints[5] - preferred_j6)),
-                float(np.sum(np.abs(joints - seed))),
-            ),
+        selectable = (
+            solutions
+            if policy["arm_branches"] == "all"
+            else clear
         )
+        if policy["hard_j6_flip"] or policy["prioritize_j6"]:
+            selectable = [
+                target
+                for target in selectable
+                if float(np.max(np.abs(target - seed)))
+                <= math.radians(policy["max_joint_motion_deg"]) + 1e-9
+                and float(np.sum(np.abs(target - seed)))
+                <= math.radians(400.0) + 1e-9
+            ]
+            if not selectable:
+                return None
+        if policy["hard_j6_flip"]:
+            selectable = [
+                target
+                for target in selectable
+                if abs(float(target[5] - preferred_j6))
+                <= math.radians(policy["max_j6_error_deg"]) + 1e-9
+            ]
+            if not selectable:
+                ik_counts["j6_rejected"] += 1
+                return None
+        if policy["hard_j6_flip"] or policy["prioritize_j6"]:
+            target = min(
+                selectable,
+                key=lambda joints: (
+                    abs(float(joints[5] - preferred_j6)),
+                    float(np.max(np.abs(joints - seed))),
+                    float(np.sum(np.abs(joints - seed))),
+                ),
+            )
+        else:
+            target = min(
+                selectable,
+                key=lambda joints: (
+                    float(np.max(np.abs(joints - seed))),
+                    abs(float(joints[5] - preferred_j6)),
+                    float(np.sum(np.abs(joints - seed))),
+                ),
+            )
         delta = target - seed
         if float(np.max(np.abs(delta))) <= math.pi + 1e-9:
             ik_counts["within_180"] += 1
@@ -229,7 +359,7 @@ def _run_case(case):
         grippers,
         reference_camera="center_camera",
         current_base_T_tcp=current_base_T_tcp,
-        coverage_targets=(sc_sector_corners(),),
+        coverage_targets=(sc_sector,),
         cross_rail_tilt_band_rad=(
             math.radians(policy["tilt_min_deg"]),
             math.radians(policy["tilt_max_deg"]),
@@ -257,6 +387,8 @@ def _run_case(case):
                 0.73,
                 0.76,
                 0.80,
+                0.85,
+                0.90,
             )
             if (
                 value >= policy["min_standoff_m"] - 1e-9
@@ -323,7 +455,25 @@ def _run_case(case):
                 if selected_target is not None
                 else None
             ),
+            j6_error_deg=(
+                math.degrees(
+                    abs(float(selected_target[5] - preferred_j6))
+                )
+                if selected_target is not None
+                else None
+            ),
         )
+        result["passed"] = bool(
+            selected_delta is not None
+            and selected_bore_margin >= policy["min_bore_margin"] - 1e-9
+            and candidate.view_quality >= policy["min_depth_cue_px"] - 1e-9
+            and candidate.max_joint_motion_rad
+            <= math.radians(policy["max_joint_motion_deg"]) + 1e-9
+            and candidate.total_joint_motion_rad
+            <= math.radians(400.0) + 1e-9
+        )
+    else:
+        result["passed"] = False
     return result
 
 
@@ -334,8 +484,8 @@ def main():
     parser.add_argument("--tilt-min-deg", type=float, default=16.0)
     parser.add_argument("--tilt-max-deg", type=float, default=20.0)
     parser.add_argument("--aim-x-mm", type=float, default=0.0)
-    parser.add_argument("--min-standoff-m", type=float, default=0.55)
-    parser.add_argument("--max-standoff-m", type=float, default=0.62)
+    parser.add_argument("--min-standoff-m", type=float, default=0.65)
+    parser.add_argument("--max-standoff-m", type=float, default=0.90)
     parser.add_argument("--min-depth-cue-px", type=float, default=3.0)
     parser.add_argument(
         "--depth-cue-motion-tolerance-px", type=float, default=0.10
@@ -346,8 +496,30 @@ def main():
     parser.add_argument("--required-depth-cameras", type=int, default=2)
     parser.add_argument("--max-joint-motion-deg", type=float, default=185.0)
     parser.add_argument(
-        "--j6-preference-motion-tolerance-deg", type=float, default=30.0
+        "--j6-preference-motion-tolerance-deg", type=float, default=180.0
     )
+    parser.add_argument("--keepout-mm", type=float, default=120.0)
+    parser.add_argument(
+        "--arm-rule",
+        choices=("sector", "whole"),
+        default="sector",
+    )
+    parser.add_argument(
+        "--arm-branches",
+        choices=("ranked", "all"),
+        default="all",
+        help=(
+            "branches checked by the arm-in-view gate; reachability always "
+            "uses the keep-out-filtered ranked set"
+        ),
+    )
+    parser.add_argument("--hard-j6-flip", action="store_true")
+    parser.add_argument(
+        "--prioritize-j6",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--max-j6-error-deg", type=float, default=15.0)
     args = parser.parse_args()
     policy = {
         "tilt_min_deg": args.tilt_min_deg,
@@ -367,6 +539,12 @@ def main():
         "j6_preference_motion_tolerance_deg": (
             args.j6_preference_motion_tolerance_deg
         ),
+        "keepout_mm": args.keepout_mm,
+        "arm_rule": args.arm_rule,
+        "arm_branches": args.arm_branches,
+        "hard_j6_flip": args.hard_j6_flip,
+        "prioritize_j6": args.prioritize_j6,
+        "max_j6_error_deg": args.max_j6_error_deg,
     }
     cases = [
         (yaw, tilt, placement, exit_index, policy)
@@ -379,10 +557,12 @@ def main():
         results = list(pool.map(_run_case, cases))
 
     found = [result for result in results if result["found"]]
+    passed = [result for result in results if result["passed"]]
     missed = [result for result in results if not result["found"]]
     summary = {
         "cases": len(results),
         "found": len(found),
+        "passed": len(passed),
         "missed": len(missed),
         "standoff_range_m": (
             [min(r["standoff_m"] for r in found), max(r["standoff_m"] for r in found)]
@@ -406,6 +586,22 @@ def main():
         ),
         "joint_max_range_deg": (
             [min(r["joint_max_deg"] for r in found), max(r["joint_max_deg"] for r in found)]
+            if found
+            else None
+        ),
+        "joint_total_range_deg": (
+            [
+                min(r["joint_total_deg"] for r in found),
+                max(r["joint_total_deg"] for r in found),
+            ]
+            if found
+            else None
+        ),
+        "j6_error_range_deg": (
+            [
+                min(r["j6_error_deg"] for r in found),
+                max(r["j6_error_deg"] for r in found),
+            ]
             if found
             else None
         ),

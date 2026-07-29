@@ -2,8 +2,11 @@
 
 Updated: 2026-07-28 (evening)
 
-> **Start at §23,** then §22. §23 is the staged-SFP tool-occlusion fix and
-> supersedes the coverage box in §8.2/§8.3 **and** §22.4. §22 describes the rest of
+> **Start at §24,** then §23, then §22. §24 is the open work: branch divergence is
+> now measured on hardware and the 140 mm keep-out is why the arm-in-view gate
+> misses it — §24.4 is the plan and §24.5 is what is still unexplained. §23 is the
+> staged-SFP tool-occlusion fix and supersedes the coverage box in §8.2/§8.3 **and**
+> §22.4. §22 describes the rest of
 > the system and supersedes any earlier section it contradicts — the roll counts,
 > the reorientation caps (§8.3/§9.2), and the "do not gate/do not widen" entries
 > in §17 that were measured under the old 90° cap, 7-roll family and legacy
@@ -1323,7 +1326,8 @@ Also capture:
 2. **Add the Flowstate `result.success && result.done && result.target_valid`
    gate** after the default-controller switch. Still missing, and it has now
    crashed Move Robot with `norm(quat)==0` on SFP as well as SC.
-3. **SC J6 preference is not engaging.** §10.4 prefers a +/-180 deg J6 flip
+3. **SC J6 preference is not engaging.** **See §24.4 item 4 — measured at
+   `j6_error=266.7deg` on 2026-07-28 20:14, the worst on record.** §10.4 prefers a +/-180 deg J6 flip
    specifically to keep the camera cluster off the occluding side, and field
    logs show `j6_error` of 129-245 deg -- it lands on the wrong side every
    time. It only wins inside a 30 deg travel plateau. This is the remaining
@@ -1816,8 +1820,10 @@ highest-value harness work.
    are spawned before trusting any coverage number.
 5. The 140 mm keep-out is calibrated from a single planner rejection at 111 mm
    and measured to a capsule *centreline* (~90 mm real clearance). Relaxing to
-   110 mm recovered cases offline. **Do not touch it without checking against
-   the workcell planner mesh test** -- publishing a pose the planner refuses is a
+   110 mm recovered cases offline. **Superseded by §24.3: the workcell planner has
+   now been observed executing a 122 mm branch, so 140 mm is provably tighter than
+   the real constraint, and being tight here makes the arm-in-view gate blind.**
+   Still prefer checking against the workcell planner mesh test -- publishing a pose the planner refuses is a
    hard move failure, and the field instruction on collisions is absolute.
 
 ## 23. Staged SFP: the outer module was behind the tool (2026-07-28, late)
@@ -2069,3 +2075,172 @@ controller handoff is published, then re-raises as `SkillError(9, ...)`).
 4. The insignia removal means a survey pose may crop the insignia. Nothing observed
    needs it, but a chained SFP → NIC → SC sequence has not been re-run on hardware
    since.
+
+## 24. Branch divergence is measured, and the keep-out is why the gate misses it
+
+Field session 2026-07-28 20:12-20:14, three chained invocations (SFP → NIC → SC)
+on the §23 build. **Nothing in this section is implemented.** It is the next
+session's work, and §24.4 is the plan.
+
+### 24.1 How to read the executed branch out of any log
+
+There is no extra instrumentation needed, and this should be the first move on any
+future report. Each invocation logs `seed_deg=` — the joints it started from — so:
+
+> **Invocation N+1's `seed_deg` is where invocation N's move actually ended.**
+
+For the last invocation in a chain there is no follow-up, so run the skill once
+more after the move and read its `seed_deg` (or `ros2 topic echo /joint_states
+--once`).
+
+### 24.2 The measurement
+
+SFP, 20:12. `target_deg` is what the skill predicted; the NIC invocation's
+`seed_deg` 71 s later is what the arm actually did:
+
+```text
+skill predicted   [-212.5, -101.2,  56.4,  -60.6, 266.3, 27.8]  TCP (-0.3738, 0.1028, 0.5968)
+Move Robot ran    [  16.5,  -80.1, -52.6, -129.9,  76.1, 76.4]  TCP (-0.3734, 0.1027, 0.5966)
+```
+
+Same TCP to **0.5 mm**, and **229° apart on J1** — a different arm configuration,
+not a variant. §11 confirmed rather than suspected.
+
+Then the part that matters:
+
+```text
+solve_ranked returned 1 branch    (140 mm keep-out applied)
+solve_all    returned 4 branches
+executed branch present in solve_ranked?   NO
+executed branch self_clearance = 122 mm    (keep-out demands >= 140)
+```
+
+**The 140 mm keep-out filtered out the branch Move Robot chose, so the arm-in-view
+gate never evaluated it.** §7.1's all-branches-clear rule validated 1 of 4 branches
+while the planner selected from all 4. Its own caveat — "cannot cover a branch
+outside `solve_ranked`'s set" — is exactly what fired.
+
+Divergence is **intermittent**, which is worth knowing before chasing it: the NIC
+invocation's predicted `target_deg=[-20.0,-112.3,-10.6,-138.5,84.2,40.3]` equals
+the SC invocation's `seed_deg` exactly, so that move executed as predicted. SFP
+diverged, NIC did not.
+
+### 24.3 Two conclusions, one of them the fix
+
+**The keep-out is a pre-filter, and that is the bug.** Two independent questions
+are being conflated:
+
+| Question | Right instrument | Should match |
+| --- | --- | --- |
+| will the planner accept this configuration? | `self_clearance` keep-out | the workcell planner's mesh test |
+| is the view usable on whatever branch runs? | arm-in-view | every branch the planner could pick |
+
+`solve_ranked` applies the first *before returning*, so the second only ever sees
+the survivors. Over-conservatism in the keep-out therefore does not merely cost
+availability — **it makes the gate blind to precisely the branches most likely to
+be chosen**, because a low-clearance branch is both the one our model rejects and
+the one that puts a camera near the forearm.
+
+**140 mm is provably tighter than the real constraint.** The workcell planner
+executed a 122 mm branch without complaint. This settles the §22.9 item 5 /
+§21.3 question with hardware evidence instead of a single inferred rejection: 140 mm
+was calibrated from one planner refusal whose best branch sat at 111 mm, measured
+to a capsule *centreline* (~90 mm of real surface clearance), and the cell has now
+demonstrably run 122 mm.
+
+### 24.4 The plan — four changes, measured together
+
+The field instruction is explicit: **do these, hold native motion.** They interact,
+so sweep them as a set, not one at a time. The unifying idea, in the field's own
+words: *lower the keep-out, then reject any pose that sees the arm on any joint
+branch — the filtering gets more accurate, not looser.* Lowering the keep-out
+**widens** the branch set, and requiring all of it arm-clear is then a **stronger**
+gate than today's, because it finally covers the branches the planner can pick.
+
+1. **Lower `min_self_clearance_m` from 140 mm.** Candidates: 120 mm (just under the
+   observed 122), 110 mm (§21.3 measured it recovering three of four start poses
+   from 7/8 to 8/8). Ideally validate against the workcell planner's mesh test
+   rather than picking a number — that is the §3.3 agreement test from
+   `NATIVE_SURVEY_MOTION_PLAN.md`, and it is worth doing even though native motion
+   is deferred.
+2. **Evaluate arm-in-view over `solve_all`, not `solve_ranked`.** Decouple the two
+   questions above: keep the keep-out as the *reachability* gate, but run the
+   arm-clear test over every kinematically valid branch. Expect this to cost
+   availability — it is strictly stronger — and expect (1) to pay some of it back.
+3. **Fix the near-plane hole.** `_arm_clear_of_own_cameras` does
+   `if not ahead: continue`, so a capsule whose centreline is behind the camera is
+   skipped even though its radius may reach in front. Clip segments at the near
+   plane, and reject outright when a camera origin falls inside a link capsule.
+   Latent rather than the current failure, but real and cheap.
+4. **Fix the J6 preference (§18 item 3).** SC's `j6_error` was **266.7°** this run
+   (`preferred_j6_deg=220.3`, achieved -46.4) — the worst on record, against 129-245°
+   previously. The ±180° flip exists specifically to keep the camera cluster off the
+   occluding side and has never once engaged, because it only wins among candidates
+   within `joint_preference_motion_tolerance_rad` = 30° of minimum travel and the
+   flipped-wrist family costs far more than that. Either widen the plateau or make
+   the flip a hard constraint for SC.
+
+Also worth considering while in here: extend `link_segments` beyond its two
+capsules (upper arm, forearm) to the wrist links and the tool. The wrist housings
+are fat blobs sitting right behind the camera mount, and a thin centreline capsule
+is a poor model of them — see §24.5.
+
+### 24.5 What is NOT yet explained — do not close this early
+
+**The arm-in-view model does not account for the reported occlusion.** At all three
+published poses, and on the diverged executed branch as well, every checked link
+comes back 0% in frame in all three cameras:
+
+```text
+                        self_clear   forearm surface -> camera origin (mm)
+SFP predicted              181 mm     left +177  center +179  right +131
+SFP executed (diverged)    122 mm     0% in frame in all three cameras
+NIC predicted              166 mm     left +181  center +172  right +116
+SC  predicted              159 mm     left +109  center +168  right +183
+```
+
+Every link centreline sits 70-114° off the optical axis against a **31.9° diagonal
+half-FOV** (25.0° horizontal, 22.5° vertical). The wrist links sit at a constant
+71/103 mm from the cameras at *every* pose, including the two that looked fine, so
+nothing there distinguishes the bad SC view.
+
+So one of these is true and it must be settled before trusting any fix:
+
+- the capsule model under-represents the hardware (wrist housings, camera mount,
+  the neighbouring cameras themselves — none of which are in `link_segments`);
+- the screenshots were not taken at the survey pose. The joint readout supplied
+  alongside them was `[-9.15,-77.58,-95.38,-97.01,90.01,80.84]` — exactly `HOME`,
+  not any published target — so this is a live possibility.
+
+**Get `seed_deg` from one extra invocation after the SC move first.** If the SC
+branch also diverged, this is one story; if it executed as predicted and the arm is
+still in frame, the model is wrong and (1)-(4) will not fix it.
+
+### 24.6 Also from this run: the SFP changes behaved as designed
+
+```text
+tier='strict' joint_cap=225 total_cap=400 -> none | probed=1376 unreachable=697
+    camera_keepout=10 seat_hidden=326 arm_in_view=315 arm_clear=28 took=42.25s
+tier='joint-travel caps lifted' joint_cap=360 total_cap=none -> FOUND | probed=76
+    ... arm_clear=1 best_worst_joint=176.3deg took=12.17s
+published: standoff=0.800 joint_max=176.3 joint_total=586.1
+```
+
+Read honestly:
+
+- **`seat_hidden=326`** — the §23.3 seat gate is doing real work on hardware, rejecting
+  326 candidates whose coverage box framed fine while a module hid behind the tool.
+- **standoff 0.800 m** — the §23.2 coverage widening selected exactly what the sweep
+  predicted.
+- **The 400° total cap did not prevent contortion, it only added a tier.** Strict had
+  28 arm-clear candidates and `best_worst_joint=161.6°` (inside the 225° cap), so the
+  total cap was the binder; the next tier lifted it and published **586.1°**. At this
+  board placement no pose under 400° exists, so the cap converts a contorted pose
+  into a *warned* contorted pose. That is better than silence and is not a fix.
+  Reordering the ladder so the total cap is relaxed last is worth measuring.
+- **Time 54.4 s** (42.25 + 12.17), down from 154.86 s but not the ~3 s the offline
+  sweep suggests. The cost is now the *failing* tier: `probed` goes 68 → 1376 because
+  a tier that finds nothing must probe every framed candidate in every standoff
+  group instead of stopping at the first success. Cheap win available: order the
+  cheap seat gate before the IK solve inside `select_clear_ik_solution` (it already
+  is), and consider bailing a standoff group early once its candidates are exhausted.
