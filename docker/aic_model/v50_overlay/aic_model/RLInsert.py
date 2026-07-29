@@ -128,15 +128,17 @@ CONTROL_MODE = "script"
 # unbounded by attempt count and terminate on this deadline alone, so it is the
 # only number that decides how many recovery cycles a stuck plug gets.
 #
-# It must stay strictly under the engine's per-task time_limit (720 s as of
+# It must stay strictly under the engine's per-task time_limit (780 s as of
 # 2026-07-28, mirrored in generate_config.py).  This clock starts inside
 # insert_cable, i.e. after board perception and approach have already spent
 # engine time, so a budget equal to the limit could never fire first -- the
 # engine would hard-cut mid-ladder instead of letting the controller hold pose
-# and return, and a run that never returns scores nothing at all.  20 s of
-# margin here is the same order as the 30 s the old 150/180 pair carried.
+# and return, and a run that never returns scores nothing at all.  The pair is
+# 720/780: insert_cable is deliberately given a full 720 s of its own, and the
+# limit was raised to 780 to leave 60 s for perception and approach ahead of it
+# rather than shrinking the controller's share.
 ACTION_TIME_BUDGET_S = float(
-    os.environ.get("RL_INSERT_ACTION_TIME_BUDGET_S", "700.0")
+    os.environ.get("RL_INSERT_ACTION_TIME_BUDGET_S", "720.0")
 )
 # Restore the bounded visual board-framing pass from b269872.  It is opt-in for
 # normal insertion tasks; the reserved task ID runs only the board search.

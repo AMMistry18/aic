@@ -58,7 +58,7 @@ RUN cd /ws_aic/src/aic && \
        "import cv2; from ultralytics import YOLO; from aic_model.RLInsert import RLInsert, SC_WEIGHTS; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP V50 + five-keypoint SC mouth imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
-ENV RL_INSERT_ACTION_TIME_BUDGET_S=700
+ENV RL_INSERT_ACTION_TIME_BUDGET_S=720
 # SC alignment closes lateral error at ~0.19 mm/s (1.5 mm segments, ~6.3 s each),
 # so the 15 s default caps convergence at ~2.9 mm while SC_MAX_HANDOFF_LATERAL_M
 # admits 10 mm.  The 2026-07-27 03:33 run started 4.90 mm out, was still

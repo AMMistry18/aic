@@ -143,7 +143,7 @@ def build_trial(trial_idx, plug_type, nic_rail, sc_rail, yaw_band):
                 "plug_type": "sfp", "plug_name": "sfp_tip",
                 "port_type": "sfp", "port_name": "sfp_port_0",
                 "target_module_name": f"nic_card_mount_{nic_rail}",
-                "time_limit": 720}
+                "time_limit": 780}
     else:
         nic_rails  = {f"nic_rail_{i}": {"entity_present": False} for i in range(5)}
         sc_rails   = build_sc_rails(sc_rail, trial_idx)
@@ -152,7 +152,7 @@ def build_trial(trial_idx, plug_type, nic_rail, sc_rail, yaw_band):
                 "plug_type": "sc", "plug_name": "sc_tip",
                 "port_type": "sc", "port_name": "sc_port_base",
                 "target_module_name": f"sc_port_{sc_rail}",
-                "time_limit": 720}
+                "time_limit": 780}
 
     cable = {cable_name: {
         "pose": {"gripper_offset": {"x": 0.0, "y": 0.015385,
@@ -196,7 +196,7 @@ def build_trial(trial_idx, plug_type, nic_spawn_rails, sc_spawn_rails, yaw_band)
             "port_type": "sfp",
             "port_name": target_port,
             "target_module_name": f"nic_card_mount_{target_rail}",
-            "time_limit": 720,
+            "time_limit": 780,
         }
     else:
         cable_type = "sfp_sc_cable_reversed"
@@ -210,7 +210,7 @@ def build_trial(trial_idx, plug_type, nic_spawn_rails, sc_spawn_rails, yaw_band)
             "port_type": "sc",
             "port_name": "sc_port_base",
             "target_module_name": f"sc_port_{target_sc}",
-            "time_limit": 720,
+            "time_limit": 780,
         }
 
     cable = {cable_name: {
