@@ -1,8 +1,8 @@
 # SC plug-pose: collection, training and measured accuracy
 
-**Run 2026-07-25/26 on Stampede3 (`rtx-small`, account IRI26004).** This is the
-follow-up to `SC_PLUG_POSE_HANDOFF.md`, which planned the work. Everything it
-listed as "not yet run" has now been run and measured.
+**Run 2026-07-25/26 on Stampede3 (`rtx-small`, account IRI26004).** This records
+the completed training and evaluation run; the earlier planning handoff has
+been retired.
 
 **Result: the 0.4 mm working target is met, with margin, on a held-out split.**
 
@@ -152,9 +152,9 @@ collecting in batches via `SC_TRIAL_START` is faster as well as safer. Note
   and survives cropping. It passes the axis gate with margin.
 - **Crop-refine costs a second inference pass** per view. Fine offline; not
   benchmarked for the control loop.
-- **Not wired into the controller.** `docs/SC_PLUG_POSE_WIRING_PATCH.md` still
-  applies unchanged, including the contract change where `_tip_pose()` may
-  return `None` and every call site must stop rather than fall back.
+- **Controller wiring is complete.** The active SC path is documented in
+  `docs/CURRENT_SYSTEM.md`; this file remains the measured model-accuracy
+  record rather than the runtime contract.
 - **The rejection gates were never re-tuned** (`SC_MAX_REPROJECTION_ERROR_PX =
   6.0`, `SC_MAX_KEYPOINT_RMSE_M = 0.0035`, both inherited from SFP). They now
   have measured distributions to tune against — open question 3 in the handoff.
@@ -162,7 +162,7 @@ collecting in batches via `SC_TRIAL_START` is faster as well as safer. Note
 ## 7. Reproducing
 
 ```bash
-cd $WORK && git clone -b sc-plug-pose https://github.com/AMMistry18/aic.git aic-sc
+cd $WORK && git clone https://github.com/AMMistry18/aic.git aic-sc
 cd aic-sc
 PIXI_HOME=$WORK/pixi PIXI_CACHE_DIR=$WORK/.pixi-cache \
   RATTLER_AUTH_FILE=$WORK/.rattler_auth.json pixi install --frozen

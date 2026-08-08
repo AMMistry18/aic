@@ -1,7 +1,7 @@
 """Align-first alignment environment (single-RL, align-only).
 
 Historical stage-2 alignment-RL environment; current deployment status is in
-`docs/INSERTION_HANDOFF.md`.
+`docs/CURRENT_SYSTEM.md`.
 Unlike `student_v3_env.StudentV3Env` (a residual-at-contact policy rewarded on
 DEPTH progress), this env's ONLY job is to square the plug over the perceived
 port. Depth is deliberately NOT rewarded here -- in deployment, once this RL

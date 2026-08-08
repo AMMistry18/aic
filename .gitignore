@@ -1,5 +1,6 @@
 # python artifacts
 __pycache__/
+.ipynb_checkpoints/
 *.egg-info/
 build/
 files.txt
@@ -43,9 +44,6 @@ RL/output/
 # regenerable outputs — too big for GitHub (100 MB/file limit). Kept on disk only.
 aic_results/
 
-# Session scratch. .artifacts/ holds ~800 MB worktree copies per entry alongside
-# the handoff docs, so ignore it wholesale and re-include only what we track.
-.artifacts/*
-!.artifacts/HANDOFF_*.md
-!.artifacts/sc_detections.png
+# Session scratch and linked worktrees are local-only.
+.artifacts/
 .worktrees/

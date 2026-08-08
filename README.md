@@ -3,8 +3,6 @@
 [![build](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml)
 [![style](https://github.com/intrinsic-dev/aic/actions/workflows/style.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/style.yml)
 
-![](../media/aic_banner.png)
-
 The **AI for Industry Challenge** is an open competition for developers and roboticists aimed at solving some of the hardest, high-impact problems in robotics and manufacturing.
 
 This repository contains the official toolkit to help participants start developing their solutions. For registration details, official rules, and FAQs, please visit the [AI for Industry Challenge event page](https://www.intrinsic.ai/events/ai-for-industry-challenge).
@@ -48,8 +46,6 @@ Follow the sections below to navigate through each phase of the process.
 ---
 
 ## Toolkit Architecture
-
-![AIC Competition Components](../media/aic_competition_components.png)
 
 The AI for Industry Challenge toolkit is divided into **two main components**:
 
@@ -162,9 +158,7 @@ Manages trial execution, validates participant models, and collects scoring data
 * **[Scene Description](./docs/scene_description.md):** Technical details of the simulation environment.
 * **[Task Board Description](./docs/task_board_description.md):** Physical layout and specifications of the task board.
 * **[Troubleshooting](./docs/troubleshooting.md):** Common issues and debugging strategies.
-* **[Current Repository Handoff](./docs/HANDOFF.md):** Authoritative insertion and board-search baselines on `main`.
-* **[Insertion Handoff](./docs/INSERTION_HANDOFF.md):** Script-only SFP V50 implementation, build, and validation contract.
-* **[Board Search Handoff](./docs/BOARD_SEARCH_HANDOFF.md):** Geometric staged-SFP implementation pinned to commit `b65a7a0`.
+* **[Current AIC System](./docs/CURRENT_SYSTEM.md):** Active board-search, pose-storage, insertion, build, and validation architecture on `main`.
 
 ### Reference Materials
 

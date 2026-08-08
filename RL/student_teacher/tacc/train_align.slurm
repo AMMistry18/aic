@@ -14,7 +14,7 @@
 # (lateral + rotation), holding z at a standoff. See:
 #   RL/student_teacher/align_env.py
 #   RL/student_teacher/train_align.py
-#   docs/INSERTION_HANDOFF.md
+#   docs/CURRENT_SYSTEM.md
 
 set -euo pipefail
 

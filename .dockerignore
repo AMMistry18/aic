@@ -1,1 +1,24 @@
-.pixi
+# Local environments and source-control metadata
+.git/
+.pixi/
+.worktrees/
+.artifacts/
+
+# Editor, notebook, and Python caches
+.DS_Store
+**/.DS_Store
+__pycache__/
+**/__pycache__/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*.pyc
+
+# Regenerable experiment and evaluation outputs
+wandb/
+runs/
+outputs/
+results/
+aic_results/
+RL/output/
+testing/visual_validation/
+*.log
