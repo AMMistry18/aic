@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from eval_sc_pose_model import cyclic_keypoint_errors, globally_match_detections
+from tools.perception.sc_port.evaluate_model import (
+    cyclic_keypoint_errors,
+    globally_match_detections,
+)
 
 
 def _label(center_x):

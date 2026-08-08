@@ -20,7 +20,7 @@ from aic_example_policies.ros.sc_mouth_pose_geometry import (  # noqa: E402
     split_for_trial,
     write_dataset_yaml,
 )
-from train_sc_mouth_pose import EXPECTED_LABEL_TOKENS  # noqa: E402
+from tools.perception.sc_mouth.train import EXPECTED_LABEL_TOKENS  # noqa: E402
 
 
 def test_physical_front_mouth_is_distinct_from_legacy_virtual_target():

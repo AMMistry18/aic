@@ -36,7 +36,7 @@ test -f "${dataset_yaml}"
 cd -- "${repo_root}"
 source .pixi/envs/default/setup.bash
 
-.pixi/envs/default/bin/python train_sfp_plug_pose.py \
+.pixi/envs/default/bin/python tools/perception/sfp_plug/train.py \
   --data "${dataset_yaml}" \
   --model yolo11s-pose.pt \
   --epochs 120 \

@@ -12,15 +12,20 @@ pose that the insertion controller servos against. We need ≤1 mm median
 lateral / ≤1.5° rotation error. An `imgsz` inference fix is already applied
 (perception_core.py `detect_sc_pose` now runs at 960 — do not undo).
 NOTE: the ACTIVE perception file is
-`aic_example_policies/aic_example_policies/ros/perception_core.py`; the copy
-at repo root has no YOLO SC path and is NOT the one to edit.
+`aic_example_policies/aic_example_policies/ros/perception_core.py`; the Docker
+overlay copy must stay synchronized with it.
 
 **Measure before/after every item.** The eval dataset
 (`~/aic_perception_data/pose_sc/`) does not currently exist on this machine —
 regenerate it with `DataCollectorScPoseGT` (see Item 3, which modifies the
-collector anyway) and get a baseline via `eval_sc_pose_model.py
---weights aic_example_policies/aic_example_policies/ros/weights/best_sc_pose.pt`
-plus a 3D-error check before starting. No item is "done" without a number.
+collector anyway) and get a baseline via:
+
+```bash
+python tools/perception/sc_port/evaluate_model.py \
+  --weights aic_example_policies/aic_example_policies/ros/weights/best_sc_pose.pt
+```
+
+Add a 3D-error check before starting. No item is "done" without a number.
 
 ---
 
@@ -136,7 +141,7 @@ e.g. Pix2Pose crops bbox×1.5 then resizes to a fixed square).
      full 1152×1024 native res by the collector, so generate a crop dataset
      offline: for each labeled image, cut the 1.5×-padded GT-bbox crop,
      transform labels into crop coordinates, write a new YOLO-pose dataset.
-     Train with `train_sc.py` pointed at it (imgsz=640 on crops is plenty).
+     Train with `tools/perception/sc_port/train.py` pointed at it (imgsz=640 on crops is plenty).
      Randomize the crop center/scale slightly per sample so the model
      tolerates coarse-stage jitter. Ship as a SECOND weights file (e.g.
      `best_sc_pose_crop.pt`) — keep the coarse model unchanged.
@@ -169,7 +174,7 @@ angle. Root cause is twofold and both halves must be fixed:
   `DataCollectorScPoseGT.py:73-83`, `_move_to_offset` :333-351 never changes
   orientation).
 - Training disables all rotation augmentation: `degrees=0.0, shear=0.0,
-  perspective=0.0` (`train_sc.py:86,89-90`).
+  perspective=0.0` (`tools/perception/sc_port/train.py:86,89-90`).
 So the network has literally never seen the port at a tilted viewing angle.
 
 **Fix — collector** (`aic_example_policies/.../DataCollectorScPoseGT.py`):
@@ -194,7 +199,7 @@ So the network has literally never seen the port at a tilted viewing angle.
    per trial = 54 images/trial → ~60-90 trials). Hold out ≥10% of TRIALS
    (not random frames — frames within a trial are correlated) as val.
 
-**Fix — training** (`train_sc.py`):
+**Fix — training** (`tools/perception/sc_port/train.py`):
 ```python
 degrees=10.0,        # was 0.0  — in-plane rotation
 perspective=0.0005,  # was 0.0  — mild out-of-plane warp
@@ -204,7 +209,7 @@ shear=2.0,           # was 0.0
 # already tiny. Measure both.
 ```
 Retrain (`yolov8m-pose`, imgsz=960, 150 epochs as before), eval with
-`eval_sc_pose_model.py`, and compare against the pre-retrain baseline on the
+`tools/perception/sc_port/evaluate_model.py`, and compare against the pre-retrain baseline on the
 SAME val split.
 
 **Acceptance.** Build a val subset binned by viewing angle (0-5°, 5-10°,

@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from generate_sc_plug_pose_trials import (
+from tools.perception.generate_sc_trials import (
     RandomizationRanges,
     eligible_sc_trials,
     generate_config,

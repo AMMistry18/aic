@@ -12,8 +12,8 @@ Workflow:
   6. Report pixel error statistics
 
 Usage:
-    pixi run python3 ~/eval_color_sc.py
-    pixi run python3 ~/eval_color_sc.py --save-viz ~/sc_color_viz --limit 20
+    pixi run python3 tools/perception/sc_port/evaluate_color.py
+    pixi run python3 tools/perception/sc_port/evaluate_color.py --save-viz ~/sc_color_viz --limit 20
 """
 import argparse
 import os

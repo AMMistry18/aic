@@ -39,7 +39,8 @@ cd "${eval_root}"
 set +u
 source "${repo_root}/.pixi/envs/default/setup.bash"
 set -u
-"${repo_root}/.pixi/envs/default/bin/python" eval_sc_pose_model.py \
+"${repo_root}/.pixi/envs/default/bin/python" \
+  "${repo_root}/tools/perception/sc_port/evaluate_model.py" \
   --weights "${weights}" \
   --data "${dataset_root}/aic_sc_pose_raw.yaml" \
   --split val \

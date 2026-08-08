@@ -10,7 +10,7 @@ been retired.
 
 ## 1. Headline numbers
 
-Measured by `validate_sc_plug_pose.py --mode dataset` against simulator TF
+Measured by `tools/perception/sc_plug/validate.py --mode dataset` against simulator TF
 ground truth, with the crop-refine second pass enabled.
 
 | Gate | val split | test split | Limit |
@@ -43,7 +43,7 @@ keypoint error was **1.47 px median**, i.e. *better* than budget. Better
 keypoints, worse tip error: that is the signature of bias, which triangulation
 cannot average away.
 
-`kpt_bias_analysis.py` (committed) measured per-keypoint signed error against
+`tools/perception/sc_plug/analyze_keypoint_bias.py` (committed) measured per-keypoint signed error against
 the GT labels on the test split:
 
 ```

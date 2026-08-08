@@ -35,7 +35,7 @@ import time
 import numpy as np
 
 # Allow the checked-out script to run before the ROS package is rebuilt.
-_REPO_ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _AIC_MODEL_SOURCE = _REPO_ROOT / "aic_model"
 if str(_AIC_MODEL_SOURCE) not in sys.path:
     sys.path.insert(0, str(_AIC_MODEL_SOURCE))

@@ -16,7 +16,7 @@ import pytest
 # The pixi env carries an older installed copy of aic_model in site-packages
 # that predates the plug-pose modules, which is why test_sfp_plug_pose.py and
 # test_sc_plug_pose_geometry.py currently fail to collect.  Resolve the source
-# tree first, the same way eval_sfp_plug_pose_model.py does at the repo root,
+# tree first, the same way tools/perception/sfp_plug/evaluate.py does at the repo root,
 # so this file tests the code actually being edited.
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
 if str(_SOURCE_ROOT) not in sys.path:

@@ -8,7 +8,7 @@ cannot leak across splits.
 The cameras and held plug move together, so the efficient default records a
 few settled synchronized frames and returns.  Pose diversity should come from
 randomizing the six-degree-of-freedom cable attachment between simulator
-trials (``generate_sfp_plug_pose_trials.py``), not from many redundant TCP
+trials (``tools/perception/generate_sfp_trials.py``), not from many redundant TCP
 viewpoints inside one trial.
 """
 

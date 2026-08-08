@@ -10,7 +10,7 @@ asset contract:
 
 Each randomized trial is assigned wholly to train, validation, or test.  The
 three wrist cameras and a few settled samples provide image diversity; grasp
-and background pose diversity comes from ``generate_sc_plug_pose_trials.py``.
+and background pose diversity comes from ``tools/perception/generate_sc_trials.py``.
 """
 
 from __future__ import annotations

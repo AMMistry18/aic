@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train the separate SC plug-pose network.
 
-This is the SC sibling of ``train_sfp_plug_pose.py``.  The two models are kept
+This is the SC sibling of ``tools/perception/sfp_plug/train.py``. The two models are kept
 separate on purpose: they detect different objects (the SC duplex plug housing
 vs. the SFP plug body), carry different local keypoint geometry, and are
 consumed by different estimators.  Only the dataset descriptor, the run name,
@@ -24,7 +24,7 @@ import time
 
 
 def _parse_args():
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[3]
     dataset_root = Path.home() / "aic_perception_data" / "sc_plug_pose"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

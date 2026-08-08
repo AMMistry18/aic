@@ -120,7 +120,7 @@ echo "  EGL devices visible to the sim container: ${gpu_probe}"
 # ------------------------------------------------------------ trial config
 echo "== generating ${TRIALS} trials from index ${TRIAL_START} =="
 "${REPO_ROOT}/.pixi/envs/default/bin/python" \
-  "${REPO_ROOT}/generate_sc_plug_pose_trials.py" \
+  "${REPO_ROOT}/tools/perception/generate_sc_trials.py" \
   --template "${REPO_ROOT}/aic_engine/config/sc_data_collect.yaml" \
   --out "${CONFIG}" \
   --trials "${TRIALS}" \

@@ -8,6 +8,9 @@ from pathlib import Path
 import yaml
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 def iter_trial_blocks(node):
     if isinstance(node, dict):
         for k, v in node.items():
@@ -84,7 +87,7 @@ def main():
     )
     parser.add_argument(
         "--out",
-        default=str(Path(__file__).resolve().parent / "outputs" / "sc_pose_pipeline" / "policy_eval_summary.json"),
+        default=str(REPO_ROOT / "outputs" / "sc_pose_pipeline" / "policy_eval_summary.json"),
     )
     args = parser.parse_args()
 

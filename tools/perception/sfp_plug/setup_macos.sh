@@ -14,7 +14,7 @@ if [[ ! -x "${pose_venv}/bin/python" ]]; then
 fi
 uv pip install \
   --python "${pose_venv}/bin/python" \
-  --requirement "${repo_dir}/requirements-sfp-plug-pose-m5.txt"
+  --requirement "${repo_dir}/requirements-macos.txt"
 
 "${pose_venv}/bin/python" - <<'PY'
 from ultralytics import YOLO  # Load OpenCV before torch in this environment.

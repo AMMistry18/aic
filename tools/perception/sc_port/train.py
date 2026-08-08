@@ -5,7 +5,7 @@ Matches hyperparameters from the NIC training recipe with tuning for SC's
 smaller keypoint count (4 vs 8) and tiny port size.
 
 Usage:
-    pixi run python3 ~/train_sc.py
+    pixi run python3 tools/perception/sc_port/train.py
 
 Output:
     Weights: ~/bestSC.pt
@@ -20,6 +20,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 HOME = Path(os.path.expanduser("~"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def parse_args():
@@ -39,7 +40,7 @@ def parse_args():
     parser.add_argument("--final-weights", default=str(HOME / "bestSC.pt"))
     parser.add_argument(
         "--metrics-out",
-        default=str(Path(__file__).resolve().parent / "outputs" / "sc_pose_pipeline" / "train_metrics.json"),
+        default=str(REPO_ROOT / "outputs" / "sc_pose_pipeline" / "train_metrics.json"),
         help="path to save summarized training metrics json",
     )
     return parser.parse_args()

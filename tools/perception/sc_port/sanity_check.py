@@ -27,7 +27,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "aic_example_policies"))
 
 from aic_example_policies.ros.perception_core import PerceptionCore  # noqa: E402

@@ -74,7 +74,7 @@ PY
 
 # The SC trainer re-checks nonempty train/val splits and 29-token pose labels
 # before it opens a GPU, then copies the best checkpoint to the SC path.
-.pixi/envs/default/bin/python train_sc_plug_pose.py \
+.pixi/envs/default/bin/python tools/perception/sc_plug/train.py \
   --data "${dataset_yaml}" \
   --model yolo11s-pose.pt \
   --epochs 120 \
@@ -97,7 +97,7 @@ PY
 # Crop-refine mirrors how the estimator runs in the controller; without it this
 # reports the ~0.45 mm uncropped number and looks like a regression.
 AIC_PLUG_POSE_CROP_REFINE=1 \
-.pixi/envs/default/bin/python validate_sc_plug_pose.py \
+.pixi/envs/default/bin/python tools/perception/sc_plug/validate.py \
   --mode dataset \
   --weights "${training_root}/best_sc_plug_pose.pt" \
   --data "${dataset_yaml}" \

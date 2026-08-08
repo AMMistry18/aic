@@ -321,7 +321,7 @@ class PerceptionCore:
             }
         """
         model = self._load_sc_yolo()
-        # The SC pose model was trained at imgsz=960 (train_sc.py). Without an
+        # The SC pose model was trained at imgsz=960 (tools/perception/sc_port/train.py). Without an
         # explicit imgsz, ultralytics letterboxes to its 640 default, silently
         # downscaling the 1152x1024 camera frames ~1.8x AND running the model
         # off its training scale. Match the training resolution here.
@@ -364,7 +364,7 @@ class PerceptionCore:
         """
         model = self._load_yolo()
         # The NIC pose model shares the same training recipe as the SC pose
-        # model (train_sc.py notes it matches the NIC recipe); match imgsz=960
+        # model (tools/perception/sc_port/train.py notes it matches the NIC recipe); match imgsz=960
         # here too, per docs/SC_PERCEPTION_ACCURACY_PLAYBOOK.md Tier-0.
         r = model(bgr, imgsz=960, verbose=False, conf=conf_thresh)[0]
         out = []

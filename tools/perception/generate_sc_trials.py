@@ -45,7 +45,7 @@ class RandomizationRanges:
 
 
 def _parse_args():
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[2]
     default_output = (
         Path.home()
         / "aic_perception_data"

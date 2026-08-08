@@ -159,6 +159,7 @@ Manages trial execution, validates participant models, and collects scoring data
 * **[Task Board Description](./docs/task_board_description.md):** Physical layout and specifications of the task board.
 * **[Troubleshooting](./docs/troubleshooting.md):** Common issues and debugging strategies.
 * **[Current AIC System](./docs/CURRENT_SYSTEM.md):** Active board-search, pose-storage, insertion, build, and validation architecture on `main`.
+* **[Repository Tools](./tools/README.md):** Evaluation and perception-model utilities organized by purpose and target.
 
 ### Reference Materials
 

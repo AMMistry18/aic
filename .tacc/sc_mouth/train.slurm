@@ -71,7 +71,7 @@ if sum(counts.values()) < minimum_total:
 print(f"SC physical-mouth dataset gate passed: {counts}")
 PY
 
-.pixi/envs/default/bin/python train_sc_mouth_pose.py \
+.pixi/envs/default/bin/python tools/perception/sc_mouth/train.py \
   --data "${dataset_yaml}" \
   --model yolo11s-pose.pt \
   --epochs 120 \
@@ -88,7 +88,7 @@ PY
 # Record geometric held-out performance.  This is deliberately informational,
 # not a deployment switch: the live controller and LOCAL_SC_PORT_KPS remain on
 # the legacy model until a separate atomic runtime migration is reviewed.
-.pixi/envs/default/bin/python validate_sc_mouth_pose.py \
+.pixi/envs/default/bin/python tools/perception/sc_mouth/validate.py \
   --weights "${training_root}/best_sc_mouth_pose.pt" \
   --data "${dataset_yaml}" \
   --split test \

@@ -11,10 +11,10 @@ was papering over:
 
 | # | Leak | Evidence |
 |---|---|---|
-| 1 | **Inference runs at imgsz=640** (ultralytics default — no `imgsz` arg passed), while training used 960 and cameras deliver 1152×1024. ~1.8× resolution thrown away on an 8.8×6.0 mm target, AND train/test scale mismatch. | `perception_core.py:153` (example-policies copy — note repo-root copy has NO YOLO SC path), `train_sc.py:33` |
-| 2 | **No rigid-shape constraint for SC**: pose = triangulate 4 corners independently (linear DLT, no distortion, no refinement) then average. The known 8.8×6.0 mm rectangle is never enforced; corner noise passes straight into position and yaw. SFP at least has an IPPE PnP fallback; SC has none. | `PerceptionInsert.py:1395-1406`, `perception_core.py:180-204` |
-| 3 | **Per-keypoint confidence discarded** — only `keypoints.xy` read; occluded/uncertain corners weighted equally. | `perception_core.py:117` |
-| 4 | **Zero angle diversity end-to-end**: GT collector holds camera orientation fixed across all 18 viewpoints (XYZ offsets only), and training uses `degrees=0, shear=0, perspective=0`. Any tilt of the wrist/cable at inference is out-of-distribution → systematic keypoint shift that varies with holding angle. **This is the "holding angle" sensitivity.** | `DataCollectorScPoseGT.py:73-83,342-347`, `train_sc.py:86-90` |
+| 1 | **Inference runs at imgsz=640** (ultralytics default — no `imgsz` arg passed), while training used 960 and cameras deliver 1152×1024. ~1.8× resolution thrown away on an 8.8×6.0 mm target, AND train/test scale mismatch. | `aic_example_policies/aic_example_policies/ros/perception_core.py:153`, `tools/perception/sc_port/train.py:33` |
+| 2 | **No rigid-shape constraint for SC**: pose = triangulate 4 corners independently (linear DLT, no distortion, no refinement) then average. The known 8.8×6.0 mm rectangle is never enforced; corner noise passes straight into position and yaw. SFP at least has an IPPE PnP fallback; SC has none. | `PerceptionInsert.py:1395-1406`, `aic_example_policies/aic_example_policies/ros/perception_core.py:180-204` |
+| 3 | **Per-keypoint confidence discarded** — only `keypoints.xy` read; occluded/uncertain corners weighted equally. | `aic_example_policies/aic_example_policies/ros/perception_core.py:117` |
+| 4 | **Zero angle diversity end-to-end**: GT collector holds camera orientation fixed across all 18 viewpoints (XYZ offsets only), and training uses `degrees=0, shear=0, perspective=0`. Any tilt of the wrist/cable at inference is out-of-distribution → systematic keypoint shift that varies with holding angle. **This is the "holding angle" sensitivity.** | `DataCollectorScPoseGT.py:73-83,342-347`, `tools/perception/sc_port/train.py:86-90` |
 | 5 | Lens distortion ignored (zeros to PnP, raw K in DLT). In sim cameras are near-ideal so low priority now; becomes real in Phase 2. Check `CameraInfo.D` once. | `CableInsertionPolicy.py:648` |
 
 Architecture context (methods research): ultralytics YOLO-pose uses a
@@ -26,7 +26,7 @@ ceiling — but we are far below that ceiling today because of leaks 1–4.
 
 ## Blocking prerequisite: the dataset does not exist on this machine
 
-`~/aic_perception_data` is absent — eval (`eval_sc_pose_model.py`) and any
+`~/aic_perception_data` is absent — eval (`tools/perception/sc_port/evaluate_model.py`) and any
 retrain need it regenerated via `DataCollectorScPoseGT` in sim. When
 regenerating:
 
@@ -50,8 +50,8 @@ regenerating:
 1. **Pass `imgsz` at inference** (`model(bgr, imgsz=960, ...)` — test 960 vs
    1152 empirically; 960 matches training scale, 1152 preserves native pixels;
    FixRes says scale-match usually wins). One line in `detect_sc_pose` and
-   `detect_nic`. Also reconcile the two perception_core.py copies (repo root
-   vs example-policies) — root copy has no SC YOLO path at all.
+   `detect_nic`. Keep the package source and Docker overlay copies synchronized;
+   the obsolete repository-root duplicate has been removed.
 2. **Use `keypoints.conf`**: drop keypoints below ~0.5 conf from
    triangulation/PnP; weight the rest.
 3. **Rigid PnP for SC**: per-camera `solvePnP` with `SOLVEPNP_IPPE` (planar
@@ -60,7 +60,7 @@ regenerating:
    (~10 lines, capped iterations). Keep the existing multi-frame consensus on
    top. Do the same refine step for SFP's PnP fallback.
 4. **Baseline measurement**: regenerate a val set (above), run
-   `eval_sc_pose_model.py` + a 3D-error variant at handoff viewpoints. Every
+   `tools/perception/sc_port/evaluate_model.py` + a 3D-error variant at handoff viewpoints. Every
    intervention below gets accepted/rejected against this number.
 
 ### Tier 1 — this week (1–3 days)
@@ -75,7 +75,7 @@ regenerating:
    match (FixRes). The refine model can be the same YOLO-pose retrained on
    crops — no new architecture.
 6. **Retrain with angle diversity**: regenerated angle-jittered data +
-   `degrees≈10, perspective≈0.0005` in train_sc.py. Directly kills the
+   `degrees≈10, perspective≈0.0005` in tools/perception/sc_port/train.py. Directly kills the
    holding-angle sensitivity. (Keep `close_mosaic`; consider `mosaic=0.5`.)
 
 ### Tier 2 — only if Tier 0+1 miss the ≤1 mm gate

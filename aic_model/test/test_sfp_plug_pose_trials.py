@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from generate_sfp_plug_pose_trials import (
+from tools.perception.generate_sfp_trials import (
     RandomizationRanges,
     eligible_sfp_trials,
     generate_config,

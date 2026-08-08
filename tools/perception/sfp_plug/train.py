@@ -12,7 +12,7 @@ import time
 
 
 def _parse_args():
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[3]
     dataset_root = Path.home() / "aic_perception_data" / "sfp_plug_pose"
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

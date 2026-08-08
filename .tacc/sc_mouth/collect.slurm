@@ -83,7 +83,7 @@ if [[ ! -x "${repo_root}/.pixi/envs/default/bin/python" ]]; then
 fi
 
 cd -- "${repo_root}"
-.pixi/envs/default/bin/python generate_sc_plug_pose_trials.py \
+.pixi/envs/default/bin/python tools/perception/generate_sc_trials.py \
   --template aic_engine/config/sc_data_collect.yaml \
   --out "${trial_config}" \
   --trials "${trial_count}" \

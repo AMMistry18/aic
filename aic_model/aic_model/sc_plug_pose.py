@@ -37,7 +37,7 @@ from .sfp_plug_pose import (
 #: Environment override for the trained SC plug-pose checkpoint.
 SC_PLUG_POSE_WEIGHTS_ENV = "AIC_SC_PLUG_POSE_WEIGHTS"
 
-#: Checkpoint written by ``train_sc_plug_pose.py`` when no override is set.
+#: Checkpoint written by ``tools/perception/sc_plug/train.py`` when no override is set.
 SC_PLUG_POSE_WEIGHTS_BASENAME = "best_sc_plug_pose.pt"
 
 # Rejection gates.  These start at the SFP values because the two plugs are of
@@ -46,7 +46,7 @@ SC_PLUG_POSE_WEIGHTS_BASENAME = "best_sc_plug_pose.pt"
 # They are rejection gates, not accuracy claims: a pose that survives them is
 # only guaranteed to be self-consistent, not correct to any particular
 # tolerance.  Re-tune them against measured held-out error before relying on
-# them for seating -- validate_sc_plug_pose.py reports the distributions needed
+# them for seating -- tools/perception/sc_plug/validate.py reports the distributions needed
 # to do that.
 SC_MAX_REPROJECTION_ERROR_PX = 6.0
 SC_MAX_KEYPOINT_RMSE_M = 0.0035

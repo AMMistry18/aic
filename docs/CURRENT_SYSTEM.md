@@ -194,6 +194,9 @@ and simulation dependencies even when the participant model does not import
 them directly.
 
 Current perception-training jobs are grouped by target under [`.tacc/`](../.tacc/).
+Developer-facing trial generation, evaluation, and perception-model utilities
+are organized under [`tools/`](../tools/); they are not imported by the active
+runtime.
 The earlier LeRobot student-teacher integration is preserved under
 [`legacy/lerobot_student_teacher/`](../legacy/lerobot_student_teacher/) because
 it remains useful for teleoperation and dataset recording, but it is not part

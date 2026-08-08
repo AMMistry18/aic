@@ -15,7 +15,8 @@ from ultralytics import YOLO
 
 # This repository uses a nested Python package.  Prefer the worktree source over
 # a potentially stale package already installed in the Pixi environment.
-_SOURCE_ROOT = Path(__file__).resolve().parent / "aic_example_policies"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_ROOT = _REPO_ROOT / "aic_example_policies"
 if _SOURCE_ROOT.is_dir():
     sys.path.insert(0, str(_SOURCE_ROOT))
 
@@ -235,7 +236,7 @@ def main():
     parser.add_argument("--conf", type=float, default=0.15)
     parser.add_argument(
         "--report",
-        default=str(Path(__file__).resolve().parent / "outputs" / "sc_pose_pipeline" / "eval_sc_pose.json"),
+        default=str(_REPO_ROOT / "outputs" / "sc_pose_pipeline" / "eval_sc_pose.json"),
     )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(

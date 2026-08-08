@@ -19,7 +19,8 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-_SOURCE_ROOT = Path(__file__).resolve().parent / "aic_example_policies"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_ROOT = _REPO_ROOT / "aic_example_policies"
 if _SOURCE_ROOT.is_dir():
     sys.path.insert(0, str(_SOURCE_ROOT))
 

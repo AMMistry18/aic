@@ -1091,10 +1091,12 @@ def test_release_dockerfile_disables_bias_and_pins_safety():
         int(match)
         for match in re.findall(
             r'"time_limit":\s*(\d+)',
-            (REPO_ROOT / "generate_config.py").read_text(encoding="utf-8"),
+            (REPO_ROOT / "tools" / "evaluation" / "generate_trials.py").read_text(
+                encoding="utf-8"
+            ),
         )
     }
-    assert time_limits, "generate_config.py must pin a per-task time_limit"
+    assert time_limits, "evaluation trial generator must pin a per-task time_limit"
     assert 60 <= int(budget.group(1)) <= min(time_limits) - 10
 
     # Baked ENV wins over source defaults, and Flowstate takes no runtime knobs,

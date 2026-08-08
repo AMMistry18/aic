@@ -127,7 +127,7 @@ CONTROL_MODE = "script"
 # only number that decides how many recovery cycles a stuck plug gets.
 #
 # It must stay strictly under the engine's per-task time_limit (780 s as of
-# 2026-07-28, mirrored in generate_config.py).  This clock starts inside
+# 2026-07-28, mirrored in tools/evaluation/generate_trials.py).  This clock starts inside
 # insert_cable, i.e. after board perception and approach have already spent
 # engine time, so a budget equal to the limit could never fire first -- the
 # engine would hard-cut mid-ladder instead of letting the controller hold pose

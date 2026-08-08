@@ -4,9 +4,9 @@ Filter out SC port images that don't contain visible blue ports.
 Deletes both the image and its matching YOLO label file.
 
 Usage:
-    python filter_no_blue.py                  # dry run, shows what would be deleted
-    python filter_no_blue.py --apply          # actually delete
-    python filter_no_blue.py --apply --min-blue-pct 0.05
+    python tools/perception/sc_port/filter_no_blue.py                  # dry run, shows what would be deleted
+    python tools/perception/sc_port/filter_no_blue.py --apply          # actually delete
+    python tools/perception/sc_port/filter_no_blue.py --apply --min-blue-pct 0.05
 """
 import argparse
 import os
