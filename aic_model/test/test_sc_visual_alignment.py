@@ -9,7 +9,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aic_model"))
 
-from aic_model.sc_visual_alignment import (
+from aic_model.insertion.sc_visual_alignment import (
     ScRecoveryEvidence,
     aggregate_sc_blue_side_signatures,
     bounded_recovery_offset_update,

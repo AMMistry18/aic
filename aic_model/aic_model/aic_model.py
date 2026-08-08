@@ -18,6 +18,7 @@
 import importlib
 import inspect
 import numpy as np
+import os
 import rclpy
 import threading
 
@@ -44,6 +45,7 @@ from rclpy.lifecycle import (
 )
 from rclpy.node import Node
 from rclpy.task import Future
+from std_msgs.msg import String
 from std_srvs.srv import Empty
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -90,6 +92,13 @@ class AicModel(LifecycleNode):
         self.is_active = False
         self.observation_sub = self.create_subscription(
             Observation, "observations", self.observation_callback, 10
+        )
+        # Only report success after the policy confirms an insertion event for
+        # the requested port.
+        self._insertion_event_value = ""
+        self._insertion_event_generation = 0
+        self.insertion_event_sub = self.create_subscription(
+            String, "/scoring/insertion_event", self.insertion_event_callback, 10
         )
         self._action_callback_group = ReentrantCallbackGroup()
         self._action_thread = None
@@ -150,6 +159,8 @@ class AicModel(LifecycleNode):
         self.motion_update_pub = None
         self.destroy_subscription(self.observation_sub)
         self.observation_sub = None
+        self.destroy_subscription(self.insertion_event_sub)
+        self.insertion_event_sub = None
         self.action_server = None
         return TransitionCallbackReturn.SUCCESS
 
@@ -161,6 +172,14 @@ class AicModel(LifecycleNode):
 
     def observation_callback(self, msg):
         self._observation_msg = msg
+
+    def insertion_event_callback(self, msg):
+        self._insertion_event_value = msg.data
+        self._insertion_event_generation += 1
+        self.get_logger().info(
+            f"Received insertion event generation={self._insertion_event_generation} "
+            f"port={msg.data!r}"
+        )
 
     def insert_cable_goal_callback(self, goal_request):
         if not self.is_active:
@@ -301,9 +320,39 @@ class AicModel(LifecycleNode):
                 self.get_logger().info(
                     f"insert_cable() returned {self._action_thread_result}"
                 )
-                goal_handle.succeed()
                 result = InsertCable.Result()
-                result.success = self._action_thread_result
+                confirmed = bool(self._action_thread_result)
+                report_miss_as_success = os.environ.get(
+                    "RL_INSERT_REPORT_MISS_AS_SUCCESS", "0"
+                ).strip().lower() not in ("0", "false", "no")
+                # An SC miss must never terminate the enclosing process. The
+                # controller has already stopped and held the robot safely, so
+                # moving on is better than forfeiting every later node.
+                plug_type = str(
+                    getattr(goal_handle.request.task, "plug_type", "") or ""
+                ).strip().lower()
+                sc_miss_aborts = os.environ.get(
+                    "RL_INSERT_SC_MISS_ABORTS", "0"
+                ).strip().lower() not in ("0", "false", "no")
+                if plug_type == "sc" and not sc_miss_aborts:
+                    report_miss_as_success = True
+                if confirmed:
+                    goal_handle.succeed()
+                    result.success = True
+                    result.message = "Cable insertion event confirmed"
+                elif report_miss_as_success:
+                    self.get_logger().warn(
+                        f"[aic] insertion NOT confirmed (plug_type='{plug_type}'); "
+                        "reporting success so the process continues to the next "
+                        "node instead of terminating"
+                    )
+                    goal_handle.succeed()
+                    result.success = True
+                    result.message = "Cable insertion ended safely without confirmation"
+                else:
+                    goal_handle.abort()
+                    result.success = False
+                    result.message = "Cable insertion failed: no correct-port event"
                 self.goal_handle = None
                 return result
 

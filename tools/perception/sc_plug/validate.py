@@ -40,15 +40,15 @@ _AIC_MODEL_SOURCE = _REPO_ROOT / "aic_model"
 if str(_AIC_MODEL_SOURCE) not in sys.path:
     sys.path.insert(0, str(_AIC_MODEL_SOURCE))
 
-from aic_model.sc_plug_pose import ScPlugPoseEstimator  # noqa: E402
-from aic_model.sc_plug_pose_geometry import (  # noqa: E402
+from aic_model.insertion.sc_plug_pose import ScPlugPoseEstimator  # noqa: E402
+from aic_model.insertion.sc_plug_pose_geometry import (  # noqa: E402
     SC_PLUG_LOCAL_KEYPOINTS_M,
     format_yolo_pose_label,
     padded_bbox,
     project_keypoints,
     visibility_flags,
 )
-from aic_model.sfp_plug_pose import (  # noqa: E402
+from aic_model.insertion.sfp_plug_pose import (  # noqa: E402
     PlugKeypointDetection,
     PlugPoseView,
     fuse_multiview_keypoints,
@@ -156,7 +156,7 @@ def nominal_tip_pose_in_mount() -> np.ndarray:
     resulting error scale by well under the precision of this study.
     """
 
-    from aic_model.rl_insert_contract import (  # noqa: PLC0415
+    from aic_model.insertion.contract import (  # noqa: PLC0415
         SFP_TIP_IN_TCP_POS,
         SFP_TIP_IN_TCP_QUAT,
     )

@@ -20,7 +20,7 @@ _AIC_MODEL_SOURCE = _REPO_ROOT / "aic_model"
 if str(_AIC_MODEL_SOURCE) not in sys.path:
     sys.path.insert(0, str(_AIC_MODEL_SOURCE))
 
-from aic_model.sfp_plug_pose import PlugPoseView, SfpPlugPoseEstimator
+from aic_model.insertion.sfp_plug_pose import PlugPoseView, SfpPlugPoseEstimator
 
 
 def _parse_args():

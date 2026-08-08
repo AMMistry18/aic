@@ -16,19 +16,19 @@ for _name in [n for n in sys.modules if n == "aic_model" or n.startswith("aic_mo
     if not _file.startswith(str(SOURCE_ROOT)):
         del sys.modules[_name]
 
-import aic_model.sc_controller as sc_controller  # noqa: E402
-from aic_model.rl_insert_contract import (  # noqa: E402
+import aic_model.insertion.sc_controller as sc_controller  # noqa: E402
+from aic_model.insertion.contract import (  # noqa: E402
     matrix_to_quat,
     port_frame,
     quat_to_matrix,
 )
-from aic_model.v50_controller import rotation_from_axis_angle  # noqa: E402
-from aic_model.sc_visual_alignment import (  # noqa: E402
+from aic_model.insertion.sfp_controller import rotation_from_axis_angle  # noqa: E402
+from aic_model.insertion.sc_visual_alignment import (  # noqa: E402
     ScBlueSideSignature,
     ScRecoveryEstimate,
 )
-from aic_model.v50_controller import HARD_FAILURE, SEATED, STALLED  # noqa: E402
-from aic_model.sc_controller import (  # noqa: E402
+from aic_model.insertion.sfp_controller import HARD_FAILURE, SEATED, STALLED  # noqa: E402
+from aic_model.insertion.sc_controller import (  # noqa: E402
     SC_TIP_IN_TCP_POS,
     SCConfig,
     SC_INSERT_DEPTH_M,
@@ -207,7 +207,7 @@ def test_tip_transform_round_trips():
 
 
 def test_event_normalisation_strips_the_cable_prefix():
-    # The scoring topic prefixes the cable instance; the task does not. v50's
+    # The scoring topic prefixes the cable instance; the task does not. SFP's
     # normaliser leaves the prefix on, so its equality test cannot match.
     assert (
         _normalize_event("cable_0#0#sc_mount_rail_0/sc_port_0")
@@ -2752,14 +2752,14 @@ class _StereoCore:
 
 
 def _stereo_policy(log=None):
-    # The reprojection and orientation steps are taken from CableInsertionPolicy itself
+    # The reprojection and orientation steps are taken from InsertionPolicy itself
     # rather than reimplemented, so this exercises the shipped geometry.
     # Imported lazily: a failure here must not break collection of this file.
-    from aic_model.CableInsertionPolicy import CableInsertionPolicy
+    from aic_model.insertion.InsertionPolicy import InsertionPolicy
 
     class _StereoPolicy:
-        _reproject_error_px = CableInsertionPolicy._reproject_error_px
-        _estimate_sfp_port_orientation = CableInsertionPolicy._estimate_sfp_port_orientation
+        _reproject_error_px = InsertionPolicy._reproject_error_px
+        _estimate_sfp_port_orientation = InsertionPolicy._estimate_sfp_port_orientation
 
         def __init__(self):
             self._pc = _StereoCore()
@@ -3406,7 +3406,7 @@ def test_sc_tip_helpers_round_trip_through_the_measured_transform():
 
 
 def test_prime_sc_plug_pose_fails_closed_when_no_estimate(monkeypatch):
-    import aic_model.v50_controller as v50_controller_mod
+    import aic_model.insertion.sfp_controller as sfp_controller_mod
 
     log = _RecordingLog()
 
@@ -3451,8 +3451,8 @@ def test_prime_sc_plug_pose_fails_closed_when_no_estimate(monkeypatch):
 
     policy = _PrimePolicy()
     policy._sc_plug_estimator = _RefusingEstimator()
-    monkeypatch.setattr(v50_controller_mod, "_observation_stamp_s", lambda _o: 1.9)
-    monkeypatch.setattr(v50_controller_mod, "_plug_views_from_observation",
+    monkeypatch.setattr(sfp_controller_mod, "_observation_stamp_s", lambda _o: 1.9)
+    monkeypatch.setattr(sfp_controller_mod, "_plug_views_from_observation",
                         lambda _p, _o: [_View("left_camera"), _View("right_camera")])
 
     result = sc_controller.prime_sc_plug_pose(policy, lambda: object(), None)
@@ -3467,7 +3467,7 @@ def test_prime_sc_plug_pose_fails_closed_when_no_estimate(monkeypatch):
 
 
 def test_configure_sc_plug_pose_refuses_without_weights(monkeypatch):
-    import aic_model.sc_plug_pose as sc_plug_pose_mod
+    import aic_model.insertion.sc_plug_pose as sc_plug_pose_mod
 
     log = _RecordingLog()
 

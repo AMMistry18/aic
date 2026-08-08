@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from aic_model.sfp_plug_pose import (
+from aic_model.insertion.sfp_plug_pose import (
     PlugKeypointDetection,
     PlugPoseView,
     SfpPlugPoseEstimator,
@@ -10,7 +10,7 @@ from aic_model.sfp_plug_pose import (
     fuse_multiview_keypoints,
     stamp_to_seconds,
 )
-from aic_model.sfp_plug_pose_geometry import (
+from aic_model.insertion.sfp_plug_pose_geometry import (
     SFP_PLUG_LOCAL_KEYPOINTS_M,
     format_yolo_pose_label,
     padded_bbox,

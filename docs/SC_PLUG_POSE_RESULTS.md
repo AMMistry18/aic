@@ -30,7 +30,7 @@ Reports are committed under `docs/reports/`.
 
 | Artifact | Where |
 |---|---|
-| Trained checkpoint | `aic_example_policies/.../ros/weights/best_sc_plug_pose.pt` (mirrored to the v50 overlay) |
+| Trained checkpoint | `aic_example_policies/.../ros/weights/best_sc_plug_pose.pt` (copied directly by Docker) |
 | Dataset | 4,050 images / 450 trials, splits 3240/405/405, 0 malformed labels, 1.2 GiB |
 | Training | `yolo11s-pose`, 120 epochs, imgsz 960, batch 8 — 2 h 08 m, `mAP50-95(P) = 0.995` |
 | Collection | 56 min for 215 trials (a second batch; see §5) |

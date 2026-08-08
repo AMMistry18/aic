@@ -3,11 +3,11 @@ import base64
 import cv2
 import numpy as np
 
-from aic_model.visual_gap import (
+from aic_model.insertion.visual_gap import (
     detect_dark_port_opening,
     encode_port_opening_diagnostic_jpeg,
 )
-from aic_model.visual_gap_recovery import (
+from aic_model.insertion.visual_gap_recovery import (
     VISUAL_GAP_DEBUG,
     VISUAL_GAP_WEDGE_ENABLE,
     VisualGapRecoveryMixin,

@@ -1,7 +1,7 @@
 # SC physical-mouth pose — TACC collection and training
 
 The trained physical-mouth model is now the canonical SC port-pose contract for
-the Docker `CableInsertionPolicy -> run_sc_insertion` runtime:
+the Docker `InsertionPolicy -> run_sc_insertion` runtime:
 
 - checkpoint: `weights/best_sc_mouth_pose.pt`;
 - schema: one `sc_mouth` class, four corners plus explicit centre;

@@ -27,21 +27,21 @@ for _name in [n for n in sys.modules if n == "aic_model" or n.startswith("aic_mo
     if not _file.startswith(str(_SOURCE_ROOT)):
         del sys.modules[_name]
 
-from aic_model.sc_plug_pose import (  # noqa: E402
+from aic_model.insertion.sc_plug_pose import (  # noqa: E402
     ScPlugPoseEstimator,
     default_sc_plug_pose_weights,
     load_sc_plug_pose_estimator,
 )
-from aic_model.sc_plug_pose_geometry import (  # noqa: E402
+from aic_model.insertion.sc_plug_pose_geometry import (  # noqa: E402
     SC_PLUG_LOCAL_KEYPOINTS_M,
     project_keypoints,
 )
-from aic_model.sfp_plug_pose import (  # noqa: E402
+from aic_model.insertion.sfp_plug_pose import (  # noqa: E402
     PlugKeypointDetection,
     PlugPoseView,
     SfpPlugPoseEstimator,
 )
-from aic_model.sfp_plug_pose_geometry import SFP_PLUG_LOCAL_KEYPOINTS_M  # noqa: E402
+from aic_model.insertion.sfp_plug_pose_geometry import SFP_PLUG_LOCAL_KEYPOINTS_M  # noqa: E402
 
 
 K = np.array([[1236.6, 0.0, 576.0], [0.0, 1236.6, 512.0], [0.0, 0.0, 1.0]])

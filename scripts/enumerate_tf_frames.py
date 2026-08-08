@@ -27,7 +27,7 @@ if str(_AIC_MODEL_SOURCE) not in sys.path:
     sys.path.insert(0, str(_AIC_MODEL_SOURCE))
 
 try:
-    from aic_model.sc_controller import parse_tf_frame_names
+    from aic_model.insertion.sc_controller import parse_tf_frame_names
 except Exception:
     # Mirrors sc_controller.parse_tf_frame_names: accept either tf2 dump
     # format ("all_frames_as_yaml()" puts each frame at column 0;

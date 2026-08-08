@@ -27,35 +27,45 @@ RUN cd /ws_aic/src/aic && \
     .pixi/envs/default/bin/python -m ensurepip --upgrade && \
     .pixi/envs/default/bin/python -m pip install --no-cache-dir "ultralytics==8.4.48"
 
-# Apply the exact V50 source and model weights after dependency layers so
-# policy-only changes remain quick Docker rebuilds.
-COPY docker/aic_model/v50_overlay /tmp/v50_overlay
+# Copy the canonical policy package and model assets after dependency layers so
+# policy-only changes remain quick Docker rebuilds. There is deliberately no
+# second Docker overlay copy: aic_model/aic_model is the source of truth.
+COPY aic_model/aic_model /tmp/aic_model
+COPY aic_example_policies/aic_example_policies/ros/perception_core.py \
+     aic_example_policies/aic_example_policies/ros/sc_mouth_pose_geometry.py \
+     /tmp/aic_example_policies/ros/
+COPY aic_example_policies/aic_example_policies/ros/weights/*.pt \
+     /tmp/aic_example_policies/ros/weights/
+COPY flowstate/aic_perception/aic_perception/__init__.py \
+     flowstate/aic_perception/aic_perception/config.py \
+     flowstate/aic_perception/aic_perception/gripper_masks.py \
+     /tmp/aic_perception/
 RUN cd /ws_aic/src/aic && \
     SITE_PACKAGES="$(.pixi/envs/default/bin/python -c 'import site; print(site.getsitepackages()[0])')" && \
-    cp /tmp/v50_overlay/aic_model/*.py /ws_aic/src/aic/aic_model/aic_model/ && \
-    cp /tmp/v50_overlay/aic_model/*.py "$SITE_PACKAGES/aic_model/" && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/*.py \
+    cp -a /tmp/aic_model/. /ws_aic/src/aic/aic_model/aic_model/ && \
+    cp -a /tmp/aic_model/. "$SITE_PACKAGES/aic_model/" && \
+    cp /tmp/aic_example_policies/ros/*.py \
        /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/ && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/*.py \
+    cp /tmp/aic_example_policies/ros/*.py \
        "$SITE_PACKAGES/aic_example_policies/ros/" && \
     mkdir -p \
        /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights \
        "$SITE_PACKAGES/aic_example_policies/ros/weights" \
        "$SITE_PACKAGES/aic_perception" && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/weights/*.pt \
+    cp /tmp/aic_example_policies/ros/weights/*.pt \
        /ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/ && \
-    cp /tmp/v50_overlay/aic_example_policies/ros/weights/*.pt \
+    cp /tmp/aic_example_policies/ros/weights/*.pt \
        "$SITE_PACKAGES/aic_example_policies/ros/weights/" && \
-    cp /tmp/v50_overlay/aic_perception/*.py "$SITE_PACKAGES/aic_perception/" && \
+    cp /tmp/aic_perception/*.py "$SITE_PACKAGES/aic_perception/" && \
     .pixi/envs/default/bin/python -m py_compile \
-       /ws_aic/src/aic/aic_model/aic_model/CableInsertionPolicy.py \
-       /ws_aic/src/aic/aic_model/aic_model/v50_controller.py \
-       /ws_aic/src/aic/aic_model/aic_model/sc_controller.py \
-       /ws_aic/src/aic/aic_model/aic_model/sc_visual_alignment.py \
-       /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
+       /ws_aic/src/aic/aic_model/aic_model/insertion/InsertionPolicy.py \
+       /ws_aic/src/aic/aic_model/aic_model/insertion/sfp_controller.py \
+       /ws_aic/src/aic/aic_model/aic_model/insertion/sc_controller.py \
+       /ws_aic/src/aic/aic_model/aic_model/insertion/sc_visual_alignment.py \
+       /ws_aic/src/aic/aic_model/aic_model/insertion/sfp_plug_pose.py \
        /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
     .pixi/envs/default/bin/python -c \
-       "import cv2; from ultralytics import YOLO; from aic_model.CableInsertionPolicy import CableInsertionPolicy, SC_WEIGHTS; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP V50 + five-keypoint SC mouth imports OK')"
+       "import cv2; from ultralytics import YOLO; from aic_model.insertion.InsertionPolicy import InsertionPolicy, SC_WEIGHTS; from aic_model.insertion.sc_controller import run_sc_insertion; from aic_model.insertion.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.insertion.sfp_controller import run_sfp_insertion; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP + SC insertion policy imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
 ENV RL_INSERT_ACTION_TIME_BUDGET_S=720
@@ -119,4 +129,4 @@ exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["--ros-args", "-p", "policy:=aic_model.CableInsertionPolicy", "-p", "use_sim_time:=true"]
+CMD ["--ros-args", "-p", "policy:=aic_model.insertion.InsertionPolicy", "-p", "use_sim_time:=true"]

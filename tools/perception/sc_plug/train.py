@@ -10,7 +10,7 @@ weights are deliberately identical so the two runs stay comparable.
 
 The dataset is produced by ``DataCollectorScPlugPoseGT`` and described by
 ``aic_sc_plug_pose.yaml`` (written by
-``aic_model.sc_plug_pose_geometry.write_dataset_yaml``).
+``aic_model.insertion.sc_plug_pose_geometry.write_dataset_yaml``).
 """
 
 from __future__ import annotations

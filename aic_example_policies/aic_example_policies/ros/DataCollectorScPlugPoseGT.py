@@ -31,7 +31,7 @@ from aic_model.policy import (
     Policy,
     SendFeedbackCallback,
 )
-from aic_model.sc_plug_pose_geometry import (
+from aic_model.insertion.sc_plug_pose_geometry import (
     SC_PLUG_LOCAL_KEYPOINTS_M,
     format_yolo_pose_label,
     padded_bbox,

@@ -19,7 +19,7 @@ The solution has three cooperating parts:
    force-limited control to insert SFP and SC connectors.
 
 Learned last-inch insertion has been removed from the active image. The
-`CableInsertionPolicy` runs the deterministic controller path; the existing
+`InsertionPolicy` runs the deterministic controller path; the existing
 `RL_INSERT_*` environment-variable prefix is retained for deployment
 compatibility.
 
@@ -27,7 +27,7 @@ compatibility.
 
 | Component | Runtime identity | Main source |
 | --- | --- | --- |
-| Participant model | `aic_model.CableInsertionPolicy` | `aic_model/aic_model/` and `docker/aic_model/v50_overlay/` |
+| Participant model | `aic_model.insertion.InsertionPolicy` | `aic_model/aic_model/insertion/` |
 | Board survey | `ai.tar2.check_board_visibility_skill_v4` | `flowstate/aic_perception/` |
 | Guarded board move | `ai.tar2.move_to_board_skill_v1` | `flowstate/aic_perception/` |
 | Pose storage | `ai.tar2.pose_kv_store_skill_v1` | `flowstate/aic_kv_store/` |
@@ -35,9 +35,9 @@ compatibility.
 
 `docker/aic_model/Dockerfile` is the complete current model build. It starts
 from the pinned upstream Phase 1 toolkit revision, installs the frozen Pixi
-environment, and copies the V50 overlay plus required pose weights into both
-the source checkout and installed Python package. The overlay is therefore the
-deployed copy when it differs from the checkout package.
+environment, and copies the canonical `aic_model/aic_model/` package plus the
+required pose weights into both the source checkout and installed Python
+package. There is no separate Docker policy overlay.
 
 ## Board search and survey
 
@@ -89,10 +89,10 @@ in [`flowstate/README.md`](../flowstate/README.md).
 
 Both connector paths share a 720-second wall-clock action deadline and an 18 N
 force-abort limit. The Docker image loads
-`aic_model.CableInsertionPolicy`, branches on the requested plug type, and uses
+`aic_model.insertion.InsertionPolicy`, branches on the requested plug type, and uses
 deterministic controllers:
 
-- **SFP:** `v50_controller.py` estimates the plug relative to the requested
+- **SFP:** `sfp_controller.py` estimates the plug relative to the requested
   port, aligns in the port frame, applies a force-limited seating trajectory,
   and performs bounded visual/lift recovery when stalled.
 - **SC:** `sc_controller.py` primes the SC grasp transform, estimates the port
@@ -110,13 +110,13 @@ must not be interpreted as a physical insertion event.
 Important implementation paths:
 
 ```text
-aic_model/aic_model/CableInsertionPolicy.py
-aic_model/aic_model/v50_controller.py
-aic_model/aic_model/sc_controller.py
-aic_model/aic_model/sc_visual_alignment.py
-aic_model/aic_model/sfp_plug_pose.py
-aic_model/aic_model/sc_plug_pose.py
-docker/aic_model/v50_overlay/
+aic_model/aic_model/insertion/InsertionPolicy.py
+aic_model/aic_model/insertion/sfp_controller.py
+aic_model/aic_model/insertion/sc_controller.py
+aic_model/aic_model/insertion/sc_visual_alignment.py
+aic_model/aic_model/insertion/sfp_plug_pose.py
+aic_model/aic_model/insertion/sc_plug_pose.py
+docker/aic_model/Dockerfile
 aic_example_policies/aic_example_policies/ros/weights/
 ```
 
@@ -169,7 +169,7 @@ PYTHONPATH="aic_model:${PYTHONPATH}" \
   aic_model/test/test_sc_visual_alignment.py \
   aic_model/test/test_sfp_plug_pose.py \
   aic_model/test/test_sfp_plug_pose_trials.py \
-  aic_model/test/test_v50_controller.py \
+  aic_model/test/test_sfp_controller.py \
   testing/sfp_v50_validation/tests
 ```
 

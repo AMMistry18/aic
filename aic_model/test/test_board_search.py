@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from aic_model.board_search import BoardSearch, CENTER_TOL_FRAC, MAX_MOVES
+from aic_model.insertion.board_search import BoardSearch, CENTER_TOL_FRAC, MAX_MOVES
 
 
 def _frame(center=(320, 240), size=(220, 150), image_size=(640, 480)):
