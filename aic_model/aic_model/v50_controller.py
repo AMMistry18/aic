@@ -1,7 +1,7 @@
 """Plug-relative deterministic SFP controller for the v50 Flowstate image.
 
-This module is intentionally separate from the deployed v49 ``RLInsert.py``.
-The v50 image installs it next to both runtime copies of ``RLInsert`` and applies
+This module is intentionally separate from the deployed v49 ``CableInsertionPolicy.py``.
+The v50 image installs it next to both runtime copies of ``CableInsertionPolicy`` and applies
 a small, hash-gated dispatch patch.  Keeping the state machine here makes the
 new behavior testable without importing ROS.
 
@@ -1854,7 +1854,7 @@ class PlugRelativeV50Controller:
     def _attempt_wedge_rescue(self) -> bool:
         """Let the visual-gap rescue re-aim at the physical opening, if present.
 
-        The rescue lives on RLInsert as a mixin the overlay image adds, so the
+        The rescue lives on CableInsertionPolicy as a mixin the overlay image adds, so the
         method may simply not exist here; a missing or disabled rescue is not an
         error, it just means the retract-and-retry is the only option left.
         Returns True when the port estimate was corrected and seating is worth

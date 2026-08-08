@@ -8,7 +8,7 @@
 
 ### lerobot_robot_aic
 
-- [lerobot_robot_aic](../student_teacher_policy/lerobot_robot_aic/README.md#teleoperating-with-lerobot): LeRobot-based teleoperation (`lerobot-teleoperate`) for joint-space and Cartesian-space control (using keyboard or SpaceMouse device)
+- [lerobot_robot_aic](../legacy/lerobot_student_teacher/lerobot_robot_aic/README.md#teleoperating-with-lerobot): LeRobot-based teleoperation (`lerobot-teleoperate`) for joint-space and Cartesian-space control (using keyboard or SpaceMouse device)
 - Enables dataset recording using `lerobot-record` for training LeRobot policies
 
 ### Additional Examples
@@ -17,7 +17,7 @@
 
 ## LeRobot Data collection and Training
 
-- [lerobot_robot_aic](../student_teacher_policy/lerobot_robot_aic/README.md#recording-training-data): [LeRobot](https://huggingface.co/lerobot) integration with AIC, which enables teleoperation and dataset recording using LeRobot
+- [lerobot_robot_aic](../legacy/lerobot_student_teacher/lerobot_robot_aic/README.md#recording-training-data): [LeRobot](https://huggingface.co/lerobot) integration with AIC, which enables teleoperation and dataset recording using LeRobot
 
 ## Plotting
 

@@ -7,6 +7,7 @@ on:
     paths:
           - 'aic_interfaces/**'
           - 'aic_utils/**'
+          - 'legacy/lerobot_student_teacher/**'
           - 'pixi.toml'
           - 'pixi.lock'
           - '!**/*.md'
@@ -14,6 +15,7 @@ on:
     paths:
           - 'aic_interfaces/**'
           - 'aic_utils/**'
+          - 'legacy/lerobot_student_teacher/**'
           - 'pixi.toml'
           - 'pixi.lock'
           - '!**/*.md'
@@ -37,7 +39,7 @@ jobs:
       # only do isort check as black check is already done by other workflows
       - name: style
         run: |
-          isort -c aic_utils/lerobot_robot_aic
+          isort -c legacy/lerobot_student_teacher/lerobot_robot_aic
       - name: type checks
         run: |
           pyright

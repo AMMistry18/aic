@@ -1,4 +1,4 @@
-"""Dark taskboard detection and bounded camera framing for :mod:`RLInsert`.
+"""Dark taskboard detection and bounded camera framing for :mod:`CableInsertionPolicy`.
 
 The detector is deliberately independent of ROS so it can be tuned from saved
 camera frames with ``python board_search.py IMAGE``.

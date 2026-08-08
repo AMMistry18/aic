@@ -10,7 +10,7 @@ The default `docker/aic_model/Dockerfile` now:
 - builds its frozen Pixi environment with Pixi 0.67.2;
 - installs Ultralytics 8.4.48;
 - applies the V50 policy, perception code, and all three model weights; and
-- starts `aic_model.RLInsert`.
+- starts `aic_model.CableInsertionPolicy`.
 
 Dependency installation precedes the policy overlay, so policy-only edits reuse
 the expensive Pixi and Ultralytics layers.
@@ -48,7 +48,7 @@ docker run --rm --entrypoint /bin/bash my-solution:v1 -lc '
   cd /ws_aic/src/aic
   .pixi/envs/default/bin/python -c "
 from ultralytics import YOLO
-from aic_model.RLInsert import RLInsert
+from aic_model.CableInsertionPolicy import CableInsertionPolicy
 from aic_model.v50_controller import run_v50_script
 from aic_perception.gripper_masks import GripperMaskBank
 YOLO(\"/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best.pt\")
@@ -59,7 +59,7 @@ print(\"SFP V50 imports and weights OK\")
 ```
 
 The entrypoint bytes must end in `0a`, not `0d 0a`. The configured policy must
-be `aic_model.RLInsert`.
+be `aic_model.CableInsertionPolicy`.
 
 ## Bundle
 

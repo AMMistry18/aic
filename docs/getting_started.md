@@ -197,7 +197,7 @@ To run the **same Step 2 + Step 3 workflow** but load the **`PerceptionInsert`**
 
 The evaluation `/entrypoint.sh` starts a **Zenoh router** in the container (`rmw_zenohd` on TCP port **7447**). Any process running `aic_model` must use `rmw_zenoh_cpp` and connect to that router (shared memory is disabled in the container router config).
 
-**Optional — SC port YOLO pose weights:** For best SC-slot behavior, set `AIC_SC_POSE_WEIGHTS` to a trained weights file (see [`outputs/sc_pose_pipeline/README.md`](../outputs/sc_pose_pipeline/README.md)). If unset, the policy uses `weights/best_sc_pose.pt` when that file exists, otherwise HSV-based SC perception.
+**Optional — SC port YOLO pose weights:** For best SC-slot behavior, set `AIC_SC_POSE_WEIGHTS` to a trained weights file (see the [SC perception accuracy playbook](./SC_PERCEPTION_ACCURACY_PLAYBOOK.md)). If unset, the policy uses `weights/best_sc_pose.pt` when that file exists, otherwise HSV-based SC perception.
 
 ##### Step 3 on the host (default)
 

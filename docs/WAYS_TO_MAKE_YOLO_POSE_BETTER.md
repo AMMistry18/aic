@@ -33,7 +33,7 @@ the example-policies copy) and averaging
 Nothing enforces that the 4 points form the known rigid 8.8×6.0 mm
 rectangle, so per-corner pixel noise flows directly into the position AND the
 orientation estimate. (Contrast: the SFP path at least has a PnP fallback,
-`RLInsert.py:643-669`.)
+`CableInsertionPolicy.py:643-669`.)
 
 **Fix.** Per camera, solve a planar PnP against the known local corner model,
 refine it, and only then fuse across cameras/frames.
@@ -82,10 +82,10 @@ refine it, and only then fuse across cameras/frames.
    PnP with all 4 but store `min_kp_conf` and weight the fusion step by it.
 
 4. Fusion across cameras: keep the existing multi-frame consensus machinery
-   (median cluster, `RLInsert.py:714-763`) but feed it per-camera PnP poses
+   (median cluster, `CableInsertionPolicy.py:714-763`) but feed it per-camera PnP poses
    (weighted by min-kp-conf and reprojection error) instead of the
    DLT-averaged point. Sanity-gate each PnP pose with reprojection error
-   (reuse the existing `MAX_PORT_REPROJ_PX` idea, `RLInsert.py:72`).
+   (reuse the existing `MAX_PORT_REPROJ_PX` idea, `CableInsertionPolicy.py:72`).
 
 **Acceptance.** On a held-out GT val set (≥200 frames at handoff-like
 viewpoints): rotation error median vs the DLT baseline must improve; target
@@ -95,7 +95,7 @@ side lengths (back-projected) match 8.8×6.0 mm — that's the rigidity check.
 **Effort.** ~half a day + eval time. Touches:
 `aic_example_policies/.../perception_core.py` (or a new helper),
 `PerceptionInsert.py:1386-1444`, and the SC path being added to
-`aic_model/aic_model/RLInsert.py`.
+`aic_model/aic_model/CableInsertionPolicy.py`.
 
 ---
 
@@ -145,7 +145,7 @@ e.g. Pix2Pose crops bbox×1.5 then resizes to a fixed square).
      good, skip the retrain. Measure, don't assume.
 
 6. Runtime: two YOLO passes ≈ 2× inference cost per frame. The pipeline
-   samples 7 frames × 3 cameras per perceive (`RLInsert.py:78`); at ~10-20 ms
+   samples 7 frames × 3 cameras per perceive (`CableInsertionPolicy.py:78`); at ~10-20 ms
    per pass this stays well inside budget.
 
 **Acceptance.** ≥2× reduction in median keypoint pixel error on the val set

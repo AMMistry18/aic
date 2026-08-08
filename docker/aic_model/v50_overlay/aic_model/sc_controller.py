@@ -515,7 +515,7 @@ SC_PRESERVE_HANDOFF_YAW = _env_bool("RL_INSERT_SC_PRESERVE_HANDOFF_YAW", True)
 # Extra ground-truth TF frames to probe when solving SC_TIP_IN_TCP_*, appended
 # after the task-derived names built by ``sc_calib_frame_candidates``.
 #
-# Do NOT reuse RLInsert's CALIB_PLUG_FRAMES: it is SFP-only
+# Do NOT reuse CableInsertionPolicy's CALIB_PLUG_FRAMES: it is SFP-only
 # ("sfp_tip,sfp_plug,plug,cable_0,sfp,gripper/sfp_tip,...") and, more subtly,
 # every name in it is missing both the ``cable_N/`` prefix and the ``_link``
 # suffix that the sim actually publishes.  The naming that demonstrably works is
@@ -1051,7 +1051,7 @@ def next_sc_depth(
 def _sc_calib_dump_enabled() -> bool:
     """Read the flag at call time, not import time.
 
-    RLInsert snapshots CALIB_DUMP into a module constant on import, which makes
+    CableInsertionPolicy snapshots CALIB_DUMP into a module constant on import, which makes
     it untestable and unsettable by anything that loads after this module.
     """
     return _env_bool("RL_INSERT_CALIB_DUMP", False) or _env_bool(
@@ -1189,7 +1189,7 @@ def _probe_tf_frames_for_tip(policy, log, lookup, tcp_pos, R_tcp, assumed_tip) -
 def dump_sc_grasp_calibration(policy, task) -> bool:
     """Log everything needed to re-solve ``SC_TIP_IN_TCP_*``.  Logs only.
 
-    RLInsert's ``_dump_grasp_calibration`` is unreachable on the SC path -- the
+    CableInsertionPolicy's ``_dump_grasp_calibration`` is unreachable on the SC path -- the
     ``plug_type == "sc"`` branch returns into ``run_sc_insertion`` well before
     it -- and it probes SFP frames and prints SFP constant names.  So
     ``RL_INSERT_CALIB_DUMP=1`` on an SC run produced nothing at all, which would
@@ -4059,7 +4059,7 @@ def configure_sc_plug_pose(policy) -> bool:
     """Load the SC plug-pose model once per process; ``False`` if unavailable.
 
     Deliberately lazy (called from ``run_sc_insertion``) rather than hooked into
-    lifecycle configure like ``configure_v50``: the mainline ``RLInsert`` has no
+    lifecycle configure like ``configure_v50``: the mainline ``CableInsertionPolicy`` has no
     such hook, and a missing SC checkpoint must fail the SC run closed without
     ever touching the SFP path.  Never raises for an absent model.
     """

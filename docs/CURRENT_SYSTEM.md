@@ -18,15 +18,16 @@ The solution has three cooperating parts:
 3. **Insertion** uses camera-derived plug/port geometry and deterministic,
    force-limited control to insert SFP and SC connectors.
 
-Learned last-inch insertion is disabled in the active image. The policy class
-is still named `RLInsert` for compatibility, but `RL_INSERT_CONTROL_MODE=script`
-and empty model variables keep execution on the deterministic controller path.
+Learned last-inch insertion has been removed from the active image. The
+`CableInsertionPolicy` runs the deterministic controller path; the existing
+`RL_INSERT_*` environment-variable prefix is retained for deployment
+compatibility.
 
 ## Active components
 
 | Component | Runtime identity | Main source |
 | --- | --- | --- |
-| Participant model | `aic_model.RLInsert` | `aic_model/aic_model/` and `docker/aic_model/v50_overlay/` |
+| Participant model | `aic_model.CableInsertionPolicy` | `aic_model/aic_model/` and `docker/aic_model/v50_overlay/` |
 | Board survey | `ai.tar2.check_board_visibility_skill_v4` | `flowstate/aic_perception/` |
 | Guarded board move | `ai.tar2.move_to_board_skill_v1` | `flowstate/aic_perception/` |
 | Pose storage | `ai.tar2.pose_kv_store_skill_v1` | `flowstate/aic_kv_store/` |
@@ -87,8 +88,9 @@ in [`flowstate/README.md`](../flowstate/README.md).
 ## Insertion
 
 Both connector paths share a 720-second wall-clock action deadline and an 18 N
-force-abort limit. The Docker image loads `aic_model.RLInsert`, branches on the
-requested plug type, and uses deterministic controllers:
+force-abort limit. The Docker image loads
+`aic_model.CableInsertionPolicy`, branches on the requested plug type, and uses
+deterministic controllers:
 
 - **SFP:** `v50_controller.py` estimates the plug relative to the requested
   port, aligns in the port frame, applies a force-limited seating trajectory,
@@ -108,7 +110,7 @@ must not be interpreted as a physical insertion event.
 Important implementation paths:
 
 ```text
-aic_model/aic_model/RLInsert.py
+aic_model/aic_model/CableInsertionPolicy.py
 aic_model/aic_model/v50_controller.py
 aic_model/aic_model/sc_controller.py
 aic_model/aic_model/sc_visual_alignment.py
@@ -191,10 +193,15 @@ scoring directories are the underlying AIC toolkit. They are indirect build
 and simulation dependencies even when the participant model does not import
 them directly.
 
-The top-level `RL/`, `.tacc/`, `models/`, and student-teacher material are
-research/training code, not the active runtime. They remain for now and should
-be removed only as a separate cleanup after deciding that the training history
-is no longer needed.
+Current perception-training jobs are grouped by target under [`.tacc/`](../.tacc/).
+The earlier LeRobot student-teacher integration is preserved under
+[`legacy/lerobot_student_teacher/`](../legacy/lerobot_student_teacher/) because
+it remains useful for teleoperation and dataset recording, but it is not part
+of the active runtime.
+
+Obsolete learned-insertion experiments, checkpoints, incremental deployment
+patches, and Isaac RL prototypes were removed in Phase 3. Git history remains
+the source for reproducing those abandoned experiments if they are ever needed.
 
 Generated runs, logs, checkpoints, notebook checkpoints, local worktrees, and
 session artifacts are ignored. Store large experiment evidence outside the

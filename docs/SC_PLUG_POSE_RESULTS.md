@@ -137,7 +137,8 @@ These are why the earlier SC attempts (jobs 3329045 cancelled at 8 h 22, 3329874
    diagnosable reason instead of burning 12 h.
 
 Also hardened for space, and `SC_TRAIN_AFTER_COLLECTION=1` fixed — it referenced
-`${repo_root}/train_sc_plug_pose.slurm`, but the file is at `.tacc/`.
+`${repo_root}/train_sc_plug_pose.slurm`, but the job now lives at
+`.tacc/sc_plug/train.slurm`.
 
 **Gazebo degrades across trials.** Measured per-trial time climbs 9.4 s → 18.7 s
 over ~175 trials, then plateaus. Restarting gives a fresh ~7 s/trial, so
@@ -181,11 +182,11 @@ Then build `containers/aic_eval_pinned.sif`, update the dated `job_root` /
 `repo_root` paths in both `.tacc` scripts, and:
 
 ```bash
-SC_MODE=smoke SC_TRIAL_COUNT=10 sbatch .tacc/sc_plug_pose_datagen.slurm
-SC_MODE=full  SC_TRIAL_COUNT=450 SC_SEED=20260725 sbatch .tacc/sc_plug_pose_datagen.slurm
-sbatch .tacc/train_sc_plug_pose.slurm
+SC_MODE=smoke SC_TRIAL_COUNT=10 sbatch .tacc/sc_plug/collect.slurm
+SC_MODE=full  SC_TRIAL_COUNT=450 SC_SEED=20260725 sbatch .tacc/sc_plug/collect.slurm
+sbatch .tacc/sc_plug/train.slurm
 ```
 
-Note `.tacc/train_sc_plug_pose.slurm` runs validation automatically but **does
+Note `.tacc/sc_plug/train.slurm` runs validation automatically but **does
 not enable crop-refine**, so it reports the ~0.45 mm uncropped number. Set
 `AIC_PLUG_POSE_CROP_REFINE=1` to get the 0.27 mm figure.

@@ -7,16 +7,16 @@ import numpy as np
 import pytest
 
 
-# RLInsert imports rclpy/aic_task_interfaces/etc, but it happens to import
+# CableInsertionPolicy imports rclpy/aic_task_interfaces/etc, but it happens to import
 # cleanly under this test env (no ROS runtime needed for the pure-math port
 # fit); pull the helpers straight from the shipped module rather than forking
 # them into a copy, so this test exercises the exact code that runs.
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "aic_model"))
 
-from aic_model.RLInsert import (  # noqa: E402
+from aic_model.CableInsertionPolicy import (  # noqa: E402
     LOCAL_SFP_PORT_KPS,
-    RLInsert,
+    CableInsertionPolicy,
     _axis_angle_to_R,
     _q_to_R,
     _weighted_kabsch_fit,
@@ -24,9 +24,9 @@ from aic_model.RLInsert import (  # noqa: E402
 
 
 def _orientation(kp_3d):
-    # _estimate_sfp_port_orientation never touches self; RLInsert's own
+    # _estimate_sfp_port_orientation never touches self; CableInsertionPolicy's own
     # test_sc_controller.py reuses it the same unbound way.
-    return RLInsert._estimate_sfp_port_orientation(None, kp_3d)
+    return CableInsertionPolicy._estimate_sfp_port_orientation(None, kp_3d)
 
 
 def test_noise_free_fit_recovers_center_and_yaw_exactly():

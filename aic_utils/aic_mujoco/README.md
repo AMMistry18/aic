@@ -305,7 +305,7 @@ export ZENOH_CONFIG_OVERRIDE='transport/shared_memory/enabled=true'
 ros2 launch aic_mujoco aic_mujoco_bringup.launch.py
 ```
 
-The robot can now be teleoperated using the `aic_teleoperation` package. See the [teleoperation](../../docs/teleoperation.md) section for details. For cartesian teleop use:
+The robot can now be teleoperated using the `aic_teleoperation` package. See the [teleoperation package README](../aic_teleoperation/README.md) for details. For cartesian teleop use:
 
 ```bash
 export RMW_IMPLEMENTATION=rmw_zenoh_cpp 
@@ -314,7 +314,7 @@ source ~/ws_aic/install/setup.bash
 ros2 run aic_teleoperation cartesian_keyboard_teleop
 ```
 
-Any of the policies in `aic_example_policies` can be used to control the robot in MuJoCo. See the [example policies](../../docs/example_policies.md) section for details.
+Any of the policies in `aic_example_policies` can be used to control the robot in MuJoCo. See the [example policies README](../../aic_example_policies/README.md) for details.
 
 ## Resources
 

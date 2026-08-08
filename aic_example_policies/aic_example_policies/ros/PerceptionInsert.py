@@ -933,7 +933,7 @@ class PerceptionInsert(Policy):
 
         unique = self._dedupe_spatial_candidates(candidates)
         try:
-            # RLInsert owns the calibrated SFP tip transform used by its
+            # CableInsertionPolicy owns the calibrated SFP tip transform used by its
             # observation contract. Use that same transform for target choice.
             tcp_pos, tcp_quat = self._tcp()
             tip_pos, _ = self._tip_from_tcp(tcp_pos, tcp_quat, "sfp")

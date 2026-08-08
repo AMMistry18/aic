@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Collect SC plug-pose ground-truth data locally, on one workstation GPU.
 #
-# This is the local counterpart to .tacc/sc_plug_pose_datagen.slurm.  It runs
+# This is the local counterpart to .tacc/sc_plug/collect.slurm.  It runs
 # the evaluation simulator in a plain docker container and the
 # DataCollectorScPlugPoseGT policy in the repo pixi env on the host.
 #

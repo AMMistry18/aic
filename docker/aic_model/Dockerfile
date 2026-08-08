@@ -48,14 +48,14 @@ RUN cd /ws_aic/src/aic && \
        "$SITE_PACKAGES/aic_example_policies/ros/weights/" && \
     cp /tmp/v50_overlay/aic_perception/*.py "$SITE_PACKAGES/aic_perception/" && \
     .pixi/envs/default/bin/python -m py_compile \
-       /ws_aic/src/aic/aic_model/aic_model/RLInsert.py \
+       /ws_aic/src/aic/aic_model/aic_model/CableInsertionPolicy.py \
        /ws_aic/src/aic/aic_model/aic_model/v50_controller.py \
        /ws_aic/src/aic/aic_model/aic_model/sc_controller.py \
        /ws_aic/src/aic/aic_model/aic_model/sc_visual_alignment.py \
        /ws_aic/src/aic/aic_model/aic_model/sfp_plug_pose.py \
        /ws_aic/src/aic/aic_model/aic_model/aic_model.py && \
     .pixi/envs/default/bin/python -c \
-       "import cv2; from ultralytics import YOLO; from aic_model.RLInsert import RLInsert, SC_WEIGHTS; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP V50 + five-keypoint SC mouth imports OK')"
+       "import cv2; from ultralytics import YOLO; from aic_model.CableInsertionPolicy import CableInsertionPolicy, SC_WEIGHTS; from aic_model.sc_controller import run_sc_insertion; from aic_model.sc_visual_alignment import detect_sc_duplex_opening; from aic_model.v50_controller import run_v50_script; from aic_example_policies.ros.sc_mouth_pose_geometry import SC_MOUTH_KEYPOINT_COUNT; from aic_perception.gripper_masks import GripperMaskBank; model = YOLO(SC_WEIGHTS); assert model.model.kpt_shape == [SC_MOUTH_KEYPOINT_COUNT, 3]; GripperMaskBank(); print('SFP V50 + five-keypoint SC mouth imports OK')"
 
 ENV AIC_SFP_PLUG_POSE_WEIGHTS=/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/weights/best_sfp_plug_pose.pt
 ENV RL_INSERT_ACTION_TIME_BUDGET_S=720
@@ -119,4 +119,4 @@ exec pixi run --as-is ros2 run aic_model aic_model "$@"
 EOF
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["--ros-args", "-p", "policy:=aic_model.RLInsert", "-p", "use_sim_time:=true"]
+CMD ["--ros-args", "-p", "policy:=aic_model.CableInsertionPolicy", "-p", "use_sim_time:=true"]

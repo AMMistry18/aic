@@ -365,18 +365,20 @@ step_smoke() {
   log "STEP 7: smoke tests"
   cd "$REPO_ROOT"
 
-  log "  7.1 real scene + Cartesian controller smoke test"
-  MUJOCO_GL=${MUJOCO_GL:-egl} pixi run python RL/scripts/cartesian_smoke.py --steps 3 --settle 20 \
+  log "  7.1 load the generated scene with MuJoCo"
+  MUJOCO_GL=${MUJOCO_GL:-egl} pixi run python - <<'PY' \
       || warn "scene.xml failed to load — run step 5 (mjcf) first"
+from pathlib import Path
 
-  log "  7.2 wandb connectivity"
-  if [[ -n "${WANDB_API_KEY:-}" ]]; then
-    pixi run python RL/scripts/connect_wandb.py --steps 20 \
-        --run-name pipeline_smoke || warn "wandb smoke failed"
-  else
-    warn "  WANDB_API_KEY not set — skipping wandb smoke test"
-    echo "    set it with:  export WANDB_API_KEY=..."
-  fi
+import mujoco
+
+scene = Path("aic_utils/aic_mujoco/mjcf/scene.xml")
+model = mujoco.MjModel.from_xml_path(str(scene))
+print(
+    f"loaded {scene}: bodies={model.nbody} joints={model.njnt} "
+    f"actuators={model.nu}"
+)
+PY
 
   ok "smoke tests complete"
 }

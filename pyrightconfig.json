@@ -1,7 +1,7 @@
 {
     "typeCheckingMode": "basic",
     "include": [
-        "student_teacher_policy/lerobot_robot_aic",
+        "legacy/lerobot_student_teacher/lerobot_robot_aic",
     ],
     "exclude": [
         "**/build"

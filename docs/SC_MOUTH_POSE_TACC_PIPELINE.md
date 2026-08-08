@@ -1,7 +1,7 @@
 # SC physical-mouth pose — TACC collection and training
 
 The trained physical-mouth model is now the canonical SC port-pose contract for
-the Docker `RLInsert -> run_sc_insertion` runtime:
+the Docker `CableInsertionPolicy -> run_sc_insertion` runtime:
 
 - checkpoint: `weights/best_sc_mouth_pose.pt`;
 - schema: one `sc_mouth` class, four corners plus explicit centre;
@@ -75,7 +75,7 @@ optional unset variables.
 
 ```bash
 cd /work2/11590/satya_a/stampede3/aic-sc-mouth-pose-src-20260727
-SC_MODE=smoke SC_MOUTH_TRIAL_COUNT=10 sbatch .tacc/sc_mouth_pose_datagen.slurm
+SC_MODE=smoke SC_MOUTH_TRIAL_COUNT=10 sbatch .tacc/sc_mouth/collect.slurm
 ```
 
 Each smoke job writes a fresh dataset directory
@@ -107,10 +107,10 @@ Gazebo's measured slowdown, while `SC_MOUTH_TRIAL_START` makes names and
 train/val/test membership continuous:
 
 ```bash
-SC_MODE=full SC_MOUTH_TRIAL_START=1  SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth_pose_datagen.slurm
-SC_MODE=full SC_MOUTH_TRIAL_START=26 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth_pose_datagen.slurm
-SC_MODE=full SC_MOUTH_TRIAL_START=51 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth_pose_datagen.slurm
-SC_MODE=full SC_MOUTH_TRIAL_START=76 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth_pose_datagen.slurm
+SC_MODE=full SC_MOUTH_TRIAL_START=1  SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth/collect.slurm
+SC_MODE=full SC_MOUTH_TRIAL_START=26 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth/collect.slurm
+SC_MODE=full SC_MOUTH_TRIAL_START=51 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth/collect.slurm
+SC_MODE=full SC_MOUTH_TRIAL_START=76 SC_MOUTH_TRIAL_COUNT=25 sbatch .tacc/sc_mouth/collect.slurm
 ```
 
 Run only one at a time on `qvrtx`; submit the next after the current job's
@@ -124,7 +124,7 @@ independent randomized viewpoints per trial, yielding up to 3,600 images over
 ## 3. Training and held-out report
 
 ```bash
-sbatch .tacc/train_sc_mouth_pose.slurm
+sbatch .tacc/sc_mouth/train.slurm
 ```
 
 This trains `yolo11s-pose` at 960 px, stores the candidate checkpoint at:

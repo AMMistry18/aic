@@ -1,4 +1,4 @@
-"""v41-compatible visual recovery mixed into RLInsert at build time.
+"""v41-compatible visual recovery mixed into CableInsertionPolicy at build time.
 
 This module is deliberately independent of the policy's control flow.  The v42
 image inherits the validated v41 policy byte-for-byte, then a strict build-time

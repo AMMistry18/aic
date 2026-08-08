@@ -4,7 +4,6 @@ pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
 # These files are executed inside Linux containers even when built from a
 # Windows checkout. Force LF to prevent `/entrypoint.sh: no such file` errors.
 docker/aic_model/Dockerfile text eol=lf
-docker/aic_model/Dockerfile.clock_skew_fix text eol=lf
 docker/aic_model/build_sfp_v50.sh text eol=lf
 docker/aic_model/v50_overlay/**/*.py text eol=lf
 flowstate/scripts/*.sh text eol=lf

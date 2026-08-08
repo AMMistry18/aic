@@ -11,4 +11,4 @@ docker build \
   --tag "$OUTPUT_IMAGE" \
   "$AIC_TOP_DIR"
 
-echo "Built $OUTPUT_IMAGE with the SFP V50 RLInsert policy"
+echo "Built $OUTPUT_IMAGE with the CableInsertionPolicy runtime"

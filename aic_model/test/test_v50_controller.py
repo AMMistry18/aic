@@ -9,7 +9,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "aic_model"))
-sys.path.insert(0, str(REPO_ROOT / "docker" / "aic_model"))
 
 from aic_model.v50_controller import (  # noqa: E402
     HARD_FAILURE,
@@ -33,7 +32,6 @@ from aic_model.v50_controller import (  # noqa: E402
 )
 import aic_model.v50_controller as v50_controller_module  # noqa: E402
 from aic_model.rl_insert_contract import port_frame  # noqa: E402
-import patch_v49_plug_relative_v50 as overlay  # noqa: E402
 
 
 def test_v50_config_bounds_force_and_seating():
@@ -1058,47 +1056,6 @@ def test_wedge_retry_can_be_disabled_and_capped():
     assert capped.trace.count("retract") == 2
 
 
-def test_overlay_rewrites_v49_dispatch_and_truthful_result():
-    rl_source = "\n".join(
-        [
-            overlay.RLIMPORT_OLD,
-            overlay.DEADLINE_OLD,
-            overlay.PERCEPTION_INIT_OLD,
-            overlay.TIP_OLD,
-            overlay.TCP_TARGET_OLD,
-            overlay.PORT_PERCEPTION_OLD,
-            overlay.SCRIPT_DISPATCH_OLD,
-        ]
-    )
-    patched_rl = overlay.patch_rlinsert_source(rl_source)
-    assert "return run_v50_script(" in patched_rl
-    assert '"45.0"' in patched_rl
-    assert "configure_v50(self)" in patched_rl
-    assert "prime_v50_plug_pose(self" in patched_rl
-    assert "return self._run_script(" not in patched_rl
-
-    model_source = "\n".join(
-        [
-            overlay.AIC_IMPORT_OLD,
-            overlay.EVENT_INIT_OLD,
-            overlay.EVENT_SHUTDOWN_OLD,
-            overlay.EVENT_CALLBACK_OLD,
-            overlay.TRUTHFUL_RESULT_OLD,
-        ]
-    )
-    patched_model = overlay.patch_aic_model_source(model_source)
-    assert 'String, "/scoring/insertion_event"' in patched_model
-    # An unconfirmed insertion must NOT abort the goal: Flowstate would terminate
-    # the enclosing 5-insertion process on the first recoverable miss.
-    assert "import os" in patched_model
-    assert "RL_INSERT_REPORT_MISS_AS_SUCCESS" in patched_model
-    assert "result.success = True" in patched_model
-    assert "Cable insertion ended safely without confirmation" in patched_model
-    # Strict reporting stays reachable via the env override.
-    assert "goal_handle.abort()" in patched_model
-    assert "Cable insertion failed: no correct-port event" in patched_model
-
-
 def test_v50_controller_overlay_matches_the_source_controller():
     source = REPO_ROOT / "aic_model" / "aic_model" / "v50_controller.py"
     overlay_source = (
@@ -1114,22 +1071,10 @@ def test_v50_controller_overlay_matches_the_source_controller():
     )
 
 
-def test_overlay_path_rejects_any_non_v49_input(tmp_path):
-    candidate = tmp_path / "RLInsert.py"
-    candidate.write_text("not v49", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="refusing non-v49"):
-        overlay.patch_path(
-            candidate,
-            overlay.EXPECTED_V49_RLINSERT_SHA256,
-            overlay.patch_rlinsert_source,
-            "RLInsert",
-        )
-
-
 def test_release_dockerfile_disables_bias_and_pins_safety():
-    dockerfile = (
-        REPO_ROOT / "docker" / "aic_model" / "Dockerfile.plug_relative_v50"
-    ).read_text(encoding="utf-8")
+    dockerfile = (REPO_ROOT / "docker" / "aic_model" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
     assert "RL_INSERT_SCRIPT_BIAS_X_M=0" in dockerfile
     assert "RL_INSERT_SCRIPT_BIAS_Y_M=0" in dockerfile
     assert "RL_INSERT_SCRIPT_BIAS_RX_RAD=0" in dockerfile
@@ -1154,13 +1099,7 @@ def test_release_dockerfile_disables_bias_and_pins_safety():
 
     # Baked ENV wins over source defaults, and Flowstate takes no runtime knobs,
     # so a seat-force retune in V50Config is a no-op in the image unless these
-    # pins move with it.  Both release Dockerfiles must agree with the source.
+    # pins move with it. The release Dockerfile must agree with the source.
     config = V50Config().validated()
-    for name in ("Dockerfile", "Dockerfile.plug_relative_v50"):
-        text = (REPO_ROOT / "docker" / "aic_model" / name).read_text(encoding="utf-8")
-        assert (
-            f"RL_INSERT_V50_TARGET_FORCE_N={config.target_axial_force_n}" in text
-        ), f"{name} pins a stale target force"
-        assert (
-            f"RL_INSERT_V50_SEAT_FORCE_CAP_N={config.seat_force_cap_n}" in text
-        ), f"{name} pins a stale seat force cap"
+    assert f"RL_INSERT_V50_TARGET_FORCE_N={config.target_axial_force_n}" in dockerfile
+    assert f"RL_INSERT_V50_SEAT_FORCE_CAP_N={config.seat_force_cap_n}" in dockerfile

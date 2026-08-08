@@ -35,11 +35,6 @@ wandb/info.txt
 # Ignore my-testing folder in testing folder
 testing/my-testing/*
 
-# student_teacher distillation dataset (large, regenerable via distill_dataset.py)
-RL/student_teacher/dataset/
-# RL runtime outputs (checkpoints, replay buffers, rollouts)
-RL/output/
-
 # Evaluation results: rosbag recordings (.mcap) and scoring/metadata are large,
 # regenerable outputs — too big for GitHub (100 MB/file limit). Kept on disk only.
 aic_results/

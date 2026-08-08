@@ -15,7 +15,7 @@ was papering over:
 | 2 | **No rigid-shape constraint for SC**: pose = triangulate 4 corners independently (linear DLT, no distortion, no refinement) then average. The known 8.8×6.0 mm rectangle is never enforced; corner noise passes straight into position and yaw. SFP at least has an IPPE PnP fallback; SC has none. | `PerceptionInsert.py:1395-1406`, `perception_core.py:180-204` |
 | 3 | **Per-keypoint confidence discarded** — only `keypoints.xy` read; occluded/uncertain corners weighted equally. | `perception_core.py:117` |
 | 4 | **Zero angle diversity end-to-end**: GT collector holds camera orientation fixed across all 18 viewpoints (XYZ offsets only), and training uses `degrees=0, shear=0, perspective=0`. Any tilt of the wrist/cable at inference is out-of-distribution → systematic keypoint shift that varies with holding angle. **This is the "holding angle" sensitivity.** | `DataCollectorScPoseGT.py:73-83,342-347`, `train_sc.py:86-90` |
-| 5 | Lens distortion ignored (zeros to PnP, raw K in DLT). In sim cameras are near-ideal so low priority now; becomes real in Phase 2. Check `CameraInfo.D` once. | `RLInsert.py:648` |
+| 5 | Lens distortion ignored (zeros to PnP, raw K in DLT). In sim cameras are near-ideal so low priority now; becomes real in Phase 2. Check `CameraInfo.D` once. | `CableInsertionPolicy.py:648` |
 
 Architecture context (methods research): ultralytics YOLO-pose uses a
 regression head with no sub-pixel decoding, and regression heads degrade most

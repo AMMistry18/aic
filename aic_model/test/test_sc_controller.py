@@ -2752,14 +2752,14 @@ class _StereoCore:
 
 
 def _stereo_policy(log=None):
-    # The reprojection and orientation steps are taken from RLInsert itself
+    # The reprojection and orientation steps are taken from CableInsertionPolicy itself
     # rather than reimplemented, so this exercises the shipped geometry.
     # Imported lazily: a failure here must not break collection of this file.
-    from aic_model.RLInsert import RLInsert
+    from aic_model.CableInsertionPolicy import CableInsertionPolicy
 
     class _StereoPolicy:
-        _reproject_error_px = RLInsert._reproject_error_px
-        _estimate_sfp_port_orientation = RLInsert._estimate_sfp_port_orientation
+        _reproject_error_px = CableInsertionPolicy._reproject_error_px
+        _estimate_sfp_port_orientation = CableInsertionPolicy._estimate_sfp_port_orientation
 
         def __init__(self):
             self._pc = _StereoCore()
