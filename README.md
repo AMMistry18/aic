@@ -1,187 +1,217 @@
-# AI for Industry Challenge Toolkit
+# AIC Cable Insertion Solution
 
-[![build](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/build.yml)
-[![style](https://github.com/intrinsic-dev/aic/actions/workflows/style.yml/badge.svg)](https://github.com/intrinsic-dev/aic/actions/workflows/style.yml)
+This repository contains a participant solution for the Intrinsic AI for
+Industry Challenge. The system uses three wrist-mounted cameras and wrist
+force/torque feedback to locate a task board and insert two connector types:
 
-The **AI for Industry Challenge** is an open competition for developers and roboticists aimed at solving some of the hardest, high-impact problems in robotics and manufacturing.
+- **SFP** transceiver connectors
+- **SC** duplex fibre connectors
 
-This repository contains the official toolkit to help participants start developing their solutions. For registration details, official rules, and FAQs, please visit the [AI for Industry Challenge event page](https://www.intrinsic.ai/events/ai-for-industry-challenge).
+The active solution is deterministic. Neural networks estimate plug and port
+geometry, while force-limited state machines handle alignment, insertion, and
+bounded recovery. Learned last-inch reinforcement-learning control is not part
+of the deployed runtime.
 
----
+The repository also retains the upstream AIC simulation toolkit required to
+build, test, and package the participant model.
 
-## Toolkit Guide
+## How the system works
 
-Welcome to the AIC toolkit documentation. This guide walks you through the complete workflow for participating in the challenge — from understanding the requirements to submitting your solution.
+The solution has three cooperating parts:
 
-Follow the sections below to navigate through each phase of the process.
+1. **Board search** finds the task board from the wrist cameras and produces a
+   safe survey pose.
+2. **Pose storage** records labelled SFP, NIC, SC, and home poses during
+   Participant Initialize and retrieves the requested pose in later trials.
+3. **Cable insertion** estimates the plug and target port, aligns the connector,
+   and seats it using force-limited SFP- or SC-specific control.
 
-1. **📖 Understand the Challenge**
-   - Read the [Challenge Overview](./docs/overview.md) to understand the goals.
-   - Review the [Qualification Phase](./docs/phases.md#qualification-phase-train-your-model) to understand what you'll be building.
-   - Review the [Scoring Guide](./docs/scoring.md) to understand how you'll be scored.
-
-2. **🔧 Set Up Your Environment**
-   - Follow the [Getting Started](./docs/getting_started.md) guide to set up and validate your development environment.
-   - Run the evaluation container and set up your local workspace with Pixi.
-
-3. **💻 Develop Your Policy**
-   - Explore the [Scene Description](./docs/scene_description.md) to learn how to customize and explore the environment.
-   - Review [AIC Interfaces](./docs/aic_interfaces.md) to understand available interfaces to communicate with sensors and actuators.
-   - Consult [AIC Controller](./docs/aic_controller.md) to learn about controlling the robot.
-   - Consult the [Challenge Rules](./docs/challenge_rules.md) to ensure compliance.
-   - Start with the [Policy Integration Guide](./docs/policy.md) to implement your solution.
-   - See [Participant Utilities](./docs/participant_utilities.md) for a list of helpful tools.
-
-4. **🧪 Test Your Solution**
-   - Use the provided simulation environment to test your policy.
-   - Run `aic_engine` with the `sample_config` in [`aic_engine/config/`](./aic_engine/config/) to test different scenarios. For more information on running the `aic_engine` with different configs, see the [aic_engine README file](./aic_engine/README.md).
-   - Create your own test scenarios by following the configuration example in [`aic_engine/config/`](./aic_engine/config/) to run with `aic_engine`.
-   - Refer to [Troubleshooting](./docs/troubleshooting.md) if you encounter issues.
-
-5. **📦 Submit Your Entry**
-   - Package your solution following the [Submission Guidelines](./docs/submission.md).
-   - Test your container locally before submitting following [these instructions](./docs/submission.md#verify-locally).
-   - Submit through the official portal following [these instructions](./docs/submission.md#2-upload-your-image-to-our-registry).
-
----
-
-## Toolkit Architecture
-
-The AI for Industry Challenge toolkit is divided into **two main components**:
-
-### 1. Evaluation Component (Provided - Run by Organizers)
-
-This component provides the complete evaluation infrastructure:
-- **`aic_engine`** - Orchestrates trials and computes scores.
-- **`aic_bringup`** - Launches simulation environment (Gazebo, robot, sensors).
-- **`aic_controller`** - Low-level robot control with force management.
-- **`aic_adapter`** - Sensor fusion and data synchronization.
-
-**What you receive:** Standard ROS sensor topics providing camera images, joint states, force/torque measurements, and TF frames.
-
-### 2. Participant Model Component (Your Implementation - What You Submit)
-
-This is what you develop and submit:
-- **A ROS 2 node** that follows the behavioral requirements defined in [Challenge Rules](./docs/challenge_rules.md).
-- **Your custom logic** - Code to process sensor data and command the robot to insert cables.
-
-**What you provide:** A container with a ROS 2 Lifecycle node named `aic_model` that responds to the `/insert_cable` action and outputs robot motion commands via standard ROS topics/services.
-
-**Convenient Entry Point:** We provide an `aic_model` framework that handles all the ROS 2 boilerplate and lifecycle management. You simply implement a Python policy class that gets dynamically loaded at runtime. See the [Policy Integration Guide](./docs/policy.md) for details.
-
-### Development and Submission Workflow
-
-> [!IMPORTANT]
-> **ROS 2 Distribution:** The official evaluation of all submissions will be conducted using **ROS 2 Kilted Kaiju**. If you choose to develop or test your policy using a different ROS 2 distribution (e.g., Humble or Jazzy), it is entirely your responsibility to ensure compatibility and support. Please note that **inter-distro communication is not guaranteed and not officially supported**.
-
-**Development Options:**
-- Develop inside a container (recommended - matches evaluation environment).
-- OR develop in native Ubuntu 24.04 environment (requires all dependencies).
-
-**Submission Requirements:**
-- Package your solution using the provided `aic_model` Dockerfile.
-- Submit your container - it must respond to standard ROS inputs and command the robot to insert cables.
-- Your container interfaces with the evaluation component via ROS topics.
-
----
-## Repository Structure
-
-```
-aic/
-├── aic_adapter/          # Adapter for interfacing between model and controller
-├── aic_assets/           # 3D models and simulation assets
-├── aic_bringup/          # Launch files for starting the challenge environment
-├── aic_controller/       # Robot controller implementation
-├── aic_description/      # Robot and environment URDF/SDF descriptions
-├── aic_engine/           # Trial orchestration and validation engine
-├── aic_example_policies/ # Example policy implementations
-├── aic_gazebo/           # Gazebo-specific plugins and configurations
-├── aic_interfaces/       # ROS 2 message, service, and action definitions
-├── aic_model/            # Template for participant policy implementation
-├── aic_scoring/          # Scoring system implementation
-├── aic_utils/            # Utility packages and tools
-├── docker/               # Docker container definitions
-└── docs/                 # Comprehensive documentation
+```text
+Wrist cameras + robot state + wrist force
+                    |
+                    v
+        Board search and pose storage
+                    |
+                    v
+     aic_model.insertion.InsertionPolicy
+              /                 \
+             v                   v
+      SFP controller       SC controller
+             \                   /
+              +----> Robot motion
 ```
 
----
+The policy uses only participant-accessible observations. It does not depend on
+simulator ground-truth board, cable, or port poses.
 
-## Key Packages for Participants
+## Active runtime
 
-### `aic_model` - Convenient Policy Framework (Recommended)
-This package provides a ready-to-use ROS 2 Lifecycle node that dynamically loads and executes your Python policy implementation. It handles all ROS 2 boilerplate, lifecycle management, and challenge rule compliance, allowing you to focus on implementing your policy logic.
-- **Location**: `aic_model/`.
-- **Documentation**: [Policy Integration Guide](./docs/policy.md).
-- **Tutorial**: [Creating a New Policy Node](./docs/policy.md#tutorial-creating-a-new-policy-node).
+| Component | Location | Purpose |
+| --- | --- | --- |
+| Policy entry point | [`aic_model/aic_model/insertion/InsertionPolicy.py`](aic_model/aic_model/insertion/InsertionPolicy.py) | Loads perception and dispatches by connector type |
+| SFP controller | [`sfp_controller.py`](aic_model/aic_model/insertion/sfp_controller.py) | SFP alignment, seating, and bounded recovery |
+| SC controller | [`sc_controller.py`](aic_model/aic_model/insertion/sc_controller.py) | SC perception, alignment, retry ladder, and spiral recovery |
+| Pose estimation | [`aic_model/aic_model/insertion/`](aic_model/aic_model/insertion/) | SFP/SC plug and port geometry |
+| Board-search skills | [`flowstate/aic_perception/`](flowstate/aic_perception/) | Board framing and guarded survey motion |
+| Pose KV store | [`flowstate/aic_kv_store/`](flowstate/aic_kv_store/) | Labelled pose persistence between trial steps |
+| Model image | [`docker/aic_model/Dockerfile`](docker/aic_model/Dockerfile) | Deployable Linux/AMD64 participant image |
 
-> **Note:** While we recommend using this framework, you may implement your own ROS 2 node from scratch as long as it adheres to the [Challenge Rules](./docs/challenge_rules.md).
+The ROS policy name used by the model container is:
 
-### `aic_interfaces` - Communication Protocols
-Defines all ROS 2 messages, services, and actions used in the challenge.
-- **Location**: `aic_interfaces/`.
-- **Documentation**: [AIC Interfaces](./docs/aic_interfaces.md).
+```text
+aic_model.insertion.InsertionPolicy
+```
 
-### `aic_example_policies` - Reference Implementations
-Example policies demonstrating different approaches and techniques.
-- **Location**: `aic_example_policies/`.
-- **README**: [aic_example_policies/README.md](./aic_example_policies/README.md).
+## Repository layout
 
-### `aic_bringup` - Launch the Environment
-Launch files to start the simulation, robot, and scoring systems.
-- **Location**: `aic_bringup/`.
-- **README**: [aic_bringup/README.md](./aic_bringup/README.md).
+```text
+aic_model/            Participant ROS model and insertion controllers
+flowstate/            Board-search, guarded-motion, and pose-store skills
+docker/               Participant and evaluation container definitions
+testing/              Frozen validation suites and test data
+tools/                Trial, evaluation, and perception-training utilities
+.tacc/                 TACC perception-training jobs grouped by target
+docs/                  System, deployment, and challenge documentation
+legacy/                Archived student-teacher/teleoperation integration
+aic_*/                 Upstream AIC toolkit, simulator, engine, and interfaces
+```
 
-### `aic_engine` - Trial Orchestrator
-Manages trial execution, validates participant models, and collects scoring data.
-- **Location**: `aic_engine/`.
-- **README**: [aic_engine/README.md](./aic_engine/README.md).
+Generated runs, checkpoints, bundles, videos, and article/site output do not
+belong in this repository. Store large experiment evidence in an artifact
+service or external storage.
 
----
+## Requirements
 
-## Additional Documentation
+The official deployment target is **Ubuntu 24.04, Linux/AMD64, and ROS 2
+Kilted**. Local source tests also run on macOS ARM64 through Pixi, but deployable
+images and Flowstate bundles must be built for Linux/AMD64.
 
-### Challenge Information
+Install:
 
-* **[Challenge Overview](./docs/overview.md):** High-level summary of the competition goals and structure.
-* **[Competition Phases](./docs/phases.md):** Details on Qualification, Phase 1, and Phase 2.
-* **[Qualification Phase](./docs/qualification_phase.md):** Detailed technical overview of the qualification phase trials and scoring.
-* **[Challenge Rules](./docs/challenge_rules.md):** Required behavior for participant models.
-* **[Scoring](./docs/scoring.md):** Metrics and methods used to evaluate performance.
-* **[Scoring Test Examples](./docs/scoring_tests.md):** Reproducible examples exercising each scoring tier with exact commands.
+- [Git](https://git-scm.com/)
+- [Pixi](https://pixi.prefix.dev/) 0.67.2
+- [Docker](https://docs.docker.com/engine/install/)
+- NVIDIA Container Toolkit when GPU acceleration is required
+- Intrinsic build/install tooling for Flowstate asset deployment
 
-### Technical Documentation
+The contest environment requires Pixi 0.67.2:
 
-* **[Getting Started](./docs/getting_started.md):** How to set up your local development environment.
-* **[Policy Integration](./docs/policy.md):** Guide to implementing your policy in the `aic_model` framework.
-* **[AIC Interfaces](./docs/aic_interfaces.md):** ROS 2 topics, services, and actions available to your policy.
-* **[AIC Controller](./docs/aic_controller.md):** Understanding the robot controller and motion commands.
-* **[Scene Description](./docs/scene_description.md):** Technical details of the simulation environment.
-* **[Task Board Description](./docs/task_board_description.md):** Physical layout and specifications of the task board.
-* **[Troubleshooting](./docs/troubleshooting.md):** Common issues and debugging strategies.
-* **[Current AIC System](./docs/CURRENT_SYSTEM.md):** Active board-search, pose-storage, insertion, build, and validation architecture on `main`.
-* **[AIC Model Runtime](./aic_model/README.md):** Canonical insertion-policy layout and runtime entry point.
-* **[Repository Tools](./tools/README.md):** Evaluation and perception-model utilities organized by purpose and target.
+```bash
+pixi self-update --version 0.67.2
+```
 
-### Reference Materials
+## Set up the repository
 
-* **[Glossary](./docs/glossary.md):** Terminology and definitions used throughout the AI for Industry Challenge
+```bash
+git clone https://github.com/AMMistry18/aic.git
+cd aic
+pixi install
+```
 
-### Submission
+The first install is large because it includes ROS, simulation, perception, and
+model dependencies. Pixi creates the local environment under `.pixi/`.
 
-* **[Submission Guidelines](./docs/submission.md):** How to package and submit your final model.
+For the complete upstream simulator setup, including the evaluation container
+and Zenoh networking, see [`docs/getting_started.md`](docs/getting_started.md).
 
----
+## Run tests
 
+Run the participant-model and frozen insertion validation suites from the
+repository root:
 
-## Support and Resources
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONPATH="aic_model:${PYTHONPATH}" \
+.pixi/envs/default/bin/python -m pytest -q \
+  aic_model/test \
+  testing/sfp_v50_validation/tests
+```
 
-- **Discussions**: Engage in conversations and ask questions about the challenge on [Open Robotics Discourse](https://discourse.openrobotics.org/c/competitions/ai-for-industry-challenge/). The community is encouraged to participate in discussions and assist each other.
-- **Issues**: Report any bugs or technical issues via [GitHub Issues](https://github.com/intrinsic-dev/aic/issues). Please refrain from using the Issue tracker for general questions about the challenge.
-  - **Note:**: Review the list of [known issues](https://github.com/intrinsic-dev/aic/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22known%20issue%22) and [bugs](https://github.com/intrinsic-dev/aic/issues?q=is%3Aissue%20state%3Aopen%20label%3Abug) before opening a new ticket.
-- **Event Page**: Visit the [AI for Industry Challenge](https://www.intrinsic.ai/events/ai-for-industry-challenge) for official updates.
+Run the Flowstate perception tests separately:
 
----
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+PYTHONPATH="flowstate/aic_perception:${PYTHONPATH}" \
+.pixi/envs/default/bin/python -m pytest -q \
+  flowstate/aic_perception/test
+```
+
+The C++ pose-store tests run as part of the Flowstate skill build when
+`ament_cmake_gtest` is available.
+
+## Build the participant model
+
+Build the current insertion-policy image from the repository root:
+
+```bash
+docker build --platform linux/amd64 \
+  --file docker/aic_model/Dockerfile \
+  --tag my-solution:v1 \
+  .
+```
+
+The Dockerfile copies the canonical `aic_model/aic_model/` package and required
+perception weights directly into the image. There is no separate policy overlay.
+
+Detailed image verification, bundle, and installation commands are in
+[`docs/INSERTION_POLICY_DOCKER_GROUND_TRUTH.md`](docs/INSERTION_POLICY_DOCKER_GROUND_TRUTH.md).
+
+## Build the Flowstate skills
+
+Flowstate builds expect this workspace layout:
+
+```text
+ws_aic_phase1/
+  src/aic/
+  src/sdk-ros/
+```
+
+From the workspace root:
+
+```bash
+bash src/aic/flowstate/scripts/build_check_board_visibility_skill.sh
+bash src/aic/flowstate/scripts/build_move_to_board_skill.sh
+bash src/aic/flowstate/scripts/build_pose_kv_store_skill.sh
+bash src/aic/flowstate/scripts/build_test_skill.sh
+```
+
+See [`flowstate/README.md`](flowstate/README.md) for process wiring, required
+asset labels, safety limits, and installation instructions.
+
+## Configuration
+
+Controller configuration is read from environment variables. The historical
+`RL_INSERT_*` prefix is retained for deployment compatibility even though the
+active insertion path is deterministic. Defaults and safety limits live beside
+the controller implementations; deployment-specific overrides are set in the
+container or Flowstate solution configuration.
+
+Do not weaken motion, force, deadline, or perception gates without rerunning the
+relevant validation suite.
+
+## Documentation
+
+- [`docs/CURRENT_SYSTEM.md`](docs/CURRENT_SYSTEM.md) — source of truth for the
+  active architecture and validation workflow
+- [`aic_model/README.md`](aic_model/README.md) — participant model layout
+- [`flowstate/README.md`](flowstate/README.md) — Flowstate skills and deployment
+- [`docs/INSERTION_EVENT_POLICY.md`](docs/INSERTION_EVENT_POLICY.md) — physical
+  insertion success-event interpretation
+- [`docs/SC_PLUG_POSE_RESULTS.md`](docs/SC_PLUG_POSE_RESULTS.md) — SC perception
+  measurements and evidence
+- [`tools/README.md`](tools/README.md) — developer utilities
+- [`docs/challenge_rules.md`](docs/challenge_rules.md) — official behavior and
+  interface requirements
+
+## Current status
+
+`main` contains the canonical SFP and SC insertion implementation, board-search
+skills, and pose KV store. Source-level controller and geometry tests cover the
+active logic. A release should additionally build the Linux/AMD64 model image,
+build all Flowstate bundles, and run end-to-end trials in the evaluation
+environment.
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the individual package files for details.
+This project and the retained AIC toolkit are licensed under the Apache License
+2.0. See [`LICENSE`](LICENSE) and individual package metadata for details.
