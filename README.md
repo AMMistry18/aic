@@ -136,6 +136,20 @@ PYTHONPATH="flowstate/aic_perception:${PYTHONPATH}" \
   flowstate/aic_perception/test
 ```
 
+To write reproducible source-validation evidence for both canonical suites,
+including the exact commands, test counts, durations, Python/platform metadata,
+and Git revision/dirty state, run:
+
+```bash
+.pixi/envs/default/bin/python tools/validation/run_source_validation.py \
+  --output-dir results/source_validation
+```
+
+This runner invokes the two commands above with their documented
+`PYTHONPATH` and `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` settings. Its JSON and
+Markdown reports record source-test validation only; they are not evidence of
+end-to-end simulated or physical cable-insertion success.
+
 The C++ pose-store tests run as part of the Flowstate skill build when
 `ament_cmake_gtest` is available.
 
