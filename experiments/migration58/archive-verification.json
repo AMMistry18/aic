@@ -1,0 +1,16 @@
+{
+  "status": "complete_verified",
+  "verified": [
+    {
+      "index": "workspace-index.json",
+      "files": 65737,
+      "completed_unix": 1794683961.2493079
+    },
+    {
+      "index": "legacy-index.json",
+      "files": 1262,
+      "completed_unix": 1794683967.3392699
+    }
+  ],
+  "current": null
+}
