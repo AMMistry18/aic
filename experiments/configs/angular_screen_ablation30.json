@@ -1,0 +1,20 @@
+{
+  "purpose": "Diagnostic component ablation; not a repaired guarded-production result",
+  "case_ids": ["dev_3000", "dev_3002", "dev_3004", "dev_3006", "dev_3008"],
+  "method": "original_perception_rim_position_body_track_noangular_handoff",
+  "baseline_batch": "transfer30v1: guarded original plug + longer adapted mouth, completed 2/5",
+  "independent_verifier_unchanged": true,
+  "SC_terminal_angle_deg": 0.25,
+  "SC_terminal_lateral_m": 0.00025,
+  "SC_terminal_depth_m": 0.01564,
+  "SC_terminal_depth_tolerance_m": 0.00025,
+  "dwell_sim_s": 1,
+  "assumptions": ["upstream angular alignment assumed", "prescribed rigid grasp", "translation estimated from actual RGB"],
+  "intervention": "Remove only the learned-estimate/prior angular veto in this explicit ablation",
+  "does_not_certify_upstream_alignment": true,
+  "guarded_production_successes_exclude_these_trials": true,
+  "failure_accounting": "Report all selected cases, no pooling with baseline or final trials",
+  "policy_object_or_target_truth_inputs": false,
+  "final_100000_series_used": false,
+  "frozen_before_execution": true
+}

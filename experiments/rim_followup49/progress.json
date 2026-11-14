@@ -1,0 +1,6 @@
+{
+  "status": "stopped_requires_inspection",
+  "final_policy_modified": false,
+  "updated_unix": 1794595796.1860864,
+  "error": "RuntimeError: Unexpected SC rim parent"
+}

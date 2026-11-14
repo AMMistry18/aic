@@ -1,0 +1,20 @@
+{
+  "purpose": "Extract public white SC body hull and robot tool triangles in TCP axes.",
+  "source_sha256": {
+    ".artifacts\\lastinch_resources\\ur5e.urdf": "04222edc10ac9d192aa32e2af19b1298e387d2cb2d15db9f0b204acba83e7d48",
+    ".artifacts\\upstream-phase1\\aic_assets\\models\\Axia80 M20\\axia_ft_sensor_visual.glb": "9c9fc8d460cf2ef4a5c07c8d048309fabc69d7dc6fc82c923dccfd72e90bfac9",
+    ".artifacts\\upstream-phase1\\aic_assets\\models\\Robotiq Hand-E\\hande_base_visual.glb": "f74a449de3efc7437687da62b2b5afb0b22a2ffb2e8251fc2d5d3cd5a6c95e7e",
+    ".artifacts\\upstream-phase1\\aic_assets\\models\\Robotiq Hand-E\\hande_finger_visual.glb": "96faa218335080bd60667d7efeec5731cff5bc524ce7893c9f57ccca797b3e07",
+    ".artifacts\\upstream-phase1\\aic_assets\\models\\SC Plug\\model.sdf": "aa1244982c496bc7c15bf344424155c4e1caf3f99368e541b71b7ec4d14dc38d",
+    ".artifacts\\upstream-phase1\\aic_assets\\models\\SC Plug\\sc_plug_visual.glb": "6e9132a64a6ce61015906dc16cb7d648c09405da01d8354644ef1dee73041cc9"
+  },
+  "body_vertices": 186,
+  "tool_triangles": 32296,
+  "finger_aperture_joint_m": [
+    0.00655,
+    0.00655
+  ],
+  "contains_object_pose_or_grasp_constant": false,
+  "robot_configuration": "arbitrary HOME cancels in TCP-relative tool geometry",
+  "template_sha256": "9a071278352aa12f41b0d6db263f4e407c6e4670f54ce0d5b5acb14282fcfa5f"
+}

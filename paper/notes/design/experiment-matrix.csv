@@ -1,0 +1,6 @@
+experiment_id,type,result_status,scope,source
+EXP1,recovery replay,verified,Partial frozen snapshot only,results/recovery_snapshot_20261112.json
+EXP2,earlier SC component screen,verified,Different revision; 5/5 full versus 0/5 without body or PI,../experiments/evidence/original_repair/component_screen_component30v1.json
+EXP3,speed43 matched development,planned,Six paired cases after replay,../experiments/recovery_20261112/speed43_development/progress.json
+EXP4,fresh combined robustness,planned,50 cases per connector; no tuning on final cases,../experiments/configs/recovered_robustness43_protocol.json
+EXP5,current matched component removal,planned,Additional 80 paired trials require qualification,../experiments/configs/recovered_robustness43_protocol.json

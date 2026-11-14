@@ -1,0 +1,290 @@
+{
+  "status": "interim_not_final_heldout",
+  "source_progress_updated_utc": "2026-10-28T16:35:11.220317+00:00",
+  "trial_count": 8,
+  "current": "dev_3004_force_tactile_no_registration",
+  "summary": [
+    {
+      "connector": "sc",
+      "method": "force_tactile_no_registration",
+      "attempted": 2,
+      "valid": 2,
+      "full_recorded_successes": 1,
+      "rate": 0.5,
+      "wilson_95_ci": [
+        0.09453120573423074,
+        0.9054687942657693
+      ],
+      "median_success_sim_s": 36.098,
+      "median_success_wall_s": 306.86914213199634,
+      "maximum_independent_force_N": 1.5283449139670453,
+      "failure_causes": {
+        "depth_outside_seat": 1
+      },
+      "environment_or_initial_state_failures": 0
+    },
+    {
+      "connector": "sc",
+      "method": "force_tactile_translation",
+      "attempted": 2,
+      "valid": 2,
+      "full_recorded_successes": 2,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.34238022750665303,
+        1
+      ],
+      "median_success_sim_s": 51.163,
+      "median_success_wall_s": 446.59880319747026,
+      "maximum_independent_force_N": 1.689898597703679,
+      "failure_causes": {},
+      "environment_or_initial_state_failures": 0
+    },
+    {
+      "connector": "sfp",
+      "method": "force_tactile_no_registration",
+      "attempted": 2,
+      "valid": 2,
+      "full_recorded_successes": 1,
+      "rate": 0.5,
+      "wilson_95_ci": [
+        0.09453120573423074,
+        0.9054687942657693
+      ],
+      "median_success_sim_s": 71.384,
+      "median_success_wall_s": 570.6873988089501,
+      "maximum_independent_force_N": 1.5015023488758463,
+      "failure_causes": {
+        "lateral_misalignment": 1
+      },
+      "environment_or_initial_state_failures": 0
+    },
+    {
+      "connector": "sfp",
+      "method": "force_tactile_translation",
+      "attempted": 2,
+      "valid": 2,
+      "full_recorded_successes": 2,
+      "rate": 1.0,
+      "wilson_95_ci": [
+        0.34238022750665303,
+        1
+      ],
+      "median_success_sim_s": 82.22399999999999,
+      "median_success_wall_s": 742.3559444144776,
+      "maximum_independent_force_N": 1.6084525565211376,
+      "failure_causes": {},
+      "environment_or_initial_state_failures": 0
+    }
+  ],
+  "runs": [
+    {
+      "run": "dev_3000_pilot27v1_force_tactile_translation",
+      "case": {
+        "case_id": "dev_3000_pilot27v1",
+        "seed": 3000,
+        "connector": "sc",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 9.365154369200445,
+        "lateral_mm": [
+          -0.0859601944380422,
+          -0.03943056997165045
+        ],
+        "angular_deg": [
+          -0.09172808066569024,
+          -0.06622691174490498,
+          -0.09792834986039847
+        ]
+      },
+      "method": "force_tactile_translation",
+      "passed": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "sim_s": 53.099999999999994,
+      "wall_s": 476.87040875898674,
+      "peak_force_N": 1.6648800514733404
+    },
+    {
+      "run": "dev_3000_pilot27v1_force_tactile_no_registration",
+      "case": {
+        "case_id": "dev_3000_pilot27v1",
+        "seed": 3000,
+        "connector": "sc",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 9.365154369200445,
+        "lateral_mm": [
+          -0.0859601944380422,
+          -0.03943056997165045
+        ],
+        "angular_deg": [
+          -0.09172808066569024,
+          -0.06622691174490498,
+          -0.09792834986039847
+        ]
+      },
+      "method": "force_tactile_no_registration",
+      "passed": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "sim_s": 36.098,
+      "wall_s": 306.86914213199634,
+      "peak_force_N": 1.5283449139670453
+    },
+    {
+      "run": "dev_3001_pilot27v1_force_tactile_translation",
+      "case": {
+        "case_id": "dev_3001_pilot27v1",
+        "seed": 3001,
+        "connector": "sfp",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 11.148287235364018,
+        "lateral_mm": [
+          0.19319369145988674,
+          0.1396020836602287
+        ],
+        "angular_deg": [
+          -0.019862007360059164,
+          -0.06021638043654237,
+          0.09864313768962954
+        ]
+      },
+      "method": "force_tactile_translation",
+      "passed": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "sim_s": 80.554,
+      "wall_s": 697.9845586559968,
+      "peak_force_N": 1.0430534095205124
+    },
+    {
+      "run": "dev_3001_pilot27v1_force_tactile_no_registration",
+      "case": {
+        "case_id": "dev_3001_pilot27v1",
+        "seed": 3001,
+        "connector": "sfp",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 11.148287235364018,
+        "lateral_mm": [
+          0.19319369145988674,
+          0.1396020836602287
+        ],
+        "angular_deg": [
+          -0.019862007360059164,
+          -0.06021638043654237,
+          0.09864313768962954
+        ]
+      },
+      "method": "force_tactile_no_registration",
+      "passed": false,
+      "reason": "lateral_misalignment",
+      "sim_s": 68.052,
+      "wall_s": 569.7373196079861,
+      "peak_force_N": 1.1559159158361634
+    },
+    {
+      "run": "dev_3002_pilot27v1_force_tactile_translation",
+      "case": {
+        "case_id": "dev_3002_pilot27v1",
+        "seed": 3002,
+        "connector": "sc",
+        "target_index": 1,
+        "sfp_port": 0,
+        "gap_mm": 5.492760170354403,
+        "lateral_mm": [
+          -0.23678126910532993,
+          -0.19436154461623445
+        ],
+        "angular_deg": [
+          0.14044685564420542,
+          -0.1405721383058406,
+          0.07515705005271192
+        ]
+      },
+      "method": "force_tactile_translation",
+      "passed": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "sim_s": 49.226,
+      "wall_s": 416.3271976359538,
+      "peak_force_N": 1.689898597703679
+    },
+    {
+      "run": "dev_3002_pilot27v1_force_tactile_no_registration",
+      "case": {
+        "case_id": "dev_3002_pilot27v1",
+        "seed": 3002,
+        "connector": "sc",
+        "target_index": 1,
+        "sfp_port": 0,
+        "gap_mm": 5.492760170354403,
+        "lateral_mm": [
+          -0.23678126910532993,
+          -0.19436154461623445
+        ],
+        "angular_deg": [
+          0.14044685564420542,
+          -0.1405721383058406,
+          0.07515705005271192
+        ]
+      },
+      "method": "force_tactile_no_registration",
+      "passed": false,
+      "reason": "depth_outside_seat",
+      "sim_s": 32.22,
+      "wall_s": 282.86150199198164,
+      "peak_force_N": 1.331729641242759
+    },
+    {
+      "run": "dev_3003_pilot27v1_force_tactile_no_registration",
+      "case": {
+        "case_id": "dev_3003_pilot27v1",
+        "seed": 3003,
+        "connector": "sfp",
+        "target_index": 1,
+        "sfp_port": 1,
+        "gap_mm": 14.405523717261605,
+        "lateral_mm": [
+          0.0013561825691496554,
+          -0.018699219040744952
+        ],
+        "angular_deg": [
+          -0.07044422524290891,
+          -0.11534390176777956,
+          -0.05639944774070739
+        ]
+      },
+      "method": "force_tactile_no_registration",
+      "passed": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "sim_s": 71.384,
+      "wall_s": 570.6873988089501,
+      "peak_force_N": 1.5015023488758463
+    },
+    {
+      "run": "dev_3003_pilot27v1_force_tactile_translation",
+      "case": {
+        "case_id": "dev_3003_pilot27v1",
+        "seed": 3003,
+        "connector": "sfp",
+        "target_index": 1,
+        "sfp_port": 1,
+        "gap_mm": 14.405523717261605,
+        "lateral_mm": [
+          0.0013561825691496554,
+          -0.018699219040744952
+        ],
+        "angular_deg": [
+          -0.07044422524290891,
+          -0.11534390176777956,
+          -0.05639944774070739
+        ]
+      },
+      "method": "force_tactile_translation",
+      "passed": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "sim_s": 83.89399999999999,
+      "wall_s": 786.7273301729583,
+      "peak_force_N": 1.6084525565211376
+    }
+  ]
+}

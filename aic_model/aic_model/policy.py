@@ -14,6 +14,7 @@
 #  limitations under the License.
 #
 
+import os
 import time
 
 import numpy as np
@@ -160,6 +161,9 @@ class Policy(ABC):
         """
         target_stiffness = _cartesian_impedance_matrix(stiffness, "stiffness")
         target_damping = _cartesian_impedance_matrix(damping, "damping")
+        native_wrench_gain=float(os.environ.get('AIC_INSERT_NATIVE_WRENCH_GAIN','.5'))
+        if not np.isfinite(native_wrench_gain) or not 0<=native_wrench_gain<=1:
+            raise ValueError('Native wrench feedback gain must be finite and in [0,1]')
         motion_update = MotionUpdate(
             header=Header(
                 frame_id=frame_id,
@@ -172,7 +176,7 @@ class Policy(ABC):
                 force=Vector3(x=0.0, y=0.0, z=0.0),
                 torque=Vector3(x=0.0, y=0.0, z=0.0),
             ),
-            wrench_feedback_gains_at_tip=[0.5, 0.5, 0.5, 0.0, 0.0, 0.0],
+            wrench_feedback_gains_at_tip=[native_wrench_gain]*3+[0.0]*3,
             trajectory_generation_mode=TrajectoryGenerationMode(
                 mode=TrajectoryGenerationMode.MODE_POSITION,
             ),
@@ -181,6 +185,9 @@ class Policy(ABC):
             move_robot(motion_update=motion_update)
         except Exception as ex:
             self.get_logger().info(f"move_robot exception: {ex}")
+            # A rejected command (including an external force guard) must
+            # terminate the attempt instead of silently continuing recovery.
+            raise
 
     @abstractmethod
     def insert_cable(

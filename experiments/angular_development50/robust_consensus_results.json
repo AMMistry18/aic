@@ -1,0 +1,447 @@
+{
+  "scope": "Static old training/development geometry only, no runtime acceptance or insertion claim",
+  "final_cases_used": 0,
+  "original_timestamp_veto_preserved": true,
+  "rows": [
+    {
+      "connector": "sc",
+      "case_id": "train_80010",
+      "fit": {
+        "position": [
+          0.030741977544320984,
+          -0.1703096299491515,
+          0.04487349902021629
+        ],
+        "rotation": [
+          [
+            -0.005736605510645308,
+            -0.9995618706663971,
+            0.029037184214511954
+          ],
+          [
+            -0.9998846896594712,
+            0.0061419115027826305,
+            0.013888279507390668
+          ],
+          [
+            -0.014060538460480831,
+            -0.02895416434615668,
+            -0.9994818445700839
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 2.139334588459351,
+          "keypoint_rmse_m": 0.000992606239450649,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 9.993316843829255e-05,
+            "angle_deg": 0.306437910211118
+          },
+          {
+            "model_displacement_m": 0.0007670511622083461,
+            "angle_deg": 2.1192798564504765
+          },
+          {
+            "model_displacement_m": 0.001369108888344589,
+            "angle_deg": 2.1284966690604956
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 1.0628090376994002,
+        "angle_deg": 1.5312758925094974
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.14254960004473105
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80011",
+      "fit": {
+        "position": [
+          0.07593449668406313,
+          -0.17591904239255482,
+          0.05385178373919084
+        ],
+        "rotation": [
+          [
+            0.09171534267100682,
+            -0.9956755914833803,
+            -0.014778783541305029
+          ],
+          [
+            -0.995586063100075,
+            -0.09139004998675218,
+            -0.02136000290991268
+          ],
+          [
+            0.01991699976483082,
+            0.016672590909632374,
+            -0.9996626120010327
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 2.1831290721278553,
+          "keypoint_rmse_m": 0.0011339022814679726,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0008250259784643005,
+            "angle_deg": 2.2173725235387756
+          },
+          {
+            "model_displacement_m": 0.0007273083080391119,
+            "angle_deg": 2.370520959233394
+          },
+          {
+            "model_displacement_m": 0.00012110031032508986,
+            "angle_deg": 0.46402891053393247
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.6718967256067809,
+        "angle_deg": 0.38165677704587603
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.08729609998408705
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80012",
+      "fit": {
+        "position": [
+          0.11963984610073247,
+          -0.17136730289364327,
+          0.044916014293080495
+        ],
+        "rotation": [
+          [
+            -0.01660169201439502,
+            -0.9997253687606081,
+            0.016539978196045142
+          ],
+          [
+            -0.9990781296764603,
+            0.015931425015242737,
+            -0.039863272559713996
+          ],
+          [
+            0.03958881943738079,
+            -0.017186528254716442,
+            -0.9990682402229113
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 1.6041097560903383,
+          "keypoint_rmse_m": 0.0004202603040855653,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0003483154509452891,
+            "angle_deg": 0.8395852829725139
+          },
+          {
+            "model_displacement_m": 0.00021233385373429798,
+            "angle_deg": 0.7919360690296617
+          },
+          {
+            "model_displacement_m": 0.0003671842637514337,
+            "angle_deg": 0.8892598018056943
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.3007892799283171,
+        "angle_deg": 0.6490251175148887
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.0814684999641031
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80013",
+      "fit": {
+        "position": [
+          0.049609046278829665,
+          -0.1360163688008401,
+          0.053530028083722946
+        ],
+        "rotation": [
+          [
+            0.010006524335887241,
+            -0.9998158390764823,
+            -0.016375512282219916
+          ],
+          [
+            -0.99918953600887,
+            -0.009359045688015242,
+            -0.039149449474904015
+          ],
+          [
+            0.038988980508519545,
+            0.016753990438085866,
+            -0.9990991758595876
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 2.196311218804325,
+          "keypoint_rmse_m": 0.0008643387257212287,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0006525601230037525,
+            "angle_deg": 0.5787369141085543
+          },
+          {
+            "model_displacement_m": 0.0006516368442218574,
+            "angle_deg": 2.0837939154577003
+          },
+          {
+            "model_displacement_m": 0.0009931805418142902,
+            "angle_deg": 0.33839429221034184
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 1.6410844439542818,
+        "angle_deg": 1.7798541854780867
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.10944500000914559
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81000",
+      "fit": {
+        "position": [
+          0.07651926542445998,
+          -0.38694298344581946,
+          0.19311457350163674
+        ],
+        "rotation": [
+          [
+            0.999732362137349,
+            -0.018020575618114026,
+            -0.01450734123360628
+          ],
+          [
+            -0.018237641286392794,
+            -0.9997215771195851,
+            -0.0149718630049358
+          ],
+          [
+            -0.014233500468448394,
+            0.015232435652959059,
+            -0.9997826665673362
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 1.1573791606348627,
+          "keypoint_rmse_m": 0.0003204192100238944,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0006445906348894442,
+            "angle_deg": 1.5944596861328684
+          },
+          {
+            "model_displacement_m": 0.0002021919778807565,
+            "angle_deg": 0.7125569010531867
+          },
+          {
+            "model_displacement_m": 0.0005670819879338566,
+            "angle_deg": 1.1419459617025265
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.5819560190562884,
+        "angle_deg": 4.337575193045934
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.05411249998724088
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81001",
+      "fit": {
+        "position": [
+          0.08237348368006348,
+          -0.34569389805218703,
+          0.19082156627513835
+        ],
+        "rotation": [
+          [
+            0.9974030209495268,
+            -0.06352559826588525,
+            -0.03393688503265056
+          ],
+          [
+            -0.0637572968451896,
+            -0.9979486475331412,
+            -0.005788262759074603
+          ],
+          [
+            -0.03349956566513073,
+            0.007936954814977743,
+            -0.9994072162279561
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 4.133092950563657,
+          "keypoint_rmse_m": 0.0013641165061674934,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0017418209133730866,
+            "angle_deg": 0.8283070742718519
+          },
+          {
+            "model_displacement_m": 8.721883455139368e-05,
+            "angle_deg": 0.15246261577954762
+          },
+          {
+            "model_displacement_m": 0.0018665865724119912,
+            "angle_deg": 0.6874098556771913
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.45078912965525786,
+        "angle_deg": 1.7493195138686974
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.08955239999340847
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81002",
+      "fit": {
+        "position": [
+          0.09025758481585548,
+          -0.3087820449741442,
+          0.19922897210295326
+        ],
+        "rotation": [
+          [
+            0.9996743008913047,
+            0.025333409942286198,
+            0.003083906317680539
+          ],
+          [
+            0.025382025497753754,
+            -0.9995348893812015,
+            -0.01690436900155596
+          ],
+          [
+            0.0026542266503725527,
+            0.01697713905242787,
+            -0.9998523550157203
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 2.036273680987771,
+          "keypoint_rmse_m": 0.0007900341852212039,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0016917305560972132,
+            "angle_deg": 2.950573303854793
+          },
+          {
+            "model_displacement_m": 0.0001669471472041707,
+            "angle_deg": 0.17766918977550725
+          },
+          {
+            "model_displacement_m": 0.0015005439727712676,
+            "angle_deg": 0.20625989124167407
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.46264407319594575,
+        "angle_deg": 1.9112500735034785
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.0945750999962911
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81003",
+      "fit": {
+        "position": [
+          0.08206773952083703,
+          -0.26950270672519117,
+          0.20216241414601416
+        ],
+        "rotation": [
+          [
+            0.9994455036749601,
+            -0.022869034343648252,
+            0.024201083696697892
+          ],
+          [
+            -0.023319297047728862,
+            -0.9995570797663764,
+            0.018489312429435304
+          ],
+          [
+            0.0237675318261138,
+            -0.019043412433240703,
+            -0.9995361188440326
+          ]
+        ],
+        "diagnostic": {
+          "optimizer_success": true,
+          "reprojection_error_px": 2.5422894328452617,
+          "keypoint_rmse_m": 0.0006741210313261069,
+          "original_geometry_gates_pass": true
+        },
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.001664913885199959,
+            "angle_deg": 1.7216881351983442
+          },
+          {
+            "model_displacement_m": 0.0004611864448893304,
+            "angle_deg": 0.8567878315223719
+          },
+          {
+            "model_displacement_m": 0.0006644676157616767,
+            "angle_deg": 0.935248607573091
+          }
+        ],
+        "truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.6169195325658379,
+        "angle_deg": 1.5802329557444834
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.10807049996219575
+    }
+  ]
+}

@@ -1,0 +1,77 @@
+{
+  "status": "designed_not_executed",
+  "preserve_current_final44": true,
+  "current_final44_primary": 100,
+  "current_final44_ablations": 80,
+  "development_boundary_cases": {
+    "sc": 36,
+    "sfp": 36
+  },
+  "matched_future_comparison": {
+    "sc": {
+      "new_independent_cases": 20,
+      "conditions": [
+        "full",
+        "vision_only",
+        "vision_plus_generic_force_spiral",
+        "without_shoulder_datum"
+      ]
+    },
+    "sfp": {
+      "new_independent_cases": 20,
+      "conditions": [
+        "full",
+        "vision_only",
+        "vision_plus_generic_force_spiral",
+        "without_lip_datum",
+        "without_sidewall_datum"
+      ]
+    }
+  },
+  "proposed_future_comparison_trials": 180,
+  "fairness": [
+    "same learned plug and port models and cropping",
+    "same exposure-time TF and upstream angular/grasp assumptions",
+    "same raw force ceiling, full per-step audit, physical success gates and action budget",
+    "no ground-truth initialization for one method only",
+    "freeze every baseline before opening new final cases",
+    "never use current final outcomes to tune the next revision"
+  ],
+  "baseline_implementation_status": "New vision-only/generic force search and per-datum removal interfaces still require development implementation; no such trials claimed",
+  "latency_metrics": [
+    "configuration wall time (one-time and per-task reported separately)",
+    "vision wall latency on specified CPU/GPU",
+    "alignment plus connector datum registration",
+    "axial stroke to first estimated goal",
+    "controller dwell",
+    "complete task simulation and wall times",
+    "failures and elapsed budgets"
+  ],
+  "physics_sensitivity": {
+    "status": "planned_not_executed",
+    "timestep_s": [
+      0.00025,
+      0.0005,
+      0.001
+    ],
+    "solver_iterations": [
+      100,
+      200,
+      400
+    ],
+    "design": "one factor at a time, representative fixed configurations; fresh same-contract collision proof for each regime",
+    "force_sampling": "every physics tick (4000/2000/1000 Hz); never compare sparse force peaks as equivalent"
+  },
+  "candidate_qualification": [
+    "offline learned-pose/output stability on saved DEVELOPMENT RGB",
+    "same known development insertion regressions with original force and seating gates",
+    "a new frozen final cohort for any policy/timing change"
+  ],
+  "speed_goals": {
+    "status": "engineering targets, not measured results",
+    "first": "accelerate CPU-only perception using existing GPU without dropping images/weights/gates",
+    "second": "reduce registration motion while retaining measurement observability; do not revive the failed higher-force profile",
+    "stroke_target_sim_s": 5.0,
+    "complete_cycle_target": "Set after phase profiling and physical feasibility tests; do not claim industrial throughput from simulator wall time"
+  }
+}

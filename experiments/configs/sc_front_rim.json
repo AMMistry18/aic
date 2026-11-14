@@ -1,0 +1,20 @@
+{
+  "purpose": "Extract front-face boundary edges from the public SC visual mesh.",
+  "source_sha256": "8425463bb8044aac09dd0e0360dccb27d279bcd8cf61f0708f70c636abba95f6",
+  "triangles": 236,
+  "segments": 22,
+  "points": 522,
+  "bounds_m": [
+    [
+      -0.0127964,
+      -0.0045415,
+      -7.17e-05
+    ],
+    [
+      0.0127964,
+      0.0045413,
+      -7.17e-05
+    ]
+  ],
+  "scene_state_used": false
+}

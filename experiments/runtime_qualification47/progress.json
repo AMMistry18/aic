@@ -1,0 +1,35 @@
+{
+  "scope": "Known development runtime qualification, no final cases used",
+  "results": [
+    {
+      "run": "dev_42000_runtime47v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "status": "environment_or_execution_failure",
+      "error": "RuntimeError: Simulator exited",
+      "case": {
+        "seed": 42000,
+        "connector": "sc",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 9.83928239544743,
+        "lateral_mm": [
+          0.6852572439077966,
+          -0.8496759024803952
+        ],
+        "angular_deg": [
+          0.09731350211028203,
+          -0.07281177168866662,
+          -0.09979125373131617
+        ],
+        "case_id": "dev_42000_runtime47v1",
+        "grasp_jitter_seed": null,
+        "case_origin": "known_failure_regression"
+      },
+      "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\dev_42000_runtime47v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff"
+    }
+  ],
+  "status": "stopped_requires_inspection",
+  "final_completed_before_slot": 27,
+  "current": "sc",
+  "error": "RuntimeError: Development case did not independently verify; preserve and inspect"
+}

@@ -1,0 +1,60 @@
+{
+  "scope": "Uninstalled render-workload calculation, not a measured speedup",
+  "source_world_sha256": "e7d3256d50ff64dbb39cfbcc08929477bc3ac58c9fcd2070128c2735ae3f3d3f",
+  "only_three_inspection_rates_differ": true,
+  "policy_images_geometry_calibration_force_physics_unchanged": true,
+  "before_Mpixels_per_sim_s": 36.12672,
+  "proposed_Mpixels_per_sim_s": 21.38112,
+  "pixel_workload_reduction_fraction": 0.40816326530612246,
+  "physical_and_runtime_qualification": false,
+  "cameras": [
+    {
+      "name": "overview",
+      "policy_input": false,
+      "width": 1280,
+      "height": 960,
+      "before_hz": 5.0,
+      "proposed_hz": 1.0
+    },
+    {
+      "name": "board",
+      "policy_input": false,
+      "width": 1280,
+      "height": 960,
+      "before_hz": 5.0,
+      "proposed_hz": 1.0
+    },
+    {
+      "name": "target",
+      "policy_input": false,
+      "width": 1280,
+      "height": 960,
+      "before_hz": 5.0,
+      "proposed_hz": 1.0
+    },
+    {
+      "name": "center_camera",
+      "policy_input": true,
+      "width": 1152,
+      "height": 1024,
+      "before_hz": 5.0,
+      "proposed_hz": 5.0
+    },
+    {
+      "name": "left_camera",
+      "policy_input": true,
+      "width": 1152,
+      "height": 1024,
+      "before_hz": 5.0,
+      "proposed_hz": 5.0
+    },
+    {
+      "name": "right_camera",
+      "policy_input": true,
+      "width": 1152,
+      "height": 1024,
+      "before_hz": 5.0,
+      "proposed_hz": 5.0
+    }
+  ]
+}

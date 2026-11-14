@@ -1,0 +1,19 @@
+cmake_minimum_required(VERSION 3.22)
+project(research_bullet_damped LANGUAGES CXX)
+find_package(gz-physics8 REQUIRED COMPONENTS sdf mesh)
+find_package(gz-common6 REQUIRED COMPONENTS graphics profiler)
+find_package(gz-plugin3 REQUIRED COMPONENTS register)
+find_package(gz-math8 REQUIRED COMPONENTS eigen3)
+find_library(DOUBLE_DYNAMICS NAMES BulletDynamics-float64 REQUIRED)
+find_library(DOUBLE_COLLISION NAMES BulletCollision-float64 REQUIRED)
+find_library(DOUBLE_MATH NAMES LinearMath-float64 REQUIRED)
+set(SOURCE_ROOT /research/.artifacts/gz-physics8.3-damped-src)
+file(GLOB BACKEND_SOURCE CONFIGURE_DEPENDS "${SOURCE_ROOT}/src/*.cc")
+add_library(ResearchBulletDamped SHARED ${BACKEND_SOURCE})
+target_compile_features(ResearchBulletDamped PRIVATE cxx_std_17)
+target_compile_definitions(ResearchBulletDamped PRIVATE BT_USE_DOUBLE_PRECISION)
+target_include_directories(ResearchBulletDamped PRIVATE ${SOURCE_ROOT}/src /usr/include/bullet)
+target_link_libraries(ResearchBulletDamped PRIVATE
+  gz-physics8::gz-physics8 gz-physics8::gz-physics8-sdf gz-physics8::gz-physics8-mesh
+  gz-common6::gz-common6 gz-common6::graphics gz-math8::eigen3 gz-plugin3::register
+  ${DOUBLE_DYNAMICS} ${DOUBLE_COLLISION} ${DOUBLE_MATH})

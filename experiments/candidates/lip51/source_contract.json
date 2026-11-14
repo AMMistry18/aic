@@ -1,0 +1,18 @@
+{
+  "parent_development_sha256": "2fcb41b2b6a19c754e41b6914f2449ec60a363b1f0c02cddbdd98b318da8ca98",
+  "candidate_sha256": "4349eea3acef79c7cc9980e2199774134f5ca273923295160e9e8698c692343a",
+  "change": "Only qualified mouth_stop search command speed 0.4 to 1.2 mm/s; legacy branch unchanged",
+  "unchanged": [
+    "0.3mm elastic lead",
+    "3mm axial capture endpoint",
+    "same kinematic stationary trigger",
+    "single fixed 0/1/0N excitation",
+    "same stationary/difference/uncertainty tests",
+    "6N observed guard",
+    "20N independent raw ceiling",
+    "original learned weights"
+  ],
+  "prospective_case": "dev_45005",
+  "baseline": "runtime47v3",
+  "final_cases_used": 0
+}

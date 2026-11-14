@@ -1,0 +1,12 @@
+{
+  "purpose": "development_only_rigid_crop_anchor_diagnostic",
+  "base_candidate": "foreground_refinement30, fixed final-epoch checkpoint; original dynamic-crop qualification failed",
+  "intervention": "Cache only first RGB detector crop/mask ROI per camera and rigid grasp; recompute refined keypoints and pose from every later actual image",
+  "not_cached": ["keypoints", "pose", "grasp transform", "camera extrinsics"],
+  "reset_required": "Clear anchors on each new grasp/task or camera calibration/image-size change",
+  "assumptions": ["prescribed rigid grasp", "cameras rigidly attached to the tool"],
+  "same_qualification_criteria_as": "foreground_refinement30.json; no numeric threshold change",
+  "no_object_truth_inputs": true,
+  "final_100000_series_used": false,
+  "production_enabled": false
+}

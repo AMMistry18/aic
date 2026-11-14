@@ -1,0 +1,6 @@
+claim_id,claim,result_status,experiment_id,boundary
+C1,Conditional SC and SFP held-grasp insertion executes with nonprivileged observations,verified,EXP1,No unrestricted rotation or population robustness claim
+C2,Connector-specific relative datums address different axial observability,verified,EXP1;EXP2,Mechanism implemented; current causal advantage remains pending
+C3,Full-rate independent geometry/contact/force verification distinguishes policy completion from a seat,verified,EXP1,Simulation fidelity and sampled contact coverage limit interpretation
+C4,Current combined method generalizes over a fresh randomized population,planned,EXP4,No final cases opened
+C5,Greater force authority reduces complete cycle time,planned,EXP3,No speed43 physical results at snapshot

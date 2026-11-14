@@ -1,0 +1,15 @@
+{
+  "backend": "source_float64",
+  "gz_physics_version": "8.3.0",
+  "bullet_version": "3.24",
+  "scalar_precision_bits": 64,
+  "source_tag": "gz-physics8_8.3.0",
+  "source_modifications": "none; BT_USE_DOUBLE_PRECISION build with float64 Bullet libraries",
+  "plugin_path": "/opt/research-bullet-double/libResearchBulletDouble.so",
+  "binary_sha256": {
+    "/opt/research-bullet-double/libResearchBulletDouble.so": "94f9a5932091b262205d8dce2d15882e6314032f61f643c1579bb9c8db97a1ec",
+    "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+    "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+    "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343"
+  }
+}

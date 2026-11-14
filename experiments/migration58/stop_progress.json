@@ -1,0 +1,7 @@
+{
+  "status": "stopped_at_completed_trial_boundary",
+  "started_unix": 1794682973.6894295,
+  "completed": 99,
+  "ended_unix": 1794683135.5905921,
+  "current_run": null
+}

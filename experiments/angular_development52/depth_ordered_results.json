@@ -1,0 +1,1497 @@
+{
+  "scope": "Static old DEVELOPMENT geometry only, no synchronized pose or insertion claim",
+  "final_cases_used": 0,
+  "policy_weights_changed": false,
+  "original_timestamp_veto_preserved": true,
+  "production_policy_modified": false,
+  "rows": [
+    {
+      "connector": "sc",
+      "case_id": "train_80010",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23736906723252224,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.16470514598264752,
+            "learned_keypoint_depth_m": 0.24783290412914585,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.22036400271060588,
+            "learned_keypoint_depth_m": 0.2464781578739368,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23601432097731317,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16399676108850575,
+            "learned_keypoint_depth_m": 0.2274629800049044,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.15464327185981383,
+            "learned_keypoint_depth_m": 0.237926816901528,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.2121515777937057,
+            "learned_keypoint_depth_m": 0.23657207064631894,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2261082337496953,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23375169195044276,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2466076968049161,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24667165025054355,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2338156453960702,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22456006798907005,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.16974493532237564,
+            "learned_keypoint_depth_m": 0.23741607284354338,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.17025076465074857,
+            "learned_keypoint_depth_m": 0.2374800262891708,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22462402143469745,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23549305155110398,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.22363338046798295,
+            "learned_keypoint_depth_m": 0.24605013706144946,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.16688593721055597,
+            "learned_keypoint_depth_m": 0.2475636427375607,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23700655722721525,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22570407713084328,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.21519715358336763,
+            "learned_keypoint_depth_m": 0.2362611626411887,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.1566871186060876,
+            "learned_keypoint_depth_m": 0.2377746683173,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": 0.16564086185335145,
+            "learned_keypoint_depth_m": 0.2272175828069545,
+            "excluded": true
+          }
+        ]
+      },
+      "reason": "only 4 keypoints triangulated; need 6"
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80011",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23623715544117838,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.17017188853913087,
+            "learned_keypoint_depth_m": 0.24786013928714307,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24639689493518,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2347739110892153,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16322988611429926,
+            "learned_keypoint_depth_m": 0.22686490916878113,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.15563537196372446,
+            "learned_keypoint_depth_m": 0.23848789301474582,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.21643991950008412,
+            "learned_keypoint_depth_m": 0.23702464866278275,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22540166481681806,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23360627407548326,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2473667966575842,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24737004350242006,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2336095209203191,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22489804523635798,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.1665313155984961,
+            "learned_keypoint_depth_m": 0.2386585678184589,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.16639005846693267,
+            "learned_keypoint_depth_m": 0.23866181466329478,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2249012920811938,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23569613528006716,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.22084498167003644,
+            "learned_keypoint_depth_m": 0.24704707866349288,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.17058115786521238,
+            "learned_keypoint_depth_m": 0.2484504695009627,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23709952611753699,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16608229263585356,
+            "learned_keypoint_depth_m": 0.22617289285051445,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.17429421371926168,
+            "learned_keypoint_depth_m": 0.23752383623394013,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.15386873772629797,
+            "learned_keypoint_depth_m": 0.23892722707140998,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": 0.15953892745311418,
+            "learned_keypoint_depth_m": 0.22757628368798424,
+            "excluded": true
+          }
+        ]
+      },
+      "reason": "only 4 keypoints triangulated; need 6"
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80012",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2343393844318774,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.17026242953867549,
+            "learned_keypoint_depth_m": 0.24481215834471826,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.22315184397902912,
+            "learned_keypoint_depth_m": 0.24328330995400427,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23281053604116345,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16290714073567342,
+            "learned_keypoint_depth_m": 0.22452621878886375,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.15498125630454196,
+            "learned_keypoint_depth_m": 0.23499899270170455,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.21408863420086666,
+            "learned_keypoint_depth_m": 0.23347014431099058,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22299737039814976,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23128774993067552,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24423017921339735,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24411296838298474,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23117053910026295,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22214174699243092,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.16725535044591838,
+            "learned_keypoint_depth_m": 0.23508417627515274,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.167519732711003,
+            "learned_keypoint_depth_m": 0.23496696544474016,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22202453616201834,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23338759234641168,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.16980145104426492,
+            "learned_keypoint_depth_m": 0.24412350771168975,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.1614602476490435,
+            "learned_keypoint_depth_m": 0.24546250931953245,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23472659395425444,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16638520458368056,
+            "learned_keypoint_depth_m": 0.22357926982781406,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.15836629003785094,
+            "learned_keypoint_depth_m": 0.2343151851930921,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.1522109140415746,
+            "learned_keypoint_depth_m": 0.23565418680093483,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": 0.1605493186643477,
+            "learned_keypoint_depth_m": 0.22491827143565682,
+            "excluded": true
+          }
+        ]
+      },
+      "reason": "only 3 keypoints triangulated; need 6"
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80013",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23703508627936645,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.17044380957152608,
+            "learned_keypoint_depth_m": 0.24801263449891617,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.22331892658161318,
+            "learned_keypoint_depth_m": 0.2464700303989425,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23549248217939278,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.160050888675162,
+            "learned_keypoint_depth_m": 0.2274303083526874,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.15407445004461712,
+            "learned_keypoint_depth_m": 0.2384078565722371,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.17407511093889033,
+            "learned_keypoint_depth_m": 0.23686525247226342,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": 0.1665208700185798,
+            "learned_keypoint_depth_m": 0.2258877042527137,
+            "excluded": true
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23389480186631012,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.24733617892845242,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2471984669499734,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23375708988783112,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2250126903279916,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.16613289409642923,
+            "learned_keypoint_depth_m": 0.23845406739013386,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.1661348336345853,
+            "learned_keypoint_depth_m": 0.23831635541165486,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.22487497834951253,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.23530577860148943,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": 0.22216364905364339,
+            "learned_keypoint_depth_m": 0.2466126149680266,
+            "excluded": true
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": 0.170533983332091,
+            "learned_keypoint_depth_m": 0.24793713583217628,
+            "excluded": true
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2366302994656391,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": 0.16763157909017176,
+            "learned_keypoint_depth_m": 0.22572411348662313,
+            "excluded": true
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": 0.17388789788843825,
+            "learned_keypoint_depth_m": 0.23703094985316028,
+            "excluded": true
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": 0.15471190055814607,
+            "learned_keypoint_depth_m": 0.23835547071730995,
+            "excluded": true
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": 0.16165589220784746,
+            "learned_keypoint_depth_m": 0.22704863435077277,
+            "excluded": true
+          }
+        ]
+      },
+      "reason": "only 2 keypoints triangulated; need 6"
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81000",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.28155796846163395,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27832965715108154,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27484482922146164,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2780731405320141,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26621948156956105,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2629911702590086,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2595063423293887,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26273465363994114,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2785897419958562,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2782633218457218,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27387087367092144,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27419729382105595,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26390766397607923,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2635812438259447,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.25918879565114444,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2595152158012789,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27974200908867114,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.28224764870593355,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27879229505771314,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2762866554404507,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26410196176191597,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2666076013791784,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2631522477309579,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26064660811369555,
+            "excluded": false
+          }
+        ]
+      },
+      "triangulated": 8,
+      "reprojection_px": 1.216189250825163,
+      "rmse_m": 0.0002824379064681552,
+      "joint": {
+        "position": [
+          0.07652718512276357,
+          -0.38694594957481654,
+          0.19313965478278697
+        ],
+        "rotation": [
+          [
+            0.999805774268685,
+            -0.015275750808816107,
+            -0.012452516862941493
+          ],
+          [
+            -0.015477994309849493,
+            -0.9997471774333706,
+            -0.016309902088979096
+          ],
+          [
+            -0.012200222585639691,
+            0.016499474271466228,
+            -0.9997894387908014
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 1.1575711439953185,
+        "fitted_delta_mm_deg": [
+          -0.016808285949871538,
+          -0.11732846719094199,
+          -0.07442176531263828,
+          -0.3824032175452561,
+          0.18415343804903989,
+          -0.21363864584744935
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0004385071609799988,
+            "angle_deg": 1.3432959451762605
+          },
+          {
+            "position_m": 0.00011478331831627129,
+            "angle_deg": 0.4623248984996296
+          },
+          {
+            "position_m": 0.0004808065067572312,
+            "angle_deg": 1.0669289053777833
+          }
+        ]
+      },
+      "scoring_only": {
+        "position_mm": 0.5126890006061162,
+        "angle_deg": 3.908087644767908
+      },
+      "joint_scoring_only": {
+        "position_mm": 0.5567765445415126,
+        "angle_deg": 4.136575266706408
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81001",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.281195464678916,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27780071104701975,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2741350019371118,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27752975556900805,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2661676898767746,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26277293624487835,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2591072271349704,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26250198076686665,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2783157216616284,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2778570100164781,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2733168795592142,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2737755912043644,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26389496707711463,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2634362554319644,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.25889612497470044,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2593548366198507,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2794043528146515,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.28173528483529336,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2781479809464763,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2758170489258343,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26387794464656134,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2662088766672033,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26262157277838616,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2602906407577442,
+            "excluded": false
+          }
+        ]
+      },
+      "triangulated": 8,
+      "reprojection_px": 5.0148254870556075,
+      "rmse_m": 0.0009589171308162975,
+      "joint": {
+        "position": [
+          0.08246109156942927,
+          -0.3456988341122547,
+          0.19062291125967817
+        ],
+        "rotation": [
+          [
+            0.9974419309782903,
+            -0.06444647384455801,
+            -0.030923232937424553
+          ],
+          [
+            -0.0647012513497911,
+            -0.9978779091558971,
+            -0.007309342817646521
+          ],
+          [
+            -0.03038654965721956,
+            0.009291416881048058,
+            -0.9994950360918612
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 4.101484352728455,
+        "fitted_delta_mm_deg": [
+          -0.10539545494761365,
+          -0.29532697892275206,
+          0.7456453766286658,
+          -1.0047935926787288,
+          0.2751267140954235,
+          -0.16116314469487844
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0014940657583771666,
+            "angle_deg": 0.8307775334382596
+          },
+          {
+            "position_m": 0.00029718247354101863,
+            "angle_deg": 0.07726485219333906
+          },
+          {
+            "position_m": 0.002050861393310705,
+            "angle_deg": 1.103492493772336
+          }
+        ]
+      },
+      "scoring_only": {
+        "position_mm": 1.2659203173765725,
+        "angle_deg": 1.0325041892093374
+      },
+      "joint_scoring_only": {
+        "position_mm": 0.5996147717308423,
+        "angle_deg": 1.7174257927973469
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81002",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2815667821467066,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.278744165321184,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.275110148201413,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2779327650269356,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2662642924950996,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.263441675669577,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.259807658549806,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26263027537532857,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27811352507175846,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27824587441500953,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27377923721013414,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27364688786688307,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26355149534848044,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26368384469173156,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2592172074868561,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2590848581436051,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27867137433059375,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.28157838375297256,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27811272469924353,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2752057152768647,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2631821896155312,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26608919903791006,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.262623539984181,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.25971653056180216,
+            "excluded": false
+          }
+        ]
+      },
+      "triangulated": 8,
+      "reprojection_px": 2.4971252250212363,
+      "rmse_m": 0.0005708195202107008,
+      "joint": {
+        "position": [
+          0.09022367686413975,
+          -0.30866944170136185,
+          0.19930816345151664
+        ],
+        "rotation": [
+          [
+            0.999291870519557,
+            0.037605618205865096,
+            -0.001254987202524016
+          ],
+          [
+            0.03757685261768164,
+            -0.9991304102138565,
+            -0.01806664144878252
+          ],
+          [
+            -0.0019333030990561076,
+            0.018006689458213883,
+            -0.9998359972884964
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.0502253306333813,
+        "fitted_delta_mm_deg": [
+          -0.16841806894023817,
+          -0.39011322100252516,
+          -0.1569373555064688,
+          -1.2942801011319334,
+          0.7524734636545444,
+          -1.9948998215702052
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0012656616925720767,
+            "angle_deg": 1.9641708816804795
+          },
+          {
+            "position_m": 0.0002469929565147982,
+            "angle_deg": 0.18875583375982055
+          },
+          {
+            "position_m": 0.0014697712214048312,
+            "angle_deg": 0.8494313647347489
+          }
+        ]
+      },
+      "scoring_only": {
+        "position_mm": 0.8911501787245805,
+        "angle_deg": 3.6990183625626645
+      },
+      "joint_scoring_only": {
+        "position_mm": 0.4830023149850709,
+        "angle_deg": 1.5814218982201662
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81003",
+      "depth_records": {
+        "left_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2809808774498537,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2780352605667108,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2742579864190168,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27720360330215965,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2659207476313864,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26297513074824347,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2591978566005494,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2621434734836923,
+            "excluded": false
+          }
+        ],
+        "center_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27767828267515715,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27764052913986664,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27298787263999785,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2730256261752883,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26344561209795014,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26340785856265964,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.25875520206279085,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2587929555980813,
+            "excluded": false
+          }
+        ],
+        "right_camera": [
+          {
+            "index": 0,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.277926546312258,
+            "excluded": false
+          },
+          {
+            "index": 1,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.28071719490127717,
+            "excluded": false
+          },
+          {
+            "index": 2,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27700279498836095,
+            "excluded": false
+          },
+          {
+            "index": 3,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.27421214639934177,
+            "excluded": false
+          },
+          {
+            "index": 4,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.26272103267585395,
+            "excluded": false
+          },
+          {
+            "index": 5,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2655116812648731,
+            "excluded": false
+          },
+          {
+            "index": 6,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2617972813519569,
+            "excluded": false
+          },
+          {
+            "index": 7,
+            "nearest_robot_depth_m": null,
+            "learned_keypoint_depth_m": 0.2590066327629377,
+            "excluded": false
+          }
+        ]
+      },
+      "triangulated": 8,
+      "reprojection_px": 2.744181788791236,
+      "rmse_m": 0.0005925081998025072,
+      "joint": {
+        "position": [
+          0.08185789670768373,
+          -0.2696139707795987,
+          0.20206307563937423
+        ],
+        "rotation": [
+          [
+            0.9996202288934801,
+            -0.02437969340898889,
+            0.012846343301901073
+          ],
+          [
+            -0.02451301333634254,
+            -0.9996461924395864,
+            0.010324830178233907
+          ],
+          [
+            0.012590081974271982,
+            -0.010635811690735443,
+            -0.9998641754486257
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.520245532115593,
+        "fitted_delta_mm_deg": [
+          0.0019702216812827688,
+          -0.24973607375835327,
+          0.13872432755578334,
+          -0.9307302601670866,
+          0.1148346034398562,
+          -1.0884030502317146
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0014374210545037426,
+            "angle_deg": 1.781133192439413
+          },
+          {
+            "position_m": 0.0003637473435108006,
+            "angle_deg": 0.20522512461029388
+          },
+          {
+            "position_m": 0.000812209563695265,
+            "angle_deg": 0.6868059259008898
+          }
+        ]
+      },
+      "scoring_only": {
+        "position_mm": 0.7633989921358852,
+        "angle_deg": 0.8798585319393588
+      },
+      "joint_scoring_only": {
+        "position_mm": 0.6018219726453325,
+        "angle_deg": 1.2719916352583605
+      }
+    }
+  ]
+}

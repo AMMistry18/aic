@@ -1,0 +1,212 @@
+{
+  "purpose": "development_only_fresh_conditional_translation_screen_not_final",
+  "frozen_before_execution": true,
+  "hypotheses": [
+    "Wider translation correction than prior <=0.307 mm cases",
+    "Unknown rigid grasp variation remains observable from RGB under upstream angular alignment"
+  ],
+  "condition": "upstream aligned SC handoff, actual rigid grasp translation estimated from images",
+  "cases": [
+    {
+      "case_id": "dev_40000",
+      "grasp_jitter_seed": null,
+      "seed": 40000,
+      "connector": "sc",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 8.519082523336785,
+      "lateral_mm": [
+        1.0922841177005336,
+        0.7364950712867733
+      ],
+      "angular_deg": [
+        -0.01849173708245297,
+        0.06093158027260301,
+        -0.020379286148272474
+      ]
+    },
+    {
+      "case_id": "dev_41000",
+      "grasp_jitter_seed": 41000,
+      "seed": 40000,
+      "connector": "sc",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 8.519082523336785,
+      "lateral_mm": [
+        1.0922841177005336,
+        0.7364950712867733
+      ],
+      "angular_deg": [
+        -0.01849173708245297,
+        0.06093158027260301,
+        -0.020379286148272474
+      ]
+    },
+    {
+      "case_id": "dev_40001",
+      "grasp_jitter_seed": null,
+      "seed": 40001,
+      "connector": "sc",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 11.732922168076348,
+      "lateral_mm": [
+        -0.45759920402997284,
+        -0.32426340346393423
+      ],
+      "angular_deg": [
+        -0.0830900975503469,
+        -0.00800081799717145,
+        0.09795049276140824
+      ]
+    },
+    {
+      "case_id": "dev_41001",
+      "grasp_jitter_seed": 41001,
+      "seed": 40001,
+      "connector": "sc",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 11.732922168076348,
+      "lateral_mm": [
+        -0.45759920402997284,
+        -0.32426340346393423
+      ],
+      "angular_deg": [
+        -0.0830900975503469,
+        -0.00800081799717145,
+        0.09795049276140824
+      ]
+    },
+    {
+      "case_id": "dev_40002",
+      "grasp_jitter_seed": null,
+      "seed": 40002,
+      "connector": "sc",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 6.145154373260706,
+      "lateral_mm": [
+        -0.2751601635561096,
+        0.5634114245974355
+      ],
+      "angular_deg": [
+        0.08843039363926383,
+        0.09452176176399271,
+        0.09280762011242291
+      ]
+    },
+    {
+      "case_id": "dev_41002",
+      "grasp_jitter_seed": 41002,
+      "seed": 40002,
+      "connector": "sc",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 6.145154373260706,
+      "lateral_mm": [
+        -0.2751601635561096,
+        0.5634114245974355
+      ],
+      "angular_deg": [
+        0.08843039363926383,
+        0.09452176176399271,
+        0.09280762011242291
+      ]
+    },
+    {
+      "case_id": "dev_40003",
+      "grasp_jitter_seed": null,
+      "seed": 40003,
+      "connector": "sc",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 7.923217006181675,
+      "lateral_mm": [
+        -0.34251308003989067,
+        0.8025049974484381
+      ],
+      "angular_deg": [
+        0.09432411819721795,
+        0.05806598937757851,
+        -0.07873296269513959
+      ]
+    },
+    {
+      "case_id": "dev_41003",
+      "grasp_jitter_seed": 41003,
+      "seed": 40003,
+      "connector": "sc",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 7.923217006181675,
+      "lateral_mm": [
+        -0.34251308003989067,
+        0.8025049974484381
+      ],
+      "angular_deg": [
+        0.09432411819721795,
+        0.05806598937757851,
+        -0.07873296269513959
+      ]
+    },
+    {
+      "case_id": "dev_40004",
+      "grasp_jitter_seed": null,
+      "seed": 40004,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 11.60865759307971,
+      "lateral_mm": [
+        0.164735405220925,
+        -1.439585873056782
+      ],
+      "angular_deg": [
+        0.0114585380645352,
+        -0.07596878233068377,
+        -0.051502780885950596
+      ]
+    },
+    {
+      "case_id": "dev_41004",
+      "grasp_jitter_seed": 41004,
+      "seed": 40004,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 11.60865759307971,
+      "lateral_mm": [
+        0.164735405220925,
+        -1.439585873056782
+      ],
+      "angular_deg": [
+        0.0114585380645352,
+        -0.07596878233068377,
+        -0.051502780885950596
+      ]
+    }
+  ],
+  "lateral_norm_sampling_mm": [
+    0.5,
+    1.5
+  ],
+  "gap_sampling_mm": [
+    5,
+    15
+  ],
+  "angular_component_sampling_deg": [
+    -0.1,
+    0.1
+  ],
+  "jitter_sampling": "Existing scene generator: tip-frame grasp translation +/-2 mm, xyz Euler components +/-0.04 rad; physical initial tip alignment retained by reset IK",
+  "pairing": "Each target/layout/handoff perturbation repeated with and without grasp jitter; distinct identities, same layout seed",
+  "independent_scoring_unchanged": true,
+  "counts_as_guarded_production_policy": false,
+  "policy_object_or_target_truth_inputs": false,
+  "final_100000_series_used": false,
+  "planned": 10,
+  "status": "frozen_not_executed",
+  "failure_accounting": "All selected cases; report environment/setup failures separately, no tuning within batch"
+}

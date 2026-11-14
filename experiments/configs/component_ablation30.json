@@ -1,0 +1,21 @@
+{
+  "purpose": "development_only_component_ablation_not_unrestricted_visual_alignment",
+  "frozen_before_execution": true,
+  "case_ids": ["dev_3000", "dev_3002", "dev_3004", "dev_3006", "dev_3008"],
+  "methods": [
+    "original_perception_rim_position_body_track_noangular_handoff",
+    "original_perception_rim_position_body_noangular_handoff",
+    "original_perception_rim_position_track_noangular_handoff"
+  ],
+  "method_order_seed": 20261030,
+  "question": "Does image-based CAD body translation and/or bounded own-robot lateral tracking cause the conditional insertion improvement?",
+  "shared_assumptions": ["upstream angular alignment assumed", "rigid grasp", "original learned plug weights", "longer-adapted mouth weights", "no learned angular veto in any compared method"],
+  "body_absent_control": "Original confidence-weighted learned plug translation; CAD mouth retained; same initial physical wrist orientation retained",
+  "tracking_absent_control": "Image body translation retained; lateral PI disabled; native extra wrench feedback remains zero",
+  "unchanged_independent_scoring": {"depth_m": 0.01564, "depth_tolerance_m": 0.00025, "lateral_m": 0.00025, "angle_deg": 0.25, "dwell_sim_s": 1, "whole_trial_max_penetration_m": 0.0001},
+  "physics": {"backend": "source_float64_damped", "step_s": 0.0005, "solver_iterations": 200},
+  "counts_as_guarded_production_policy": false,
+  "policy_object_or_target_truth_inputs": false,
+  "failure_accounting": "All selected cases including perception rejection; environment failures separately retained",
+  "final_100000_series_used": false
+}

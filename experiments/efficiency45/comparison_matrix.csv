@@ -1,0 +1,10 @@
+connector,condition,fresh_cases,status,causal_question
+sc,full,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sc,vision_only,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sc,vision_plus_generic_force_spiral,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sc,without_shoulder_datum,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sfp,full,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sfp,vision_only,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sfp,vision_plus_generic_force_spiral,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sfp,without_lip_datum,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization
+sfp,without_sidewall_datum,20,planned_not_implemented_or_executed,relative physical datum vs shared learned visual initialization

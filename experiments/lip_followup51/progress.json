@@ -1,0 +1,33 @@
+{
+  "status": "completed_development_pair_requires_review",
+  "final_policy_modified": false,
+  "prospective_case": "dev_45005",
+  "baseline": "runtime47v3",
+  "final_cases_used_for_tuning": 0,
+  "updated_unix": 1794598631.6651387,
+  "candidate_sha256": "4349eea3acef79c7cc9980e2199774134f5ca273923295160e9e8698c692343a",
+  "comparison": [
+    {
+      "condition": "measured_start_baseline",
+      "run": "dev_45005_runtime47v3_original_perception_sfp_contact_datum_handoff",
+      "verified_success": true,
+      "lip_phase_sim_s": 21.756000000000004,
+      "action_sim_s": 51.9735,
+      "record_wall_s": 660.356463543998,
+      "raw_peak_N": 4.684120385723578,
+      "force_coverage": true
+    },
+    {
+      "condition": "faster_bounded_lip_search",
+      "run": "dev_45005_runtime47v5_original_perception_sfp_contact_datum_handoff",
+      "verified_success": true,
+      "lip_phase_sim_s": 17.2475,
+      "action_sim_s": 47.071,
+      "record_wall_s": 569.9129857090011,
+      "raw_peak_N": 8.881041147703968,
+      "force_coverage": true
+    }
+  ],
+  "final_sources_unchanged": true,
+  "not_a_randomized_success_rate": true
+}

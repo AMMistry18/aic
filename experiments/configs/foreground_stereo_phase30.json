@@ -1,0 +1,13 @@
+{
+  "purpose": "development_only_occlusion_and_sampling_phase_diagnostic",
+  "evidence": "Actual paired images show moving orange cable occlusion in centre camera; fresh centre keypoints change 8-11px while sides change <0.45px",
+  "refiner_checkpoint": "Same fixed final-epoch foreground checkpoint; no retraining",
+  "views": "Predict all three views; fuse left/right only in this diagnostic, centre remains available for port perception",
+  "sampling_phases_native_crop_px": [[0,0],[0.5,0],[-0.5,0],[0,0.5],[0,-0.5]],
+  "fusion": "Undo each shift exactly; average keypoint coordinates by their original confidence; no choice based on prior/ground-truth agreement",
+  "rigid_crop_anchor": true,
+  "camera_intrinsics_or_extrinsics_changed": false,
+  "qualification_thresholds": "Exactly foreground_refinement30.json; no relaxed angular or physical limits",
+  "production_enabled": false,
+  "final_100000_series_used": false
+}

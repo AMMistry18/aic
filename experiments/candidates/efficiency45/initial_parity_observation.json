@@ -1,0 +1,16 @@
+{
+  "scope": "First benchmark execution, retained from captured tool output",
+  "input_sha256": "85bdbdb13c12e101d0c91f3e16cdd36c6fb4f7b3bb6707a22ba8125076a68f43",
+  "baseline_wall_s": 1.3446043320000172,
+  "candidate_wall_s": 0.677662533998955,
+  "speedup": 1.9841798307269125,
+  "edge_distance_calls": {
+    "baseline": 9,
+    "candidate": 3
+  },
+  "identical_pose_and_all_diagnostics": false,
+  "reason": "accepted",
+  "detailed_output_arrays_saved": false,
+  "later_single_replay_matched_exactly": true,
+  "qualification": "Unqualified until numerical repeatability is investigated; no insertion result claimed"
+}

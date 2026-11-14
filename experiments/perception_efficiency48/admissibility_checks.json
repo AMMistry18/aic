@@ -1,0 +1,6 @@
+{
+  "scope": "Synthetic mathematical check, not insertion testing",
+  "checks": 1000,
+  "passed": true,
+  "maximum_excess_px": -0.03015484670137836
+}

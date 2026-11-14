@@ -1,0 +1,160 @@
+{
+  "scope": "Development only, not additional insertion results",
+  "updated_utc": "2026-11-13T16:19:02.507333+00:00",
+  "final_sources_unchanged": true,
+  "frozen_source_count": 110,
+  "final_cases_used_for_development": 0,
+  "final_policy_modified": false,
+  "angular": {
+    "sc": {
+      "cases": 4,
+      "median_original_angle_error_deg": 1.9188135721800514,
+      "median_joint_angle_error_deg": 0.5141261339052892,
+      "improved": 4,
+      "joint_within_terminal_angle_tolerance": 1,
+      "terminal_tolerance_deg": 0.25,
+      "production_accepted": 0,
+      "static_capture_sync_rejections_preserved": true
+    },
+    "sfp": {
+      "cases": 4,
+      "median_original_angle_error_deg": 2.365761275886001,
+      "median_joint_angle_error_deg": 1.6494238455087564,
+      "improved": 1,
+      "joint_within_terminal_angle_tolerance": 0,
+      "terminal_tolerance_deg": 0.1,
+      "production_accepted": 0,
+      "static_capture_sync_rejections_preserved": true
+    }
+  },
+  "body_six_dof": {
+    "attempted": 4,
+    "accepted": 0
+  },
+  "cropped_pipeline": {
+    "sc": {
+      "cases": 3,
+      "median_cpu_wall_s": 5.743109404000279,
+      "median_gpu_wall_s": 0.11330030899989652,
+      "all_acceptance_agrees": true,
+      "all_rejection_agrees": true,
+      "maximum_position_difference_um": 1.9446291225282606,
+      "maximum_angle_difference_deg": 0.008276664217917697
+    },
+    "sfp": {
+      "cases": 3,
+      "median_cpu_wall_s": 5.320864686000277,
+      "median_gpu_wall_s": 0.12299304100451991,
+      "all_acceptance_agrees": true,
+      "all_rejection_agrees": true,
+      "maximum_position_difference_um": 2.089732403215553,
+      "maximum_angle_difference_deg": 0.0038470506184553133
+    }
+  },
+  "cropped_pipeline_scope": "Plug detector crops plus original weighted fusion/gates; excludes port/body/rim fitting, ROS waiting and motion; CPU quota 1, concurrent final study",
+  "thread_candidate": {
+    "scope": "Real CPU inference runtime guard check only, not insertion qualification",
+    "final_cases_read": 0,
+    "robot_commands_sent": 0,
+    "calls": [
+      {
+        "threads": 1,
+        "device": "cpu"
+      }
+    ],
+    "wall_s": 2.334401547006564,
+    "threads_after_inference": 1,
+    "detections": 1,
+    "passed": true
+  },
+  "thread_candidate_integration": {
+    "scope": "Real learned inference through copied candidate modules; not physical insertion qualification",
+    "final_cases_read": 0,
+    "ground_truth_loaded": false,
+    "rows": [
+      {
+        "detector": "sc_plug",
+        "threads": 1,
+        "detections": 1,
+        "cold_wall_s": 9.175974475001567,
+        "weight_sha256": "acdae2c1896d0d8d262b6c07fba4da1af6a80d501d7c23dc38aef33dffd2b665"
+      },
+      {
+        "detector": "sc_port",
+        "threads": 1,
+        "detections": 5,
+        "cold_wall_s": 8.954154699997162
+      },
+      {
+        "detector": "sfp_plug",
+        "threads": 1,
+        "detections": 1,
+        "cold_wall_s": 2.615282669001317,
+        "weight_sha256": "3fbd45ff067bafa07098c7e2a300fbc71732d9422f81fdf6e126ead0b6d9b3fd"
+      },
+      {
+        "detector": "sfp_port",
+        "threads": 1,
+        "detections": 5,
+        "cold_wall_s": 3.1478588419995504
+      }
+    ],
+    "passed": true
+  },
+  "physical_short_probe": {
+    "completed": 0,
+    "environment_or_cancelled_attempts": 5,
+    "deferred": true,
+    "reason": "Concurrent full-scene renderers threaten final raw sensor coverage; offline diagnostics continue"
+  },
+  "final_accounting_checkpoint": {
+    "status": "primary_final_trials",
+    "attempts": 18,
+    "summary": {
+      "sc": {
+        "attempted": 9,
+        "policy_eligible": 8,
+        "verified": 7,
+        "all_attempt_wilson95": [
+          0.45258896910698887,
+          0.9367748928821533
+        ],
+        "policy_eligible_wilson95": [
+          0.5291118177871464,
+          0.9775825085499433
+        ],
+        "median_success_sim_s": 29.834500000000006,
+        "median_success_wall_s": 293.3740200519969,
+        "maximum_raw_peak_N": 3.150219475292434,
+        "complete_force_audits": 7,
+        "failure_causes": {
+          "setup_interruption_before_policy": 1,
+          "high_rate_force_audit:raw_force_coverage_gap": 1
+        }
+      },
+      "sfp": {
+        "attempted": 9,
+        "policy_eligible": 9,
+        "verified": 7,
+        "all_attempt_wilson95": [
+          0.45258896910698887,
+          0.9367748928821533
+        ],
+        "policy_eligible_wilson95": [
+          0.45258896910698887,
+          0.9367748928821533
+        ],
+        "median_success_sim_s": 58.61000000000001,
+        "median_success_wall_s": 610.353928165001,
+        "maximum_raw_peak_N": 3.4042541431386972,
+        "complete_force_audits": 9,
+        "failure_causes": {
+          "visual_grasp_failed:reprojection:7.14px>6.00px": 1,
+          "original_policy_returned_failure": 1
+        }
+      }
+    },
+    "does_not_select_development_candidates": true,
+    "resource_contention_note": "Separate development Gazebo renderers ran concurrently during part of final44; wall timings are shared-laptop timings. SC700045 had a 0.3605 s raw force gap and remains failed. Causation has not been established; concurrent development rendering stopped."
+  }
+}

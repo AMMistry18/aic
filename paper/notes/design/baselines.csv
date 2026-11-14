@@ -1,0 +1,7 @@
+method,role,selected,reason,citation
+Initial learned geometry,ablation anchor,yes,Existing matched SC no-body evidence; no full combined comparison,team
+Without tracking compensation,ablation anchor,yes,Isolate own-robot tracking effect,team
+Discard axial correction; retain probes,ablation anchor,planned,Isolate information benefit from probe motion,kim2022
+Insert-One,related work,no,Broader 6DoF real-world task; no comparable implementation executed,chang2024
+FORGE,related work,no,Force-aware learned sim-to-real; no matched benchmark executed,noseworthy2024
+SyPAS,related work,no,Different connector types and real-world servoing; numerical ranking inappropriate,sypas

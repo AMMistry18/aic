@@ -1,0 +1,325 @@
+{
+  "scope": "Offline historical SC development RGB/CAD reuse, no insertion claim",
+  "final_cases_used": 0,
+  "original_thresholds_unchanged": true,
+  "installed": false,
+  "rows": [
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\000\\inputs.json",
+      "input_sha256": "85bdbdb13c12e101d0c91f3e16cdd36c6fb4f7b3bb6707a22ba8125076a68f43",
+      "times_s": {
+        "baseline": 2.1089135999791324,
+        "candidate": 1.6525710999849252,
+        "baseline_repeat": 1.8955419999547303
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\003\\inputs.json",
+      "input_sha256": "0e284ae35b5f87f8ca049c42529608808e65bd99a0dc9582c64f07a99cc13848",
+      "times_s": {
+        "baseline": 1.7855395000078715,
+        "candidate": 1.1834843999822624,
+        "baseline_repeat": 1.5673130999784917
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\006\\inputs.json",
+      "input_sha256": "df5add0081c5dae839975e130a069ce522767f7996983ad08eb8f8ab7fe81dae",
+      "times_s": {
+        "baseline": 1.4527464999700896,
+        "candidate": 1.0426587000256404,
+        "baseline_repeat": 1.4296481999917887
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\000\\inputs.json",
+      "input_sha256": "14174d0fb3efddfeda58fea8c8477667057fd9b1486371d69939db1a30c15855",
+      "times_s": {
+        "baseline": 1.6099080999847502,
+        "candidate": 1.4859796999953687,
+        "baseline_repeat": 1.6609961000503972
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\003\\inputs.json",
+      "input_sha256": "ef7863c558863ee09d13273c87a8fa0a7dd6387c42fcc219d969fe9fac651a90",
+      "times_s": {
+        "baseline": 1.4643696999992244,
+        "candidate": 1.211421900021378,
+        "baseline_repeat": 1.499288199993316
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\006\\inputs.json",
+      "input_sha256": "e70e64503de247eb525f46578764a8d505ba5248029b3f30f07bf72f3bf07ee0",
+      "times_s": {
+        "baseline": 1.6812503000255674,
+        "candidate": 1.2991946000256576,
+        "baseline_repeat": 1.397061499999836
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\000\\inputs.json",
+      "input_sha256": "1f6ab2fd4438759becd5c1f32c843e454a6ffe47ce2fff5e2cea1807c303c026",
+      "times_s": {
+        "baseline": 1.5153933000401594,
+        "candidate": 1.0903447999735363,
+        "baseline_repeat": 1.4365556999691762
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\003\\inputs.json",
+      "input_sha256": "51eaa422f16777c007c6bd61a5fb78578edbf9f4b1c0d29582a795d00f6f5f66",
+      "times_s": {
+        "baseline": 1.4047291000024416,
+        "candidate": 0.9040192000102252,
+        "baseline_repeat": 1.3546454000170343
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\006\\inputs.json",
+      "input_sha256": "9978e4b2f5db8ccbab8a37027041a3684dedd58c747c2f156aa0d5d678c53148",
+      "times_s": {
+        "baseline": 1.3310002000071108,
+        "candidate": 1.120336199994199,
+        "baseline_repeat": 1.5278450000332668
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\000\\inputs.json",
+      "input_sha256": "2e6bc8a26332aa1159570ae0cba5ae088674ed072758e2f1184836d7720de3c9",
+      "times_s": {
+        "baseline": 1.4667056999751367,
+        "candidate": 1.1241520999465138,
+        "baseline_repeat": 1.565802899945993
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\003\\inputs.json",
+      "input_sha256": "ddadcef87e861ab1fd586a24d3f372388c974389fd198da6df3471e39cad04fa",
+      "times_s": {
+        "baseline": 1.377169799990952,
+        "candidate": 1.0712542000110261,
+        "baseline_repeat": 1.381335099984426
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    },
+    {
+      "input": ".artifacts\\lastinch_runs\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\rim_inputs\\006\\inputs.json",
+      "input_sha256": "6a676bea8d1d3b1ffa897fce581c9b43df93b067a6e683c9fe9a5a65af254d6f",
+      "times_s": {
+        "baseline": 1.3656455000163987,
+        "candidate": 0.9417611999670044,
+        "baseline_repeat": 1.183855000010226
+      },
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3,
+        "baseline_repeat": 9
+      },
+      "candidate_vs_original": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      },
+      "original_repeat": {
+        "same_decision": true,
+        "bit_identical": true,
+        "maximum_modeled_displacement_m": 0.0,
+        "maximum_raw_diagnostic_difference_mixed_units": 0.0
+      }
+    }
+  ],
+  "all_gate_decisions_match": true,
+  "maximum_modeled_displacement_m": 0.0,
+  "median_original_s": 1.4655376999871805,
+  "median_candidate_s": 1.1222441499703564,
+  "source_sha256": "c54fd34dd1f720e701cf5bf1e408fcf85d11d4d09e3f4c30e3985811529aee93"
+}

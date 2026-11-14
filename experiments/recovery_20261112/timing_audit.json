@@ -1,0 +1,46 @@
+{
+  "scope": "Single successful recovered SFP development case; not a population speed estimate",
+  "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff\\policy.json",
+  "action_wall_s": 715.4829235990001,
+  "action_sim_s": 57.458,
+  "travel_sim_s": 6.959999999999994,
+  "travel_policy_samples": 336,
+  "travel_policy_force_ge_3N_samples": 0,
+  "travel_policy_peak_force_N": 1.4119567030803921,
+  "force_scope": "50Hz production observations during travel; independent 2000Hz whole-action peak is a separate metric",
+  "phases": [
+    {
+      "phase": "entrance_lip_probe_+0.002m",
+      "wall_stamp_s": 1794525805.9741833,
+      "sim_s": 18.0905,
+      "until_next_sim_s": 13.720000000000002,
+      "until_next_wall_s": 174.6021773815155
+    },
+    {
+      "phase": "entrance_lip_probe_-0.002m",
+      "wall_stamp_s": 1794525980.5763607,
+      "sim_s": 31.8105,
+      "until_next_sim_s": 8.1525,
+      "until_next_wall_s": 116.83269190788269
+    },
+    {
+      "phase": "aligned_entry",
+      "wall_stamp_s": 1794526097.4090526,
+      "sim_s": 39.963,
+      "until_next_sim_s": 5.007999999999996,
+      "until_next_wall_s": 55.18124270439148
+    },
+    {
+      "phase": "opposed_side_wall_registration",
+      "wall_stamp_s": 1794526152.5902953,
+      "sim_s": 44.971,
+      "until_next_sim_s": 16.893,
+      "until_next_wall_s": 183.04419565200806
+    },
+    {
+      "phase": "full_depth_insertion",
+      "wall_stamp_s": 1794526335.634491,
+      "sim_s": 61.864
+    }
+  ]
+}

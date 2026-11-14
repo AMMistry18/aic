@@ -1,0 +1,26 @@
+{
+  "scope": "Static development image fit only; original synchronization rejections preserved",
+  "final_cases_used": 0,
+  "rows": [
+    {
+      "case_id": "train_81000",
+      "reason": "insufficient_unoccluded_subpixel_shell_boundary",
+      "wall_s": 0.049899700039532036
+    },
+    {
+      "case_id": "train_81001",
+      "reason": "insufficient_unoccluded_subpixel_shell_boundary",
+      "wall_s": 0.034539800020866096
+    },
+    {
+      "case_id": "train_81002",
+      "reason": "insufficient_unoccluded_subpixel_shell_boundary",
+      "wall_s": 0.07349800004158169
+    },
+    {
+      "case_id": "train_81003",
+      "reason": "insufficient_unoccluded_subpixel_shell_boundary",
+      "wall_s": 0.03341650002403185
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "sc": {
+    "verified": 6,
+    "attempts": 7,
+    "policy_trials": 6,
+    "policy_failures": 0,
+    "setup_failures": 0,
+    "cancelled_duplicate_setups": 1,
+    "median_success_sim_s": 30.113750000000003,
+    "median_success_wall_s": 282.68074184300167,
+    "max_raw_peak_N": 3.3220326328816037,
+    "complete_2000Hz": true,
+    "descriptive_policy_trial_wilson95": [
+      0.6096657120978346,
+      1.0
+    ],
+    "interval_limitation": "Development case selection and shared-seed pairs prevent a held-out population interpretation"
+  },
+  "sfp": {
+    "verified": 5,
+    "attempts": 7,
+    "policy_trials": 6,
+    "policy_failures": 1,
+    "setup_failures": 1,
+    "cancelled_duplicate_setups": 0,
+    "median_success_sim_s": 58.04800000000001,
+    "median_success_wall_s": 561.1202927480044,
+    "max_raw_peak_N": 3.2850959292257382,
+    "complete_2000Hz": true,
+    "descriptive_policy_trial_wilson95": [
+      0.43649717781352987,
+      0.9699466302516935
+    ],
+    "interval_limitation": "Development case selection and shared-seed pairs prevent a held-out population interpretation"
+  }
+}

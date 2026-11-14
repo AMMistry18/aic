@@ -1,0 +1,559 @@
+{
+  "scope": "Development perception diagnostics only; no angular-motion or insertion success claimed",
+  "final_cases_read": 0,
+  "truth_used_for_optimization": false,
+  "rows": [
+    {
+      "connector": "sc",
+      "case_id": "train_80010",
+      "original_failure": "stale_stamp_spread:3.000s>0.120s",
+      "original_crop_pipeline_wall_s": 8.453386139997747,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0006112638663834855,
+        "reprojection_px": 2.1396471671674355,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.12105539999902248,
+      "joint_fit": {
+        "position": [
+          0.030898914622321007,
+          -0.1703828925233255,
+          0.04523690163432605
+        ],
+        "rotation": [
+          [
+            0.005546119754730487,
+            -0.9994223650955965,
+            0.03352874442012977
+          ],
+          [
+            -0.9999577386722944,
+            -0.005788700001667046,
+            -0.007142256063876392
+          ],
+          [
+            0.007332218290358593,
+            -0.033487715643425044,
+            -0.9994122330029427
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 1.868020949767019,
+        "fitted_delta_mm_deg": [
+          -0.02945836103887058,
+          0.05376686120560432,
+          -0.13563874524387878,
+          1.3104623589206257,
+          0.10203757351588638,
+          -0.28204077620988993
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.00024896590258721056,
+            "angle_deg": 0.9101572685086122
+          },
+          {
+            "position_m": 0.00010902045406938036,
+            "angle_deg": 0.6267895457465811
+          },
+          {
+            "position_m": 0.0006285610747389481,
+            "angle_deg": 0.8378246944488694
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.8379302196386297,
+        "angle_deg": 1.2690464611977113
+      },
+      "joint_errors": {
+        "position_mm": 0.8590063908665267,
+        "angle_deg": 0.31475486667239927
+      }
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80011",
+      "original_failure": "stale_stamp_spread:2.000s>0.120s",
+      "original_crop_pipeline_wall_s": 0.18446154599951115,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0008031890038441927,
+        "reprojection_px": 3.2869065581216326,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.13700009998865426,
+      "joint_fit": {
+        "position": [
+          0.07599392885004724,
+          -0.17606478768811495,
+          0.053736121534108464
+        ],
+        "rotation": [
+          [
+            0.10107451051761658,
+            -0.994729347488341,
+            -0.017247277148682245
+          ],
+          [
+            -0.9947121304857198,
+            -0.10072501435529649,
+            -0.020056144885929092
+          ],
+          [
+            0.018213203677121127,
+            0.01918324082485913,
+            -0.9996500800196396
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.208081239302327,
+        "fitted_delta_mm_deg": [
+          0.02124488137518298,
+          -0.13869580843060403,
+          0.11632267727820679,
+          -2.6365356200266503,
+          -0.6409624784683933,
+          -0.6256339752315156
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.00019907512282390908,
+            "angle_deg": 1.8862010909252307
+          },
+          {
+            "position_m": 0.00015645458217032664,
+            "angle_deg": 1.546039689287471
+          },
+          {
+            "position_m": 0.0001942248327115909,
+            "angle_deg": 1.0472628165444442
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.7947591746060796,
+        "angle_deg": 2.787171816992955
+      },
+      "joint_errors": {
+        "position_mm": 0.8507480251558893,
+        "angle_deg": 0.22615518790187175
+      }
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80012",
+      "original_failure": "stale_stamp_spread:1.500s>0.120s",
+      "original_crop_pipeline_wall_s": 0.12430530400160933,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.00033705656974995335,
+        "reprojection_px": 1.6559945084401324,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.12395899998955429,
+      "joint_fit": {
+        "position": [
+          0.11965219510705755,
+          -0.17140921407190465,
+          0.04485894413022544
+        ],
+        "rotation": [
+          [
+            -0.016189887654042345,
+            -0.9997557818878534,
+            0.015042078299117901
+          ],
+          [
+            -0.9991362281876679,
+            0.015600363438387803,
+            -0.03851527208148842
+          ],
+          [
+            0.038271204066116934,
+            -0.01565264330384838,
+            -0.9991447891556721
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 1.5953798699446209,
+        "fitted_delta_mm_deg": [
+          -0.014505175083714222,
+          0.0631310890708823,
+          0.10030745410305263,
+          -0.3299277173270851,
+          -0.14717451347448599,
+          0.006829307447499392
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.000546857623615578,
+            "angle_deg": 0.24410348461627665
+          },
+          {
+            "position_m": 5.610151577231358e-05,
+            "angle_deg": 0.8945569696322359
+          },
+          {
+            "position_m": 0.00025259394614928973,
+            "angle_deg": 0.8271427666850171
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.3959104955472756,
+        "angle_deg": 1.0074114653681308
+      },
+      "joint_errors": {
+        "position_mm": 0.32908388806038125,
+        "angle_deg": 0.7134974011381789
+      }
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80013",
+      "original_failure": "stale_stamp_spread:7.500s>0.120s",
+      "original_crop_pipeline_wall_s": 0.10736517499753973,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0006235621742586684,
+        "reprojection_px": 2.7143939405752917,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.10837119998177513,
+      "joint_fit": {
+        "position": [
+          0.049683943671682856,
+          -0.13590115893582813,
+          0.05351366866843873
+        ],
+        "rotation": [
+          [
+            0.013567338557249472,
+            -0.9998171767525601,
+            -0.013473692701440452
+          ],
+          [
+            -0.9994805112032861,
+            -0.01316634306094002,
+            -0.02941691919997812
+          ],
+          [
+            0.029234141842875514,
+            0.013865802571129108,
+            -0.9994764151643444
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.1663142793208507,
+        "fitted_delta_mm_deg": [
+          -0.1450090242654694,
+          -0.33995212549828613,
+          -0.008621299129470556,
+          -2.1691803327361785,
+          0.8562482533204876,
+          -0.6572465148523438
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0006860558862217002,
+            "angle_deg": 0.94918380963136
+          },
+          {
+            "position_m": 0.000239126339094567,
+            "angle_deg": 1.2733508949247854
+          },
+          {
+            "position_m": 0.0006703076067228478,
+            "angle_deg": 0.7815945901153866
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 1.3236071522236479,
+        "angle_deg": 2.5685806831623914
+      },
+      "joint_errors": {
+        "position_mm": 1.561795090757979,
+        "angle_deg": 1.4970242724049974
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81000",
+      "original_failure": "stale_stamp_spread:5.000s>0.120s",
+      "original_crop_pipeline_wall_s": 0.7902240010007517,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0002824379064681552,
+        "reprojection_px": 1.216189250825163,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.06999390001874417,
+      "joint_fit": {
+        "position": [
+          0.07652718512276357,
+          -0.38694594957481654,
+          0.19313965478278697
+        ],
+        "rotation": [
+          [
+            0.999805774268685,
+            -0.015275750808816107,
+            -0.012452516862941493
+          ],
+          [
+            -0.015477994309849493,
+            -0.9997471774333706,
+            -0.016309902088979096
+          ],
+          [
+            -0.012200222585639691,
+            0.016499474271466228,
+            -0.9997894387908014
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 1.1575711439953185,
+        "fitted_delta_mm_deg": [
+          -0.016808285949871538,
+          -0.11732846719094199,
+          -0.07442176531263828,
+          -0.3824032175452561,
+          0.18415343804903989,
+          -0.21363864584744935
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0004385071609799988,
+            "angle_deg": 1.3432959451762605
+          },
+          {
+            "position_m": 0.00011478331831627129,
+            "angle_deg": 0.4623248984996296
+          },
+          {
+            "position_m": 0.0004808065067572312,
+            "angle_deg": 1.0669289053777833
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.5126890006061162,
+        "angle_deg": 3.908087644767908
+      },
+      "joint_errors": {
+        "position_mm": 0.5567765445415126,
+        "angle_deg": 4.136575266706408
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81001",
+      "original_failure": "stale_stamp_spread:3.500s>0.120s",
+      "original_crop_pipeline_wall_s": 0.10216124400176341,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0009589171308162975,
+        "reprojection_px": 5.0148254870556075,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.08435899997130036,
+      "joint_fit": {
+        "position": [
+          0.08246109156942927,
+          -0.3456988341122547,
+          0.19062291125967817
+        ],
+        "rotation": [
+          [
+            0.9974419309782903,
+            -0.06444647384455801,
+            -0.030923232937424553
+          ],
+          [
+            -0.0647012513497911,
+            -0.9978779091558971,
+            -0.007309342817646521
+          ],
+          [
+            -0.03038654965721956,
+            0.009291416881048058,
+            -0.9994950360918612
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 4.101484352728455,
+        "fitted_delta_mm_deg": [
+          -0.10539545494761365,
+          -0.29532697892275206,
+          0.7456453766286658,
+          -1.0047935926787288,
+          0.2751267140954235,
+          -0.16116314469487844
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0014940657583771666,
+            "angle_deg": 0.8307775334382596
+          },
+          {
+            "position_m": 0.00029718247354101863,
+            "angle_deg": 0.07726485219333906
+          },
+          {
+            "position_m": 0.002050861393310705,
+            "angle_deg": 1.103492493772336
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 1.2659203173765725,
+        "angle_deg": 1.0325041892093374
+      },
+      "joint_errors": {
+        "position_mm": 0.5996147717308423,
+        "angle_deg": 1.7174257927973469
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81002",
+      "original_failure": "stale_stamp_spread:6.000s>0.120s",
+      "original_crop_pipeline_wall_s": 0.13672327500535175,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0005708195202107008,
+        "reprojection_px": 2.4971252250212363,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.06695000000763685,
+      "joint_fit": {
+        "position": [
+          0.09022367686413975,
+          -0.30866944170136185,
+          0.19930816345151664
+        ],
+        "rotation": [
+          [
+            0.999291870519557,
+            0.037605618205865096,
+            -0.001254987202524016
+          ],
+          [
+            0.03757685261768164,
+            -0.9991304102138565,
+            -0.01806664144878252
+          ],
+          [
+            -0.0019333030990561076,
+            0.018006689458213883,
+            -0.9998359972884964
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.0502253306333813,
+        "fitted_delta_mm_deg": [
+          -0.16841806894023817,
+          -0.39011322100252516,
+          -0.1569373555064688,
+          -1.2942801011319334,
+          0.7524734636545444,
+          -1.9948998215702052
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0012656616925720767,
+            "angle_deg": 1.9641708816804795
+          },
+          {
+            "position_m": 0.0002469929565147982,
+            "angle_deg": 0.18875583375982055
+          },
+          {
+            "position_m": 0.0014697712214048312,
+            "angle_deg": 0.8494313647347489
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.8911501787245805,
+        "angle_deg": 3.6990183625626645
+      },
+      "joint_errors": {
+        "position_mm": 0.4830023149850709,
+        "angle_deg": 1.5814218982201662
+      }
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81003",
+      "original_failure": "stale_stamp_spread:2.000s>0.120s",
+      "original_crop_pipeline_wall_s": 0.1247362409994821,
+      "static_geometry_diagnostic": {
+        "production_clock_rejection_preserved": true,
+        "rmse_m": 0.0005925081998025072,
+        "reprojection_px": 2.744181788791236,
+        "production_pose_accepted": false
+      },
+      "joint_fit_wall_s": 0.0693135000183247,
+      "joint_fit": {
+        "position": [
+          0.08185789670768373,
+          -0.2696139707795987,
+          0.20206307563937423
+        ],
+        "rotation": [
+          [
+            0.9996202288934801,
+            -0.02437969340898889,
+            0.012846343301901073
+          ],
+          [
+            -0.02451301333634254,
+            -0.9996461924395864,
+            0.010324830178233907
+          ],
+          [
+            0.012590081974271982,
+            -0.010635811690735443,
+            -0.9998641754486257
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 2.520245532115593,
+        "fitted_delta_mm_deg": [
+          0.0019702216812827688,
+          -0.24973607375835327,
+          0.13872432755578334,
+          -0.9307302601670866,
+          0.1148346034398562,
+          -1.0884030502317146
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0014374210545037426,
+            "angle_deg": 1.781133192439413
+          },
+          {
+            "position_m": 0.0003637473435108006,
+            "angle_deg": 0.20522512461029388
+          },
+          {
+            "position_m": 0.000812209563695265,
+            "angle_deg": 0.6868059259008898
+          }
+        ]
+      },
+      "original_errors": {
+        "position_mm": 0.7633989921358852,
+        "angle_deg": 0.8798585319393588
+      },
+      "joint_errors": {
+        "position_mm": 0.6018219726453325,
+        "angle_deg": 1.2719916352583605
+      }
+    }
+  ]
+}

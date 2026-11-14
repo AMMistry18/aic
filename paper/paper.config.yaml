@@ -1,0 +1,10 @@
+venue: IEEE Robotics and Automation Practice
+page_target_body: 4
+page_limit_references: 1
+runtime:
+  python: C:/Python314/python.exe
+  simulator_container: research-aic-eval
+  perception_python: /opt/research-perception/bin/python
+evidence_snapshot: results/recovery_snapshot_20261112.json
+study_status: partial_development
+final_trials_started: false

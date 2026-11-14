@@ -61,6 +61,32 @@ def test_axial_lead_cannot_exceed_the_sc_bore():
                  force_abort_n=18.0, max_axial_lead_m=0.020).validated()
 
 
+def test_terminal_brake_removes_overtravel_and_bounds_elastic_lead():
+    config = SCConfig(terminal_brake_enable=True, max_axial_lead_m=.001).validated()
+    # A stale, advanced setpoint cannot retain 1 mm of stored spring demand
+    # at the shoulder. The public physical seat is the absolute endpoint.
+    for depth in np.linspace(config.seat_candidate_depth_m, SC_INSERT_DEPTH_M, 20):
+        target = next_sc_depth(depth, .020, .025, 0., config)
+        assert target <= SC_INSERT_DEPTH_M
+        assert target-depth <= config.terminal_max_lead_m + 1e-12
+    # The dwell handoff advances at the same limited speed, with no endpoint jump.
+    depth = config.seat_candidate_depth_m
+    assert next_sc_depth(depth, depth, .025, 0., config)-depth == pytest.approx(.0005*.025)
+    assert next_sc_depth(depth, depth, .025, config.seat_force_cap_n, config) == depth
+    # An actual overshoot must produce a restoring position error rather than
+    # move the scheduled trajectory to the overshooting physical tip.
+    assert next_sc_depth(depth, depth-.0003, .025, 0., config) < depth-.00025
+
+
+def test_terminal_brake_does_not_change_unselected_flowstate_controller():
+    config = SCConfig(max_axial_lead_m=.001).validated()
+    depth = .0153
+    assert next_sc_depth(depth, depth, .025, 0., config)-depth == pytest.approx(.008*.025)
+    assert next_sc_depth(.016, .017, 1., 0., config) > SC_INSERT_DEPTH_M
+    # An unselected feature cannot invalidate an existing slower deployment.
+    assert SCConfig(free_speed_m_s=.0001).validated().free_speed_m_s == .0001
+
+
 def test_config_bounds_are_scaled_to_the_bore():
     config = SCConfig().validated()
     assert config.target_axial_force_n < config.seat_force_cap_n < config.force_abort_n

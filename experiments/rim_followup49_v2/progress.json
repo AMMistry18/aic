@@ -1,0 +1,35 @@
+{
+  "status": "completed_development_pair_requires_review",
+  "final_policy_modified": false,
+  "updated_unix": 1794597272.52385,
+  "parent_check": {
+    "original_sha256": "0e0fc3ecf701e9fe900c600a0715275b8147c0a755627a7178003e5d766962b7",
+    "clone_sha256": "04cf65f9f26204f7782fc99fabf8dc586e9d0bad8bf538ab740aa88c7e9be253",
+    "source_text_identical_after_utf8_bom_decoding": true
+  },
+  "candidate_sha256": "c54fd34dd1f720e701cf5bf1e408fcf85d11d4d09e3f4c30e3985811529aee93",
+  "comparison": [
+    {
+      "condition": "baseline",
+      "run": "dev_42000_runtime47v2_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "verified_success": true,
+      "record_wall_s": 300.0660860370117,
+      "action_sim_s": 27.673499999999997,
+      "port_measurement_wall_s": 53.654,
+      "raw_peak_N": 3.5080881739792824,
+      "force_coverage": true
+    },
+    {
+      "condition": "cached",
+      "run": "dev_42000_runtime47v4_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "verified_success": true,
+      "record_wall_s": 282.193658454009,
+      "action_sim_s": 26.189000000000007,
+      "port_measurement_wall_s": 45.833,
+      "raw_peak_N": 3.060299145213354,
+      "force_coverage": true
+    }
+  ],
+  "final_sources_unchanged": true,
+  "not_a_randomized_success_rate": true
+}

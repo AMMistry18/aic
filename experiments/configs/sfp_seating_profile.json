@@ -1,0 +1,11 @@
+{
+  "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+  "geometry_evidence": "Pinned NIC Card Mount source entrance-to-seat = 45.8 mm; source box SAT is clear at the nominal seat. Empty active-contact observations require a live physics heartbeat and a matching deliberate lateral-contact positive control. Conservative 0.10 mm lateral / 0.10 degree pose budget; independently bounded penetration.",
+  "seated_depth_m": 0.0458,
+  "depth_tolerance_m": 0.00025,
+  "lateral_tolerance_m": 0.0001,
+  "angular_tolerance_deg": 0.10,
+  "max_penetration_m": 0.0001,
+  "dwell_s": 1.0,
+  "max_sample_gap_s": 0.03
+}

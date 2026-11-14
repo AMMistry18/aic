@@ -1,0 +1,106 @@
+{
+  "scope": "Actual robot kinematics/observability audit; no object pose or grasp truth read",
+  "robot_urdf_sha256": "205847fb1e25da3112d2719de9a2072545310f8ea2e2e34b108154f685290e2c",
+  "rows": [
+    {
+      "camera": "left_camera",
+      "joint_configurations": 21,
+      "maximum_tcp_relative_position_change_m": 2.0014830212433605e-16,
+      "maximum_tcp_relative_rotation_matrix_change": 2.220446049250313e-16
+    },
+    {
+      "camera": "center_camera",
+      "joint_configurations": 21,
+      "maximum_tcp_relative_position_change_m": 1.576213700060856e-16,
+      "maximum_tcp_relative_rotation_matrix_change": 3.3306690738754696e-16
+    },
+    {
+      "camera": "right_camera",
+      "joint_configurations": 21,
+      "maximum_tcp_relative_position_change_m": 2.330476870336199e-16,
+      "maximum_tcp_relative_rotation_matrix_change": 2.220446049250313e-16
+    }
+  ],
+  "tcp_from_camera": {
+    "left_camera": [
+      [
+        0.49999939438862695,
+        0.8365152157523216,
+        0.22414927933378026,
+        -0.10051658396221158
+      ],
+      [
+        -0.8660257534267776,
+        0.48296256541323884,
+        0.1294084804448505,
+        -0.0580325931364037
+      ],
+      [
+        -3.5480430670327825e-06,
+        -0.258823210366284,
+        0.9659247101938648,
+        -0.20543589102822196
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "center_camera": [
+      [
+        0.9999999999931569,
+        9.348309003318291e-08,
+        3.6982578692070176e-06,
+        -8.110621063650569e-10
+      ],
+      [
+        -1.047492601145846e-06,
+        0.9659247102003763,
+        0.25882321036418116,
+        -0.116079182624172
+      ],
+      [
+        -3.548043067116028e-06,
+        -0.2588232103662839,
+        0.9659247101938646,
+        -0.20543789102822202
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "right_camera": [
+      [
+        0.5000012112967424,
+        -0.836515120820287,
+        -0.22414558068543608,
+        0.10051658313858015
+      ],
+      [
+        0.866024704433541,
+        0.4829627298402134,
+        0.1294148866865284,
+        -0.05803259456297396
+      ],
+      [
+        -3.548043067060514e-06,
+        -0.258823210366284,
+        0.9659247101938647,
+        -0.20543589102822207
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "inference": "For a rigid grasp G, camera_from_plug = inverse(tcp_from_camera) @ G. Moving the common wrist cannot change gripper self-occlusion of the plug; fixture/background occlusion and lighting may change.",
+  "implication": "Angular recovery needs additional measurement information, such as a genuinely different fixed view or qualified contact constraints; repeating wrist frames alone cannot remove systematic hidden-corner bias."
+}

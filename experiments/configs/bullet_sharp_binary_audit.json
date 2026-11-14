@@ -1,0 +1,16 @@
+{
+  "backend": "source_float64_sharp",
+  "gz_physics_version": "8.3.0",
+  "bullet_version": "3.24",
+  "scalar_precision_bits": 64,
+  "source_tag": "gz-physics8_8.3.0",
+  "source_modifications": "SDF btBoxShape construction calls setMargin(0.0); dimensions unchanged; dynamic AttachBox API unchanged and unused",
+  "plugin_path": "/opt/research-bullet-sharp/libResearchBulletSharp.so",
+  "binary_sha256": {
+    "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+    "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+    "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+    "/opt/research-bullet-sharp/libResearchBulletSharp.so": "fea108d05308fe4adb67a7e64ee6b45e607a3d2164d103e201adedb19194843e"
+  },
+  "source_provenance": ".artifacts/box_margin27/source_changes.json"
+}

@@ -1,0 +1,15 @@
+{
+  "scope": "Real CPU inference runtime guard check only, not insertion qualification",
+  "final_cases_read": 0,
+  "robot_commands_sent": 0,
+  "calls": [
+    {
+      "threads": 1,
+      "device": "cpu"
+    }
+  ],
+  "wall_s": 2.334401547006564,
+  "threads_after_inference": 1,
+  "detections": 1,
+  "passed": true
+}

@@ -1,0 +1,38 @@
+{
+  "purpose": "public mesh geometry in mouth frame; no scene placement",
+  "source_asset": "SC Port 2/sc_port_visual.glb",
+  "source_sha256": "8425463bb8044aac09dd0e0360dccb27d279bcd8cf61f0708f70c636abba95f6",
+  "source_model_sha256": "4ba39bb5227b493c68b43ab896c83b6c8c4f31703fe6a9ead21dac730fec9959",
+  "material": "Material.004",
+  "blue_rule": "B > 1.3*R and B > 1.1*G on source texture vertices",
+  "mouth_from_body": [
+    [
+      -0.9999999999964794,
+      1.7108391384098885e-23,
+      -2.653589793352727e-06,
+      3.4203440803796704e-26
+    ],
+    [
+      2.6535897933348254e-06,
+      -3.6732051033222793e-06,
+      -0.9999999999897332,
+      -7.346410206644567e-09
+    ],
+    [
+      -9.747179571009997e-12,
+      -0.9999999999932538,
+      3.67320510328781e-06,
+      0.013640000000013492
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "source_blue_vertex_count": 12974,
+  "hull_vertex_count": 466,
+  "trimesh_version": "5.2.0",
+  "npz_sha256": "ca25230cf76725ffdd960cd6580e0c4add367145164a61994157047a3e153972"
+}

@@ -1,0 +1,407 @@
+{
+  "scope": "Historical development cohort only; successful-only timing summaries with every completed policy retained",
+  "final_trials_read": 0,
+  "configuration_note": "record_wall_s includes configuration and post-action evidence capture; action_sim_s starts after configuration",
+  "stroke_note": "SFP phase includes 1.2s controller dwell; stroke wall time is not logged and is not inferred by a scale factor",
+  "summary": {
+    "sc": {
+      "successful_development_trials": 9,
+      "median_record_wall_s": 286.5136731290004,
+      "median_configuration_wall_s": 22.35427105599956,
+      "median_action_sim_s": 30.166,
+      "median_stage_sim_s": {
+        "prealignment": 0.5680000000000005,
+        "seating_including_shoulder_registration": 21.039,
+        "shoulder_registration_subset": 8.029000000000003,
+        "visual_initialization": 8.306
+      },
+      "median_stage_wall_s": {
+        "prealignment": 4.722999999999999,
+        "seating_including_shoulder_registration": 167.38799999999998,
+        "visual_initialization": 79.767
+      }
+    },
+    "sfp": {
+      "successful_development_trials": 6,
+      "median_record_wall_s": 578.2886156170025,
+      "median_configuration_wall_s": 20.277993705998597,
+      "median_action_sim_s": 58.54175000000001,
+      "median_stage_sim_s": {
+        "aligned_entry": 5.08325,
+        "final_insertion_phase_including_dwell": 6.9184999999999945,
+        "final_stroke_to_first_estimated_goal": 5.085500000000003,
+        "opposed_lip_registration": 22.287750000000003,
+        "sidewall_registration": 16.96575
+      },
+      "median_stage_wall_s": {
+        "aligned_entry": 44.52178394794464,
+        "opposed_lip_registration": 215.3120436668396,
+        "sidewall_registration": 158.81835627555847
+      }
+    }
+  },
+  "records": [
+    {
+      "run": "dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "6c6e97035f6bace4a9db01f2a52b7422615b074562f6bbb1c29223df7aa53f2a",
+      "record_wall_s": 286.5136731290004,
+      "configuration_wall_s": 17.206828804000907,
+      "policy_and_capture_wall_s": 269.3068443249995,
+      "action_sim_s": 28.522000000000006,
+      "stage_wall_s": {
+        "visual_initialization": 66.382,
+        "prealignment": 4.480000000000004,
+        "seating_including_shoulder_registration": 187.776
+      },
+      "stage_sim_s": {
+        "visual_initialization": 6.956,
+        "prealignment": 0.5259999999999998,
+        "seating_including_shoulder_registration": 19.769000000000002,
+        "shoulder_registration_subset": 8.165
+      }
+    },
+    {
+      "run": "dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "6245f284560d0c26e31f6bcb9f9b47beff7b856d9e29f0610897be0744bcd13d",
+      "record_wall_s": 715.4829235990001,
+      "configuration_wall_s": 18.457127746001788,
+      "policy_and_capture_wall_s": 697.0257958529983,
+      "action_sim_s": 57.458,
+      "stage_wall_s": {
+        "opposed_lip_registration": 291.4348692893982,
+        "aligned_entry": 55.18124270439148,
+        "sidewall_registration": 183.04419565200806,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 21.872500000000002,
+        "aligned_entry": 5.007999999999996,
+        "sidewall_registration": 16.893,
+        "final_insertion_phase_including_dwell": 6.959999999999994,
+        "final_stroke_to_first_estimated_goal": 5.250500000000002
+      }
+    },
+    {
+      "run": "dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "51fe1d4b69380cb6e3210ffaef069207e7088bdddb4890eba6443a9b0b3f0758",
+      "record_wall_s": 291.52750317299797,
+      "configuration_wall_s": 30.755041319996963,
+      "policy_and_capture_wall_s": 260.772461853001,
+      "action_sim_s": 30.166,
+      "stage_wall_s": {
+        "visual_initialization": 80.183,
+        "prealignment": 4.560999999999993,
+        "seating_including_shoulder_registration": 165.78699999999998
+      },
+      "stage_sim_s": {
+        "visual_initialization": 8.306,
+        "prealignment": 0.4819999999999993,
+        "seating_including_shoulder_registration": 20.134,
+        "shoulder_registration_subset": 8.599000000000004
+      }
+    },
+    {
+      "run": "dev_45009_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "f9900026575fcc4ea13e90b7119be0e1c7e85c19379eb09213189663b865738c",
+      "record_wall_s": 514.756642671,
+      "configuration_wall_s": 20.7953829399994,
+      "policy_and_capture_wall_s": 493.9612597310006,
+      "action_sim_s": 58.04800000000001,
+      "stage_wall_s": {
+        "opposed_lip_registration": 169.73762226104736,
+        "aligned_entry": 42.29752779006958,
+        "sidewall_registration": 145.590393781662,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 20.5085,
+        "aligned_entry": 5.172999999999995,
+        "sidewall_registration": 16.9825,
+        "final_insertion_phase_including_dwell": 6.876999999999995,
+        "final_stroke_to_first_estimated_goal": 5.105000000000004
+      }
+    },
+    {
+      "run": "dev_43003_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "4fb8f5ee52fe2504c807a2970b139fbde99a75ea2c01a9d8fd70764828022e93",
+      "record_wall_s": 278.84781055700296,
+      "configuration_wall_s": 23.324494041000435,
+      "policy_and_capture_wall_s": 255.52331651600252,
+      "action_sim_s": 33.097,
+      "stage_wall_s": {
+        "visual_initialization": 86.109,
+        "prealignment": 4.722999999999999,
+        "seating_including_shoulder_registration": 155.437
+      },
+      "stage_sim_s": {
+        "visual_initialization": 10.197,
+        "prealignment": 0.6479999999999997,
+        "seating_including_shoulder_registration": 21.104999999999997,
+        "shoulder_registration_subset": 8.211500000000001
+      }
+    },
+    {
+      "run": "dev_45002_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "45781b63f27a73363c8f0587260fab6fefee857e3827c945c11c33cd25f0199c",
+      "record_wall_s": 609.6568938720011,
+      "configuration_wall_s": 21.08129765099875,
+      "policy_and_capture_wall_s": 588.5755962210023,
+      "action_sim_s": 68.715,
+      "stage_wall_s": {
+        "opposed_lip_registration": 202.74822759628296,
+        "aligned_entry": 43.331278800964355,
+        "sidewall_registration": 161.92122864723206,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 23.394499999999997,
+        "aligned_entry": 5.233499999999999,
+        "sidewall_registration": 17.521,
+        "final_insertion_phase_including_dwell": 7.435500000000005,
+        "final_stroke_to_first_estimated_goal": 5.041499999999999
+      }
+    },
+    {
+      "run": "dev_43004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "7023bf73cc6e98b078d5bde736da8c18e21e5ca29dd8eb7f0bc049c4f30176a8",
+      "record_wall_s": 261.0201588560012,
+      "configuration_wall_s": 19.009251916999347,
+      "policy_and_capture_wall_s": 242.01090693900187,
+      "action_sim_s": 31.643,
+      "stage_wall_s": {
+        "visual_initialization": 67.194,
+        "prealignment": 4.339999999999989,
+        "seating_including_shoulder_registration": 161.252
+      },
+      "stage_sim_s": {
+        "visual_initialization": 8.363,
+        "prealignment": 0.6029999999999998,
+        "seating_including_shoulder_registration": 21.572000000000003,
+        "shoulder_registration_subset": 8.029000000000003
+      }
+    },
+    {
+      "run": "dev_45001_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "76e403da1266d745822385cc1434fc2f651e92d3bf66780280e2004638e558c5",
+      "record_wall_s": 560.8058138769993,
+      "configuration_wall_s": 19.760604471997794,
+      "policy_and_capture_wall_s": 541.0452094050015,
+      "action_sim_s": 59.52250000000001,
+      "stage_wall_s": {
+        "opposed_lip_registration": 225.73054814338684,
+        "aligned_entry": 39.081353187561035,
+        "sidewall_registration": 147.4195261001587,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 21.753500000000003,
+        "aligned_entry": 4.823,
+        "sidewall_registration": 17.322999999999993,
+        "final_insertion_phase_including_dwell": 7.011500000000012,
+        "final_stroke_to_first_estimated_goal": 5.224000000000004
+      }
+    },
+    {
+      "run": "dev_42001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "c491e96937fbf55241a82a750c1aadcd87d91e9114663f30926c73c353a5dce4",
+      "record_wall_s": 272.2054695840052,
+      "configuration_wall_s": 18.240864400002465,
+      "policy_and_capture_wall_s": 253.96460518400272,
+      "action_sim_s": 28.226000000000003,
+      "stage_wall_s": {
+        "visual_initialization": 81.916,
+        "prealignment": 4.525000000000006,
+        "seating_including_shoulder_registration": 156.889
+      },
+      "stage_sim_s": {
+        "visual_initialization": 7.223,
+        "prealignment": 0.5680000000000005,
+        "seating_including_shoulder_registration": 19.148,
+        "shoulder_registration_subset": 7.625500000000002
+      }
+    },
+    {
+      "run": "dev_45008_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "9808138af9477fcb5e892cadbf4f35e9d89dce1d33672b62d6ce2a196c60d24e",
+      "record_wall_s": 561.1202927480044,
+      "configuration_wall_s": 19.585112261003815,
+      "policy_and_capture_wall_s": 541.5351804870006,
+      "action_sim_s": 57.53900000000001,
+      "stage_wall_s": {
+        "opposed_lip_registration": 204.89353919029236,
+        "aligned_entry": 45.71228909492493,
+        "sidewall_registration": 173.97359991073608,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 22.703,
+        "aligned_entry": 5.1370000000000005,
+        "sidewall_registration": 16.893499999999996,
+        "final_insertion_phase_including_dwell": 6.7485,
+        "final_stroke_to_first_estimated_goal": 4.987000000000002
+      }
+    },
+    {
+      "run": "dev_42004_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "2ae4799a47bdd152766e3df0760bb47112cb55d15aa11db8bb09a42d941129c8",
+      "record_wall_s": 322.71700611200504,
+      "configuration_wall_s": 19.489683320003678,
+      "policy_and_capture_wall_s": 303.22732279200136,
+      "action_sim_s": 30.061500000000006,
+      "stage_wall_s": {
+        "visual_initialization": 69.764,
+        "prealignment": 4.881,
+        "seating_including_shoulder_registration": 217.558
+      },
+      "stage_sim_s": {
+        "visual_initialization": 6.591,
+        "prealignment": 0.5330000000000004,
+        "seating_including_shoulder_registration": 21.787,
+        "shoulder_registration_subset": 7.944000000000003
+      }
+    },
+    {
+      "run": "dev_45007_recovery20261112resume2_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": false,
+      "source_policy_sha256": "b8eab6706c901e148da053592b06a5be80d7b5fab25400acaed90558dd03ccf0",
+      "record_wall_s": 112.81166269400273,
+      "configuration_wall_s": 27.72765696800343,
+      "policy_and_capture_wall_s": 85.0840057259993,
+      "action_sim_s": 7.495000000000001,
+      "stage_wall_s": {},
+      "stage_sim_s": {}
+    },
+    {
+      "run": "dev_42003_recovery20261112resume2_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "088df4c19b54794010cd54a61a09d929765ba9114fed5b174d8c6c74c39fdc8f",
+      "record_wall_s": 307.1655864139975,
+      "configuration_wall_s": 34.163475706998724,
+      "policy_and_capture_wall_s": 273.0021107069988,
+      "action_sim_s": 30.2935,
+      "stage_wall_s": {
+        "visual_initialization": 79.767,
+        "prealignment": 5.429000000000002,
+        "seating_including_shoulder_registration": 173.02300000000002
+      },
+      "stage_sim_s": {
+        "visual_initialization": 7.515,
+        "prealignment": 0.609,
+        "seating_including_shoulder_registration": 21.039,
+        "shoulder_registration_subset": 8.147000000000006
+      }
+    },
+    {
+      "run": "dev_45004_recovery20261112resume2_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": true,
+      "source_policy_sha256": "04411b449f622230e72d98b93b0155ebdef9e17900dcba402c57fe8501e0ec05",
+      "record_wall_s": 595.4569384860006,
+      "configuration_wall_s": 22.90231080800004,
+      "policy_and_capture_wall_s": 572.5546276780005,
+      "action_sim_s": 59.0355,
+      "stage_wall_s": {
+        "opposed_lip_registration": 233.12635827064514,
+        "aligned_entry": 49.81386470794678,
+        "sidewall_registration": 155.7154839038849,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 23.3345,
+        "aligned_entry": 5.029499999999999,
+        "sidewall_registration": 16.948999999999998,
+        "final_insertion_phase_including_dwell": 6.829999999999998,
+        "final_stroke_to_first_estimated_goal": 5.0660000000000025
+      }
+    },
+    {
+      "run": "dev_43000_recovery20261112resume2_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "448bacc6f6451b66ee77d03122b8133965fdc9cfcff60e3d51e04121dae2e300",
+      "record_wall_s": 280.5741443509978,
+      "configuration_wall_s": 22.35427105599956,
+      "policy_and_capture_wall_s": 258.21987329499825,
+      "action_sim_s": 29.218000000000004,
+      "stage_wall_s": {
+        "visual_initialization": 75.625,
+        "prealignment": 5.259999999999991,
+        "seating_including_shoulder_registration": 167.38799999999998
+      },
+      "stage_sim_s": {
+        "visual_initialization": 8.325,
+        "prealignment": 0.6189999999999998,
+        "seating_including_shoulder_registration": 19.173000000000002,
+        "shoulder_registration_subset": 7.6569999999999965
+      }
+    },
+    {
+      "run": "dev_45006_recovery20261112resume2_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "verified_success": false,
+      "source_policy_sha256": "a829c5e8b75b4da88ba3c2555e119796b7e02f4461d6179802305d77ee9a90cf",
+      "record_wall_s": 615.482513117,
+      "configuration_wall_s": 18.199374971998623,
+      "policy_and_capture_wall_s": 597.2831381450014,
+      "action_sim_s": 56.616,
+      "stage_wall_s": {
+        "opposed_lip_registration": 223.57001328468323,
+        "aligned_entry": 53.24649906158447,
+        "sidewall_registration": 177.48327827453613,
+        "final_insertion_phase_including_dwell": null
+      },
+      "stage_sim_s": {
+        "opposed_lip_registration": 21.657999999999998,
+        "aligned_entry": 5.0685,
+        "sidewall_registration": 16.957500000000003,
+        "final_insertion_phase_including_dwell": 6.846499999999992,
+        "final_stroke_to_first_estimated_goal": 5.0434999999999945
+      }
+    },
+    {
+      "run": "dev_42002_recovery20261112resume2_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "verified_success": true,
+      "source_policy_sha256": "ed56914d0fda098d2591b647adcb74c669a4b5b594fb91fa8d1a7e83de651a64",
+      "record_wall_s": 311.0633729960027,
+      "configuration_wall_s": 23.021515345004445,
+      "policy_and_capture_wall_s": 288.0418576509983,
+      "action_sim_s": 32.4255,
+      "stage_wall_s": {
+        "visual_initialization": 79.856,
+        "prealignment": 4.747,
+        "seating_including_shoulder_registration": 192.86899999999997
+      },
+      "stage_sim_s": {
+        "visual_initialization": 8.849,
+        "prealignment": 0.5629999999999988,
+        "seating_including_shoulder_registration": 21.782,
+        "shoulder_registration_subset": 7.9354999999999976
+      }
+    }
+  ]
+}

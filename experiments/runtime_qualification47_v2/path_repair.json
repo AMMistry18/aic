@@ -1,0 +1,15 @@
+{
+  "changes": [
+    {
+      "path": "experiments\\start_kilted_handoff.sh",
+      "before_sha256": "d76dd2ed9140e774a85b1325ae3569e447c5a5bfe75c576097d376f212552d90",
+      "after_sha256": "acb5a316b584e1a7a5a2f8b78351dc10c995126129c00034987e84d97dfd6e91"
+    },
+    {
+      "path": "experiments\\prepare_kilted_handoff.py",
+      "before_sha256": "7d90f6801966d831d78d11e0fa71ca4f7c24465909c7455181edb5db048c3e8f",
+      "after_sha256": "ebca7456c93e403fee6ede92df9788941a7726a99e2a15e506eca95d71388ddd"
+    }
+  ],
+  "final_sources_changed": false
+}

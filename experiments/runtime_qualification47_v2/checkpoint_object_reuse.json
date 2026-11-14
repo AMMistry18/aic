@@ -1,0 +1,40 @@
+{
+  "purpose": "Future evidence snapshots hardlink immutable weights; no existing evidence deleted or weights changed",
+  "rows": [
+    {
+      "path": "aic_example_policies\\aic_example_policies\\ros\\weights\\best.pt",
+      "sha256": "938175f78d3fef50e0dffcfccc3103a1a7afeb2576f46732187336043ba661e9",
+      "bytes": 53249216
+    },
+    {
+      "path": "aic_example_policies\\aic_example_policies\\ros\\weights\\best_sc_mouth_pose.pt",
+      "sha256": "af7d41d2647317aa9e2cda0e4966c0c864fb1386b3377757724765858f1a9b68",
+      "bytes": 19828744
+    },
+    {
+      "path": "aic_example_policies\\aic_example_policies\\ros\\weights\\best_sc_plug_pose.pt",
+      "sha256": "acdae2c1896d0d8d262b6c07fba4da1af6a80d501d7c23dc38aef33dffd2b665",
+      "bytes": 19840840
+    },
+    {
+      "path": "aic_example_policies\\aic_example_policies\\ros\\weights\\best_sfp_plug_pose.pt",
+      "sha256": "cd8444950d3be102dcfbc7532f848743f29985273ff6e208e374b223ed5088df",
+      "bytes": 19840648
+    },
+    {
+      "path": "experiments\\recovery_20261112\\checkpoints\\nic_recovery20261112\\best.pt",
+      "sha256": "31a18e6509554411141e5191c97cc839b0430f563ab4d913cd758c1e3a4b51e5",
+      "bytes": 53235648
+    },
+    {
+      "path": "experiments\\recovery_20261112\\checkpoints\\plug_recovery20261112\\best.pt",
+      "sha256": "3fbd45ff067bafa07098c7e2a300fbc71732d9422f81fdf6e126ead0b6d9b3fd",
+      "bytes": 19830280
+    },
+    {
+      "path": "experiments\\recovery_20261112\\checkpoints\\sc_mouth_recovery20261112\\best.pt",
+      "sha256": "32f1ed5243f523001099d16dab5a6c9bfffc377cda935ceb4ebb9f17ebcfdc5b",
+      "bytes": 19828552
+    }
+  ]
+}

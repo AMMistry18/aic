@@ -1,0 +1,234 @@
+{
+  "purpose": "development_only_persistent_terminal_braking_regressions_and_fresh_cases_not_final",
+  "frozen_before_execution": true,
+  "rng_seed": 20261101,
+  "condition": "Upstream aligned SC connector; rigid unknown grasp translation from RGB; no general rotation claim",
+  "hypothesis": "Persistent scheduled target plus early settling reserve permits physical braking rather than chasing load-induced overshoot",
+  "required_sensor_hz": 2000,
+  "physics_step_s": 0.0005,
+  "maximum_measured_raw_force_N": 8,
+  "no_missing_force_step_allowed": true,
+  "geometry_and_contact_thresholds_unchanged": true,
+  "counts_as_guarded_production_policy": false,
+  "cases": [
+    {
+      "seed": 42000,
+      "connector": "sc",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 9.83928239544743,
+      "lateral_mm": [
+        0.6852572439077966,
+        -0.8496759024803952
+      ],
+      "angular_deg": [
+        0.09731350211028203,
+        -0.07281177168866662,
+        -0.09979125373131617
+      ],
+      "case_id": "dev_42000",
+      "grasp_jitter_seed": null,
+      "case_origin": "known_failure_regression"
+    },
+    {
+      "case_id": "dev_41004",
+      "grasp_jitter_seed": 41004,
+      "seed": 40004,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 11.60865759307971,
+      "lateral_mm": [
+        0.164735405220925,
+        -1.439585873056782
+      ],
+      "angular_deg": [
+        0.0114585380645352,
+        -0.07596878233068377,
+        -0.051502780885950596
+      ],
+      "case_origin": "known_failure_regression"
+    },
+    {
+      "seed": 42000,
+      "connector": "sc",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 9.83928239544743,
+      "lateral_mm": [
+        0.6852572439077966,
+        -0.8496759024803952
+      ],
+      "angular_deg": [
+        0.09731350211028203,
+        -0.07281177168866662,
+        -0.09979125373131617
+      ],
+      "case_id": "dev_43000",
+      "grasp_jitter_seed": 43000,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42001,
+      "connector": "sc",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 9.326033483773125,
+      "lateral_mm": [
+        0.09924060782441833,
+        -1.0134559106994498
+      ],
+      "angular_deg": [
+        -0.013226786945689864,
+        -0.050022999878306766,
+        -0.039819947609042755
+      ],
+      "case_id": "dev_42001",
+      "grasp_jitter_seed": null,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42001,
+      "connector": "sc",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 9.326033483773125,
+      "lateral_mm": [
+        0.09924060782441833,
+        -1.0134559106994498
+      ],
+      "angular_deg": [
+        -0.013226786945689864,
+        -0.050022999878306766,
+        -0.039819947609042755
+      ],
+      "case_id": "dev_43001",
+      "grasp_jitter_seed": 43001,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42002,
+      "connector": "sc",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 13.980187411665362,
+      "lateral_mm": [
+        0.553443164835664,
+        0.5999258784890051
+      ],
+      "angular_deg": [
+        0.021446425005320194,
+        0.062016308658551095,
+        -0.07809653404239068
+      ],
+      "case_id": "dev_42002",
+      "grasp_jitter_seed": null,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42002,
+      "connector": "sc",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 13.980187411665362,
+      "lateral_mm": [
+        0.553443164835664,
+        0.5999258784890051
+      ],
+      "angular_deg": [
+        0.021446425005320194,
+        0.062016308658551095,
+        -0.07809653404239068
+      ],
+      "case_id": "dev_43002",
+      "grasp_jitter_seed": 43002,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42003,
+      "connector": "sc",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 11.15200792508137,
+      "lateral_mm": [
+        -0.3329620643665666,
+        1.117220768789548
+      ],
+      "angular_deg": [
+        0.04406388173357442,
+        0.001161488986065315,
+        -0.06300215380402974
+      ],
+      "case_id": "dev_42003",
+      "grasp_jitter_seed": null,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42003,
+      "connector": "sc",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 11.15200792508137,
+      "lateral_mm": [
+        -0.3329620643665666,
+        1.117220768789548
+      ],
+      "angular_deg": [
+        0.04406388173357442,
+        0.001161488986065315,
+        -0.06300215380402974
+      ],
+      "case_id": "dev_43003",
+      "grasp_jitter_seed": 43003,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42004,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 13.258151383613194,
+      "lateral_mm": [
+        1.188662027535584,
+        -0.32479554621477197
+      ],
+      "angular_deg": [
+        -0.022546356099761675,
+        0.07096418868931481,
+        -0.03822517169674971
+      ],
+      "case_id": "dev_42004",
+      "grasp_jitter_seed": null,
+      "case_origin": "unexecuted_seeded_development"
+    },
+    {
+      "seed": 42004,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 13.258151383613194,
+      "lateral_mm": [
+        1.188662027535584,
+        -0.32479554621477197
+      ],
+      "angular_deg": [
+        -0.022546356099761675,
+        0.07096418868931481,
+        -0.03822517169674971
+      ],
+      "case_id": "dev_43004",
+      "grasp_jitter_seed": 43004,
+      "case_origin": "unexecuted_seeded_development"
+    }
+  ],
+  "separate_denominators": {
+    "known_failure_regressions": 2,
+    "unexecuted_development_cases": 9
+  },
+  "method": "original_perception_rim_position_body_track_brake_noangular_handoff",
+  "source_freeze": "runner checks all source/checkpoint SHA256 values before every trial",
+  "force_capture": "single ForceTorque system, SDF rate zero, delivered timestamps required at each 0.5ms step",
+  "final_100000_or_200000_series_access": false,
+  "recorder": "RELIABLE ROS raw wrist subscription with depth 10000; one ForceTorque system; complete per-step delivered coverage required",
+  "harness_revision": 20
+}

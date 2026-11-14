@@ -1,0 +1,47 @@
+[
+  {
+    "run": "sfp_positive_control_supported_control44v1_initial_pose_guarded",
+    "connector": "sfp",
+    "method": "initial_pose_guarded",
+    "harness_revision": null,
+    "reason": "force_abort",
+    "command_count": null,
+    "visual_grasp_available": null,
+    "wall_s": 263.34717279100005,
+    "sim_s": 22.218,
+    "controller_tare": null,
+    "visual_reacquisition_events": null,
+    "rim_refinement_enabled": null,
+    "contact_grasp_registration": null,
+    "contact_entry_search": null,
+    "orientation_condition": null,
+    "native_wrench_feedback_gain": null,
+    "body_translation_refinement_enabled": null,
+    "sc_body_diagnostic": null,
+    "lateral_tracking_compensation_enabled": null,
+    "peak_tared_force_N": 8.003096582211676,
+    "verified_success": false,
+    "max_global_penetration_m": 3.129439147882645e-07,
+    "tracking_peak_compensation_N": null,
+    "angular_screen_diagnostic_ablation": false,
+    "counts_as_guarded_production_policy": true,
+    "terminal_metrics": {
+      "depth_m": {
+        "min": 5.1749446811411026e-05,
+        "max": 5.185180322445082e-05
+      },
+      "lateral_error_m": {
+        "min": 0.0019913371519863243,
+        "max": 0.0019930909901267127
+      },
+      "angular_error_deg": {
+        "min": 0.02106266459254167,
+        "max": 0.02221351167209264
+      },
+      "max_penetration_m": {
+        "min": 2.6055240651276745e-10,
+        "max": 4.321728178910269e-10
+      }
+    }
+  }
+]

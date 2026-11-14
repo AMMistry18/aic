@@ -1,0 +1,37 @@
+{
+  "page_count": 4,
+  "pages": [
+    {
+      "page": 1,
+      "words": 620,
+      "width_pt": 612.0,
+      "height_pt": 792.0
+    },
+    {
+      "page": 2,
+      "words": 854,
+      "width_pt": 612.0,
+      "height_pt": 792.0
+    },
+    {
+      "page": 3,
+      "words": 728,
+      "width_pt": 612.0,
+      "height_pt": 792.0
+    },
+    {
+      "page": 4,
+      "words": 463,
+      "width_pt": 612.0,
+      "height_pt": 792.0
+    }
+  ],
+  "citations": 8,
+  "unresolved_citations": [],
+  "compile_problems": [],
+  "raw_evidence_compared": true,
+  "result_status": "partial_development",
+  "pending_results_marked": true,
+  "visual_inspection": "Passed: all four latest rendered pages inspected; no clipping, overlaps or unreadable tables",
+  "pdf_sha256": "7d576dadcc7a5d8973694a23243117aaaca8e48a7e4b157da519589cdf1020b1"
+}

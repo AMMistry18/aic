@@ -1,0 +1,39 @@
+{
+  "purpose": "Prospective frozen FINAL conditional-SC component comparison; does not evaluate unrestricted rotation or SFP",
+  "readiness_gate": "Do not start unless all ten translation30v1 development cases pass independent verification with correct jitter provenance and unchanged source hashes",
+  "conditions": "Prescribed rigid grasp; nominal upstream connector angular alignment; translation and in-hand grasp are estimated from actual RGB",
+  "independent_cases": 50,
+  "planned_trials": 150,
+  "case_seed_range": [200000, 200049],
+  "old_100000_series": "Untouched; belongs to the earlier broader/full-angle protocol, not relabeled as this conditional task",
+  "sampling": {
+    "target_index": "Independent discrete uniform 0..4 per case",
+    "gap_mm": [5, 15],
+    "lateral_radius_mm": [0.5, 1.5],
+    "lateral_direction_rad": "Uniform [-pi,pi]",
+    "nominal_initial_xyz_Euler_deg": [-0.1, 0.1],
+    "grasp_jitter": "Independent Bernoulli(0.5); source generator uniform +/-2mm translation and +/-0.04rad xyz Euler components",
+    "grasp_jitter_seed": "300000 + case offset when selected"
+  },
+  "methods": [
+    "original_perception_rim_position_body_track_noangular_handoff",
+    "original_perception_rim_position_track_noangular_handoff",
+    "original_perception_rim_position_body_noangular_handoff"
+  ],
+  "method_order_seed": 20261031,
+  "same_seed_across_methods": true,
+  "source_and_checkpoint_lock": "Must match the qualifying development version before final start; every trial aborts if frozen sources change",
+  "no_tuning_on_final_trials": true,
+  "no_success_based_early_stopping": true,
+  "all_selected_cases_retained": true,
+  "setup_failures": "Preserve and report separately; also report all-selected and policy-eligible denominators, never silently replace cases",
+  "initial_pose_diagnostics": "Report actual initial angle/offset; do not filter cases post-hoc by final success conditions",
+  "scoring": {"depth_m": 0.01564, "depth_tolerance_m": 0.00025, "lateral_m": 0.00025, "angle_deg": 0.25, "continuous_dwell_sim_s": 1, "whole_trial_penetration_m": 0.0001},
+  "force": "Independent wrist FT; 8N pre-command abort is not a physical force cap; retain every overshoot",
+  "statistics": "Wilson 95% intervals per method under the declared sampling distribution; observed paired success differences and exact two-sided McNemar tests, no cross-task generalization",
+  "timing": "Separate policy simulation/wall times; run without concurrent owned training or inference audits",
+  "policy_object_or_target_truth_inputs": false,
+  "new_foreground_refiner_deployed": false,
+  "disk_stop_floor_GiB": 1.5,
+  "publication_status": "No submission or claim of novelty/hardware generalization follows automatically from this experiment"
+}

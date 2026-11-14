@@ -1,0 +1,176 @@
+{
+  "scope": "Cached DEV detections only",
+  "ground_truth_read": false,
+  "final_cases_used": 0,
+  "policy_changed": false,
+  "rows": [
+    {
+      "run": "dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "original_failure": null,
+      "original_reprojection_px": 1.6163975908533355,
+      "original_rmse_m": 0.00026836971047852147,
+      "joint_fit": {
+        "position": [
+          -0.25618060326677655,
+          0.5087741453943434,
+          0.19018315270905575
+        ],
+        "rotation": [
+          [
+            -0.9992690721246204,
+            0.031399696190357415,
+            0.02180322394401819
+          ],
+          [
+            0.03160945029200446,
+            0.9994566261054401,
+            0.009343189293161464
+          ],
+          [
+            -0.021498003336055407,
+            0.010025548019125812,
+            -0.9997186225331
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 1.5717906733500515,
+        "fitted_delta_mm_deg": [
+          0.06698589412715522,
+          0.05173781114424633,
+          0.07120424272921079,
+          0.16011697707095754,
+          -0.385078789642651,
+          -0.6498177889976398
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.00014879683649684423,
+            "angle_deg": 0.8753699402287068
+          },
+          {
+            "position_m": 0.00019674756042651988,
+            "angle_deg": 0.8148250365882636
+          },
+          {
+            "position_m": 0.00035195707819304255,
+            "angle_deg": 1.152279668966789
+          }
+        ]
+      },
+      "input_sync_spread_s": 0.0,
+      "improvement_is_not_pose_accuracy_or_insertion_success": true
+    },
+    {
+      "run": "dev_45009_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "original_failure": "reprojection:16.19px>6.00px",
+      "original_reprojection_px": 16.186656365349688,
+      "original_rmse_m": 0.0007053899415342108,
+      "joint_fit": {
+        "position": [
+          -0.24891194726071245,
+          0.42488464227627226,
+          0.18750082166404106
+        ],
+        "rotation": [
+          [
+            -0.9940447909707298,
+            0.1056932239432531,
+            0.026531037605783216
+          ],
+          [
+            0.10647212995369264,
+            0.993866174644103,
+            0.029895023689933343
+          ],
+          [
+            -0.023208599420949765,
+            0.03254180865869423,
+            -0.9992008765018865
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 13.43670380760369,
+        "fitted_delta_mm_deg": [
+          -0.08946959727848108,
+          0.7570207076658046,
+          3.5520895729028883,
+          1.850893809167458,
+          0.4965175248106201,
+          0.5105246125199197
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.009179884880702458,
+            "angle_deg": 1.86292503075164
+          },
+          {
+            "position_m": 0.0005305599892371389,
+            "angle_deg": 0.9355924077816512
+          },
+          {
+            "position_m": 0.009072650307119286,
+            "angle_deg": 1.303256279695227
+          }
+        ]
+      },
+      "input_sync_spread_s": 0.0,
+      "improvement_is_not_pose_accuracy_or_insertion_success": true
+    },
+    {
+      "run": "dev_45002_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "original_failure": null,
+      "original_reprojection_px": 5.275731880767044,
+      "original_rmse_m": 0.0006058411040058483,
+      "joint_fit": {
+        "position": [
+          -0.2823076600373118,
+          0.5449099551428285,
+          0.18716125083830348
+        ],
+        "rotation": [
+          [
+            -0.999072799581713,
+            0.024673095979611738,
+            0.03528143237935178
+          ],
+          [
+            0.025733057229124674,
+            0.9992212569986624,
+            0.029911357837029175
+          ],
+          [
+            -0.034515951408015444,
+            0.03079152313207408,
+            -0.9989296928220752
+          ]
+        ],
+        "optimizer_success": true,
+        "mean_reprojection_error_px": 4.375368831298791,
+        "fitted_delta_mm_deg": [
+          0.11848880937892381,
+          0.021502963049269404,
+          0.8688731522546298,
+          -0.25890908844232285,
+          -1.0414883185757637,
+          0.3572426924135444
+        ],
+        "leave_one_view_out": [
+          {
+            "position_m": 0.0034668064818363315,
+            "angle_deg": 1.2637341656887169
+          },
+          {
+            "position_m": 0.0003158919407413502,
+            "angle_deg": 0.2996797544713902
+          },
+          {
+            "position_m": 0.002298883941384071,
+            "angle_deg": 1.8200548571910944
+          }
+        ]
+      },
+      "input_sync_spread_s": 0.0,
+      "improvement_is_not_pose_accuracy_or_insertion_success": true
+    }
+  ]
+}

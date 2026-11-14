@@ -1,0 +1,31 @@
+{
+  "status": "completed_development_pair_requires_review",
+  "final_policy_modified": false,
+  "updated_unix": 1794595791.9957929,
+  "candidate_sha256": "5dcb2b929d0bd1c0ef2a2138a9c70b1bb39dad26b4d8bc138bb189c1a2194f54",
+  "candidate_installed_only_in_development": true,
+  "comparison": [
+    {
+      "condition": "baseline",
+      "run": "dev_45005_runtime47v2_original_perception_sfp_contact_datum_handoff",
+      "verified_success": true,
+      "registration_sim_s": 16.872500000000002,
+      "action_sim_s": 56.15850000000001,
+      "record_wall_s": 645.242761631991,
+      "raw_peak_N": 3.2562199594375616,
+      "force_coverage": true
+    },
+    {
+      "condition": "measured_start",
+      "run": "dev_45005_runtime47v3_original_perception_sfp_contact_datum_handoff",
+      "verified_success": true,
+      "registration_sim_s": 11.829500000000003,
+      "action_sim_s": 51.9735,
+      "record_wall_s": 660.356463543998,
+      "raw_peak_N": 4.684120385723578,
+      "force_coverage": true
+    }
+  ],
+  "final_sources_unchanged": true,
+  "not_a_randomized_success_rate": true
+}

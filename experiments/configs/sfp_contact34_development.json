@@ -1,0 +1,187 @@
+{
+  "purpose": "development_only_SFP_contact_datum_all_five_NICs_both_slots_not_final",
+  "rng_seed": 20261102,
+  "condition": "upstream aligned angle components +/-0.03 degrees, visually unknown rigid grasp, public level fixture family",
+  "cases": [
+    {
+      "case_id": "dev_45000",
+      "seed": 45000,
+      "connector": "sfp",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 11.75296180327214,
+      "lateral_mm": [
+        -0.11325177057987601,
+        0.5104962996100113
+      ],
+      "angular_deg": [
+        0.019827415883066524,
+        -0.006115047829180275,
+        -0.01893445825987304
+      ],
+      "grasp_jitter_seed": 45000
+    },
+    {
+      "case_id": "dev_45001",
+      "seed": 45001,
+      "connector": "sfp",
+      "target_index": 0,
+      "sfp_port": 1,
+      "gap_mm": 10.685097658262125,
+      "lateral_mm": [
+        0.7115405366626679,
+        -0.0263011638503734
+      ],
+      "angular_deg": [
+        0.0022115547047066864,
+        0.009867649238846886,
+        6.543080349618105e-05
+      ],
+      "grasp_jitter_seed": 45001
+    },
+    {
+      "case_id": "dev_45002",
+      "seed": 45002,
+      "connector": "sfp",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 8.544082053970481,
+      "lateral_mm": [
+        -0.4120008557730394,
+        -0.11841248205731458
+      ],
+      "angular_deg": [
+        0.02864957711181257,
+        -0.024010341700231357,
+        0.002339286112718629
+      ],
+      "grasp_jitter_seed": 45002
+    },
+    {
+      "case_id": "dev_45003",
+      "seed": 45003,
+      "connector": "sfp",
+      "target_index": 1,
+      "sfp_port": 1,
+      "gap_mm": 12.818737860760343,
+      "lateral_mm": [
+        0.6162949730233434,
+        0.27249985771616214
+      ],
+      "angular_deg": [
+        0.02343894603902677,
+        0.006071452866788514,
+        0.017216361022951536
+      ],
+      "grasp_jitter_seed": 45003
+    },
+    {
+      "case_id": "dev_45004",
+      "seed": 45004,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 13.608574372193996,
+      "lateral_mm": [
+        -0.02324368660971865,
+        -0.026196948719401925
+      ],
+      "angular_deg": [
+        0.008274981625089592,
+        0.020903712745004785,
+        -0.01154474652508455
+      ],
+      "grasp_jitter_seed": 45004
+    },
+    {
+      "case_id": "dev_45005",
+      "seed": 45005,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 1,
+      "gap_mm": 11.37658937820039,
+      "lateral_mm": [
+        0.7706629864287617,
+        0.04588319159661958
+      ],
+      "angular_deg": [
+        0.02834247331333864,
+        0.0028202965518954737,
+        -0.019039391920676333
+      ],
+      "grasp_jitter_seed": 45005
+    },
+    {
+      "case_id": "dev_45006",
+      "seed": 45006,
+      "connector": "sfp",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 8.713887658427772,
+      "lateral_mm": [
+        -0.5609390730994358,
+        -0.5892597950981315
+      ],
+      "angular_deg": [
+        0.029223662791192886,
+        -0.020331897620490494,
+        -0.026970189445494206
+      ],
+      "grasp_jitter_seed": 45006
+    },
+    {
+      "case_id": "dev_45007",
+      "seed": 45007,
+      "connector": "sfp",
+      "target_index": 3,
+      "sfp_port": 1,
+      "gap_mm": 12.634516998524392,
+      "lateral_mm": [
+        -0.2322656481761486,
+        0.35587580833936316
+      ],
+      "angular_deg": [
+        0.027697566286975783,
+        -0.003370315790830726,
+        0.01591740887017224
+      ],
+      "grasp_jitter_seed": 45007
+    },
+    {
+      "case_id": "dev_45008",
+      "seed": 45008,
+      "connector": "sfp",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 9.18338320601757,
+      "lateral_mm": [
+        0.21657654982165808,
+        -0.6504679528052556
+      ],
+      "angular_deg": [
+        -0.01682015502910466,
+        0.00564729244282388,
+        -0.01764893827437082
+      ],
+      "grasp_jitter_seed": 45008
+    },
+    {
+      "case_id": "dev_45009",
+      "seed": 45009,
+      "connector": "sfp",
+      "target_index": 4,
+      "sfp_port": 1,
+      "gap_mm": 8.69897182626553,
+      "lateral_mm": [
+        0.7932229428795285,
+        0.45155685346863783
+      ],
+      "angular_deg": [
+        0.014111291979821569,
+        -0.02834270221147138,
+        -0.02402729820361998
+      ],
+      "grasp_jitter_seed": 45009
+    }
+  ]
+}

@@ -399,6 +399,8 @@ class SfpPlugPoseEstimator:
         local_keypoints_m: np.ndarray | None = None,
         crop_refine: bool | None = None,
         crop_pad_scale: float = 6.0,
+        refinement_strategy: str | None = None,
+        max_refinement_disagreement_m: float = .0001,
     ):
         if model is None:
             if weights_path is None:
@@ -455,6 +457,11 @@ class SfpPlugPoseEstimator:
             except ValueError:
                 pass
         self.crop_pad_scale = max(1.1, float(crop_pad_scale))
+        self.refinement_strategy = refinement_strategy or os.environ.get('AIC_PLUG_POSE_REFINE_STRATEGY', 'fixed')
+        if self.refinement_strategy not in ('fixed', 'geometric_selective'):
+            raise ValueError('Unknown plug refinement strategy')
+        self.max_refinement_disagreement_m = float(max_refinement_disagreement_m)
+        self.last_refinement_diagnostics = None
 
     def _load_model(self):
         if self._model is None:
@@ -581,7 +588,7 @@ class SfpPlugPoseEstimator:
             )
         return out
 
-    def _predict(self, views: Sequence[PlugPoseView]) -> list[PlugKeypointDetection]:
+    def _predict_fixed(self, views: Sequence[PlugPoseView], *, crop_refine=None) -> list[PlugKeypointDetection]:
         model = self._load_model()
         kwargs: dict[str, Any] = {
             "verbose": False,
@@ -595,7 +602,7 @@ class SfpPlugPoseEstimator:
             return []
 
         parsed = self._best_per_result(results)
-        if self.crop_refine:
+        if self.crop_refine if crop_refine is None else crop_refine:
             parsed = self._refine_on_crops(views, parsed, model, kwargs)
 
         detections: list[PlugKeypointDetection] = []
@@ -611,6 +618,20 @@ class SfpPlugPoseEstimator:
                     box_confidence=box_conf,
                 )
             )
+        return detections
+
+    def _predict(self, views: Sequence[PlugPoseView]) -> list[PlugKeypointDetection]:
+        if self.refinement_strategy == 'fixed':
+            return self._predict_fixed(views)
+        from .perception_quality import select_geometric_refinement
+        full = self._predict_fixed(views, crop_refine=False)
+        crop = self._predict_fixed(views, crop_refine=True)
+        detections, self.last_refinement_diagnostics = select_geometric_refinement(
+            views, [('full_frame', full), ('native_crop', crop)], self.local_keypoints_m,
+            max_reprojection_error_px=self.max_reprojection_error_px,
+            max_keypoint_rmse_m=self.max_keypoint_rmse_m,
+            max_pose_disagreement_m=self.max_refinement_disagreement_m,
+            min_keypoint_confidence=self.min_keypoint_confidence)
         return detections
 
     def detect_views(

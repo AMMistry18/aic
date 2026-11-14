@@ -1,0 +1,34 @@
+{
+  "sc_before.jpg": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\sampled_cameras\\target_11.000.jpg",
+    "sha256": "b880fe0b6a046f590531c2566b26de81c3b98335e1c8bc5cb9a013323fcde527",
+    "pixel_transform": "none"
+  },
+  "sc_after.jpg": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\sampled_cameras\\target_40.600.jpg",
+    "sha256": "90e30ee06ebf851dcd6d10b65567517385bb202f287f34dda3a269f36579de73",
+    "pixel_transform": "none"
+  },
+  "sfp_before.jpg": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff\\sampled_cameras\\target_10.600.jpg",
+    "sha256": "ff2506486b9cd9fccb709efa86d4045ad4be93f5905c870d618e4d40e968d547",
+    "pixel_transform": "none"
+  },
+  "sfp_after.jpg": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff\\sampled_cameras\\target_68.400.jpg",
+    "sha256": "b5ae92e7eb43b73bebe5c550d3368e7694899b7f2a4dbaeb0b6507ed90d0597b",
+    "pixel_transform": "none"
+  },
+  "SC_trace": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff\\verification_trace.json.gz",
+    "sha256": "dfcab3dc2e53bcc1eb44f3b0ef44d7662480767d0b527b1009da7b8a82af8e33",
+    "rows": 3143,
+    "purpose": "Evaluator only; not a policy input"
+  },
+  "SFP_trace": {
+    "source": "experiments\\recovery_20261112\\verified_evidence\\runs\\dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff\\verification_trace.json.gz",
+    "sha256": "a55910aeb680eac7662fdc74218009cdacce26447d65aeab9c7396c5b7e83c30",
+    "rows": 5981,
+    "purpose": "Evaluator only; not a policy input"
+  }
+}

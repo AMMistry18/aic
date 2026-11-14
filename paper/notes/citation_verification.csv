@@ -1,0 +1,9 @@
+key,verified_primary_url,source_type,claim_scope,checked_local_date
+team,https://satyaa27.github.io/intrinsic-ai-for-industry-challenge-team-tar-2-sol/,Project report,Original learned landmark/multiview/force controller description,2026-11-12
+kim2022,https://arxiv.org/abs/2110.03555,ICRA 2022 paper,Active external-contact estimates as insertion input,2026-11-12
+chang2024,https://www.merl.com/publications/TR2024-137,IROS 2024 institutional primary record,Visual tracking plus impedance control and in-hand uncertainty,2026-11-12
+sypas,https://sypas2026.github.io/,Authors project page; publication metadata not established,Synthetic socket perception and visual servoing; no comparative numbers used,2026-11-12
+noseworthy2024,https://arxiv.org/abs/2408.04587,Preprint v2 Jan 2025,Force-aware policy transfer under pose uncertainty,2026-11-12
+narang2022,https://arxiv.org/abs/2205.03532,RSS 2022 paper,Contact-rich assembly simulation,2026-11-12
+tang2023,https://arxiv.org/abs/2305.17110,RSS 2023 paper,Assembly sim-to-real transfer,2026-11-12
+aic,https://github.com/intrinsic-dev/aic,Public repository locally cloned and pinned,Actual challenge models; exact local revision verified,2026-11-12

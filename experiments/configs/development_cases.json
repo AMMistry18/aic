@@ -1,0 +1,188 @@
+{
+  "purpose": "development_only_not_final",
+  "rng_seed": 3000,
+  "methods": [
+    "initial_pose_guarded",
+    "visual_without_recovery",
+    "full_visual_force_recovery"
+  ],
+  "scene_and_simulator_seed_shared": true,
+  "camera_rate_hz": 5,
+  "remote_endpoint_support": false,
+  "cases": [
+    {
+      "case_id": "dev_3000",
+      "seed": 3000,
+      "connector": "sc",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 9.365154369200445,
+      "lateral_mm": [
+        -0.0859601944380422,
+        -0.03943056997165045
+      ],
+      "angular_deg": [
+        -0.09172808066569024,
+        -0.06622691174490498,
+        -0.09792834986039847
+      ]
+    },
+    {
+      "case_id": "dev_3001",
+      "seed": 3001,
+      "connector": "sfp",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 11.148287235364018,
+      "lateral_mm": [
+        0.19319369145988674,
+        0.1396020836602287
+      ],
+      "angular_deg": [
+        -0.019862007360059164,
+        -0.06021638043654237,
+        0.09864313768962954
+      ]
+    },
+    {
+      "case_id": "dev_3002",
+      "seed": 3002,
+      "connector": "sc",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 5.492760170354403,
+      "lateral_mm": [
+        -0.23678126910532993,
+        -0.19436154461623445
+      ],
+      "angular_deg": [
+        0.14044685564420542,
+        -0.1405721383058406,
+        0.07515705005271192
+      ]
+    },
+    {
+      "case_id": "dev_3003",
+      "seed": 3003,
+      "connector": "sfp",
+      "target_index": 1,
+      "sfp_port": 1,
+      "gap_mm": 14.405523717261605,
+      "lateral_mm": [
+        0.0013561825691496554,
+        -0.018699219040744952
+      ],
+      "angular_deg": [
+        -0.07044422524290891,
+        -0.11534390176777956,
+        -0.05639944774070739
+      ]
+    },
+    {
+      "case_id": "dev_3004",
+      "seed": 3004,
+      "connector": "sc",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 5.4423484121111105,
+      "lateral_mm": [
+        -0.07243217479025932,
+        0.1917371975645829
+      ],
+      "angular_deg": [
+        -0.10833600753112896,
+        0.06716907465318822,
+        -0.14902350529421776
+      ]
+    },
+    {
+      "case_id": "dev_3005",
+      "seed": 3005,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 8.090865841579017,
+      "lateral_mm": [
+        -0.22182024821494062,
+        0.030345581341600703
+      ],
+      "angular_deg": [
+        0.08231591465771393,
+        0.11052801832545536,
+        -0.013206993654003435
+      ]
+    },
+    {
+      "case_id": "dev_3006",
+      "seed": 3006,
+      "connector": "sc",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 6.552627740423722,
+      "lateral_mm": [
+        -0.051614861916760846,
+        0.149658813691198
+      ],
+      "angular_deg": [
+        -0.028098614132508234,
+        -0.07623066163116982,
+        0.1094624492846277
+      ]
+    },
+    {
+      "case_id": "dev_3007",
+      "seed": 3007,
+      "connector": "sfp",
+      "target_index": 3,
+      "sfp_port": 1,
+      "gap_mm": 13.76773219643301,
+      "lateral_mm": [
+        -0.16486496494993186,
+        0.07010023031022933
+      ],
+      "angular_deg": [
+        0.03183861541510588,
+        -0.07930594694090022,
+        0.10686114861390764
+      ]
+    },
+    {
+      "case_id": "dev_3008",
+      "seed": 3008,
+      "connector": "sc",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 5.180964162393641,
+      "lateral_mm": [
+        -0.18508591596470825,
+        -0.16006525660370385
+      ],
+      "angular_deg": [
+        -0.07401706319975968,
+        0.02944850907221222,
+        -0.13832173211226698
+      ]
+    },
+    {
+      "case_id": "dev_3009",
+      "seed": 3009,
+      "connector": "sfp",
+      "target_index": 4,
+      "sfp_port": 0,
+      "gap_mm": 9.83438120253429,
+      "lateral_mm": [
+        -0.2159004113057339,
+        0.19463702740967265
+      ],
+      "angular_deg": [
+        0.03288650910554877,
+        0.008940539384726276,
+        0.08675378837525999
+      ]
+    }
+  ],
+  "protocol_revision": 3,
+  "physics_step_s": 0.001,
+  "boundary_note": "Unconstrained source cable; remote fixed support rejected by measured 117 mm drift before development trials.",
+  "revision_note": "SC adapters have one duplex target frame (port 0); correct two invalid SC slot indices only. Seeds, gaps and perturbations unchanged. Revision 2 is archived; its pre-simulation failures are not policy outcomes."
+}

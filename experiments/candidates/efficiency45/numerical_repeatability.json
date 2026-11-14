@@ -1,0 +1,9 @@
+{
+  "status": "uninstalled_prototype",
+  "insertion_trials": 0,
+  "no_acceptance_threshold_changed": true,
+  "six_frame_replay": "Five exact diagnostic matches; sixth has identical primary pose and accepted decision but different leave-one-out scores",
+  "candidate_LOO_difference_m": 1.202308624837986e-12,
+  "baseline_repeat_LOO_difference_m": 4.713773356577176e-09,
+  "interpretation": "Baseline itself is not bitwise stable; numerical repeatability needs further characterization. No end-to-end speedup or qualification claimed."
+}

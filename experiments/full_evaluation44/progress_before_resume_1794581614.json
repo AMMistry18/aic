@@ -1,0 +1,1338 @@
+{
+  "status": "stopped_requires_inspection",
+  "results": [
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 74461,
+        "action_samples": 49012,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999995,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -3.7083399115233284,
+          -10.006072004688551,
+          14.866755226145791
+        ],
+        "peak_tared_force_N": 2.574684594911028,
+        "p95_tared_force_N": 0.9556019784972882,
+        "peak_sim_s": 39.4315,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sc_700029_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.015565855652513045,
+          "max": 0.015565871472174501
+        },
+        "lateral_error_m": {
+          "min": 2.85094650480101e-05,
+          "max": 2.8512219603863896e-05
+        },
+        "angular_error_deg": {
+          "min": 0.09251570337707495,
+          "max": 0.09253107487757387
+        },
+        "max_penetration_m": {
+          "min": 0.0,
+          "max": 0.0
+        }
+      },
+      "requested_contact_during_terminal_dwell": true,
+      "max_requested_target_penetration_m": 7.31818473415833e-08,
+      "max_global_penetration_m": 7.31818473415833e-08,
+      "wall_s": 293.3740200519969,
+      "sim_s": 32.523,
+      "peak_policy_tared_force_N": 1.2794409015627026,
+      "profile_sha256": "adcb16b7803102c1e8dfd9d80989388eaa298f3b6aa9bcc6fbfee2104aafc05f",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "9ce3cbf533813be5f91ba1fe3089c26aa1d6585c1a0de0de280f798b92805395",
+      "clearance_seat_contact_basis": null,
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 101,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 101,
+        "active_impulse_distance_range_m": [
+          2.3179420416142135e-12,
+          4.331032313881218e-12
+        ],
+        "maximum_normal_impulse_Ns": 4.8628685997138e-05
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.372405428383688,
+      "case": {
+        "case_id": "final_sc_700029_final44v1_full",
+        "seed": 700029,
+        "connector": "sc",
+        "target_index": 4,
+        "sfp_port": 0,
+        "gap_mm": 14.162569755237673,
+        "lateral_mm": [
+          0.6866198532988749,
+          0.07444956156938637
+        ],
+        "angular_deg": [
+          0.08699507039872065,
+          -0.052526798477837505,
+          0.03771588167651152
+        ],
+        "grasp_jitter_seed": null
+      },
+      "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sc_700029_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "base_case_id": "final_sc_700029",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 140647,
+        "action_samples": 112751,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 2000.0000000000002,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -0.9228617109238221,
+          -7.452495085473458,
+          19.238479682495598
+        ],
+        "peak_tared_force_N": 3.4042541431386972,
+        "p95_tared_force_N": 0.8832047958167344,
+        "peak_sim_s": 34.089,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sfp_710003_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.04584459409140054,
+          "max": 0.04585445331399424
+        },
+        "lateral_error_m": {
+          "min": 2.4291886019475627e-05,
+          "max": 3.0182913412931134e-05
+        },
+        "angular_error_deg": {
+          "min": 0.029061906038569743,
+          "max": 0.029128156658354613
+        },
+        "max_penetration_m": {
+          "min": 4.4830210576880115e-12,
+          "max": 5.506160990215582e-12
+        }
+      },
+      "requested_contact_during_terminal_dwell": false,
+      "max_requested_target_penetration_m": 4.363585085659251e-07,
+      "max_global_penetration_m": 4.363585085659251e-07,
+      "wall_s": 681.6960161980023,
+      "sim_s": 65.5665,
+      "peak_policy_tared_force_N": 1.9196674369992548,
+      "profile_sha256": "4cfcb0338021658e43bf697d612bda06f1604a37e503433ff17f8c2ae46c49fa",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "c37d2b713934f31fe91389159830b8c2ec81b0636b2bf3b1ad45f9c2e00fa7fa",
+      "clearance_seat_contact_basis": {
+        "maximum_source_box_overlap_m": 0.0,
+        "collision_contract_sha256": "3e67b3a82e46eb70157dc5cd2a130d88f744e9aa1a8b8025a02917a53c5fe6e2",
+        "positive_control_qualified": true,
+        "basis": "clearance at nominal seat; contact-enabled lateral miss independently qualified"
+      },
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 0,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 0,
+        "active_impulse_distance_range_m": null,
+        "maximum_normal_impulse_Ns": null
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 2.0118027374732748,
+      "case": {
+        "case_id": "final_sfp_710003_final44v1_full",
+        "seed": 710003,
+        "connector": "sfp",
+        "target_index": 1,
+        "sfp_port": 1,
+        "gap_mm": 12.584993730506167,
+        "lateral_mm": [
+          -0.5582726444522198,
+          -0.2014799452783439
+        ],
+        "angular_deg": [
+          0.008254865028628162,
+          0.019034602594384276,
+          0.014647564841445568
+        ],
+        "grasp_jitter_seed": 730003
+      },
+      "method": "original_perception_sfp_contact_datum_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sfp_710003_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "base_case_id": "final_sfp_710003",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 62547,
+        "action_samples": 39600,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999998,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -3.665474793930141,
+          -10.115385629150536,
+          14.563602290829483
+        ],
+        "peak_tared_force_N": 3.137160786834804,
+        "p95_tared_force_N": 0.8052702459186282,
+        "peak_sim_s": 33.676,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sc_700044_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.015550061403774181,
+          "max": 0.015550082511585425
+        },
+        "lateral_error_m": {
+          "min": 7.13200860912714e-05,
+          "max": 7.757093457532325e-05
+        },
+        "angular_error_deg": {
+          "min": 0.1718935644571952,
+          "max": 0.1719342747294759
+        },
+        "max_penetration_m": {
+          "min": 0.0,
+          "max": 1.79078815372479e-07
+        }
+      },
+      "requested_contact_during_terminal_dwell": true,
+      "max_requested_target_penetration_m": 1.8674920459717668e-07,
+      "max_global_penetration_m": 1.8674920459717668e-07,
+      "wall_s": 262.7542219950046,
+      "sim_s": 26.842000000000006,
+      "peak_policy_tared_force_N": 1.122103441333982,
+      "profile_sha256": "adcb16b7803102c1e8dfd9d80989388eaa298f3b6aa9bcc6fbfee2104aafc05f",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "1f5ddf78e033ddcd10ee703215d73e1d8e69c3a34ff25e537c14be0a6a773ad5",
+      "clearance_seat_contact_basis": null,
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 101,
+        "signed_touch_pair_count": 37,
+        "active_impulse_point_count": 37,
+        "active_impulse_distance_range_m": [
+          -1.79078815372479e-07,
+          -1.6973257985608287e-07
+        ],
+        "maximum_normal_impulse_Ns": 0.00011863617161761365
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.0525699951305056,
+      "case": {
+        "case_id": "final_sc_700044_final44v1_full",
+        "seed": 700044,
+        "connector": "sc",
+        "target_index": 4,
+        "sfp_port": 0,
+        "gap_mm": 6.333726220900307,
+        "lateral_mm": [
+          -0.0009060704769679952,
+          0.9801339455531699
+        ],
+        "angular_deg": [
+          -0.07292497720477842,
+          0.08350512926365741,
+          0.007097623005194412
+        ],
+        "grasp_jitter_seed": null
+      },
+      "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sc_700044_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "base_case_id": "final_sc_700044",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 123550,
+        "action_samples": 106790,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 2000.0,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -1.0311524758944466,
+          -7.926806840930958,
+          18.48332948752566
+        ],
+        "peak_tared_force_N": 3.346640506430233,
+        "p95_tared_force_N": 0.8172273160472376,
+        "peak_sim_s": 55.299,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sfp_710014_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.04580743464572157,
+          "max": 0.04580743464572157
+        },
+        "lateral_error_m": {
+          "min": 2.993445264967263e-06,
+          "max": 2.993445264967263e-06
+        },
+        "angular_error_deg": {
+          "min": 0.01635172978923691,
+          "max": 0.01635172978923691
+        },
+        "max_penetration_m": {
+          "min": 2.4584564369211056e-09,
+          "max": 3.92234762791163e-09
+        }
+      },
+      "requested_contact_during_terminal_dwell": false,
+      "max_requested_target_penetration_m": 3.6143149871333473e-07,
+      "max_global_penetration_m": 3.6143149871333473e-07,
+      "wall_s": 651.7906217030031,
+      "sim_s": 57.57650000000001,
+      "peak_policy_tared_force_N": 2.0041749312340404,
+      "profile_sha256": "4cfcb0338021658e43bf697d612bda06f1604a37e503433ff17f8c2ae46c49fa",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "e705ca46278978d44094e5fb36806eb786419449e1471ead4b627952f363c7ef",
+      "clearance_seat_contact_basis": {
+        "maximum_source_box_overlap_m": 0.0,
+        "collision_contract_sha256": "3e67b3a82e46eb70157dc5cd2a130d88f744e9aa1a8b8025a02917a53c5fe6e2",
+        "positive_control_qualified": true,
+        "basis": "clearance at nominal seat; contact-enabled lateral miss independently qualified"
+      },
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 0,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 0,
+        "active_impulse_distance_range_m": null,
+        "maximum_normal_impulse_Ns": null
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.893173671166792,
+      "case": {
+        "case_id": "final_sfp_710014_final44v1_full",
+        "seed": 710014,
+        "connector": "sfp",
+        "target_index": 2,
+        "sfp_port": 0,
+        "gap_mm": 12.70463777082563,
+        "lateral_mm": [
+          -0.1033948892757538,
+          -0.4178723440810213
+        ],
+        "angular_deg": [
+          0.02667432966257831,
+          -0.005179143170588079,
+          0.010685352237737061
+        ],
+        "grasp_jitter_seed": 730014
+      },
+      "method": "original_perception_sfp_contact_datum_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sfp_710014_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "base_case_id": "final_sfp_710014",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 62199,
+        "action_samples": 38990,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999998,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -2.8129856933743875,
+          -9.88633303310603,
+          15.181563786703201
+        ],
+        "peak_tared_force_N": 3.150219475292434,
+        "p95_tared_force_N": 0.7528497871038479,
+        "peak_sim_s": 36.2025,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sc_700046_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.01555051584336231,
+          "max": 0.015550565096331327
+        },
+        "lateral_error_m": {
+          "min": 4.437225103729325e-05,
+          "max": 4.444574631833572e-05
+        },
+        "angular_error_deg": {
+          "min": 0.17242992060371712,
+          "max": 0.17262612942662262
+        },
+        "max_penetration_m": {
+          "min": 0.0,
+          "max": 0.0
+        }
+      },
+      "requested_contact_during_terminal_dwell": true,
+      "max_requested_target_penetration_m": 1.7829166518748462e-07,
+      "max_global_penetration_m": 1.7829166518748462e-07,
+      "wall_s": 297.8994307529938,
+      "sim_s": 26.619500000000002,
+      "peak_policy_tared_force_N": 0.9613288193755779,
+      "profile_sha256": "adcb16b7803102c1e8dfd9d80989388eaa298f3b6aa9bcc6fbfee2104aafc05f",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "f64b1bc5f7a29e22ead1b967b2001e3208f4f4fd00830313260474feeb1ea62d",
+      "clearance_seat_contact_basis": null,
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 101,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 101,
+        "active_impulse_distance_range_m": [
+          7.726877545261571e-12,
+          1.862629378774125e-11
+        ],
+        "maximum_normal_impulse_Ns": 6.138522820455867e-05
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.2545045238866759,
+      "case": {
+        "case_id": "final_sc_700046_final44v1_full",
+        "seed": 700046,
+        "connector": "sc",
+        "target_index": 1,
+        "sfp_port": 0,
+        "gap_mm": 5.562660707036193,
+        "lateral_mm": [
+          0.4882044124568385,
+          0.43076981626598393
+        ],
+        "angular_deg": [
+          0.07609516145397305,
+          0.06867020650156261,
+          0.03640024461052177
+        ],
+        "grasp_jitter_seed": 710046
+      },
+      "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sc_700046_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "base_case_id": "final_sc_700046",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 127135,
+        "action_samples": 106967,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999998,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -0.9739235611011203,
+          -8.592888150378704,
+          18.1227479410101
+        ],
+        "peak_tared_force_N": 3.1229804349954753,
+        "p95_tared_force_N": 0.9045351238004868,
+        "peak_sim_s": 56.7385,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sfp_710026_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.04580525926573731,
+          "max": 0.04580525926573731
+        },
+        "lateral_error_m": {
+          "min": 5.016648837296102e-06,
+          "max": 5.016648837296102e-06
+        },
+        "angular_error_deg": {
+          "min": 0.03292162678224657,
+          "max": 0.03292162678224657
+        },
+        "max_penetration_m": {
+          "min": 4.579662095955209e-08,
+          "max": 4.6107191892214924e-08
+        }
+      },
+      "requested_contact_during_terminal_dwell": false,
+      "max_requested_target_penetration_m": 1.294655252628514e-07,
+      "max_global_penetration_m": 1.294655252628514e-07,
+      "wall_s": 610.353928165001,
+      "sim_s": 59.05800000000001,
+      "peak_policy_tared_force_N": 1.8422345521927108,
+      "profile_sha256": "4cfcb0338021658e43bf697d612bda06f1604a37e503433ff17f8c2ae46c49fa",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "575951f7ca254dcd2a7c5a8787a201f4a9ba339df313eb636ee2b547bd503e2c",
+      "clearance_seat_contact_basis": {
+        "maximum_source_box_overlap_m": 0.0,
+        "collision_contract_sha256": "3e67b3a82e46eb70157dc5cd2a130d88f744e9aa1a8b8025a02917a53c5fe6e2",
+        "positive_control_qualified": true,
+        "basis": "clearance at nominal seat; contact-enabled lateral miss independently qualified"
+      },
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 0,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 0,
+        "active_impulse_distance_range_m": null,
+        "maximum_normal_impulse_Ns": null
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.8053375179667253,
+      "case": {
+        "case_id": "final_sfp_710026_final44v1_full",
+        "seed": 710026,
+        "connector": "sfp",
+        "target_index": 3,
+        "sfp_port": 0,
+        "gap_mm": 12.84629541275622,
+        "lateral_mm": [
+          -0.691141880547186,
+          0.44797189747434474
+        ],
+        "angular_deg": [
+          0.0022719798156760687,
+          0.0250633754152643,
+          0.017720369965306543
+        ],
+        "grasp_jitter_seed": 730026
+      },
+      "method": "original_perception_sfp_contact_datum_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sfp_710026_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "base_case_id": "final_sfp_710026",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_seat_with_contact",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 68635,
+        "action_samples": 44260,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 2000.0,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -3.2524956913831344,
+          -9.997847034164039,
+          14.894357276302577
+        ],
+        "peak_tared_force_N": 2.484175433518243,
+        "p95_tared_force_N": 0.8508854605431686,
+        "peak_sim_s": 39.8865,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sc_700004_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "connector": "sc",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.015560071890273789,
+          "max": 0.015560088408109747
+        },
+        "lateral_error_m": {
+          "min": 2.896442428273303e-05,
+          "max": 2.8977843697021525e-05
+        },
+        "angular_error_deg": {
+          "min": 0.09256126005931392,
+          "max": 0.09268253900797355
+        },
+        "max_penetration_m": {
+          "min": 0.0,
+          "max": 0.0
+        }
+      },
+      "requested_contact_during_terminal_dwell": true,
+      "max_requested_target_penetration_m": 3.27469012916719e-08,
+      "max_global_penetration_m": 5.111748828266051e-08,
+      "wall_s": 292.9855096590036,
+      "sim_s": 29.834500000000006,
+      "peak_policy_tared_force_N": 1.046198649231516,
+      "profile_sha256": "adcb16b7803102c1e8dfd9d80989388eaa298f3b6aa9bcc6fbfee2104aafc05f",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "54d2fd4b0ca827095883a6b35c87933518e6aa2ca7baad7158e988e1a2d0f8b1",
+      "clearance_seat_contact_basis": null,
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 101,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 101,
+        "active_impulse_distance_range_m": [
+          6.275336647540624e-12,
+          7.614973854321034e-12
+        ],
+        "maximum_normal_impulse_Ns": 4.788885847930831e-05
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.0827711270399631,
+      "case": {
+        "case_id": "final_sc_700004_final44v1_full",
+        "seed": 700004,
+        "connector": "sc",
+        "target_index": 4,
+        "sfp_port": 0,
+        "gap_mm": 10.15192997453064,
+        "lateral_mm": [
+          0.5296131955113792,
+          1.2407646266098897
+        ],
+        "angular_deg": [
+          0.06196302894687708,
+          0.0009676490323186904,
+          0.00035710884566278467
+        ],
+        "grasp_jitter_seed": 710004
+      },
+      "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sc_700004_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "base_case_id": "final_sc_700004",
+      "ablation": "full",
+      "final": true
+    },
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 123961,
+        "action_samples": 105580,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999998,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -1.520347918469149,
+          -7.8957916996093775,
+          19.224086359346796
+        ],
+        "peak_tared_force_N": 3.338339831557532,
+        "p95_tared_force_N": 0.7494405853166987,
+        "peak_sim_s": 28.45,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "final_sfp_710010_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.04583105748490238,
+          "max": 0.045835456737479935
+        },
+        "lateral_error_m": {
+          "min": 4.04160595552661e-05,
+          "max": 4.960329585546644e-05
+        },
+        "angular_error_deg": {
+          "min": 0.02617277242882017,
+          "max": 0.026193427206148232
+        },
+        "max_penetration_m": {
+          "min": 3.5609430840559375e-12,
+          "max": 4.553372890702997e-12
+        }
+      },
+      "requested_contact_during_terminal_dwell": false,
+      "max_requested_target_penetration_m": 4.502428190675298e-07,
+      "max_global_penetration_m": 4.502428190675298e-07,
+      "wall_s": 552.8238092610045,
+      "sim_s": 57.76950000000001,
+      "peak_policy_tared_force_N": 3.4515022227380014,
+      "profile_sha256": "4cfcb0338021658e43bf697d612bda06f1604a37e503433ff17f8c2ae46c49fa",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "e6cd4e4e2826b0433c0642e4b9f7aae401f3da75dd8dbde601f4b225dffa568d",
+      "clearance_seat_contact_basis": {
+        "maximum_source_box_overlap_m": 0.0,
+        "collision_contract_sha256": "3e67b3a82e46eb70157dc5cd2a130d88f744e9aa1a8b8025a02917a53c5fe6e2",
+        "positive_control_qualified": true,
+        "basis": "clearance at nominal seat; contact-enabled lateral miss independently qualified"
+      },
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 0,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 0,
+        "active_impulse_distance_range_m": null,
+        "maximum_normal_impulse_Ns": null
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 3.523462493205146,
+      "case": {
+        "case_id": "final_sfp_710010_final44v1_full",
+        "seed": 710010,
+        "connector": "sfp",
+        "target_index": 0,
+        "sfp_port": 0,
+        "gap_mm": 8.676590806674238,
+        "lateral_mm": [
+          -0.3022551384645269,
+          -0.019313596372066977
+        ],
+        "angular_deg": [
+          0.008366819541868797,
+          -0.01747985847365553,
+          0.004933761449817171
+        ],
+        "grasp_jitter_seed": 730010
+      },
+      "method": "original_perception_sfp_contact_datum_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\final_sfp_710010_final44v1_full_original_perception_sfp_contact_datum_handoff",
+      "base_case_id": "final_sfp_710010",
+      "ablation": "full",
+      "final": true
+    }
+  ],
+  "development": [
+    {
+      "verified_success": true,
+      "reason": "stable_geometric_clearance_seat_collision_control_validated",
+      "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+      "high_rate_wrist_audit": {
+        "qualified": true,
+        "reason": "qualified",
+        "force_ceiling_N": 20.0,
+        "samples_over_ceiling": 0,
+        "raw_samples": 123983,
+        "action_samples": 105612,
+        "expected_hz": 2000.0,
+        "observed_mean_hz": 1999.9999999999995,
+        "maximum_action_gap_s": 0.0005000000000023874,
+        "complete_action_coverage": true,
+        "baseline_N": [
+          -1.9416473388468556,
+          -8.242507600944831,
+          18.139449785958597
+        ],
+        "peak_tared_force_N": 3.1161511348702717,
+        "p95_tared_force_N": 0.8456415736624675,
+        "peak_sim_s": 36.2525,
+        "samples_over_8N": 0,
+        "sensor_frame_ids": [
+          "ur5e/ati/attach_joint/AtiForceTorqueSensor"
+        ],
+        "force_norm_requires_no_world_or_object_pose": true,
+        "scope": "Sampled physical sensor peak; no interpolation, no object/contact truth inputs"
+      },
+      "run": "dev_45006_coverage44v1_original_perception_sfp_contact_datum_handoff",
+      "connector": "sfp",
+      "terminal_metrics": {
+        "depth_m": {
+          "min": 0.0458044606384905,
+          "max": 0.0458044606384905
+        },
+        "lateral_error_m": {
+          "min": 4.4790186778495754e-06,
+          "max": 4.4790186778495754e-06
+        },
+        "angular_error_deg": {
+          "min": 0.03763238192491027,
+          "max": 0.03763238192491027
+        },
+        "max_penetration_m": {
+          "min": 8.389090199493253e-09,
+          "max": 1.335964793422464e-08
+        }
+      },
+      "requested_contact_during_terminal_dwell": false,
+      "max_requested_target_penetration_m": 3.5151000830796056e-07,
+      "max_global_penetration_m": 3.5151000830796056e-07,
+      "wall_s": 551.6329210219992,
+      "sim_s": 57.48300000000001,
+      "peak_policy_tared_force_N": 2.009984533153879,
+      "profile_sha256": "4cfcb0338021658e43bf697d612bda06f1604a37e503433ff17f8c2ae46c49fa",
+      "contact_consistency_definition": "Post-hoc timestamp join; transport arrival order is not simulation time.\n\nContact consistency requires live physics observation, bounded penetration and\nno wrong target contact. SC requires terminal requested-target contact, proved\nby signed geometric touch or an audited nonzero solver normal impulse. Cached\npositive-gap manifolds without an applied impulse are insufficient. An SFP\nclearance seat additionally needs a qualified collision positive control with\nthe identical collision contract and timestep, plus a source-geometry check.\nAll final pose samples are retained, including the post-command tail.\n",
+      "world_sha256": "2546ff9e2f08464f2cb58537e1357022efcdc21e15fcb997b2628d5b752f4e45",
+      "clearance_seat_contact_basis": {
+        "maximum_source_box_overlap_m": 0.0,
+        "collision_contract_sha256": "3e67b3a82e46eb70157dc5cd2a130d88f744e9aa1a8b8025a02917a53c5fe6e2",
+        "positive_control_qualified": true,
+        "basis": "clearance at nominal seat; contact-enabled lateral miss independently qualified"
+      },
+      "physics_contact_contract": {
+        "engine": "bullet-featherstone",
+        "gz_physics_version": "8.3.0",
+        "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+        "backend": "source_float64_damped",
+        "scalar_precision_bits": 64,
+        "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+        "binary_audit": {
+          "backend": "source_float64_damped",
+          "gz_physics_version": "8.3.0",
+          "bullet_version": "3.24",
+          "scalar_precision_bits": 64,
+          "source_tag": "gz-physics8_8.3.0",
+          "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+          "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+          "binary_sha256": {
+            "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+            "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+            "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+            "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+          },
+          "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+        },
+        "depth_convention": "signed_distance_negative_penetration",
+        "collision_identity_resolution": "link_only; 8.3.0 selects an arbitrary collision name within each link",
+        "contact_wrench_semantics": "not a force vector: 8.3.0 reports scalar impulse in xyz; use independent wrist FT",
+        "source_url": "https://github.com/gazebosim/gz-physics/blob/gz-physics8_8.3.0/bullet-featherstone/src/SimulationFeatures.cc",
+        "audit_date": "2026-10-26"
+      },
+      "verification_semantics_revision": 3,
+      "terminal_requested_contact_evidence": {
+        "pair_count": 0,
+        "signed_touch_pair_count": 0,
+        "active_impulse_point_count": 0,
+        "active_impulse_distance_range_m": null,
+        "maximum_normal_impulse_Ns": null
+      },
+      "verifier_sha256": "7d5591f14d6557de353c4402229c259394b37ae95a827eadd3f4f5dfeb46a990",
+      "terminal_violation_counts": {
+        "depth": 0,
+        "lateral": 0,
+        "angular": 0,
+        "penetration": 0,
+        "contact_observation": 0
+      },
+      "status": "completed",
+      "peak_independent_tared_force_N": 1.9755024903221268,
+      "case": {
+        "case_id": "dev_45006_coverage44v1",
+        "seed": 45006,
+        "connector": "sfp",
+        "target_index": 3,
+        "sfp_port": 0,
+        "gap_mm": 8.713887658427772,
+        "lateral_mm": [
+          -0.5609390730994358,
+          -0.5892597950981315
+        ],
+        "angular_deg": [
+          0.029223662791192886,
+          -0.020331897620490494,
+          -0.026970189445494206
+        ],
+        "grasp_jitter_seed": 45006
+      },
+      "method": "original_perception_sfp_contact_datum_handoff",
+      "evidence_dir": ".artifacts\\lastinch_runs\\dev_45006_coverage44v1_original_perception_sfp_contact_datum_handoff"
+    }
+  ],
+  "final_trials_started": true,
+  "planned_primary": 100,
+  "planned_ablation": 80,
+  "started_unix": 1794537656.330753,
+  "updated_unix": 1794581087.376694,
+  "summary": {
+    "sc": {
+      "attempted": 4,
+      "policy_eligible": 4,
+      "verified": 4,
+      "all_attempt_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "policy_eligible_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "median_success_sim_s": 28.338250000000006,
+      "median_success_wall_s": 293.17976485550025,
+      "maximum_raw_peak_N": 3.150219475292434,
+      "complete_force_audits": 4,
+      "failure_causes": {}
+    },
+    "sfp": {
+      "attempted": 4,
+      "policy_eligible": 4,
+      "verified": 4,
+      "all_attempt_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "policy_eligible_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "median_success_sim_s": 58.41375000000001,
+      "median_success_wall_s": 631.072274934002,
+      "maximum_raw_peak_N": 3.4042541431386972,
+      "complete_force_audits": 4,
+      "failure_causes": {}
+    }
+  },
+  "ablation_summary": {
+    "no_axial_correction": {
+      "sc": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      },
+      "sfp": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      }
+    },
+    "no_lateral_tracking": {
+      "sc": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      },
+      "sfp": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      }
+    }
+  },
+  "selected_policy": "recovered_baseline",
+  "preliminary_checks_override": {
+    "instruction": "forget the current checks, run the proper final test for the paper",
+    "skipped": [
+      "further preliminary-check repetitions",
+      "four development ablation interface trials"
+    ],
+    "contact_control": "Already finished; existing recording scored without another simulation",
+    "measurement_checks_already_passed": 78,
+    "retained": [
+      "per-trial controller/load/camera setup",
+      "independent seating/contact verification",
+      "complete 2000 Hz raw force audit",
+      "20N raw resultant ceiling"
+    ],
+    "contact_proof": "experiments\\full_evaluation44\\contact_positive_control.json",
+    "contact_proof_sha256": "596bddadf1d98d17d7d66b8f814b9ce7c6565274cfc0f8fd6c91d98bc67de166"
+  },
+  "manifest_sha256": "46993a29379d5666e42ac2c21432f55c96d3c9c2f4456468c951bce94557f71c",
+  "current_run": "final_sc_700026_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+  "error": "TimeoutExpired: Command '['docker', 'stop', 'research-aic-eval']' timed out after 30 seconds"
+}

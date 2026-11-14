@@ -1,0 +1,6 @@
+component,inputs,outputs,contribution_status,ablation
+Weighted keypoints,Three RGB views and calibrated exposure transforms,Plug and port proposals,Reused original method,Single-view or equal-weight study not yet done
+CAD refinement,RGB edges and public geometry,Validated lateral/full translation candidate,Engineering integration,Earlier SC no-body screen verified
+Relative datum registration,Own estimated tip motion and tared wrist force,SC shoulder or SFP lip/sidewall correction,Candidate practical contribution,Discard correction while retaining probes; pending
+Tracking compensation,Own TCP tracking error and force,Bounded PI/feedforward,Established control principle,Earlier no-PI screen verified; current removal pending
+Independent evaluator,Evaluator-only poses contacts and 2000Hz force,Seat verdict and recorded failure,Auditable simulation evaluation,Never a policy input

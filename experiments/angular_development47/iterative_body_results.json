@@ -1,0 +1,351 @@
+{
+  "scope": "Static development CAD/RGB fitting only; no runtime pose or insertion acceptance",
+  "final_cases_used": 0,
+  "production_stamp_veto_preserved": true,
+  "rows": [
+    {
+      "case_id": "train_80010",
+      "fit": {
+        "position": [
+          0.030763377373643888,
+          -0.16976526517794682,
+          0.046078207991943794
+        ],
+        "rotation": [
+          [
+            0.006931579974976876,
+            -0.9994953426051871,
+            0.03100021467006319
+          ],
+          [
+            -0.999269994371113,
+            -0.008088060771009726,
+            -0.037337134631894774
+          ],
+          [
+            0.03756902379096766,
+            -0.030718779004119855,
+            -0.9988217684191161
+          ]
+        ],
+        "mean_support_error_px": 0.1569197724097113,
+        "accepted": false,
+        "iterations": [
+          {
+            "iteration": 0,
+            "parameter_change_mm_deg": 1.4262773624676721,
+            "support_error_px": 0.1634675073178917,
+            "directions_per_view": [
+              32,
+              48,
+              32
+            ]
+          },
+          {
+            "iteration": 1,
+            "parameter_change_mm_deg": 0.7697079536179329,
+            "support_error_px": 0.15691976002809246,
+            "directions_per_view": [
+              31,
+              47,
+              32
+            ]
+          },
+          {
+            "iteration": 2,
+            "parameter_change_mm_deg": 1.6914958614570337e-06,
+            "support_error_px": 0.1569197724097113,
+            "directions_per_view": [
+              31,
+              47,
+              32
+            ]
+          }
+        ],
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0010559414764778916,
+            "angle_deg": 1.1348566708796137
+          },
+          {
+            "model_displacement_m": 0.0013496152610536008,
+            "angle_deg": 1.7338985953801795
+          },
+          {
+            "model_displacement_m": 0.00045110432786457763,
+            "angle_deg": 0.4833493763813374
+          }
+        ],
+        "ground_truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.3351287639072616,
+        "angle_deg": 1.625465275237971
+      },
+      "wall_s": 0.9824003999819979
+    },
+    {
+      "case_id": "train_80011",
+      "fit": {
+        "position": [
+          0.07594094003926168,
+          -0.1752091193196933,
+          0.05388262024395822
+        ],
+        "rotation": [
+          [
+            0.09401338983896562,
+            -0.9953656732274297,
+            -0.020215318238699678
+          ],
+          [
+            -0.9955416749685484,
+            -0.09414691499113517,
+            0.005756022799544264
+          ],
+          [
+            -0.007632557356718355,
+            0.01958404856400186,
+            -0.9997790801522304
+          ]
+        ],
+        "mean_support_error_px": 0.12649500070713546,
+        "accepted": false,
+        "iterations": [
+          {
+            "iteration": 0,
+            "parameter_change_mm_deg": 1.7492333681734284,
+            "support_error_px": 0.12659963800645713,
+            "directions_per_view": [
+              32,
+              47,
+              16
+            ]
+          },
+          {
+            "iteration": 1,
+            "parameter_change_mm_deg": 0.017182564500776407,
+            "support_error_px": 0.1264950013653271,
+            "directions_per_view": [
+              33,
+              47,
+              16
+            ]
+          },
+          {
+            "iteration": 2,
+            "parameter_change_mm_deg": 7.86745068228133e-08,
+            "support_error_px": 0.12649500070713546,
+            "directions_per_view": [
+              33,
+              47,
+              16
+            ]
+          }
+        ],
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.0005129622883434564,
+            "angle_deg": 0.43421164806247786
+          },
+          {
+            "model_displacement_m": 0.0012003911701881213,
+            "angle_deg": 1.4261563740267729
+          },
+          {
+            "model_displacement_m": 0.0007225057881411558,
+            "angle_deg": 0.8175218537191963
+          }
+        ],
+        "ground_truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.24900316839846237,
+        "angle_deg": 1.4359508130272052
+      },
+      "wall_s": 0.6734604999655858
+    },
+    {
+      "case_id": "train_80012",
+      "fit": {
+        "position": [
+          0.1196567560194368,
+          -0.1711856993483909,
+          0.045212388939866247
+        ],
+        "rotation": [
+          [
+            -0.011166600009631206,
+            -0.9997073798805971,
+            0.021458370313169297
+          ],
+          [
+            -0.9964419543321038,
+            0.00933216896675193,
+            -0.08376360945657686
+          ],
+          [
+            0.0835388454016624,
+            -0.022317375173800932,
+            -0.9962545839665228
+          ]
+        ],
+        "mean_support_error_px": 0.13930896042750532,
+        "accepted": false,
+        "iterations": [
+          {
+            "iteration": 0,
+            "parameter_change_mm_deg": 1.7081907492660455,
+            "support_error_px": 0.13895383764498442,
+            "directions_per_view": [
+              31,
+              47,
+              32
+            ]
+          },
+          {
+            "iteration": 1,
+            "parameter_change_mm_deg": 1.0363656092041686,
+            "support_error_px": 0.13975985798810261,
+            "directions_per_view": [
+              32,
+              47,
+              31
+            ]
+          },
+          {
+            "iteration": 2,
+            "parameter_change_mm_deg": 0.04111748955122628,
+            "support_error_px": 0.13930895900788806,
+            "directions_per_view": [
+              32,
+              48,
+              31
+            ]
+          },
+          {
+            "iteration": 3,
+            "parameter_change_mm_deg": 1.3217587007128935e-07,
+            "support_error_px": 0.13930896042750532,
+            "directions_per_view": [
+              32,
+              48,
+              31
+            ]
+          }
+        ],
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.00019209238213618613,
+            "angle_deg": 0.3025541333679322
+          },
+          {
+            "model_displacement_m": 0.001006753043356034,
+            "angle_deg": 1.1531848672297524
+          },
+          {
+            "model_displacement_m": 0.0003000145237608709,
+            "angle_deg": 0.2898602360964676
+          }
+        ],
+        "ground_truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.3964068247371767,
+        "angle_deg": 2.2008463822323407
+      },
+      "wall_s": 0.9581939000054263
+    },
+    {
+      "case_id": "train_80013",
+      "fit": {
+        "position": [
+          0.049250514226410344,
+          -0.1344295578669744,
+          0.0540268701704103
+        ],
+        "rotation": [
+          [
+            0.017690190467927455,
+            -0.9992352995999042,
+            -0.03486937330521272
+          ],
+          [
+            -0.9998048068089715,
+            -0.01737186679690937,
+            -0.00941097899606559
+          ],
+          [
+            0.008798036308312223,
+            0.03502904905189825,
+            -0.9993475673056083
+          ]
+        ],
+        "mean_support_error_px": 0.12323185693276216,
+        "accepted": false,
+        "iterations": [
+          {
+            "iteration": 0,
+            "parameter_change_mm_deg": 2.393239612829897,
+            "support_error_px": 0.12037962734671778,
+            "directions_per_view": [
+              31,
+              47,
+              20
+            ]
+          },
+          {
+            "iteration": 1,
+            "parameter_change_mm_deg": 0.11266452350280466,
+            "support_error_px": 0.12053671819717893,
+            "directions_per_view": [
+              31,
+              46,
+              20
+            ]
+          },
+          {
+            "iteration": 2,
+            "parameter_change_mm_deg": 0.1126645301469872,
+            "support_error_px": 0.12037962729548203,
+            "directions_per_view": [
+              31,
+              47,
+              20
+            ]
+          },
+          {
+            "iteration": 3,
+            "parameter_change_mm_deg": 0.1126645348209009,
+            "support_error_px": 0.1205367182305991,
+            "directions_per_view": [
+              31,
+              46,
+              20
+            ]
+          }
+        ],
+        "leave_one_view_out": [
+          {
+            "model_displacement_m": 0.00047151505997328886,
+            "angle_deg": 0.4615045446922831
+          },
+          {
+            "model_displacement_m": 0.0016168452750205133,
+            "angle_deg": 1.884962165131327
+          },
+          {
+            "model_displacement_m": 0.00022267388202908811,
+            "angle_deg": 0.21789509962072243
+          }
+        ],
+        "ground_truth_used_for_fitting": false
+      },
+      "scoring_only": {
+        "position_mm": 0.09011939919601436,
+        "angle_deg": 0.39312107393305673
+      },
+      "wall_s": 0.9294159000273794
+    }
+  ]
+}

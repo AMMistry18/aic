@@ -1,0 +1,79 @@
+{
+  "purpose": "Prospective combined SC/SFP simulation-only last-inch study after recovery and speed development",
+  "status": "prespecified_protocol_case_manifests_not_generated_final_trials_not_started",
+  "development_stages": {
+    "historical_replay": "17 fixed original cases, restored V38 code and new recovery20261112 checkpoints; no tuning during replay",
+    "speed_screen": "6 matched cases (3 SC, 3 SFP), speed43 candidate against recovered baseline; original outcomes retained",
+    "selection": "Candidate needs all 6 independent geometric/contact/force verifications and at least 10 percent lower median simulated action time for each connector on matched cases. Otherwise retain baseline or fix on development cases and requalify. No final case may guide selection."
+  },
+  "readiness": [
+    "Complete and inspect both development stages; investigate setup and policy failures without removing them",
+    "Freeze chosen source, original/adapted weight hashes, physics plugin, public asset revision and all measurement profiles",
+    "Verify contact-positive-control contract and calibrated setup including all six cameras",
+    "Run current-method negative controls and freeze ablation implementations before opening final cases"
+  ],
+  "primary_final_trials": 100,
+  "connectors": {
+    "sc": {
+      "cases": 50,
+      "seed_range": [700000, 700049],
+      "allocation": "10 cases per SC mount, randomized fixed order",
+      "gap_mm": [5, 15],
+      "lateral_radius_mm": [0.5, 1.5],
+      "lateral_direction_rad": "uniform [-pi,pi]",
+      "initial_xyz_Euler_components_deg": [-0.1, 0.1],
+      "grasp_profile": "challenge_sc",
+      "grasp_jitter": "25 selected independently before execution, +/-2mm translation and existing source-grasp rotation jitter; upstream tip angular alignment is still prescribed",
+      "cable_initialization": "sc_straight_outboard"
+    },
+    "sfp": {
+      "cases": 50,
+      "seed_range": [710000, 710049],
+      "allocation": "5 cases per slot across five NICs and both slots, randomized fixed order",
+      "gap_mm": [7, 15],
+      "lateral_xy_components_mm": [-0.8, 0.8],
+      "initial_xyz_Euler_components_deg": [-0.03, 0.03],
+      "grasp_profile": "legacy_sfp with existing seeded unknown-grasp jitter",
+      "fixture_condition": "Public level fixture family; no unrestricted six-DOF claim"
+    }
+  },
+  "simulator_ground_truth": "Setup and independent scoring only; production policy uses RGB, exposure-time own-robot transforms, own kinematics and wrist force",
+  "force": {
+    "raw_tared_resultant_ceiling_N": 20,
+    "sample_rate_hz": 2000,
+    "missing_action_sample_allowed": false,
+    "interpretation": "Post-hoc measured ceiling, not a guaranteed bound from a lower-rate controller guard"
+  },
+  "physics": {
+    "backend": "source_float64_damped",
+    "timestep_s": 0.0005,
+    "solver_iterations": 200,
+    "asset_commit": "7148df9ab62b4b550b101189098f05bc0dba8444",
+    "plugin_sha256": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+  },
+  "scoring": "Unchanged SC/SFP depth, lateral, full-angle, continuous terminal dwell and physical contact/clearance-control gates; whole-trial observed penetration and complete raw-force audit",
+  "record": [
+    "All-selected and policy-eligible success counts with Wilson 95 percent intervals",
+    "Successful action simulation and wall times, plus elapsed time for every failure",
+    "Raw peak, p95, over-limit counts and force sampling completeness",
+    "Terminal depth, lateral/angle errors, observed penetration and contact evidence",
+    "Target/slot, gap, translation, angular and grasp-jitter configuration",
+    "Setup, perception, contact observability, alignment, force, timeout and verification failure causes",
+    "Headless before/during/after camera images, raw traces, source and weight checksums"
+  ],
+  "ablation_extension": {
+    "planned_additional_trials": 80,
+    "paired_subset": "20 cases per connector selected before execution, two matched ablations each; full-policy outcomes come from the same 100 primary trials",
+    "conditions": [
+      "Discard measured axial correction while retaining the same contact motions and checks",
+      "Disable lateral tracking compensation while retaining perception and measurement checks"
+    ],
+    "implementation_status": "Pending implementation and development qualification; no ablation results claimed",
+    "statistics": "Paired outcome differences and exact McNemar tests with multiplicity correction; separate timings and forces"
+  },
+  "no_tuning_on_final_trials": true,
+  "no_success_based_early_stopping": true,
+  "no_post_hoc_case_replacement": true,
+  "storage": "Stop at a safe trial boundary below 8 GiB free; preserve exported raw traces, checkpoint objects and selected camera evidence",
+  "publication_scope": "Simulation-only conditional held-grasp last-inch insertion for both connector types; no pickup, general rotation, latch retention, electrical mating or hardware validation claim"
+}

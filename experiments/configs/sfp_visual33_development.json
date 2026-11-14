@@ -1,0 +1,22 @@
+{
+  "purpose": "development_only_original_sfp_pipeline_diagnosis",
+  "cases": [
+    {
+      "case_id": "dev_44000",
+      "seed": 1001,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.0,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ]
+}

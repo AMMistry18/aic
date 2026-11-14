@@ -1,0 +1,11 @@
+{
+  "purpose": "interface_smoke_not_insertion_evaluation",
+  "upstream_commit": "7148df9ab62b4b550b101189098f05bc0dba8444",
+  "template": ".artifacts/upstream-phase1/aic_engine/config/sample_config.yaml",
+  "connector": "sc",
+  "seeds": [731, 732, 733],
+  "policy": "aic_example_policies.ros.WaveArm",
+  "task_time_limit_s": 20,
+  "trial_wall_timeout_s": 180,
+  "scene_perturbation": {"x_m": 0.005, "y_m": 0.005, "yaw_rad": 0.01}
+}

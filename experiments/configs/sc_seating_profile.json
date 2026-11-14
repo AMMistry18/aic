@@ -1,0 +1,11 @@
+{
+  "asset_revision": "7148df9ab62b4b550b101189098f05bc0dba8444",
+  "geometry_evidence": "SC Port entrance-to-base 15.64 mm; source box SAT audit experiments/audit_sc_collision_fit.py: clear through 12 mm, nominal shoulder contact about 0.05 mm at seat; narrow divider clearance 0.348 mm per side",
+  "seated_depth_m": 0.01564,
+  "depth_tolerance_m": 0.00025,
+  "lateral_tolerance_m": 0.00025,
+  "angular_tolerance_deg": 0.25,
+  "max_penetration_m": 0.0001,
+  "dwell_s": 1.0,
+  "max_sample_gap_s": 0.03
+}

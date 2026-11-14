@@ -1,0 +1,16 @@
+{
+  "backend": "source_float64_damped",
+  "gz_physics_version": "8.3.0",
+  "bullet_version": "3.24",
+  "scalar_precision_bits": 64,
+  "source_tag": "gz-physics8_8.3.0",
+  "source_modifications": "Sharp SDF box margins zero; read SDF BALL Axis damping for existing viscous torque update on all DOFs",
+  "plugin_path": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+  "binary_sha256": {
+    "/usr/lib/x86_64-linux-gnu/libBulletDynamics-float64.so.3.24": "4e4512ca2d505df76e33bd5b4cca1e60472ed5e58885753c3f2d67c7c67256a7",
+    "/usr/lib/x86_64-linux-gnu/libBulletCollision-float64.so.3.24": "baa16598bc6a54aa51c825af6680807b548decb33ff11f469ac24c09f54826c2",
+    "/usr/lib/x86_64-linux-gnu/libLinearMath-float64.so.3.24": "5d3fe859ad08f78fac1e51ed85dddd9e39da501a0d566e86e00da5565d9e5343",
+    "/opt/research-bullet-damped/libResearchBulletDamped.so": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf"
+  },
+  "source_provenance": "experiments/configs/bullet_damped_source_provenance.json"
+}

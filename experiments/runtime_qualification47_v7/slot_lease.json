@@ -1,0 +1,11 @@
+{
+  "pid": 45828,
+  "created": 1794581613.7174058,
+  "state": "released",
+  "heartbeat": 1794682657.565404,
+  "development_container": "research-aic-perception30",
+  "final_policy_changes": false,
+  "coordinator_source_sha256": "c84109e9fb7dfa8a5e196a6a0e57914950eb43a917f2d90f307d11c0687ca853",
+  "final_completed_before_slot": 98,
+  "released_unix": 1794682657.5653994
+}

@@ -1,0 +1,90 @@
+{
+  "scope": "Historical development RGB only; image-cache microbenchmark, not insertion speed",
+  "cpu_threads": 1,
+  "samples": [
+    {
+      "input": ".artifacts/lastinch_runs/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/000/inputs.json",
+      "input_sha256": "85bdbdb13c12e101d0c91f3e16cdd36c6fb4f7b3bb6707a22ba8125076a68f43",
+      "baseline_wall_s": 4.818969401996583,
+      "candidate_wall_s": 1.313543367999955,
+      "speedup": 3.6686793290533726,
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    },
+    {
+      "input": ".artifacts/lastinch_runs/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/003/inputs.json",
+      "input_sha256": "0e284ae35b5f87f8ca049c42529608808e65bd99a0dc9582c64f07a99cc13848",
+      "baseline_wall_s": 1.0961406210044515,
+      "candidate_wall_s": 1.4629949199952534,
+      "speedup": 0.7492443111203748,
+      "edge_distance_calls": {
+        "candidate": 3,
+        "baseline": 9
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    },
+    {
+      "input": ".artifacts/lastinch_runs/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/006/inputs.json",
+      "input_sha256": "df5add0081c5dae839975e130a069ce522767f7996983ad08eb8f8ab7fe81dae",
+      "baseline_wall_s": 1.4157428389953566,
+      "candidate_wall_s": 0.6783885750046466,
+      "speedup": 2.08692022707732,
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    },
+    {
+      "input": ".artifacts/lastinch_runs/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/000/inputs.json",
+      "input_sha256": "14174d0fb3efddfeda58fea8c8477667057fd9b1486371d69939db1a30c15855",
+      "baseline_wall_s": 1.1381995370029472,
+      "candidate_wall_s": 1.5846823020037846,
+      "speedup": 0.7182509298953658,
+      "edge_distance_calls": {
+        "candidate": 3,
+        "baseline": 9
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    },
+    {
+      "input": ".artifacts/lastinch_runs/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/003/inputs.json",
+      "input_sha256": "ef7863c558863ee09d13273c87a8fa0a7dd6387c42fcc219d969fe9fac651a90",
+      "baseline_wall_s": 2.2809887580006034,
+      "candidate_wall_s": 0.7640217070002109,
+      "speedup": 2.9855025545759446,
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    },
+    {
+      "input": ".artifacts/lastinch_runs/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_43001_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/006/inputs.json",
+      "input_sha256": "e70e64503de247eb525f46578764a8d505ba5248029b3f30f07bf72f3bf07ee0",
+      "baseline_wall_s": 0.8525940609979443,
+      "candidate_wall_s": 1.1040786960002151,
+      "speedup": 0.7722221831529463,
+      "edge_distance_calls": {
+        "candidate": 3,
+        "baseline": 9
+      },
+      "identical_pose_and_all_diagnostics": false,
+      "reason": "accepted"
+    }
+  ],
+  "all_outputs_identical": false,
+  "median_baseline_wall_s": 1.2769711879991519,
+  "median_candidate_wall_s": 1.208811032000085,
+  "median_paired_speedup": 1.4295712051151332,
+  "physics_trials": 0,
+  "installed": false
+}

@@ -1,0 +1,36 @@
+{
+  "status": "waiting_for_recording_regression",
+  "results": [],
+  "development": [],
+  "final_trials_started": false,
+  "planned_primary": 100,
+  "planned_ablation": 80,
+  "started_unix": 1794537656.330753,
+  "updated_unix": 1794537656.3307657,
+  "summary": {
+    "sc": {
+      "attempted": 0,
+      "policy_eligible": 0,
+      "verified": 0,
+      "all_attempt_wilson95": null,
+      "policy_eligible_wilson95": null,
+      "median_success_sim_s": null,
+      "median_success_wall_s": null,
+      "maximum_raw_peak_N": null,
+      "complete_force_audits": 0,
+      "failure_causes": {}
+    },
+    "sfp": {
+      "attempted": 0,
+      "policy_eligible": 0,
+      "verified": 0,
+      "all_attempt_wilson95": null,
+      "policy_eligible_wilson95": null,
+      "median_success_sim_s": null,
+      "median_success_wall_s": null,
+      "maximum_raw_peak_N": null,
+      "complete_force_audits": 0,
+      "failure_causes": {}
+    }
+  }
+}

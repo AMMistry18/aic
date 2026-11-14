@@ -1,0 +1,180 @@
+[
+  {
+    "run": "dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+    "connector": "sc",
+    "method": "original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+    "harness_revision": 38,
+    "reason": "command_and_dwell_completed",
+    "command_count": 974,
+    "visual_grasp_available": true,
+    "wall_s": 286.5136731290004,
+    "sim_s": 28.522000000000006,
+    "controller_tare": {
+      "success": true,
+      "message": "Successfully tared force torque sensor."
+    },
+    "visual_reacquisition_events": [],
+    "rim_refinement_enabled": true,
+    "contact_grasp_registration": null,
+    "contact_entry_search": null,
+    "orientation_condition": "upstream_aligned_handoff_assumed",
+    "native_wrench_feedback_gain": 0.0,
+    "body_translation_refinement_enabled": true,
+    "sc_body_diagnostic": {
+      "accepted": true,
+      "reason": "accepted",
+      "position": [
+        -0.23334104561237382,
+        0.36891399314778506,
+        0.03995560045961643
+      ],
+      "prior_rotation": [
+        [
+          0.017838509906062394,
+          0.9998408811227573,
+          0.0
+        ],
+        [
+          0.9998408811227573,
+          -0.01783850990606295,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          -1.0000000000000004
+        ]
+      ],
+      "correction_base_m": [
+        0.00011633521562695801,
+        -0.0002626136678541209,
+        0.00023570384088962912
+      ],
+      "mean_support_error_px": 0.36916903951306357,
+      "directions_per_view": [
+        32,
+        24,
+        33
+      ],
+      "leave_one_view_out_disagreement_m": [
+        9.699398023712928e-05,
+        8.622405923510369e-05,
+        7.976791072937014e-05
+      ],
+      "leave_one_view_out_vectors_base_m": [
+        [
+          -2.996346999627754e-05,
+          -4.705561492358279e-05,
+          7.934602556011419e-05
+        ],
+        [
+          4.797372043869414e-05,
+          2.9305900715133976e-05,
+          -6.537793757471552e-05
+        ],
+        [
+          -2.738938654465671e-05,
+          4.06765385501216e-05,
+          -6.291391180348441e-05
+        ]
+      ],
+      "partial_translation": {
+        "lateral_candidate_qualified": true,
+        "maximum_lateral_disagreement_m": 5.621666718558891e-05,
+        "unqualified_axial_disagreement_m": 7.934602556011423e-05,
+        "lateral_budget_m": 0.00025,
+        "axial_contact_capture_bound_m": 0.0005,
+        "requires_axial_contact_measurement": true,
+        "full_visual_pose_certified": false
+      },
+      "raster_offset_px": -0.5,
+      "orientation_assumption": "upstream_aligned_to_visual_port",
+      "simulator_object_inputs": false,
+      "measured_prior_mismatch_deg": 1.3274016319602353,
+      "prior_consistency_limit_deg": 0.9157752620691243,
+      "port_symmetry_branch_deg": 0,
+      "angular_prior_certified": false,
+      "angular_consistency_screen_applied": false,
+      "diagnostic_ablation": true,
+      "camera_stamp_s": [
+        20.4,
+        20.4,
+        20.4
+      ],
+      "exposure_tcp_stamp_s": 20.4
+    },
+    "lateral_tracking_compensation_enabled": true,
+    "peak_tared_force_N": 1.180600591007286,
+    "verified_success": true,
+    "max_global_penetration_m": 1.3635600381854256e-07,
+    "tracking_peak_compensation_N": 0.4242161250669882,
+    "angular_screen_diagnostic_ablation": true,
+    "counts_as_guarded_production_policy": false,
+    "terminal_metrics": {
+      "depth_m": {
+        "min": 0.015565555074779422,
+        "max": 0.015565578595128773
+      },
+      "lateral_error_m": {
+        "min": 0.0001203950464316413,
+        "max": 0.00012040053566745524
+      },
+      "angular_error_deg": {
+        "min": 0.1345756612660046,
+        "max": 0.13461045527217402
+      },
+      "max_penetration_m": {
+        "min": 0.0,
+        "max": 0.0
+      }
+    }
+  },
+  {
+    "run": "dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+    "connector": "sfp",
+    "method": "original_perception_sfp_contact_datum_handoff",
+    "harness_revision": 38,
+    "reason": "command_and_dwell_completed",
+    "command_count": 2423,
+    "visual_grasp_available": true,
+    "wall_s": 715.4829235990001,
+    "sim_s": 57.458,
+    "controller_tare": {
+      "success": true,
+      "message": "Successfully tared force torque sensor."
+    },
+    "visual_reacquisition_events": [],
+    "rim_refinement_enabled": false,
+    "contact_grasp_registration": null,
+    "contact_entry_search": null,
+    "orientation_condition": "upstream_aligned_handoff_assumed",
+    "native_wrench_feedback_gain": 0.0,
+    "body_translation_refinement_enabled": false,
+    "sc_body_diagnostic": null,
+    "lateral_tracking_compensation_enabled": false,
+    "peak_tared_force_N": 2.0527634712869096,
+    "verified_success": true,
+    "max_global_penetration_m": 2.82829546733008e-07,
+    "tracking_peak_compensation_N": 0.17093526788317703,
+    "angular_screen_diagnostic_ablation": false,
+    "counts_as_guarded_production_policy": false,
+    "terminal_metrics": {
+      "depth_m": {
+        "min": 0.045805251443210515,
+        "max": 0.0458160044757808
+      },
+      "lateral_error_m": {
+        "min": 3.4675813931960066e-06,
+        "max": 4.6075399525471244e-06
+      },
+      "angular_error_deg": {
+        "min": 0.020162641616688227,
+        "max": 0.020211212246043674
+      },
+      "max_penetration_m": {
+        "min": 3.323079658668071e-16,
+        "max": 1.1611534216776631e-14
+      }
+    }
+  }
+]

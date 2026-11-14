@@ -1,0 +1,21 @@
+{
+  "scope": "Copied development workspace only; frozen final policy untouched",
+  "installed_workspace": "C:\\Users\\anshu\\College\\Intrinsic\\aic\\aic\\.artifacts\\dev46_workspace",
+  "changes": [
+    {
+      "path": "aic_model/aic_model/insertion/sfp_plug_pose.py",
+      "before_sha256": "392091688b13c8ca4ccb8f34a3655cdeb188b42859af458b970da015f6e0aa27",
+      "after_sha256": "77febbe3a07be6a1b9d61391a9d002d879819181d49a406309c480a65c477976"
+    },
+    {
+      "path": "aic_example_policies/aic_example_policies/ros/perception_core.py",
+      "before_sha256": "2280c52d98ba614f6f31ab9f1253f36973fcd97448a4f30a92bdddb80877acbd",
+      "after_sha256": "1845cc0d7f9e03d53bd7821dbe62b9e416b3995f9b7990b18f2de92c4f681406"
+    }
+  ],
+  "helper_sha256": "2f90ed2d38067e636c567316a8934b2b4fe1530677907c5487a84a9ba357e936",
+  "inference_proof": "experiments/parallel_dev46/thread_callback_verification.json",
+  "weights_changed": false,
+  "acceptance_thresholds_changed": false,
+  "physical_insertion_qualified": false
+}

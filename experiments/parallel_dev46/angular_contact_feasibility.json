@@ -1,0 +1,679 @@
+{
+  "scope": "Analytic pinned-source collision-box diagnostic only; no simulated contact/insertion claim",
+  "final_cases_read": 0,
+  "noise_is_hypothetical_not_measured": true,
+  "noise_sensitivity": [
+    {
+      "hypothetical_independent_center_sigma_um": 1,
+      "depth_separation_mm": 8,
+      "angular_95_halfwidth_deg": 0.03970394954252837
+    },
+    {
+      "hypothetical_independent_center_sigma_um": 5,
+      "depth_separation_mm": 8,
+      "angular_95_halfwidth_deg": 0.19851974771264186
+    },
+    {
+      "hypothetical_independent_center_sigma_um": 10,
+      "depth_separation_mm": 8,
+      "angular_95_halfwidth_deg": 0.3970394954252837
+    },
+    {
+      "hypothetical_independent_center_sigma_um": 25,
+      "depth_separation_mm": 8,
+      "angular_95_halfwidth_deg": 0.9925987385632096
+    }
+  ],
+  "rows": [
+    {
+      "tilt_axis": 0,
+      "angle_deg": 0.0,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0004999757453875475,
+          "upper_m": 0.000498340851462978,
+          "midpoint_m": -8.174469622847453e-07,
+          "span_m": 0.0009983165968505256,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0004994823597460963,
+          "upper_m": 0.00038413423518324707,
+          "midpoint_m": -5.767406228142461e-05,
+          "span_m": 0.0008836165949293434,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -56.85661531913986,
+      "uniform_straight_channel_formula_angle_deg": -0.8143561819878606
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -0.03,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0004990098620299888,
+          "upper_m": 0.0004984540068418211,
+          "midpoint_m": -2.779275940838167e-07,
+          "span_m": 0.0009974638688718099,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0004947916857934701,
+          "upper_m": 0.0003876828128133056,
+          "midpoint_m": -5.355443649008229e-05,
+          "span_m": 0.0008824744986067757,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -53.27650889599847,
+      "uniform_straight_channel_formula_angle_deg": -0.7630846553443281
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 0.03,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0005005000519280082,
+          "upper_m": 0.0004973227597385497,
+          "midpoint_m": -1.5886460947292709e-06,
+          "span_m": 0.000997822811666558,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.000500006666286557,
+          "upper_m": 0.0003805844992589685,
+          "midpoint_m": -5.971108351379424e-05,
+          "span_m": 0.0008805911655455254,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -58.122437419064966,
+      "uniform_straight_channel_formula_angle_deg": -0.8324840032419368
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -0.1,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0004966232361044353,
+          "upper_m": 0.0004984595443841049,
+          "midpoint_m": 9.181541398347736e-07,
+          "span_m": 0.0009950827804885401,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00048263120218039647,
+          "upper_m": 0.00039595833372994886,
+          "midpoint_m": -4.3336434225223805e-05,
+          "span_m": 0.0008785895359103453,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -44.25458836505858,
+      "uniform_straight_channel_formula_angle_deg": -0.6338744222135725
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 0.1,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0005017279396481994,
+          "upper_m": 0.0004949427047248032,
+          "midpoint_m": -3.3926174616981017e-06,
+          "span_m": 0.0009966706443730027,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0005012345540067485,
+          "upper_m": 0.0003722972666859134,
+          "midpoint_m": -6.446864366041756e-05,
+          "span_m": 0.0008735318206926619,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -61.07602619871946,
+      "uniform_straight_channel_formula_angle_deg": -0.8747816539353005
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -0.25,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0004914877483256296,
+          "upper_m": 0.0004984926461322062,
+          "midpoint_m": 3.502448903288302e-06,
+          "span_m": 0.0009899803944578359,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00045655155555925206,
+          "upper_m": 0.0004136705077909245,
+          "midpoint_m": -2.144052388416379e-05,
+          "span_m": 0.0008702220633501766,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -24.942972787452092,
+      "uniform_straight_channel_formula_angle_deg": -0.35727713650888693
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 0.25,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.00050195910221584,
+          "upper_m": 0.0004898213077880348,
+          "midpoint_m": -6.068897213902589e-06,
+          "span_m": 0.0009917804100038749,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0005014657165743888,
+          "upper_m": 0.00035451752484812904,
+          "midpoint_m": -7.347409586312987e-05,
+          "span_m": 0.0008559832414225179,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -67.40519864922729,
+      "uniform_straight_channel_formula_angle_deg": -0.9654169749170131
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -0.5,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.00048286392309026605,
+          "upper_m": 0.0004986121653084224,
+          "midpoint_m": 7.87412110907817e-06,
+          "span_m": 0.0009814760883986883,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0004130195928844696,
+          "upper_m": 0.0004431274650637042,
+          "midpoint_m": 1.5053936089617312e-05,
+          "span_m": 0.0008561470579481738,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 7.179814980539144,
+      "uniform_straight_channel_formula_angle_deg": 0.10284316356879672
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 0.5,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0005020808952375834,
+          "upper_m": 0.00048122099900557393,
+          "midpoint_m": -1.0429948116004738e-05,
+          "span_m": 0.0009833018942431574,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0005015875095961327,
+          "upper_m": 0.0003248192467357487,
+          "midpoint_m": -8.8384131430192e-05,
+          "span_m": 0.0008264067563318815,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -77.95418331418726,
+      "uniform_straight_channel_formula_angle_deg": -1.116470092749898
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -1.0,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0004653725096879299,
+          "upper_m": 0.00049909250452478,
+          "midpoint_m": 1.685999741842507e-05,
+          "span_m": 0.00096446501421271,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003257025956662825,
+          "upper_m": 0.0004995858901662312,
+          "midpoint_m": 8.694164724997434e-05,
+          "span_m": 0.0008252884858325137,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 70.08164983154927,
+      "uniform_straight_channel_formula_angle_deg": 1.0037429929644825
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 1.0,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0005025657818419654,
+          "upper_m": 0.0004637767407136674,
+          "midpoint_m": -1.9394520564148995e-05,
+          "span_m": 0.0009663425225556327,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0005020723962005141,
+          "upper_m": 0.00026166359366139313,
+          "midpoint_m": -0.0001202044012695605,
+          "span_m": 0.0007637359898619073,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -100.8098807054115,
+      "uniform_straight_channel_formula_angle_deg": -1.4436895660420896
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": -2.0,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.000429404750101034,
+          "upper_m": 0.000501018226228899,
+          "midpoint_m": 3.5806738063932496e-05,
+          "span_m": 0.000930422976329933,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00015000917268783457,
+          "upper_m": 0.0005015116118703501,
+          "midpoint_m": 0.00017575121959125778,
+          "span_m": 0.0006515207845581847,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 139.94448152732528,
+      "uniform_straight_channel_formula_angle_deg": 2.0037397611596997
+    },
+    {
+      "tilt_axis": 0,
+      "angle_deg": 2.0,
+      "lateral_axis": 1,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0005045005958979959,
+          "upper_m": 0.00042790380581182854,
+          "midpoint_m": -3.82983950430837e-05,
+          "span_m": 0.0009324044017098244,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0005040072102565448,
+          "upper_m": 0.00012606142077166497,
+          "midpoint_m": -0.00018897289474243992,
+          "span_m": 0.0006300686310282098,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -150.67449969935623,
+      "uniform_straight_channel_formula_angle_deg": -2.1572332963989975
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 0.0,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.00037449999999999766,
+          "upper_m": 0.00037500000000000033,
+          "midpoint_m": 2.500000000013342e-07,
+          "span_m": 0.000749499999999998,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00037449999999999766,
+          "upper_m": 0.00037500000000000033,
+          "midpoint_m": 2.500000000013342e-07,
+          "span_m": 0.000749499999999998,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 0.0,
+      "uniform_straight_channel_formula_angle_deg": 0.0
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -0.03,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003745009424101185,
+          "upper_m": 0.0003739799244194812,
+          "midpoint_m": -2.605089953186589e-07,
+          "span_m": 0.0007484808668295998,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003745009424101185,
+          "upper_m": 0.0003697911338328502,
+          "midpoint_m": -2.3549042886341655e-06,
+          "span_m": 0.0007442920762429687,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -2.0943952933155066,
+      "uniform_straight_channel_formula_angle_deg": -0.029999999993203588
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 0.03,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.00037347979018249487,
+          "upper_m": 0.00037550094241012126,
+          "midpoint_m": 1.0105761138131959e-06,
+          "span_m": 0.0007489807325926161,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003692909995958638,
+          "upper_m": 0.00037550094241012126,
+          "midpoint_m": 3.1049714071287296e-06,
+          "span_m": 0.000744791942005985,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 2.0943952933155336,
+      "uniform_straight_channel_formula_angle_deg": 0.029999999993203973
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -0.1,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003745104712211461,
+          "upper_m": 0.0003715924145233087,
+          "midpoint_m": -1.4590283489186858e-06,
+          "span_m": 0.0007461028857444548,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003745104712211461,
+          "upper_m": 0.00035762976633296143,
+          "midpoint_m": -8.440352444092324e-06,
+          "span_m": 0.0007321402375541075,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -6.981324095173638,
+      "uniform_straight_channel_formula_angle_deg": -0.09999999997734585
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 0.1,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003710919675993673,
+          "upper_m": 0.0003755104712211488,
+          "midpoint_m": 2.209251810890748e-06,
+          "span_m": 0.0007466024388205161,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00035712931940902004,
+          "upper_m": 0.0003755104712211488,
+          "midpoint_m": 9.190575906064386e-06,
+          "span_m": 0.0007326397906301689,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 6.981324095173638,
+      "uniform_straight_channel_formula_angle_deg": 0.09999999997734585
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -0.25,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003745654450449491,
+          "upper_m": 0.0003664417206035307,
+          "midpoint_m": -4.061862220709219e-06,
+          "span_m": 0.0007410071656484799,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003745654450449491,
+          "upper_m": 0.00033153491404582576,
+          "midpoint_m": -2.151526549956168e-05,
+          "span_m": 0.0007061003590907749,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -17.453403278852463,
+      "uniform_straight_channel_formula_angle_deg": -0.249999999943367
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 0.25,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003659406061435414,
+          "upper_m": 0.00037556544504495186,
+          "midpoint_m": 4.812419450705242e-06,
+          "span_m": 0.0007415060511884932,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003310337995858365,
+          "upper_m": 0.00037556544504495186,
+          "midpoint_m": 2.2265822729557676e-05,
+          "span_m": 0.0007065992446307883,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 17.453403278852434,
+      "uniform_straight_channel_formula_angle_deg": 0.2499999999433666
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -0.5,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003747617789338232,
+          "upper_m": 0.000357752210728031,
+          "midpoint_m": -8.504784102896082e-06,
+          "span_m": 0.0007325139896618542,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003747617789338232,
+          "upper_m": 0.000287937268417777,
+          "midpoint_m": -4.34122552580231e-05,
+          "span_m": 0.0006626990473516002,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -34.90747115512702,
+      "uniform_straight_channel_formula_angle_deg": -0.4999999998867329
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 0.5,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003572499912852592,
+          "upper_m": 0.0003757617789338259,
+          "midpoint_m": 9.255893824283365e-06,
+          "span_m": 0.0007330117702190851,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00028743504897500515,
+          "upper_m": 0.0003757617789338259,
+          "midpoint_m": 4.4163364979410386e-05,
+          "span_m": 0.0006631968279088311,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 34.90747115512702,
+      "uniform_straight_channel_formula_angle_deg": 0.4999999998867329
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -1.0,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.00037554709579980944,
+          "upper_m": 0.00033997811843136953,
+          "midpoint_m": -1.7784488684219953e-05,
+          "span_m": 0.000715525214231179,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00037554709579980944,
+          "upper_m": 0.00020033759903726757,
+          "midpoint_m": -8.760474838127093e-05,
+          "span_m": 0.000575884694837077,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -69.82025969705099,
+      "uniform_straight_channel_formula_angle_deg": -0.9999999997734733
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 1.0,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003394737172904803,
+          "upper_m": 0.0003765470957998122,
+          "midpoint_m": 1.8536689254665942e-05,
+          "span_m": 0.0007160208130902925,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.00019983319789637833,
+          "upper_m": 0.0003765470957998122,
+          "midpoint_m": 8.835694895171692e-05,
+          "span_m": 0.0005763802936961904,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 69.82025969705099,
+      "uniform_straight_channel_formula_angle_deg": 0.9999999997734733
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": -2.0,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003786880642437174,
+          "upper_m": 0.0003028392689755985,
+          "midpoint_m": -3.792439763405944e-05,
+          "span_m": 0.000681527333219316,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -0.0003786880642437174,
+          "upper_m": 2.347311310494224e-05,
+          "midpoint_m": -0.0001776074755693876,
+          "span_m": 0.00040216117734865963,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": -139.68307793532816,
+      "uniform_straight_channel_formula_angle_deg": -1.9999999995470163
+    },
+    {
+      "tilt_axis": 1,
+      "angle_deg": 2.0,
+      "lateral_axis": 0,
+      "depth_measurements": [
+        {
+          "observable": true,
+          "lower_m": -0.0003023306164088133,
+          "upper_m": 0.00037968806424371927,
+          "midpoint_m": 3.8678723917453e-05,
+          "span_m": 0.0006820186806525325,
+          "depth_m": 0.002
+        },
+        {
+          "observable": true,
+          "lower_m": -2.2964460538157213e-05,
+          "upper_m": 0.00037968806424371927,
+          "midpoint_m": 0.00017836180185278104,
+          "span_m": 0.00040265252478187646,
+          "depth_m": 0.01
+        }
+      ],
+      "two_depth_center_shift_um": 139.68307793532804,
+      "uniform_straight_channel_formula_angle_deg": 1.9999999995470148
+    }
+  ]
+}

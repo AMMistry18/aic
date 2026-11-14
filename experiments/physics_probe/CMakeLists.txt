@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(research_solver_probe LANGUAGES CXX)
+find_package(gz-physics8 REQUIRED)
+find_package(gz-plugin3 REQUIRED COMPONENTS loader)
+find_package(sdformat15 REQUIRED)
+add_executable(solver_probe solver_probe.cc)
+target_compile_features(solver_probe PRIVATE cxx_std_17)
+target_link_libraries(solver_probe PRIVATE gz-physics8::gz-physics8 gz-plugin3::loader sdformat15::sdformat15)

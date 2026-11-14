@@ -1,0 +1,22 @@
+{
+  "purpose": "fixed development diagnostic, not final reliability or independent repeated seeds",
+  "case_id": "dev_3003",
+  "seed": 3003,
+  "method": "force_tactile_translation",
+  "execution_order": "Capability readback; changed-configuration controls and trials; final engine-default reference repeat. All contexts are fixed before execution.",
+  "contexts": [
+    {"name": "default_dt1", "timestep_s": 0.001, "solver_iterations_requested": null, "contact_control": "existing pinned default/1ms qualified proof"},
+    {"name": "iters200_dt1", "timestep_s": 0.001, "solver_iterations_requested": 200, "contact_control": "new executed intentional lateral miss"},
+    {"name": "iters200_dt05", "timestep_s": 0.0005, "solver_iterations_requested": 200, "contact_control": "new executed intentional lateral miss"}
+  ],
+  "requirements": [
+    "Same frozen policy sources, connector geometry, seeded layout and prescribed grasp",
+    "Actual solver setter/getter capability probe before starting the study",
+    "Observe requested solver-iteration component in the live workcell",
+    "Fresh full-contact handoff gate for every trial",
+    "Match collision control by timestep and requested solver configuration",
+    "Keep terminal seating and recorded whole-trial penetration outcomes separate",
+    "Report bootstrap and measured initial states; do not assume bitwise repeated handoffs",
+    "No held-out final cases and no automatic parameter tuning"
+  ]
+}

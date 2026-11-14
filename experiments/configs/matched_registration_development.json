@@ -1,0 +1,16 @@
+{
+  "purpose": "development ablation; held-out final cases untouched",
+  "case_ids": ["dev_3001", "dev_3003", "dev_3005", "dev_3007", "dev_3009"],
+  "methods": ["force_tactile_no_registration", "force_tactile_translation"],
+  "method_order_seed": 934,
+  "physics_step_s": 0.001,
+  "solver_iterations_requested": null,
+  "source_inertias_unchanged": true,
+  "remote_support": false,
+  "primary_endpoint": "verified terminal seat AND recorded whole-trial penetration <=0.1 mm",
+  "secondary_endpoint": "terminal geometric seat under unchanged verifier",
+  "eligibility": "report setup failures and invalid pre-command contacts separately; preserve every raw outcome",
+  "shared_conditions": ["CAD orientation family", "protocol gap", "prescribed grasp", "load support", "tracking compensation", "input handling", "approach waypoint", "terminal dwell", "force and seat thresholds"],
+  "intervention": "omit opposed lateral registration probes only",
+  "limitations": "different activation histories; development cases already observed; no final-reliability or causal force/time claim"
+}

@@ -1,0 +1,25 @@
+{
+  "scope": "Historical development RGB only; image-cache microbenchmark, not insertion speed",
+  "cpu_threads": 1,
+  "samples": [
+    {
+      "input": ".artifacts/lastinch_runs/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff/rim_inputs/000/inputs.json",
+      "input_sha256": "85bdbdb13c12e101d0c91f3e16cdd36c6fb4f7b3bb6707a22ba8125076a68f43",
+      "baseline_wall_s": 1.5890244170004735,
+      "candidate_wall_s": 0.7619798260056996,
+      "speedup": 2.0853890913754816,
+      "edge_distance_calls": {
+        "baseline": 9,
+        "candidate": 3
+      },
+      "identical_pose_and_all_diagnostics": true,
+      "reason": "accepted"
+    }
+  ],
+  "all_outputs_identical": true,
+  "median_baseline_wall_s": 1.5890244170004735,
+  "median_candidate_wall_s": 0.7619798260056996,
+  "median_paired_speedup": 2.0853890913754816,
+  "physics_trials": 0,
+  "installed": false
+}

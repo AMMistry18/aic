@@ -1,0 +1,41 @@
+{
+  "purpose": "prospective development factorial; no final seeds",
+  "case_ids": [
+    "dev_3000",
+    "dev_3002",
+    "dev_3004",
+    "dev_3006",
+    "dev_3008"
+  ],
+  "methods": [
+    "original_perception_rim_position_handoff",
+    "original_perception_rim_position_body_handoff",
+    "original_perception_rim_position_track_handoff",
+    "original_perception_rim_position_body_track_handoff"
+  ],
+  "method_order_seed": 20261029,
+  "orientation_condition": "upstream_aligned_handoff_assumed; initial perturbations from fixed development manifest",
+  "grasp_condition": "challenge_sc rigid attachment visually estimated; fixed known finger aperture",
+  "primary_endpoint": "independent stable requested-target seat plus whole-trial penetration <=0.1 mm",
+  "sc_thresholds": {
+    "depth_m": 0.01564,
+    "depth_tolerance_m": 0.00025,
+    "lateral_m": 0.00025,
+    "angle_deg": 0.25,
+    "dwell_sim_s": 1
+  },
+  "shared_native_wrench_gain": 0,
+  "physics_backend": "source_float64_damped",
+  "physics_step_s": 0.0005,
+  "solver_iterations": 200,
+  "failure_accounting": "all selected cases including pre-motion perception rejections; setup failures separate and preserved",
+  "source_freeze": "no policy changes during a matched batch; if changed, report a new version, never pool",
+  "status": "ready_not_executed",
+  "final_100000_series_used": false,
+  "tracking_parameters": {
+    "proportional_gain_N_per_m": 400,
+    "integral_gain_N_per_m_s": 200,
+    "force_norm_bound_N": 0.5,
+    "integral_contact_freeze_N": 1
+  }
+}

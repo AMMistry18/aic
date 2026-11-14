@@ -1,0 +1,1563 @@
+{
+  "scope": "Post-inference projected-label diagnostic on eight reused static TRAINING/development scenes, not held-out accuracy",
+  "final_cases_used": 0,
+  "policy_weights_changed": false,
+  "truth_used_for_runtime_or_fitting": false,
+  "caveat": "Network keypoint score is not a calibrated probability of subpixel accuracy; high-score errors here do not establish population miscalibration.",
+  "summary": {
+    "sc": {
+      "points": 96,
+      "score_ge_099": 93,
+      "mean_score": 0.9993408527225256,
+      "high_score_median_error_px": 2.362573802787224,
+      "high_score_p95_error_px": 6.355015706130249,
+      "high_score_over_2px": 56
+    },
+    "sfp": {
+      "points": 96,
+      "score_ge_099": 96,
+      "mean_score": 0.9999928412338098,
+      "high_score_median_error_px": 2.3077950951215,
+      "high_score_p95_error_px": 9.495949441337624,
+      "high_score_over_2px": 56
+    }
+  },
+  "rows": [
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999263286590576,
+      "scoring_only_error_px": 2.6806990897076384
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999977350234985,
+      "scoring_only_error_px": 1.9758615871935143
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999991655349731,
+      "scoring_only_error_px": 0.5681744736324219
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999575614929199,
+      "scoring_only_error_px": 2.1555640867859833
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.999970555305481,
+      "scoring_only_error_px": 2.972788991697585
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.99993896484375,
+      "scoring_only_error_px": 3.256613929772367
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999803304672241,
+      "scoring_only_error_px": 3.6360529933029797
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999960660934448,
+      "scoring_only_error_px": 3.647327260789588
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.999872088432312,
+      "scoring_only_error_px": 0.6342411657770683
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999948740005493,
+      "scoring_only_error_px": 1.1418051318114923
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999980926513672,
+      "scoring_only_error_px": 0.8645966466137356
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999392032623291,
+      "scoring_only_error_px": 1.0284209062660201
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999885559082031,
+      "scoring_only_error_px": 1.1087206538386063
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.9999271631240845,
+      "scoring_only_error_px": 3.2902107837155503
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999631643295288,
+      "scoring_only_error_px": 2.8315436779575784
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999878406524658,
+      "scoring_only_error_px": 0.42935241867230906
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9998989105224609,
+      "scoring_only_error_px": 2.8924899519529563
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999971389770508,
+      "scoring_only_error_px": 1.4086457919989022
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999923706054688,
+      "scoring_only_error_px": 1.6118876864365521
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9996113181114197,
+      "scoring_only_error_px": 3.5116299693349724
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999971389770508,
+      "scoring_only_error_px": 4.003219551330397
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999768733978271,
+      "scoring_only_error_px": 2.760501458486542
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.99988853931427,
+      "scoring_only_error_px": 2.7692902508110824
+    },
+    {
+      "connector": "sc",
+      "case": "train_80010",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9998644590377808,
+      "scoring_only_error_px": 4.792986276080429
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9998843669891357,
+      "scoring_only_error_px": 1.7839384721693041
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999892711639404,
+      "scoring_only_error_px": 2.317057314392028
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999936819076538,
+      "scoring_only_error_px": 2.6413478693165175
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9998297691345215,
+      "scoring_only_error_px": 1.4088494446898652
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999620914459229,
+      "scoring_only_error_px": 2.467532425276367
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9998373985290527,
+      "scoring_only_error_px": 3.788071010029606
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999208450317383,
+      "scoring_only_error_px": 3.5032516661999886
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.999993085861206,
+      "scoring_only_error_px": 2.084960995087794
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9998997449874878,
+      "scoring_only_error_px": 0.493592681290264
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999958276748657,
+      "scoring_only_error_px": 2.2377088980288242
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999985694885254,
+      "scoring_only_error_px": 1.9419354824495965
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999707937240601,
+      "scoring_only_error_px": 0.5198912505947006
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999923706054688,
+      "scoring_only_error_px": 1.2966114189083715
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.9999536275863647,
+      "scoring_only_error_px": 3.3967714644219016
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999828338623047,
+      "scoring_only_error_px": 3.3858179555497867
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999942779541016,
+      "scoring_only_error_px": 0.72423663084341
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.99008709192276,
+      "scoring_only_error_px": 2.2945082986527803
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999054670333862,
+      "scoring_only_error_px": 5.380693121361558
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999260902404785,
+      "scoring_only_error_px": 6.585428731580864
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9887191653251648,
+      "scoring_only_error_px": 3.4023677339583784
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999661445617676,
+      "scoring_only_error_px": 0.7548252739601334
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999338388442993,
+      "scoring_only_error_px": 8.163246237637171
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9998581409454346,
+      "scoring_only_error_px": 9.151043876568716
+    },
+    {
+      "connector": "sc",
+      "case": "train_80011",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9994194507598877,
+      "scoring_only_error_px": 2.575719021365439
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999665021896362,
+      "scoring_only_error_px": 0.26633144682061427
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.999996542930603,
+      "scoring_only_error_px": 0.6564179452419125
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999980926513672,
+      "scoring_only_error_px": 0.624279987026823
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999575614929199,
+      "scoring_only_error_px": 0.7949899774553317
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999798536300659,
+      "scoring_only_error_px": 2.3431655436272036
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9998883008956909,
+      "scoring_only_error_px": 1.7510361313482627
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999490976333618,
+      "scoring_only_error_px": 1.8873750196492882
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999967813491821,
+      "scoring_only_error_px": 2.7834181839643812
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9997411370277405,
+      "scoring_only_error_px": 0.9508263310929843
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999886751174927,
+      "scoring_only_error_px": 1.639708538947969
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999969005584717,
+      "scoring_only_error_px": 1.0585200544764493
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999418258666992,
+      "scoring_only_error_px": 1.5390240161861115
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999775886535645,
+      "scoring_only_error_px": 0.5572810835495433
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.999904990196228,
+      "scoring_only_error_px": 2.4827645810776757
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.999969482421875,
+      "scoring_only_error_px": 2.362573802787224
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.999988317489624,
+      "scoring_only_error_px": 0.5906295081087662
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9997832179069519,
+      "scoring_only_error_px": 1.7465231293438077
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999934434890747,
+      "scoring_only_error_px": 2.0467291449027916
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999905824661255,
+      "scoring_only_error_px": 1.985587473236151
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.99964439868927,
+      "scoring_only_error_px": 2.24200040282718
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999959468841553,
+      "scoring_only_error_px": 5.281215796630714
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999651908874512,
+      "scoring_only_error_px": 5.443045698610386
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9999035596847534,
+      "scoring_only_error_px": 5.219335630715948
+    },
+    {
+      "connector": "sc",
+      "case": "train_80012",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.999889612197876,
+      "scoring_only_error_px": 5.378207279482285
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9998530149459839,
+      "scoring_only_error_px": 2.063630910845718
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999954700469971,
+      "scoring_only_error_px": 2.5391551394499667
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999972581863403,
+      "scoring_only_error_px": 2.4527382252399805
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9998346567153931,
+      "scoring_only_error_px": 0.2027637245794879
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999328851699829,
+      "scoring_only_error_px": 3.028887565579513
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.999866247177124,
+      "scoring_only_error_px": 5.5348036680918895
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999510049819946,
+      "scoring_only_error_px": 5.635455095469307
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999891519546509,
+      "scoring_only_error_px": 2.75790835153197
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9998258948326111,
+      "scoring_only_error_px": 0.9321259159405471
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999949932098389,
+      "scoring_only_error_px": 3.863457367578437
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999974966049194,
+      "scoring_only_error_px": 2.843934696718344
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999016523361206,
+      "scoring_only_error_px": 0.8685429356087161
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999837875366211,
+      "scoring_only_error_px": 0.53688600646341
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.9999505281448364,
+      "scoring_only_error_px": 2.86706081908279
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999731779098511,
+      "scoring_only_error_px": 2.8437151205535134
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.999983549118042,
+      "scoring_only_error_px": 1.0048097098318687
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9825279116630554,
+      "scoring_only_error_px": 6.658098567160496
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9997300505638123,
+      "scoring_only_error_px": 5.807465662332618
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9998342990875244,
+      "scoring_only_error_px": 8.036329845427918
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9830170273780823,
+      "scoring_only_error_px": 7.377553509945236
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9998615980148315,
+      "scoring_only_error_px": 3.225642897969174
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9998027682304382,
+      "scoring_only_error_px": 5.134388085458829
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9997435212135315,
+      "scoring_only_error_px": 7.146503032118214
+    },
+    {
+      "connector": "sc",
+      "case": "train_80013",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.999087929725647,
+      "scoring_only_error_px": 6.201407022496512
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 3.901436167622945
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999942779541016,
+      "scoring_only_error_px": 4.843560888910555
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999887943267822,
+      "scoring_only_error_px": 3.4464552245892706
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999991655349731,
+      "scoring_only_error_px": 0.6686069340029236
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.999996542930603,
+      "scoring_only_error_px": 0.8822317614525651
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9999566078186035,
+      "scoring_only_error_px": 2.7218548023914697
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999984502792358,
+      "scoring_only_error_px": 4.137662348483184
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 2.4963877591205663
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 3.547331449459201
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999992847442627,
+      "scoring_only_error_px": 2.2977304267016336
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999902248382568,
+      "scoring_only_error_px": 0.6399304075962036
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999973773956299,
+      "scoring_only_error_px": 2.3178597635413665
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999982118606567,
+      "scoring_only_error_px": 1.829084355202783
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.999984622001648,
+      "scoring_only_error_px": 2.666965856245417
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999982118606567,
+      "scoring_only_error_px": 3.8949027858157645
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 1.406093816720969
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 0.8297371597718641
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.999998927116394,
+      "scoring_only_error_px": 1.7253653999569794
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999873638153076,
+      "scoring_only_error_px": 1.4627222430392304
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9999985694885254,
+      "scoring_only_error_px": 0.6305350609279735
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999985694885254,
+      "scoring_only_error_px": 2.5205664248442305
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999562501907349,
+      "scoring_only_error_px": 2.560980525829997
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9999929666519165,
+      "scoring_only_error_px": 3.4991820669606017
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81000",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 3.6342445197518343
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 0.8138616791466393
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999934434890747,
+      "scoring_only_error_px": 1.2433600842822858
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999852180480957,
+      "scoring_only_error_px": 0.827962907015929
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999990463256836,
+      "scoring_only_error_px": 0.40050847257032784
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999973773956299,
+      "scoring_only_error_px": 2.5374802482615015
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9999618530273438,
+      "scoring_only_error_px": 2.3388073184768143
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999984502792358,
+      "scoring_only_error_px": 2.0410136385162745
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 2.1085820512758113
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9999996423721313,
+      "scoring_only_error_px": 4.8785936727699175
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999979734420776,
+      "scoring_only_error_px": 7.2468520055977095
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999891519546509,
+      "scoring_only_error_px": 3.988912424451559
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.999998927116394,
+      "scoring_only_error_px": 3.042699785457184
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999889135360718,
+      "scoring_only_error_px": 19.110120248599046
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.999839186668396,
+      "scoring_only_error_px": 19.7045819950162
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999880790710449,
+      "scoring_only_error_px": 17.05403536656291
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999992847442627,
+      "scoring_only_error_px": 16.757181694872266
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 0.26368012611021685
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999990463256836,
+      "scoring_only_error_px": 1.9228685211083896
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999924898147583,
+      "scoring_only_error_px": 1.1901906060688041
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9999978542327881,
+      "scoring_only_error_px": 1.6109569777774946
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999978542327881,
+      "scoring_only_error_px": 1.9062660500539848
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999833106994629,
+      "scoring_only_error_px": 2.0478862299513803
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9999983310699463,
+      "scoring_only_error_px": 1.2093106247282348
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81001",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 2.1743815461545717
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 1.6166120466862661
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999969005584717,
+      "scoring_only_error_px": 2.4128728475540364
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999963045120239,
+      "scoring_only_error_px": 2.1768156905667833
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999995231628418,
+      "scoring_only_error_px": 2.4126469957936445
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999959468841553,
+      "scoring_only_error_px": 1.3764574365450302
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9999655485153198,
+      "scoring_only_error_px": 2.080330620570071
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999994039535522,
+      "scoring_only_error_px": 1.4053656275476931
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 1.848480988617035
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 1.0,
+      "scoring_only_error_px": 2.634381586145445
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 5.635043292006938
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999948740005493,
+      "scoring_only_error_px": 4.698654961746407
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999990463256836,
+      "scoring_only_error_px": 1.9519543119162535
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999991655349731,
+      "scoring_only_error_px": 2.456872878489938
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.9999912977218628,
+      "scoring_only_error_px": 4.1332292109476665
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999991655349731,
+      "scoring_only_error_px": 3.5805076817722723
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 1.619828860344559
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 2.844613980816852
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999992847442627,
+      "scoring_only_error_px": 1.8280905532538434
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999891519546509,
+      "scoring_only_error_px": 0.42605165805997425
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.9999977350234985,
+      "scoring_only_error_px": 3.075721723107864
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.999998927116394,
+      "scoring_only_error_px": 2.612077456969662
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999891519546509,
+      "scoring_only_error_px": 2.286779493928618
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.9999986886978149,
+      "scoring_only_error_px": 0.20513806993221798
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81002",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 3.093112878108165
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 0,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 0.295644985777309
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 1,
+      "score": 0.9999970197677612,
+      "scoring_only_error_px": 3.2623823528093845
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 2,
+      "score": 0.9999949932098389,
+      "scoring_only_error_px": 3.596695957388418
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 3,
+      "score": 0.9999994039535522,
+      "scoring_only_error_px": 1.493156800984962
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 4,
+      "score": 0.9999967813491821,
+      "scoring_only_error_px": 0.6508844921869705
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 5,
+      "score": 0.9999706745147705,
+      "scoring_only_error_px": 2.9636986429605265
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 6,
+      "score": 0.9999992847442627,
+      "scoring_only_error_px": 3.458808372338018
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "left_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 0.12251215528050236
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 0,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 3.182713126667193
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 1,
+      "score": 0.9999983310699463,
+      "scoring_only_error_px": 3.047788971502379
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 2,
+      "score": 0.9999614953994751,
+      "scoring_only_error_px": 3.5484911120712046
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 3,
+      "score": 0.9999943971633911,
+      "scoring_only_error_px": 2.9062466814011354
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 4,
+      "score": 0.9999992847442627,
+      "scoring_only_error_px": 8.325341785457363
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 5,
+      "score": 0.9999914169311523,
+      "scoring_only_error_px": 8.782234750010366
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 6,
+      "score": 0.9999978542327881,
+      "scoring_only_error_px": 9.404563542005386
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "center_camera",
+      "keypoint": 7,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 9.770107139334335
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 0,
+      "score": 0.9999997615814209,
+      "scoring_only_error_px": 0.4765208322101425
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 1,
+      "score": 0.9999994039535522,
+      "scoring_only_error_px": 0.8398171091704328
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 2,
+      "score": 0.9999957084655762,
+      "scoring_only_error_px": 0.7947893900591807
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 3,
+      "score": 0.999998927116394,
+      "scoring_only_error_px": 1.2472922653574088
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 4,
+      "score": 0.9999970197677612,
+      "scoring_only_error_px": 0.8377795728632789
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 5,
+      "score": 0.9999756813049316,
+      "scoring_only_error_px": 1.862601238193966
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 6,
+      "score": 0.999998927116394,
+      "scoring_only_error_px": 1.3771500207214606
+    },
+    {
+      "connector": "sfp",
+      "case": "train_81003",
+      "camera": "right_camera",
+      "keypoint": 7,
+      "score": 0.9999998807907104,
+      "scoring_only_error_px": 0.7171545822491714
+    }
+  ]
+}

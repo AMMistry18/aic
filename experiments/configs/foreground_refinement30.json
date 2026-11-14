@@ -1,0 +1,22 @@
+{
+  "purpose": "development_only_context_suppression_hypothesis_not_deployed",
+  "hypothesis": "Original plug predictions vary despite physically invariant camera-to-plug geometry. Suppressing non-plug context may reduce that sensitivity.",
+  "first_stage": "Frozen original SC plug checkpoint, actual full RGB image",
+  "refinement": "Separately adapted original network on pad-six native crops; white image support and robot-owned tool mask, no object/CAD pose mask",
+  "primary_checkpoint": "Fixed final epoch 60",
+  "secondary_checkpoint": "Ordinary validation-fitness best, reported as diagnostic only",
+  "training_scenes": "Existing train_80010 through train_80029 only",
+  "development_scenes": "Existing val_90010 through val_90015 and archived before/after captures; no final data",
+  "candidate_physical_development_qualification": {
+    "all_six_static_original_geometry_gates_pass": true,
+    "median_static_angular_error_less_than_original_baseline": true,
+    "worst_static_angular_error_no_worse_than_original_baseline": true,
+    "all_four_recorded_before_after_grasp_rotation_changes_deg_max": 0.25,
+    "all_four_recorded_before_after_grasp_translation_changes_mm_max": 0.25
+  },
+  "not_a_task_accuracy_certificate": true,
+  "full_rotation_claim_requires": "Fresh physical trials with actual angular perturbation, no upstream-angle-preservation mode, unchanged independent strict verifier",
+  "original_acceptance_and_physical_thresholds_unchanged": true,
+  "simulator_truth_for_runtime_mask_or_inference": false,
+  "final_100000_series_used": false
+}

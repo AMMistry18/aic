@@ -1,0 +1,730 @@
+{
+  "purpose": "development_only_efficiency45_boundary_characterization_not_final",
+  "status": "prepared_not_executed",
+  "cases": [
+    {
+      "case_id": "dev_82000",
+      "seed": 82000,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 0.5
+    },
+    {
+      "case_id": "dev_82001",
+      "seed": 82001,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        3.061616997868383e-17,
+        0.5
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 0.5
+    },
+    {
+      "case_id": "dev_82002",
+      "seed": 82002,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -0.5,
+        6.123233995736766e-17
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 0.5
+    },
+    {
+      "case_id": "dev_82003",
+      "seed": 82003,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -9.184850993605148e-17,
+        -0.5
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 0.5
+    },
+    {
+      "case_id": "dev_82004",
+      "seed": 82004,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        1.0,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 1.0
+    },
+    {
+      "case_id": "dev_82005",
+      "seed": 82005,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        6.123233995736766e-17,
+        1.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 1.0
+    },
+    {
+      "case_id": "dev_82006",
+      "seed": 82006,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -1.0,
+        1.2246467991473532e-16
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 1.0
+    },
+    {
+      "case_id": "dev_82007",
+      "seed": 82007,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -1.8369701987210297e-16,
+        -1.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 1.0
+    },
+    {
+      "case_id": "dev_82008",
+      "seed": 82008,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        2.0,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 2.0
+    },
+    {
+      "case_id": "dev_82009",
+      "seed": 82009,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        1.2246467991473532e-16,
+        2.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 2.0
+    },
+    {
+      "case_id": "dev_82010",
+      "seed": 82010,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -2.0,
+        2.4492935982947064e-16
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 2.0
+    },
+    {
+      "case_id": "dev_82011",
+      "seed": 82011,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -3.6739403974420594e-16,
+        -2.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 2.0
+    },
+    {
+      "case_id": "dev_82012",
+      "seed": 82012,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        3.0,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 3.0
+    },
+    {
+      "case_id": "dev_82013",
+      "seed": 82013,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        1.8369701987210297e-16,
+        3.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 3.0
+    },
+    {
+      "case_id": "dev_82014",
+      "seed": 82014,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -3.0,
+        3.6739403974420594e-16
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 3.0
+    },
+    {
+      "case_id": "dev_82015",
+      "seed": 82015,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        -5.51091059616309e-16,
+        -3.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "handoff_translation_radius_mm",
+      "severity": 3.0
+    },
+    {
+      "case_id": "dev_82016",
+      "seed": 82016,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        -0.03,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.03
+    },
+    {
+      "case_id": "dev_82017",
+      "seed": 82017,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.03,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.03
+    },
+    {
+      "case_id": "dev_82018",
+      "seed": 82018,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        -0.03,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.03
+    },
+    {
+      "case_id": "dev_82019",
+      "seed": 82019,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.03,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.03
+    },
+    {
+      "case_id": "dev_82020",
+      "seed": 82020,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        -0.1,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.1
+    },
+    {
+      "case_id": "dev_82021",
+      "seed": 82021,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.1,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.1
+    },
+    {
+      "case_id": "dev_82022",
+      "seed": 82022,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        -0.1,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.1
+    },
+    {
+      "case_id": "dev_82023",
+      "seed": 82023,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.1,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.1
+    },
+    {
+      "case_id": "dev_82024",
+      "seed": 82024,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        -0.25,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.25
+    },
+    {
+      "case_id": "dev_82025",
+      "seed": 82025,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.25,
+        0.0,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.25
+    },
+    {
+      "case_id": "dev_82026",
+      "seed": 82026,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        -0.25,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.25
+    },
+    {
+      "case_id": "dev_82027",
+      "seed": 82027,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.0,
+      "lateral_mm": [
+        0.5,
+        0.0
+      ],
+      "angular_deg": [
+        0.0,
+        0.25,
+        0.0
+      ],
+      "grasp_jitter_seed": 82900,
+      "development_group": "upstream_tilt_deg",
+      "severity": 0.25
+    },
+    {
+      "case_id": "dev_82028",
+      "seed": 82028,
+      "connector": "sfp",
+      "target_index": 0,
+      "sfp_port": 0,
+      "gap_mm": 13.215934159913129,
+      "lateral_mm": [
+        -0.895703416485209,
+        -1.3539875472927796
+      ],
+      "angular_deg": [
+        -0.010297190692905037,
+        -0.0069148892117038355,
+        0.02816686174527685
+      ],
+      "grasp_jitter_seed": 83000,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82029",
+      "seed": 82029,
+      "connector": "sfp",
+      "target_index": 0,
+      "sfp_port": 1,
+      "gap_mm": 9.23867040776967,
+      "lateral_mm": [
+        -0.19939116201241025,
+        0.6122907964869948
+      ],
+      "angular_deg": [
+        0.02774326227766459,
+        -0.02372988178454938,
+        -0.017634619097994433
+      ],
+      "grasp_jitter_seed": 83001,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82030",
+      "seed": 82030,
+      "connector": "sfp",
+      "target_index": 1,
+      "sfp_port": 0,
+      "gap_mm": 9.455397894685191,
+      "lateral_mm": [
+        -1.3710256618475976,
+        1.4196456376034359
+      ],
+      "angular_deg": [
+        -0.014321752120311726,
+        0.020622722231423675,
+        -0.01647614939747011
+      ],
+      "grasp_jitter_seed": 83002,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82031",
+      "seed": 82031,
+      "connector": "sfp",
+      "target_index": 1,
+      "sfp_port": 1,
+      "gap_mm": 13.934716896781284,
+      "lateral_mm": [
+        -0.038910951950673844,
+        1.455934957551047
+      ],
+      "angular_deg": [
+        0.013753826374674205,
+        -0.0172260746243415,
+        0.004466232924093476
+      ],
+      "grasp_jitter_seed": 83003,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82032",
+      "seed": 82032,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 0,
+      "gap_mm": 10.726056374700036,
+      "lateral_mm": [
+        0.20218294986823881,
+        1.0894418789987612
+      ],
+      "angular_deg": [
+        0.01672880376321706,
+        0.01611702679349255,
+        0.0037367231966127235
+      ],
+      "grasp_jitter_seed": 83004,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82033",
+      "seed": 82033,
+      "connector": "sfp",
+      "target_index": 2,
+      "sfp_port": 1,
+      "gap_mm": 11.622275692174487,
+      "lateral_mm": [
+        0.13782297078073236,
+        1.4220757362177143
+      ],
+      "angular_deg": [
+        0.007815842173627824,
+        -0.0026515371054636055,
+        -0.006434240613713477
+      ],
+      "grasp_jitter_seed": 83005,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82034",
+      "seed": 82034,
+      "connector": "sfp",
+      "target_index": 3,
+      "sfp_port": 0,
+      "gap_mm": 13.870736023225376,
+      "lateral_mm": [
+        0.036986402846095334,
+        -1.49135224898663
+      ],
+      "angular_deg": [
+        0.0056965741476460025,
+        -0.00646740922342913,
+        -0.012518153356385165
+      ],
+      "grasp_jitter_seed": 83006,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    },
+    {
+      "case_id": "dev_82035",
+      "seed": 82035,
+      "connector": "sfp",
+      "target_index": 3,
+      "sfp_port": 1,
+      "gap_mm": 11.282620098738857,
+      "lateral_mm": [
+        0.23366151281296088,
+        1.3125930522297802
+      ],
+      "angular_deg": [
+        -0.002560485998601661,
+        0.024740815771795294,
+        -0.010524451393500705
+      ],
+      "grasp_jitter_seed": 83007,
+      "development_group": "unknown_grasp_and_random_handoff",
+      "severity": null
+    }
+  ],
+  "note": "Angular cases above current final tolerance deliberately characterize the failure envelope of the upstream-aligned policy. No general angular recovery or altered scoring is implied.",
+  "force_ceiling_N": 20,
+  "no_acceptance_threshold_relaxation": true,
+  "held_out_seeds_used": false
+}

@@ -1,0 +1,571 @@
+{
+  "scope": "Static development contour diagnostics, no runtime acceptance/insertion claim",
+  "final_cases_used": 0,
+  "production_timestamp_vetoes_preserved": true,
+  "rows": [
+    {
+      "connector": "sc",
+      "case_id": "train_80010",
+      "fit": {
+        "position": [
+          0.03078007938860892,
+          -0.17001337456237112,
+          0.04564198826591678
+        ],
+        "rotation": [
+          [
+            0.005171168533625087,
+            -0.9995190557238673,
+            0.03057640039091289
+          ],
+          [
+            -0.9999718600872877,
+            -0.005002490385289897,
+            0.005590538750013866
+          ],
+          [
+            -0.005434891863429044,
+            -0.030604449591744888,
+            -0.9995167980657554
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 0.827630011705884,
+            "points_per_view": [
+              38,
+              81,
+              44
+            ],
+            "parameter_change_mm_deg": 1.42269431095528
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 0.8087959345831655,
+            "points_per_view": [
+              39,
+              80,
+              42
+            ],
+            "parameter_change_mm_deg": 0.7629137811868874
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 0.7796690140183677,
+            "points_per_view": [
+              36,
+              81,
+              42
+            ],
+            "parameter_change_mm_deg": 0.31934787797033237
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 0.7836644953110098,
+            "points_per_view": [
+              36,
+              80,
+              42
+            ],
+            "parameter_change_mm_deg": 0.023002605320353156
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 0.8089515300157654,
+            "points_per_view": [
+              38,
+              80,
+              42
+            ],
+            "parameter_change_mm_deg": 0.13725952412466252
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.005178272092890069,
+          0.004787786644575016,
+          0.00471826441589338
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.3253634502417541,
+        "angle_deg": 0.8593971807782749
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.3006102999788709
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80011",
+      "fit": {
+        "position": [
+          0.07600299776568901,
+          -0.1752929551707264,
+          0.05384768883419122
+        ],
+        "rotation": [
+          [
+            0.10981415691789578,
+            -0.9934943015390004,
+            -0.030164942399172504
+          ],
+          [
+            -0.993457191045858,
+            -0.110666538681652,
+            0.028208629450863016
+          ],
+          [
+            -0.031363362378505386,
+            0.026869872082986232,
+            -0.9991468107713498
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 0.8888797657017288,
+            "points_per_view": [
+              34,
+              63,
+              15
+            ],
+            "parameter_change_mm_deg": 3.050329422268186
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 0.9578516199450062,
+            "points_per_view": [
+              34,
+              65,
+              15
+            ],
+            "parameter_change_mm_deg": 2.097071402082648
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 0.9648944292455743,
+            "points_per_view": [
+              35,
+              64,
+              14
+            ],
+            "parameter_change_mm_deg": 2.0219750706028567
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 0.9618005753431236,
+            "points_per_view": [
+              34,
+              65,
+              14
+            ],
+            "parameter_change_mm_deg": 1.934935413493503
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 0.988288926331223,
+            "points_per_view": [
+              36,
+              65,
+              14
+            ],
+            "parameter_change_mm_deg": 2.03011625878717
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.005093949650553838,
+          0.006830810515276655,
+          0.003343869785065542
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.2633501811911808,
+        "angle_deg": 2.910288231501855
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.2566483999835327
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80012",
+      "fit": {
+        "position": [
+          0.11970640532893068,
+          -0.1713160323896167,
+          0.0446237214451231
+        ],
+        "rotation": [
+          [
+            -0.008341813714352825,
+            -0.9997760748683093,
+            0.01944773161250314
+          ],
+          [
+            -0.9997725157987474,
+            0.00795684630210401,
+            -0.01978901842862355
+          ],
+          [
+            0.019629844558700624,
+            -0.019608383866132555,
+            -0.9996150161360922
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 0.9274225855062597,
+            "points_per_view": [
+              34,
+              69,
+              34
+            ],
+            "parameter_change_mm_deg": 0.5383579128364864
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 0.8716608600634044,
+            "points_per_view": [
+              34,
+              67,
+              33
+            ],
+            "parameter_change_mm_deg": 0.21576604937277766
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 0.872743240136408,
+            "points_per_view": [
+              34,
+              68,
+              33
+            ],
+            "parameter_change_mm_deg": 1.4264806546799382
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 0.8725499556947229,
+            "points_per_view": [
+              35,
+              65,
+              31
+            ],
+            "parameter_change_mm_deg": 0.41605915634823526
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 0.8865274133753296,
+            "points_per_view": [
+              34,
+              67,
+              32
+            ],
+            "parameter_change_mm_deg": 0.8530111526617673
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.005050088135440299,
+          0.004644532124011592,
+          0.005265008933972476
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.31125043293258625,
+        "angle_deg": 1.478355653079514
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.242621399986092
+    },
+    {
+      "connector": "sc",
+      "case_id": "train_80013",
+      "fit": {
+        "position": [
+          0.049042402982549964,
+          -0.13431810771331,
+          0.05367547975814689
+        ],
+        "rotation": [
+          [
+            0.004822902247000738,
+            -0.9989289463343761,
+            -0.046018472260699606
+          ],
+          [
+            -0.9984601184046864,
+            -0.0073536629228349555,
+            0.054984685112449416
+          ],
+          [
+            -0.05526419789713544,
+            0.04568242350084149,
+            -0.9974261800323247
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 0.8151315770869231,
+            "points_per_view": [
+              21,
+              64,
+              14
+            ],
+            "parameter_change_mm_deg": 6.605591701690037
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 0.8049592448842979,
+            "points_per_view": [
+              23,
+              64,
+              17
+            ],
+            "parameter_change_mm_deg": 2.1036836183346677
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 0.8490141534859562,
+            "points_per_view": [
+              20,
+              66,
+              15
+            ],
+            "parameter_change_mm_deg": 1.986444193118638
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 0.8568911800678468,
+            "points_per_view": [
+              20,
+              64,
+              17
+            ],
+            "parameter_change_mm_deg": 0.6358116350740713
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 0.844960130118266,
+            "points_per_view": [
+              22,
+              64,
+              17
+            ],
+            "parameter_change_mm_deg": 0.48960184723013656
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.0008155956325397379,
+          0.0055471250176091025,
+          0.0011845651164451312
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.47154013918555154,
+        "angle_deg": 4.054252971600108
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.2398224000353366
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81000",
+      "fit": {
+        "position": [
+          0.0768510691936156,
+          -0.38673427754080647,
+          0.1939590527768588
+        ],
+        "rotation": [
+          [
+            0.9995395085089278,
+            0.016569944188812673,
+            0.0254206191763693
+          ],
+          [
+            0.017086115078866582,
+            -0.9996494620933801,
+            -0.020224183739445515
+          ],
+          [
+            0.025076594689911434,
+            0.02064921029954324,
+            -0.9994722479952921
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 1.0919948020887016,
+            "points_per_view": [
+              64,
+              69,
+              41
+            ],
+            "parameter_change_mm_deg": 6.108106932333248
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 1.2234244152520173,
+            "points_per_view": [
+              68,
+              87,
+              43
+            ],
+            "parameter_change_mm_deg": 5.017615778561393
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 1.3254029008960688,
+            "points_per_view": [
+              69,
+              102,
+              47
+            ],
+            "parameter_change_mm_deg": 2.2756087322719094
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 1.3270131416350548,
+            "points_per_view": [
+              73,
+              103,
+              49
+            ],
+            "parameter_change_mm_deg": 3.126407629648103
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 1.4256011520126157,
+            "points_per_view": [
+              72,
+              103,
+              51
+            ],
+            "parameter_change_mm_deg": 1.7441274691734023
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.0006413687035637901,
+          0.0017960354365077937,
+          0.0002527524975918632
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.4516672032818538,
+        "angle_deg": 1.6842658611274666
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.35657479998189956
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81001",
+      "fit": {
+        "position": [
+          0.08255699602742848,
+          -0.3452464699280197,
+          0.191343956753649
+        ],
+        "rotation": [
+          [
+            0.9914135108224,
+            -0.12983432442759338,
+            -0.015565948709705693
+          ],
+          [
+            -0.12897892295282645,
+            -0.9905282631414314,
+            0.04709774253557775
+          ],
+          [
+            -0.021533415723744787,
+            -0.04468565897968988,
+            -0.9987689942568392
+          ]
+        ],
+        "iterations": [
+          {
+            "iteration": 0,
+            "mean_normal_error_px": 0.7285885006853597,
+            "points_per_view": [
+              34,
+              24,
+              20
+            ],
+            "parameter_change_mm_deg": 3.500315518570585
+          },
+          {
+            "iteration": 1,
+            "mean_normal_error_px": 0.6476769046474324,
+            "points_per_view": [
+              32,
+              24,
+              21
+            ],
+            "parameter_change_mm_deg": 2.571015083423632
+          },
+          {
+            "iteration": 2,
+            "mean_normal_error_px": 0.5446594956728352,
+            "points_per_view": [
+              31,
+              20,
+              21
+            ],
+            "parameter_change_mm_deg": 6.021374224923533
+          },
+          {
+            "iteration": 3,
+            "mean_normal_error_px": 0.6581801689337478,
+            "points_per_view": [
+              28,
+              25,
+              20
+            ],
+            "parameter_change_mm_deg": 5.81448059014453
+          },
+          {
+            "iteration": 4,
+            "mean_normal_error_px": 0.4955425949395283,
+            "points_per_view": [
+              28,
+              19,
+              21
+            ],
+            "parameter_change_mm_deg": 4.050360577699899
+          }
+        ],
+        "leave_one_view_out_displacement_m": [
+          0.001036496938128045,
+          0.0008762928350414856,
+          0.0008133373340601651
+        ],
+        "ground_truth_used": false
+      },
+      "scoring_only": {
+        "position_mm": 0.26193209302177534,
+        "angle_deg": 3.5013105862104865
+      },
+      "view_consistency_passed": false,
+      "wall_s": 0.25980330002494156
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81002",
+      "reason": "insufficient_visible_contour:right_camera:11",
+      "wall_s": 0.23758419998921454
+    },
+    {
+      "connector": "sfp",
+      "case_id": "train_81003",
+      "reason": "insufficient_visible_contour:center_camera:8",
+      "wall_s": 0.010040200024377555
+    }
+  ]
+}

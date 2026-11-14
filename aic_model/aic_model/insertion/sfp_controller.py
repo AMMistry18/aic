@@ -13,6 +13,8 @@ the cameras become occluded during seating.
 
 from __future__ import annotations
 
+from .controller_clock import control_time
+
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
@@ -913,7 +915,12 @@ def prime_sfp_plug_pose(policy, get_observation, move_robot) -> bool:
             "no_fixed_grasp_fallback=true"
         )
         return False
-    tcp_pos, tcp_quat = policy._tcp()
+    try:
+        at_stamp=getattr(policy,'_tcp_at_stamp',None)
+        tcp_pos,tcp_quat=at_stamp(estimate.stamp_s) if at_stamp is not None else policy._tcp()
+    except Exception as exc:
+        policy.get_logger().error(f'[sfp] PLUG_POSE_REJECT reason=exposure_tcp_unavailable:{exc}')
+        return False
     policy._sfp_grasp_transform = solve_tip_in_tcp(
         tcp_pos,
         tcp_quat,
@@ -978,6 +985,8 @@ class SfpInsertionController:
         return value
 
     def _event_status(self):
+        from .observable_terminal import enabled
+        if enabled():return None
         value = self._event()
         if value is None:
             return None
@@ -1264,10 +1273,10 @@ class SfpInsertionController:
         )
 
     def _align(self) -> bool:
-        start = time.monotonic()
+        start = control_time(self.policy,time.monotonic)
         depth, _, _, _, _ = self._errors()
         align_depth = depth
-        while time.monotonic() - start < self.config.align_timeout_wall_s:
+        while control_time(self.policy,time.monotonic) - start < self.config.align_timeout_wall_s:
             self.policy._enforce_action_deadline(self.move_robot)
             depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
             lateral = float(np.linalg.norm(lateral_xy))
@@ -1319,10 +1328,12 @@ class SfpInsertionController:
         and the seat corrections that got the plug in, so the press stays
         positive for the whole dwell.
         """
+        from .observable_terminal import enabled,hold_candidate
+        if enabled():return hold_candidate(self,fixed_tip,self.Rp if fixed_rotation is None else fixed_rotation,'sfp')
         rotation = self.Rp if fixed_rotation is None else fixed_rotation
-        deadline = time.monotonic() + self.config.insertion_event_timeout_wall_s
+        deadline = control_time(self.policy,time.monotonic) + self.config.insertion_event_timeout_wall_s
         hard_force_since = None
-        while time.monotonic() < deadline:
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             event_status = self._event_status()
             if event_status is not None:
@@ -1332,8 +1343,8 @@ class SfpInsertionController:
             tip_pos, _ = self._tip_pose()
             if np.isfinite(force) and force > self.config.force_abort_n:
                 self._hold_tip(tip_pos, rotation)
-                hard_force_since = hard_force_since or time.monotonic()
-                if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
+                hard_force_since = hard_force_since or control_time(self.policy,time.monotonic)
+                if control_time(self.policy,time.monotonic) - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
                         f"[sfp] >{self.config.force_abort_n:.1f}N during event dwell"
                     )
@@ -1354,8 +1365,8 @@ class SfpInsertionController:
         """Back out only enough to remove side load before a local probe."""
 
         target_depth = max(0.0, float(start_depth) - self.config.wedge_recovery_unload_m)
-        deadline = time.monotonic() + self.config.wedge_recovery_unload_timeout_wall_s
-        while time.monotonic() < deadline:
+        deadline = control_time(self.policy,time.monotonic) + self.config.wedge_recovery_unload_timeout_wall_s
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             event_status = self._event_status()
             if event_status is not None:
@@ -1507,10 +1518,10 @@ class SfpInsertionController:
                 float(depth) + self.config.wedge_recovery_probe_depth_m,
             )
             command_depth = float(unloaded_depth)
-            last_command_time = time.monotonic()
-            deadline = time.monotonic() + self.config.wedge_recovery_probe_timeout_wall_s
+            last_command_time = control_time(self.policy,time.monotonic)
+            deadline = control_time(self.policy,time.monotonic) + self.config.wedge_recovery_probe_timeout_wall_s
             improved_samples = 0
-            while time.monotonic() < deadline:
+            while control_time(self.policy,time.monotonic) < deadline:
                 self.policy._enforce_action_deadline(self.move_robot)
                 event_status = self._event_status()
                 if event_status is not None:
@@ -1564,7 +1575,7 @@ class SfpInsertionController:
                 else:
                     improved_samples = 0
 
-                now = time.monotonic()
+                now = control_time(self.policy,time.monotonic)
                 elapsed = max(self.config.command_dt_sim_s, now - last_command_time)
                 command_depth = min(
                     probe_goal,
@@ -1591,7 +1602,7 @@ class SfpInsertionController:
     def _seat(self) -> str:
         depth, _, _, _, _ = self._errors()
         command_depth = depth
-        now = time.monotonic()
+        now = control_time(self.policy,time.monotonic)
         last_command_time = now
         progress = WallProgressWatch.start(depth, now, self.config)
         hard_force_since = None
@@ -1670,7 +1681,7 @@ class SfpInsertionController:
             recovery_tilt = np.asarray(next_tilt, dtype=np.float64).reshape(2)
             acc_lat = np.zeros(2, dtype=np.float64)
             acc_tilt = np.zeros(2, dtype=np.float64)
-            recovered_now = time.monotonic()
+            recovered_now = control_time(self.policy,time.monotonic)
             progress = WallProgressWatch.start(recovered_depth, recovered_now, self.config)
             command_depth = recovered_depth
             last_command_time = recovered_now
@@ -1689,7 +1700,7 @@ class SfpInsertionController:
             lateral = float(np.linalg.norm(lateral_xy))
             rotation = float(np.linalg.norm(rotation_error))
             force = self._force_magnitude(observation)
-            now = time.monotonic()
+            now = control_time(self.policy,time.monotonic)
             seat_wrench_sample = None
             if self.config.seat_align_enable:
                 acc_lat, acc_tilt, seat_wrench_sample = self._seat_alignment_sample(
@@ -1915,10 +1926,10 @@ class SfpInsertionController:
         walls -- and only once it is clear of the mouth does it move back to the
         starting pose and orientation.
         """
-        deadline = time.monotonic() + self.config.retract_timeout_wall_s
+        deadline = control_time(self.policy,time.monotonic) + self.config.retract_timeout_wall_s
         cleared = False
         command_depth = None
-        while time.monotonic() < deadline:
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             depth, _, _, tip_pos, tip_rotation = self._errors()
             if depth <= self.config.retract_clear_depth_m:
@@ -1945,7 +1956,7 @@ class SfpInsertionController:
             )
             return False
 
-        while time.monotonic() < deadline:
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             _, _, _, tip_pos, _ = self._errors()
             delta = np.asarray(start_tip_pos, dtype=np.float64).reshape(3) - tip_pos

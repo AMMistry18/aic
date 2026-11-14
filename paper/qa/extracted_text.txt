@@ -1,0 +1,467 @@
+Visual and Contact Registration for Last-Inch
+SC and SFP Connector Insertion
+Working draft for author review
+Abstract— Reliable connector insertion requires correcting
+the errors that sensors can actually observe near an occluded
+mating surface. We extend an existing conﬁdence-weighted mul-
+tiview perception pipeline with connector-speciﬁc relative con-
+tact registration: an optical connector uses its terminal shoulder,
+whereas a small form-factor pluggable module uses opposed
+entrance-lip and side-wall measurements. Bounded impedance-
+control targets carry the resulting corrections through insertion.
+We evaluate the held-grasp, upstream-aligned last-inch task
+in headless Gazebo using public challenge geometry and an
+independent geometry, contact, and full-rate force recorder.
+A frozen partial development snapshot contains six veriﬁed
+optical-connector seats in six policy trials and ﬁve veriﬁed
+module seats in six policy trials; one additional module setup
+failed before execution. All completed policy trials have com-
+plete 2,000 Hz force coverage, with a maximum raw tared force
+of 3.322 N. A module perception rejection and a controller
+startup failure remain in the record. The evidence demonstrates
+conditional insertion capability and exposes timing and observ-
+ability failures; broader robustness and current-method causal
+comparisons remain under evaluation.
+Index Terms— Robotic assembly, connector insertion, visual
+perception, contact sensing, simulation evaluation.
+I. APPLICATION AND SCOPE
+SC optical connectors and small form-factor pluggable
+(SFP) modules present different mating geometries despite
+sharing a familiar align-and-insert task. Near engagement,
+the gripper and connector obscure useful image features,
+and compliant robot tracking can leave residual errors af-
+ter a valid pose command. Our starting point is a chal-
+lenge pipeline that combines learned landmarks, conﬁdence-
+weighted multiview reconstruction, a visually estimated
+grasp transform, and force-aware insertion [1]. We retain that
+perception structure and isolate the ﬁnal insertion skill for
+inspection in Gazebo.
+The task begins with a connector held rigidly near the
+requested port. Upstream angular alignment is prescribed;
+translation and the in-hand offset are estimated from images.
+The policy preserves the handed-off wrist orientation. SC
+angular perturbations have components within ±0.1◦; SFP
+uses ±0.03◦and a public level-ﬁxture prior. Seeded in-
+hand translation can vary by ±2 mm per component. These
+conditions deﬁne conditional last-inch insertion, excluding
+pickup, long-range transport, unrestricted rotational recovery,
+and release retention.
+Related work already establishes the main ingredients.
+Active Extrinsic Contact Sensing estimates external contacts
+to guide insertion [2]. Insert-One combines visual tracking
+with impedance control under in-hand pose uncertainty [3].
+SyPAS uses synthetic socket perception and visual servoing
+SC approach
+SC veriﬁed seat
+SFP approach
+SFP veriﬁed seat
+Fig. 1.
+Headless target-camera frames from recorded SC case 42000 and
+SFP case 45005. Gripper occlusion remains visible; images alone cannot
+certify engagement. Independent terminal measurements accompany both
+sequences.
+before compliant connector insertion [4]; FORGE learns
+force-aware manipulation under pose uncertainty [5]. Factory
+and IndustReal address contact-rich simulation and transfer,
+respectively [6], [7]. We do not claim these general principles
+as new, or compare success rates across their different tasks.
+The practical contribution examined here is the allocation
+of uncertain relative coordinates to connector-speciﬁc mea-
+surements. Image geometry initializes alignment; qualiﬁed
+physical datums correct unresolved axial or lateral bias;
+a separate evaluator determines whether a seat occurred.
+Figure 1 shows the actual source meshes. The candidate
+advantage of this allocation, beyond feasibility, requires
+matched current-method ablations that are still pending.
+II. VISUAL AND CONTACT REGISTRATION
+A. Visual initialization with exposure-time transforms
+Three calibrated wrist cameras provide learned plug and
+port keypoints [1]. Conﬁdence-weighted triangulation and
+rigid template ﬁtting initialize the plug frame; reprojection
+and shape checks reject inconsistent measurements. Detector
+conﬁdence supplies ﬁtting weights, not a calibrated proba-
+bility of pose accuracy. The original SC plug checkpoint is
+retained. The SC mouth and SFP plug/network-interface-card
+models are adapted from their original checkpoints using 20
+rendered training scenes and six separate development scenes
+1
+
+
+RGB keypoints
+exposure-time TCP
+CAD reﬁnement
+component checks
+SC shoulder
+SFP lip / walls
+Bounded insertion
+own-TCP + wrench
+Independent verdict
+poses / contact / force
+No object truth
+enters the policy
+Fig. 2.
+Visual estimates initialize relative coordinates; connector-speciﬁc
+contact observations reﬁne them. Evaluator poses and contact ﬂags are used
+only after execution and never feed the production correction.
+per connector, with three views per scene. Recovery training
+uses 60 epochs, 960-pixel inputs, AdamW at 2 × 10−4, and
+frozen early layers. Synthetic labels may use simulator poses
+ofﬂine; runtime observations do not.
+Let BTE(ti) be the robot tool-center-point (TCP) trans-
+form at image exposure ti, and B bTP (ti) the image-derived
+plug transform. The cached grasp estimate is
+E bTP = (BTE(ti))−1B bTP (ti).
+(1)
+Own-robot kinematics then carry the tip estimate through
+occlusion. Before inference and image ﬁtting, the pipeline
+copies exposure-time transforms that could otherwise expire
+from transform history. Missing exposure data rejects the es-
+timate; a latest-pose substitution is not permitted. Processing
+must also preserve wrist stationarity within 0.10 mm and
+0.05◦.
+For SC, learned associations initialize CAD rim and
+occlusion-aware body translation ﬁts. A restricted lateral
+estimate requires repeat-exposure agreement and subsequent
+axial registration; it does not establish full pose. For SFP,
+directional image edges reﬁne the public two-port entrance
+geometry, including its 23.2 mm pitch, while excluding
+the held-plug footprint. The ﬁt uses the level-ﬁxture prior
+rather than an unrestricted orientation estimate. Figure 2
+summarizes the measurement boundary.
+B. Geometry determines the physical datum
+With mouth estimate bpM, tip estimate bpP and insertion
+axis a, the controller uses relative depth bd = a⊤(bpP −bpM).
+A visual depth bias can persist even when the robot tracks its
+command. A physical datum registers this relative coordinate
+through a separate measurement.
+SC terminal shoulder. SC offers a repeatable shoulder near
+15.64 mm depth. A bounded load/unload/reload sequence
+combines command advance, stationary measured motion,
+compression, release, and repeated stop positions. The two
+stop measurements must agree within 0.05 mm, and the
+applied axial correction is bounded by 0.5 mm. The legacy
+SC blocking window requires at least 20 unique samples
+over 0.8 s, gaps no greater than 50 ms, and no more
+than 25 µm measured travel. Separate force-noise negative
+qualiﬁcation remains incomplete; the SC detector is not
+claimed equivalent to SFP’s controlled-excitation check.
+SFP entrance lip and side walls. The SFP seat is a clear-
+ance region without an equivalent terminal stop. Two probes
+at opposed ±2 mm lateral offsets touch the entrance lip;
+their consistency registers the axial origin against a public
+53.5 µm datum. Kinematic blocking only triggers the test.
+A ﬁxed 0/1/0 N excitation must produce a distinguishable
+reaction and subsequent release while the apparent contact
+location remains stationary. For load-window means ¯fL, ¯fH
+and standard errors sL, sH,
+¯fH −¯fL ≥max
+
+0.025 N, 3
+q
+s2
+L + s2
+H
+
+.
+(2)
+The uncertainty uses at least the known 0.2 N per-axis noise
+ﬂoor. Release must resolve a decrease and return to baseline.
+Each force window spans 0.4 s, uses actual unique sensor
+timestamps, and rejects gaps, stale samples, or tip displace-
+ment above 25 µm. Retained bounded search intent cannot
+replace these current measurement checks. Shallow opposed
+side-wall probes then register lateral centering before full-
+depth travel.
+C. Bounded execution
+The estimated tip target is converted to a TCP command
+using Eq. 1. Cartesian impedance, persistent depth setpoints,
+bounded lateral proportional-integral compensation, and ter-
+minal braking reduce tracking error. Compensation integrates
+own-robot error, freezes during contact measurements, and
+has bounded authority. The evaluated SFP proﬁle requests 10
+mm/s travel and 2 mm/s near the seat, with a 3 N travel pause
+and 6 N inner abort. The separate 20 N measured resultant
+ceiling is veriﬁed from raw data; a lower-rate pre-command
+guard cannot guarantee that bound. The faster development
+candidate is not included in the reported cohort.
+III. TESTBED AND INDEPENDENT VERIFICATION
+The scene uses public Phase 1 assets [8], pinned at revision
+7148df9: ﬁve network-interface cards with two SFP slots
+each, ﬁve SC duplex mounts, staging ﬁxtures, source cables,
+a UR5e arm, and an ATI force/torque sensor. Original visual
+and collision meshes remain active. A declared rigid grasp
+attachment replaces upstream manipulation; automatic port
+attachment is disabled. A source-audited double-precision
+Bullet backend runs at 0.5 ms with 200 solver iterations and
+declared cable-joint damping. These are simulation model
+choices, not measurements of physical connector compli-
+ance.
+Before policy execution, a calibrated hold checks reset
+accuracy, contact health, and six camera streams. Production
+inputs are RGB, camera calibration, exposure-time own-
+robot transforms, kinematics, public geometry, and wrist
+wrench. Object poses, hidden contact state, and scoring
+signals are excluded from the policy and retained for diag-
+nostics or independent evaluation only. Setup failures remain
+recorded alongside policy failures.
+The evaluator applies Table I to actual simulator poses
+and checks the requested target and healthy contact obser-
+vations. SC additionally requires terminal physical seating
+contact. Positive-gap cached manifolds with zero solver
+impulse do not sufﬁce. SFP’s clearance seat requires both
+source-geometry non-overlap and an independently executed
+deliberate lateral miss with the identical collision contract,
+2
+
+
+TABLE I
+INDEPENDENT CONTINUOUS TERMINAL DWELL CRITERIA
+Criterion
+SC
+SFP
+Depth (mm)
+15.64 ± 0.25
+45.80 ± 0.25
+Maximum lateral error (mm)
+0.25
+0.10
+Maximum full angular error (deg)
+0.25
+0.10
+Continuous dwell (s)
+1.0
+1.0
+Observed penetration limit (mm)
+0.10
+0.10
+Every-step wrist force (Hz)
+2,000
+2,000
+TABLE II
+RECOVERED DEVELOPMENT SNAPSHOT; SUCCESSFUL-ONLY MEDIAN
+TIMES
+Measure
+SC
+SFP
+Veriﬁed / completed policy trials
+6/6
+5/6
+Veriﬁed / all setup attempts
+6/7
+5/7
+Median simulation time (s)
+30.11
+58.05
+Median wall time (s)
+282.7
+561.1
+Maximum raw tared force (N)
+3.32
+3.29
+2,000 Hz force coverage
+all
+all
+backend, time step, and solver settings. Surviving control
+traces were requaliﬁed after recovery and contain 1,236
+physical contact pairs; their 8.11 N force abort is a positive
+contact control, not a successful insertion. All completed
+policy trials require complete 2,000 Hz raw wrist coverage.
+Penetration is evaluated from recorded contact observations,
+not proved bounded at every unrecorded instant.
+IV. MEASURED DEVELOPMENT RESULTS
+A. Recovered-policy snapshot
+We freeze the adapted checkpoint hashes, controller
+sources, and measurement proﬁles before replaying prede-
+ﬁned development handoffs across target identities. Table II
+is an immutable partial snapshot before speed tuning. The
+newly trained checkpoints deﬁne this measured cohort; ear-
+lier success counts are not pooled with it. Reused develop-
+ment cases and shared simulation seeds with distinct grasp
+conditions must not be interpreted as independent held-out
+reliability samples.
+The SFP attempt denominator includes one controller-
+bootstrap timeout and its subsequent policy retry. That retry
+rejected a 2.393 px rim residual against the unchanged 2 px
+gate before insertion. The SC setup denominator includes
+one duplicate setup cancelled before policy execution after
+a resume-bookkeeping error. All attempts remain in the
+trial ledger. The snapshot has six distinct attempted case
+identities per connector; SC includes shared-seed cases with
+different grasp conditions. Descriptive Wilson intervals over
+completed policy trials are 61.0–100.0% for SC and 43.6–
+97.0% for SFP. They quantify small-count uncertainty, not
+population robustness. The remaining predeﬁned replay cases
+are pending.
+Representative independently veriﬁed seats provide a ge-
+ometric cross-check beyond the controller’s own depth es-
+timate. SC case 42000 remained near 15.566 mm depth
+0
+10
+20
+30
+Recorded sim time (s)
+−10
+0
+10
+Depth (mm)
+SC
+0
+20
+40
+60
+Recorded sim time (s)
+0
+20
+40
+Depth (mm)
+SFP
+Fig. 3.
+Recorded evaluator depth relative to the actual mouth, plotted from
+the ﬁrst recorded sample. Dashed lines mark nominal seats. These diagnostic
+poses never enter the production policy. Each ﬁnal verdict also requires
+continuous dwell, alignment, contact validity, and raw-force coverage.
+TABLE III
+EARLIER SC REVISION: FIVE MATCHED DEVELOPMENT CASES
+Method
+Veriﬁed / attempted
+Body reﬁnement + lateral tracking
+5/5
+Without body translation reﬁnement
+0/5
+Without lateral tracking compensation
+0/5
+with at most 0.1204 mm lateral error and 0.1346◦angular
+error. Its raw peak was 3.322 N. SFP case 45005 remained
+at 45.805–45.816 mm depth, with 0.0046 mm lateral and
+0.0202◦angular error; its raw peak was 3.107 N. Their
+camera sequences appear in Fig. 1; Fig. 3 uses evaluator
+traces to show the approach and terminal depth.
+B. What failed and which changes helped
+An earlier matched SC component screen isolates two
+ingredients under the same upstream-aligned condition (Ta-
+ble III). On ﬁve ﬁxed development cases, removing image-
+based body translation or lateral tracking eliminated veriﬁed
+seats. That revision predates current axial registration and the
+recovered checkpoints. It supports those components on that
+screen; it does not establish the current combined method’s
+causal advantage.
+Failure analysis also exposed errors outside the contact
+controller. In an earlier SFP cohort, three of ten trials
+failed before motion because their exposure-time transforms
+expired during computation. Retaining copied transforms
+before inference repaired all three selected failures and
+preserved one earlier pass: 4/4 under unchanged scoring, with
+raw peaks 2.9993–3.1833 N. These selected repairs form a
+separate cohort and are not pooled into Table II. Likewise,
+preserving executed search intent repaired a sampling-gap
+failure in probe readiness, but did not relax the sensor
+windows needed to accept contact.
+The recovered SFP case 45005 took 57.458 simulated and
+715.483 wall seconds. Its ﬁnal stroke accounted for only
+6.96 simulated seconds; the policy’s travel samples peaked
+at 1.412 N and never reached the 3 N pause. Perception,
+approach, and registration therefore dominate this exam-
+ple’s cycle time. Whole-action raw peaks and these lower-
+rate travel observations are distinct measurements. Raising
+3
+
+
+a force ceiling alone would not accelerate an unpaused,
+velocity-limited stroke. A matched faster-motion study is
+planned; no faster-proﬁle outcome or hardware throughput
+advantage is claimed.
+V. DISCUSSION AND CONCLUSION
+Connector geometry determines which physical datum is
+available. A terminal shoulder supports SC axial registration;
+SFP instead needs an entrance datum and shallow lateral
+contacts. The proposed allocation makes those assumptions
+and acceptance checks explicit while preserving the origi-
+nal learned, conﬁdence-weighted visual initialization. Inde-
+pendent veriﬁcation prevents estimated depth or command
+completion from being mistaken for a physical seat.
+The frozen snapshot contains six veriﬁed SC seats and
+ﬁve SFP seats, with one SFP perception rejection, one
+startup failure and a cancelled duplicate setup retained. All
+completed policy trials satisfy the raw-force coverage audit.
+Earlier SC component removals and transform-expiry repairs
+motivate the design, while broader causal and reliability
+claims remain open.
+The study is simulation-only and conditional on a rigid
+grasp, upstream angular alignment, and the SFP ﬁxture prior.
+It establishes held geometric seating, not electrical mating,
+latch retention, cable grasp robustness, or hardware transfer.
+[Results pending: current axial-correction and tracking abla-
+tions; 50 fresh SC and 50 fresh SFP trials after development
+selection and a source/ checkpoint freeze.] Those trials will
+report all-selected denominators, failure causes, conﬁdence
+intervals, and separate simulation/wall times.
+REFERENCES
+[1] Team
+TAR-2-SOL,
+“Intrinsic:
+AI
+for
+industry
+challenge,”
+Project
+report,
+2026.
+[Online].
+Available:
+https://satyaa27.github.
+io/intrinsic-ai-for-industry-challenge-team-tar-2-sol/
+[2] S. Kim and A. Rodriguez, “Active extrinsic contact sensing: Application
+to
+general
+peg-in-hole
+insertion,”
+in
+Proc.
+IEEE
+International
+Conference on Robotics and Automation, 2022. [Online]. Available:
+https://arxiv.org/abs/2110.03555
+[3] H.
+Chang,
+A.
+Boularias,
+and
+S.
+Jain,
+“Insert-One:
+One-shot
+robust visual-force servoing for novel object insertion with 6-DoF
+tracking,” in Proc. IEEE/RSJ International Conference on Intelligent
+Robots and Systems, 2024, pp. 2935–2942. [Online]. Available:
+https://www.merl.com/publications/TR2024-137
+[4] “SyPAS: Synthetic socket perception and visual servoing for robotic
+connector insertion,” Authors’ project page, 2026, accessed November
+12, 2026. [Online]. Available: https://sypas2026.github.io/
+[5] M. Noseworthy, B. Tang, B. Wen, A. Handa, C. Kessens, N. Roy,
+D. Fox, F. Ramos, Y. Narang, and I. Akinola, “FORGE: Force-guided
+exploration for robust contact-rich manipulation under uncertainty,”
+arXiv:2408.04587, 2024, version 2, January 2025. [Online]. Available:
+https://arxiv.org/abs/2408.04587
+[6] Y. Narang, K. Storey, I. Akinola, M. Macklin, P. Reist, L. Wawrzyniak,
+Y.
+Guo,
+A.
+Moravanszky,
+G.
+State,
+M.
+Lu,
+A.
+Handa,
+and
+D. Fox, “Factory: Fast contact for robotic assembly,” in Proc.
+Robotics: Science and Systems, 2022. [Online]. Available: https:
+//arxiv.org/abs/2205.03532
+[7] B. Tang, M. A. Lin, I. Akinola, A. Handa, G. S. Sukhatme, F. Ramos,
+D. Fox, and Y. Narang, “Industreal: Transferring contact-rich assembly
+tasks from simulation to reality,” in Proc. Robotics: Science and
+Systems, 2023. [Online]. Available: https://arxiv.org/abs/2305.17110
+[8] Intrinsic and Open Robotics, “AI for industry challenge toolkit,” Public
+source repository, Phase 1 asset revision 7148df9, 2026. [Online].
+Available: https://github.com/intrinsic-dev/aic
+4

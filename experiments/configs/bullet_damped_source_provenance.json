@@ -1,0 +1,28 @@
+{
+  "base": "gz-physics8_8.3.0 float64 sharp boxes",
+  "change": "Read SDF BALL Axis damping into JointInfo; existing AddJointDampingTorque applies -D*qdot to every DOF; source cable declares 0.2",
+  "source_files_sha256": {
+    "source_provenance.json": "c9ffb256acac3c8627afcffc084b6624e7303af8fb819a4e39ed7bbbb170e7b1",
+    "src\\Base.cc": "26ff046892efbb0f32d9b898121acee888ae1523216a74a47e13a7900b390d89",
+    "src\\Base.hh": "ce84a91ec95d42553931ad17cb66ca3234c98a3dc05e24a89aa3a4128db33648",
+    "src\\EntityManagementFeatures.cc": "b353afecd96c8440042cc9f16f612edfb66dfc6444cb6d5086a652d5c04545ee",
+    "src\\EntityManagementFeatures.hh": "b1a5d6b4ab5690750b9aff22857ebb34bddde5f5cdf0612524ac48e72c911c97",
+    "src\\FreeGroupFeatures.cc": "086062b5f0bf518225e8cfd8c68eb972550a50768d36c336976c833ec8ed3c4d",
+    "src\\FreeGroupFeatures.hh": "da112a94202ec909691abeda34501b51b43f40e3e50914b98a3c9eda95d3798c",
+    "src\\JointFeatures.cc": "fede0b1855fe31789caaa27217528736d5e9d8a487137e10863afc7b9c565e01",
+    "src\\JointFeatures.hh": "f81b2eac49c51cb3228f8f67e1cd5493fcc8f1616afea677ef2c3fe50225a117",
+    "src\\KinematicsFeatures.cc": "9c9420f39739abdf96be9d0d964948e24ff706a46383dacce63ae1ceb2a03d19",
+    "src\\KinematicsFeatures.hh": "6c2c5b0afe70734a21e7cec71feb9525f06a4289d750006718c8092c364e709e",
+    "src\\LinkFeatures.cc": "9becf14c4fe2ef7d3ae9e87c300177a251d29b17c27d4a789d28445bce84d32d",
+    "src\\LinkFeatures.hh": "000e79de78bb986d5ad3217f2946d7a312053203427d1af43afb4eaea7646916",
+    "src\\plugin.cc": "abfb4fac5dbe15ea8c68d264e8ea26df07af26c534d9797a835a04b74e3f171d",
+    "src\\SDFFeatures.cc": "a6f2093223b6b115c98bacf0920db4cdf5592f587467329e463a732a10f449b3",
+    "src\\SDFFeatures.hh": "7c700eb7494c7c029c1a2797741f4731bea4ab04098290b63b0d2443b2094efb",
+    "src\\ShapeFeatures.cc": "b42f611883251f77a0fbf0ada239fd72b25fc0001935b49b8344d47c38303c01",
+    "src\\ShapeFeatures.hh": "b3bccc84a3f5b4afe659296761b805c7b0c1db1fe269d669a6bb22331ce21ed6",
+    "src\\SimulationFeatures.cc": "6d8af4cba4da77f3b416222e8afdac5b7a8a7a54b1395eba7f8bda2190ff6836",
+    "src\\SimulationFeatures.hh": "89f7d698f005c14de7da822afcba415f604ffc16b2566b10fe9d61a1ba6fbfe3",
+    "src\\WorldFeatures.cc": "d794fbec9bfe689ed9b04760c81ee7665a21d44c703dca4ab67e925cbe884ff0",
+    "src\\WorldFeatures.hh": "083f6b21d03bbdf29d5620bcb724e8e916e6a7a39aeeeaa9f4353ff5db941c1f"
+  }
+}

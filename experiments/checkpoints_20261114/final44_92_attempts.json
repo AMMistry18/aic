@@ -1,0 +1,154 @@
+{
+  "client_date": "2026-11-14",
+  "recorded_unix": 1794678323.1710365,
+  "scope": "Partial frozen final44 accounting; no policy or outcome changes",
+  "final_source_freeze_sha256": "543e1924b27b5d6fa9f33b04dce5a7120909444810ffc7cb63771241757eed8a",
+  "main_ledger_sha256": "e9ccdd5e6869e5e278e0e30ce65f1805687ccbcba422691a32f24e16fab94eb0",
+  "attempts": 92,
+  "summary": {
+    "sc": {
+      "attempted": 46,
+      "policy_eligible": 45,
+      "verified": 44,
+      "all_attempt_wilson95": [
+        0.8546774097378094,
+        0.9879945544014435
+      ],
+      "policy_eligible_wilson95": [
+        0.8843331823158513,
+        0.9960664011171667
+      ],
+      "median_success_sim_s": 30.533500000000004,
+      "median_success_wall_s": 286.97813914900325,
+      "maximum_raw_peak_N": 3.487739971945713,
+      "complete_force_audits": 44,
+      "failure_causes": {
+        "setup_interruption_before_policy": 1,
+        "high_rate_force_audit:raw_force_coverage_gap": 1
+      }
+    },
+    "sfp": {
+      "attempted": 46,
+      "policy_eligible": 46,
+      "verified": 31,
+      "all_attempt_wilson95": [
+        0.5296773241932241,
+        0.7913405669074435
+      ],
+      "policy_eligible_wilson95": [
+        0.5296773241932241,
+        0.7913405669074435
+      ],
+      "median_success_sim_s": 59.429,
+      "median_success_wall_s": 582.3423883880023,
+      "maximum_raw_peak_N": 7.889495145302251,
+      "complete_force_audits": 46,
+      "failure_causes": {
+        "visual_grasp_failed:reprojection:7.14px>6.00px": 1,
+        "original_policy_returned_failure": 7,
+        "visual_grasp_failed:reprojection:6.26px>6.00px": 1,
+        "visual_grasp_failed:reprojection:10.59px>6.00px": 1,
+        "visual_grasp_failed:reprojection:10.82px>6.00px": 1,
+        "visual_grasp_failed:reprojection:11.30px>6.00px": 1,
+        "visual_grasp_failed:reprojection:10.19px>6.00px": 1,
+        "visual_grasp_failed:reprojection:6.50px>6.00px": 1,
+        "visual_grasp_failed:reprojection:9.23px>6.00px": 1
+      }
+    }
+  },
+  "ablation_summary": {
+    "no_axial_correction": {
+      "sc": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      },
+      "sfp": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      }
+    },
+    "no_lateral_tracking": {
+      "sc": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      },
+      "sfp": {
+        "attempted": 0,
+        "policy_eligible": 0,
+        "verified": 0,
+        "all_attempt_wilson95": null,
+        "policy_eligible_wilson95": null,
+        "median_success_sim_s": null,
+        "median_success_wall_s": null,
+        "maximum_raw_peak_N": null,
+        "complete_force_audits": 0,
+        "failure_causes": {}
+      }
+    }
+  },
+  "sfp_non_grasp_failure_classification": {
+    "Independent wrist sample has invalid age 0.1220s": 1,
+    "SFP datum waypoint tracking timeout": 3,
+    "SFP fixed lip excitation unobservable: release:stale_duplicate_or_gapped_sensor": 1,
+    "Rim image residual 2.642px exceeds 2px": 1,
+    "Outer force guard wrist data stale": 1
+  },
+  "current_run": "final_sc_700020_final44v1_full_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+  "faster_lip_development": {
+    "status": "completed_development_pair_requires_review",
+    "final_policy_modified": false,
+    "prospective_case": "dev_45005",
+    "baseline": "runtime47v3",
+    "final_cases_used_for_tuning": 0,
+    "updated_unix": 1794598631.6651387,
+    "candidate_sha256": "4349eea3acef79c7cc9980e2199774134f5ca273923295160e9e8698c692343a",
+    "comparison": [
+      {
+        "condition": "measured_start_baseline",
+        "run": "dev_45005_runtime47v3_original_perception_sfp_contact_datum_handoff",
+        "verified_success": true,
+        "lip_phase_sim_s": 21.756000000000004,
+        "action_sim_s": 51.9735,
+        "record_wall_s": 660.356463543998,
+        "raw_peak_N": 4.684120385723578,
+        "force_coverage": true
+      },
+      {
+        "condition": "faster_bounded_lip_search",
+        "run": "dev_45005_runtime47v5_original_perception_sfp_contact_datum_handoff",
+        "verified_success": true,
+        "lip_phase_sim_s": 17.2475,
+        "action_sim_s": 47.071,
+        "record_wall_s": 569.9129857090011,
+        "raw_peak_N": 8.881041147703968,
+        "force_coverage": true
+      }
+    ],
+    "final_sources_unchanged": true,
+    "not_a_randomized_success_rate": true
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "parent_development_sha256": "a8635bb350b40a5fa6457fa3ac3178bed35d030ae910d313c0079bcd53825498",
+  "candidate_sha256": "a842d9e8c57dab748f75b109ae93068f94bbc8ad51e3afbf1bcc10335f520de6",
+  "change": "Only SC unloaded/release command speed 0.2 to 0.8 mm/s; press remains 0.2mm/s",
+  "unchanged": [
+    "loading speed",
+    "25um stationary threshold",
+    "same 0.8s block window",
+    "force rise test",
+    "two repeated stops within 50um",
+    "200um retract goal",
+    "500um maximum datum correction",
+    "force guard",
+    "same final seating and 2000Hz audit"
+  ],
+  "prospective_case": "dev_42000",
+  "baseline": "runtime47v4",
+  "final_cases_used": 0
+}

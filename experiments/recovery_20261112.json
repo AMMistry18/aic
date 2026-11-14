@@ -1,0 +1,37 @@
+{
+  "purpose": "Recovery inventory; historical chat claims are NOT reconstructed raw trial evidence",
+  "date": "2026-11-12",
+  "historical_qualification41v2": {
+    "source": "Earlier conversation updates, retained in conversation context",
+    "original_path": ".artifacts/finish41/qualification41v2/progress.json",
+    "raw_evidence_available": false,
+    "sc_verified": 8,
+    "sc_attempted": 9,
+    "sfp_verified": 8,
+    "sfp_attempted": 8,
+    "unattempted": 4,
+    "failed_setup_case": "dev_42002",
+    "maximum_reported_raw_force_N": 3.433096785,
+    "limitations": "Development cases, conditional upstream alignment, held rigid grasp. Counts cannot currently be independently reverified from original raw traces."
+  },
+  "surviving_condensed_results": [
+    "experiments/evidence/exposure40/summary.json",
+    "experiments/evidence/exposure40/trials.csv",
+    "experiments/evidence/original_repair/component_screen_component30v1.json"
+  ],
+  "recovered_runtime": {
+    "container": "research-aic-eval",
+    "physics_plugin": "/opt/research-bullet-damped/libResearchBulletDamped.so",
+    "sha256_verified_20261112": "8f7aff37ec99f324c637c73a6c96509e95ccbc54d512b62785d894fa5c8aacaf",
+    "gpu_container": "research-aic-perception30",
+    "gpu_verified": "NVIDIA GeForce RTX 4070 Laptop GPU; torch CUDA available"
+  },
+  "missing_checkpoint_recovery_targets": {
+    ".artifacts/perception_data30/training/sc_mouth_standard30_v1/run/weights/best.pt": "e68f0fbea9ab8472ce1fca7be862a67fe914b33785e0ec3725a6a88c4f830078",
+    ".artifacts/sfp_visual33/training/plug33_v1/run/weights/best.pt": "547a1f958907549eac240701d2f0ce791cb2b8ec0238f887a540988be91dd683",
+    ".artifacts/sfp_visual33/training/nic33_v1/run/weights/best.pt": "46c3fb8d270e2acf46b396381cdef6f18e98c237c7764b651deb7e325756e4ed"
+  },
+  "retraining_rule": "Use a new revision/name and new measurements unless recovered checkpoint hashes match exactly. Never label retraining as recovery of original checkpoints.",
+  "fresh_verified_insertions": 0,
+  "preservation": "No source or evidence deleted during this recovery. Other WSL projects must remain untouched."
+}

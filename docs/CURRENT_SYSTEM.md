@@ -101,11 +101,19 @@ deterministic controllers:
   unload, re-prime the grasp, refresh the port pose, realign, use bounded visual
   recovery, and run a small force-limited spiral search.
 
-Fresh insertion events are the physical-success signal. The controller accepts
-a fresh event without applying a second depth gate because the scoring event is
-a proximity trigger. A failed SC insertion can be reported as a successful
-action result so the enclosing Flowstate process continues; that process result
-must not be interpreted as a physical insertion event.
+Fresh insertion events are the deployment completion signal. The controller
+accepts a fresh event without applying a second depth gate. This is not an
+independent measurement of physical seating: the simulator uses contact/touch
+triggers and can subsequently make cable connections static.
+
+The current `run_sc_insertion` returns its controller outcome through
+`finish(outcome, ...)`. The enclosing `AicModel` action wrapper can still convert
+a miss into action success: SC does so by default unless
+`RL_INSERT_SC_MISS_ABORTS=1`; other misses can be converted when
+`RL_INSERT_REPORT_MISS_AS_SUCCESS=1`. Research runs must set the former to `1`
+and the latter to `0`, and independently distinguish action
+outcome, event occurrence, requested-port correctness, and independently verified
+seating. See `EXPERIMENT_PLAN.md` and `experiments/verification.py`.
 
 Important implementation paths:
 

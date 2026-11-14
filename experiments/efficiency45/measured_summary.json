@@ -1,0 +1,66 @@
+{
+  "status": "Measured development timing and hardware microbenchmarks; current final policy unchanged",
+  "development_timing": {
+    "sc": {
+      "successful_development_trials": 9,
+      "median_record_wall_s": 286.5136731290004,
+      "median_configuration_wall_s": 22.35427105599956,
+      "median_action_sim_s": 30.166,
+      "median_stage_sim_s": {
+        "prealignment": 0.5680000000000005,
+        "seating_including_shoulder_registration": 21.039,
+        "shoulder_registration_subset": 8.029000000000003,
+        "visual_initialization": 8.306
+      },
+      "median_stage_wall_s": {
+        "prealignment": 4.722999999999999,
+        "seating_including_shoulder_registration": 167.38799999999998,
+        "visual_initialization": 79.767
+      }
+    },
+    "sfp": {
+      "successful_development_trials": 6,
+      "median_record_wall_s": 578.2886156170025,
+      "median_configuration_wall_s": 20.277993705998597,
+      "median_action_sim_s": 58.54175000000001,
+      "median_stage_sim_s": {
+        "aligned_entry": 5.08325,
+        "final_insertion_phase_including_dwell": 6.9184999999999945,
+        "final_stroke_to_first_estimated_goal": 5.085500000000003,
+        "opposed_lip_registration": 22.287750000000003,
+        "sidewall_registration": 16.96575
+      },
+      "median_stage_wall_s": {
+        "aligned_entry": 44.52178394794464,
+        "opposed_lip_registration": 215.3120436668396,
+        "sidewall_registration": 158.81835627555847
+      }
+    }
+  },
+  "gpu_detector_microbenchmarks": [
+    {
+      "connector": "sc",
+      "cpu_triplet_s": 0.9532897730023251,
+      "gpu_triplet_s": 0.058109712997975294,
+      "speedup": 16.404998817246618
+    },
+    {
+      "connector": "sfp",
+      "cpu_triplet_s": 3.5104634550007177,
+      "gpu_triplet_s": 0.10697599899867782,
+      "speedup": 32.81543045037706
+    }
+  ],
+  "gpu_scope": "FP32 full-frame YOLO microbenchmark; original weighted multi-view/crop pipeline and physical insertion not benchmarked",
+  "hardware_configuration_observed": {
+    "research-aic-eval_GPU_assigned": false,
+    "research-aic-perception30_GPU_assigned": true,
+    "simulator_software_rendering_forced": true
+  },
+  "image_cache_prototype": "Uninstalled; primary pose/decisions matched on six replay images, but exact leave-one-out diagnostics differed; repeated original also varies. No physical performance claim.",
+  "boundary_cases_prepared": 72,
+  "boundary_cases_executed": 0,
+  "new_baseline_trials_executed": 0,
+  "higher_force_speed43": "Remains stopped; not revived",
+  "reporting_decision": "Report full cycle and stage timings; exclude one-time configuration only when separately disclosed. Do not relabel final stroke as full pipeline throughput."
+}

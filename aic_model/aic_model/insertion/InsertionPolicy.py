@@ -263,6 +263,10 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
         self._wrench_baseline = np.zeros(6, dtype=np.float64)
         self._last_port_quat_wxyz = None
         self._last_port_reproj_px = None
+        self._wrist_sensor_cache=None
+        if os.environ.get('AIC_INSERT_HIGH_RATE_WRIST','0')=='1':
+            from .wrist_observation import WristSensorCache
+            self._wrist_sensor_cache=WristSensorCache(parent_node)
 
         # ---- perception weights (SFP + physical SC mouth) ----
         sc_weights = SC_WEIGHTS if os.path.exists(SC_WEIGHTS) else None
@@ -321,6 +325,15 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
         t = self._lookup_transform("base_link", "gripper/tcp")
         tr, ro = t.transform.translation, t.transform.rotation
         return (np.array([tr.x, tr.y, tr.z]), np.array([ro.w, ro.x, ro.y, ro.z]))  # wxyz
+
+    def _tcp_at_stamp(self,stamp_s):
+        from rclpy.clock import ClockType
+        # A visual tip belongs to its exposure time, even if inference ends
+        # after the wrist has moved. Solve the rigid grasp in that same frame.
+        t=self._parent_node._tf_buffer.lookup_transform(
+            'base_link','gripper/tcp',Time(seconds=float(stamp_s),clock_type=ClockType.ROS_TIME),Duration(seconds=.2))
+        tr,ro=t.transform.translation,t.transform.rotation
+        return np.array([tr.x,tr.y,tr.z]),np.array([ro.w,ro.x,ro.y,ro.z])
 
     def _tip_from_tcp(self, tcp_pos, tcp_quat):
         """Plug tip from the fresh per-run visual grasp transform."""
@@ -405,9 +418,16 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
             return None
         return bgr, K
 
-    def _lookup_cam_from_base(self, cam_name):
+    def _lookup_cam_from_base(self, cam_name, stamp=None):
         try:
-            tf = self._lookup_transform(f"{cam_name}/optical", "base_link")
+            if stamp is None:
+                tf = self._lookup_transform(f"{cam_name}/optical", "base_link")
+            else:
+                # Wrist cameras move with the arm. A latest-TF lookup combines
+                # historical pixels with a different physical camera pose.
+                tf = self._parent_node._tf_buffer.lookup_transform(
+                    f"{cam_name}/optical", "base_link", Time.from_msg(stamp),
+                    Duration(seconds=0.2))
         except TransformException as e:
             self.get_logger().warn(f"{cam_name}: TF lookup failed: {e}")
             return None
@@ -420,7 +440,10 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
             if d is None:
                 continue
             bgr, K = d
-            T = self._lookup_cam_from_base(cam)
+            message = getattr(obs, cam.replace("_camera", "_image"), None)
+            header = getattr(message, "header", None)
+            stamp = getattr(header, "stamp", None)
+            T = self._lookup_cam_from_base(cam, stamp) if stamp is not None else self._lookup_cam_from_base(cam)
             if T is None:
                 continue
             views[cam] = (bgr, K, T)
@@ -442,6 +465,15 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
         """
         if kp_3d.shape != (4, 3):
             return None, None
+        if os.environ.get('AIC_SFP_FULL_PORT_ORIENTATION','0')=='1':
+            # Preserve the measured plane tilt. Source NIC cages are not
+            # necessarily normal to world Z; flattening the rigid fit loses
+            # a degree of physical alignment before control even starts.
+            try:
+                rotation,_=_weighted_kabsch_fit(LOCAL_SFP_PORT_KPS,kp_3d,np.ones(4))
+            except (ValueError,np.linalg.LinAlgError):
+                return None,None
+            return _rotmat_to_quat_wxyz(rotation),float(np.arctan2(rotation[1,0],rotation[0,0]))
         x_axis = ((kp_3d[0] + kp_3d[3]) * 0.5) - ((kp_3d[1] + kp_3d[2]) * 0.5)
         x_axis[2] = 0.0
         x_axis = _normalize(x_axis)
@@ -893,6 +925,10 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
 
     def _run(self, task, get_observation, move_robot, send_feedback):
         log = self.get_logger()
+        wrist_cache=getattr(self,'_wrist_sensor_cache',None)
+        if wrist_cache is not None:
+            original_observation=get_observation
+            get_observation=lambda:wrist_cache.merge(original_observation())
         self._task = task
         plug_type = (task.plug_type or "sfp").lower()
         log.info(f"[rl] task: cable={task.cable_name} plug={task.plug_name} "
@@ -943,9 +979,19 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
             send_feedback("fresh plug pose unavailable -- insertion aborted")
             return False
 
+        if os.environ.get('AIC_SFP_CONTACT_DATUM','0')=='1':
+            from .sfp_contact_datum import run
+            return run(self,task,get_observation,move_robot,send_feedback)
+
         # --- perceive the SFP port pose (multi-frame consensus so one bad frame
         #     or a wrong-port pick does not commit us to the wrong cage)
         perceived = self.perceive_port_pose_consensus(task, get_observation)
+        from .visual_reacquisition import enabled as quality_reacquisition_enabled, bounded_retreat
+        if perceived is None and quality_reacquisition_enabled():
+            send_feedback('sfp visual evidence insufficient; bounded retreat and reacquisition')
+            if not bounded_retreat(self,get_observation,move_robot,'sfp'):return False
+            if not prime_sfp_plug_pose(self,get_observation,move_robot):return False
+            perceived=self.perceive_port_pose_consensus(task,get_observation)
         if perceived is None:
             log.error("[rl] perception failed to produce an SFP port pose")
             return False
@@ -960,7 +1006,7 @@ class InsertionPolicy(VisualGapRecoveryMixin, Policy):
 
         # --- wrench baseline captured HERE, at the current handoff pose. We do
         #     NOT move up/away first, so this is a valid contact-force baseline.
-        self._wrench_baseline = self._wrench_vector(obs)
+        self._wrench_baseline = self._wrench_vector(get_observation())
         log.info(
             f"[rl] handoff wrench baseline="
             f"{np.round(self._wrench_baseline, 4).tolist()} "

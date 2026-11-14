@@ -1,0 +1,533 @@
+{
+  "scope": "FP32 full-frame YOLO microbenchmark; original weighted multi-view/crop pipeline and physical insertion not benchmarked",
+  "final_trials_read": 0,
+  "cpu_threads": 1,
+  "gpu": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "torch_version": "2.8.0+cu128",
+  "results": [
+    {
+      "connector": "sc",
+      "development_run": "dev_42000_recovery20261112v1_original_perception_rim_position_body_track_brake_axial_partial_noangular_handoff",
+      "weight_sha256": "32f1ed5243f523001099d16dab5a6c9bfffc377cda935ceb4ebb9f17ebcfdc5b",
+      "input_sha256": [
+        "f164da0a93f881614cb0d1b6832fb571f4418a37dc06331963c06cf976dac782",
+        "06ede60aa580ceafba1f2af021e89a86c178674326147d611946c9be7e8cd973",
+        "538446123723c26572f64ae88ab70978898191ea5705462a6f6e565fbaa0a1ed"
+      ],
+      "measurements": {
+        "cpu": {
+          "wall_s": [
+            0.9532897730023251,
+            1.554297825001413,
+            0.9504226139979437,
+            0.8417174890055321,
+            1.5535408280047704
+          ],
+          "median_triplet_wall_s": 0.9532897730023251,
+          "detections_per_view": [
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ]
+          ],
+          "instrumented_per_image_ms": [
+            [
+              {
+                "preprocess": 6.576516333249553,
+                "inference": 310.0423116678333,
+                "postprocess": 0.9842233339441009
+              },
+              {
+                "preprocess": 6.576516333249553,
+                "inference": 310.0423116678333,
+                "postprocess": 0.9842233339441009
+              },
+              {
+                "preprocess": 6.576516333249553,
+                "inference": 310.0423116678333,
+                "postprocess": 0.9842233339441009
+              }
+            ],
+            [
+              {
+                "preprocess": 4.495515000598971,
+                "inference": 512.1905876682528,
+                "postprocess": 1.185133999873263
+              },
+              {
+                "preprocess": 4.495515000598971,
+                "inference": 512.1905876682528,
+                "postprocess": 1.185133999873263
+              },
+              {
+                "preprocess": 4.495515000598971,
+                "inference": 512.1905876682528,
+                "postprocess": 1.185133999873263
+              }
+            ],
+            [
+              {
+                "preprocess": 4.914981664721078,
+                "inference": 310.8335873330361,
+                "postprocess": 0.9258536665583961
+              },
+              {
+                "preprocess": 4.914981664721078,
+                "inference": 310.8335873330361,
+                "postprocess": 0.9258536665583961
+              },
+              {
+                "preprocess": 4.914981664721078,
+                "inference": 310.8335873330361,
+                "postprocess": 0.9258536665583961
+              }
+            ],
+            [
+              {
+                "preprocess": 4.44028166627201,
+                "inference": 275.06216700082103,
+                "postprocess": 0.9400720009580255
+              },
+              {
+                "preprocess": 4.44028166627201,
+                "inference": 275.06216700082103,
+                "postprocess": 0.9400720009580255
+              },
+              {
+                "preprocess": 4.44028166627201,
+                "inference": 275.06216700082103,
+                "postprocess": 0.9400720009580255
+              }
+            ],
+            [
+              {
+                "preprocess": 6.8241503346750205,
+                "inference": 509.55530733335763,
+                "postprocess": 1.338011667636844
+              },
+              {
+                "preprocess": 6.8241503346750205,
+                "inference": 509.55530733335763,
+                "postprocess": 1.338011667636844
+              },
+              {
+                "preprocess": 6.8241503346750205,
+                "inference": 509.55530733335763,
+                "postprocess": 1.338011667636844
+              }
+            ]
+          ]
+        },
+        "0": {
+          "wall_s": [
+            0.06214530600118451,
+            0.058109712997975294,
+            0.06590487700304948,
+            0.05612316000042483,
+            0.0520586499987985
+          ],
+          "median_triplet_wall_s": 0.058109712997975294,
+          "detections_per_view": [
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ],
+            [
+              4,
+              5,
+              5
+            ]
+          ],
+          "instrumented_per_image_ms": [
+            [
+              {
+                "preprocess": 5.083997998250804,
+                "inference": 10.722406999169229,
+                "postprocess": 4.75932466846037
+              },
+              {
+                "preprocess": 5.083997998250804,
+                "inference": 10.722406999169229,
+                "postprocess": 4.75932466846037
+              },
+              {
+                "preprocess": 5.083997998250804,
+                "inference": 10.722406999169229,
+                "postprocess": 4.75932466846037
+              }
+            ],
+            [
+              {
+                "preprocess": 4.63271766542069,
+                "inference": 10.668881999057097,
+                "postprocess": 3.9157149997966676
+              },
+              {
+                "preprocess": 4.63271766542069,
+                "inference": 10.668881999057097,
+                "postprocess": 3.9157149997966676
+              },
+              {
+                "preprocess": 4.63271766542069,
+                "inference": 10.668881999057097,
+                "postprocess": 3.9157149997966676
+              }
+            ],
+            [
+              {
+                "preprocess": 6.313332999222136,
+                "inference": 11.022945667112557,
+                "postprocess": 4.306458999053575
+              },
+              {
+                "preprocess": 6.313332999222136,
+                "inference": 11.022945667112557,
+                "postprocess": 4.306458999053575
+              },
+              {
+                "preprocess": 6.313332999222136,
+                "inference": 11.022945667112557,
+                "postprocess": 4.306458999053575
+              }
+            ],
+            [
+              {
+                "preprocess": 6.240036001448364,
+                "inference": 9.259493667438315,
+                "postprocess": 3.056969668250531
+              },
+              {
+                "preprocess": 6.240036001448364,
+                "inference": 9.259493667438315,
+                "postprocess": 3.056969668250531
+              },
+              {
+                "preprocess": 6.240036001448364,
+                "inference": 9.259493667438315,
+                "postprocess": 3.056969668250531
+              }
+            ],
+            [
+              {
+                "preprocess": 5.386917999809763,
+                "inference": 9.167281333551122,
+                "postprocess": 2.6608766662927033
+              },
+              {
+                "preprocess": 5.386917999809763,
+                "inference": 9.167281333551122,
+                "postprocess": 2.6608766662927033
+              },
+              {
+                "preprocess": 5.386917999809763,
+                "inference": 9.167281333551122,
+                "postprocess": 2.6608766662927033
+              }
+            ]
+          ]
+        }
+      },
+      "speedup_cpu_over_gpu": 16.404998817246618
+    },
+    {
+      "connector": "sfp",
+      "development_run": "dev_45005_recovery20261112v1_original_perception_sfp_contact_datum_handoff",
+      "weight_sha256": "31a18e6509554411141e5191c97cc839b0430f563ab4d913cd758c1e3a4b51e5",
+      "input_sha256": [
+        "f9fa8e42ad6a2a4c684cc2543648bae5c7c86684652e8b18a176d062e336f85f",
+        "33d76c96ad46711d34ea9a2ec1d42299c2f4aba46eb569c7ebd7f910fcc6dfb8",
+        "a0ac31005ff208bb4ddc87a40c8936fd2e6ff5e12a290b21035d15e18f16f186"
+      ],
+      "measurements": {
+        "cpu": {
+          "wall_s": [
+            3.425016061999486,
+            3.470812505001959,
+            4.663057432000642,
+            4.570824367001478,
+            3.5104634550007177
+          ],
+          "median_triplet_wall_s": 3.5104634550007177,
+          "detections_per_view": [
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ]
+          ],
+          "instrumented_per_image_ms": [
+            [
+              {
+                "preprocess": 7.107578331973248,
+                "inference": 1124.5175540000976,
+                "postprocess": 2.47344933450222
+              },
+              {
+                "preprocess": 7.107578331973248,
+                "inference": 1124.5175540000976,
+                "postprocess": 2.47344933450222
+              },
+              {
+                "preprocess": 7.107578331973248,
+                "inference": 1124.5175540000976,
+                "postprocess": 2.47344933450222
+              }
+            ],
+            [
+              {
+                "preprocess": 10.431234666612,
+                "inference": 1134.4878879996638,
+                "postprocess": 0.9899913323655104
+              },
+              {
+                "preprocess": 10.431234666612,
+                "inference": 1134.4878879996638,
+                "postprocess": 0.9899913323655104
+              },
+              {
+                "preprocess": 10.431234666612,
+                "inference": 1134.4878879996638,
+                "postprocess": 0.9899913323655104
+              }
+            ],
+            [
+              {
+                "preprocess": 8.500036667101085,
+                "inference": 1533.0111753331341,
+                "postprocess": 3.360586333049772
+              },
+              {
+                "preprocess": 8.500036667101085,
+                "inference": 1533.0111753331341,
+                "postprocess": 3.360586333049772
+              },
+              {
+                "preprocess": 8.500036667101085,
+                "inference": 1533.0111753331341,
+                "postprocess": 3.360586333049772
+              }
+            ],
+            [
+              {
+                "preprocess": 10.269867998431437,
+                "inference": 1501.2231993314344,
+                "postprocess": 2.830854333296884
+              },
+              {
+                "preprocess": 10.269867998431437,
+                "inference": 1501.2231993314344,
+                "postprocess": 2.830854333296884
+              },
+              {
+                "preprocess": 10.269867998431437,
+                "inference": 1501.2231993314344,
+                "postprocess": 2.830854333296884
+              }
+            ],
+            [
+              {
+                "preprocess": 11.67963433302551,
+                "inference": 1153.070110999882,
+                "postprocess": 0.9009083320658343
+              },
+              {
+                "preprocess": 11.67963433302551,
+                "inference": 1153.070110999882,
+                "postprocess": 0.9009083320658343
+              },
+              {
+                "preprocess": 11.67963433302551,
+                "inference": 1153.070110999882,
+                "postprocess": 0.9009083320658343
+              }
+            ]
+          ]
+        },
+        "0": {
+          "wall_s": [
+            0.11361630100145703,
+            0.11898745600046823,
+            0.09580743100377731,
+            0.09811809899838408,
+            0.10697599899867782
+          ],
+          "median_triplet_wall_s": 0.10697599899867782,
+          "detections_per_view": [
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ],
+            [
+              5,
+              5,
+              7
+            ]
+          ],
+          "instrumented_per_image_ms": [
+            [
+              {
+                "preprocess": 8.680590333824512,
+                "inference": 23.093519666872453,
+                "postprocess": 5.882065333328986
+              },
+              {
+                "preprocess": 8.680590333824512,
+                "inference": 23.093519666872453,
+                "postprocess": 5.882065333328986
+              },
+              {
+                "preprocess": 8.680590333824512,
+                "inference": 23.093519666872453,
+                "postprocess": 5.882065333328986
+              }
+            ],
+            [
+              {
+                "preprocess": 10.216172333457507,
+                "inference": 22.54435699918152,
+                "postprocess": 6.741041999096827
+              },
+              {
+                "preprocess": 10.216172333457507,
+                "inference": 22.54435699918152,
+                "postprocess": 6.741041999096827
+              },
+              {
+                "preprocess": 10.216172333457507,
+                "inference": 22.54435699918152,
+                "postprocess": 6.741041999096827
+              }
+            ],
+            [
+              {
+                "preprocess": 5.614986000485563,
+                "inference": 21.545066665566992,
+                "postprocess": 4.094594667549245
+              },
+              {
+                "preprocess": 5.614986000485563,
+                "inference": 21.545066665566992,
+                "postprocess": 4.094594667549245
+              },
+              {
+                "preprocess": 5.614986000485563,
+                "inference": 21.545066665566992,
+                "postprocess": 4.094594667549245
+              }
+            ],
+            [
+              {
+                "preprocess": 7.175995332848591,
+                "inference": 21.33704066606394,
+                "postprocess": 3.743137000128627
+              },
+              {
+                "preprocess": 7.175995332848591,
+                "inference": 21.33704066606394,
+                "postprocess": 3.743137000128627
+              },
+              {
+                "preprocess": 7.175995332848591,
+                "inference": 21.33704066606394,
+                "postprocess": 3.743137000128627
+              }
+            ],
+            [
+              {
+                "preprocess": 9.279731333663221,
+                "inference": 21.204082666372415,
+                "postprocess": 4.653912665768682
+              },
+              {
+                "preprocess": 9.279731333663221,
+                "inference": 21.204082666372415,
+                "postprocess": 4.653912665768682
+              },
+              {
+                "preprocess": 9.279731333663221,
+                "inference": 21.204082666372415,
+                "postprocess": 4.653912665768682
+              }
+            ]
+          ]
+        }
+      },
+      "speedup_cpu_over_gpu": 32.81543045037706
+    }
+  ],
+  "does_not_certify_pose_parity": true,
+  "installed": false
+}

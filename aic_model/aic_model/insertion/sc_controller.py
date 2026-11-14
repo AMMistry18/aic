@@ -75,6 +75,8 @@ CALIBRATION NOTES:
 
 from __future__ import annotations
 
+from .controller_clock import control_time
+
 import itertools
 import os
 import re
@@ -126,6 +128,8 @@ from .sfp_controller import (
     rotation_from_axis_angle,
     solve_tip_in_tcp,
     tip_from_tcp_transform,
+    WRENCH_SENSOR_TO_TCP_POS_M,
+    shift_wrench_moment_to_point,
 )
 
 # Distinct from both True and False: `ScInsertionController._align` returns
@@ -716,6 +720,13 @@ class SCConfig:
 
     seat_mouth_zone_m: float = 0.002          # 13% of bore, as SFP's 6 mm is
     seat_mouth_speed_scale: float = 0.25
+    # Optional shoulder approach: reduce both velocity and stored elastic lead
+    # before the public CAD end stop. Uses visual depth + own TCP only.
+    terminal_brake_enable: bool = False
+    terminal_brake_distance_m: float = 0.002
+    terminal_settle_reserve_m: float = 0.001
+    terminal_speed_m_s: float = 0.0005
+    terminal_max_lead_m: float = 0.0003
     seat_overtravel_m: float = 0.0015         # 10% of bore, as SFP's 5 mm is
     seat_candidate_depth_m: float = 0.0152    # 97% of bore, as SFP's 44.5 mm is
     insertion_event_timeout_wall_s: float = 6.0
@@ -835,6 +846,11 @@ class SCConfig:
             seat_align_release_decay=_env_float("RL_INSERT_SC_SEAT_ALIGN_RELEASE_DECAY", 0.7),
             seat_mouth_zone_m=_env_float("RL_INSERT_SC_SEAT_MOUTH_ZONE_M", 0.002),
             seat_mouth_speed_scale=_env_float("RL_INSERT_SC_SEAT_MOUTH_SPEED_SCALE", 0.25),
+            terminal_brake_enable=_env_bool("RL_INSERT_SC_TERMINAL_BRAKE", False),
+            terminal_brake_distance_m=_env_float("RL_INSERT_SC_TERMINAL_BRAKE_DISTANCE_M", 0.002),
+            terminal_settle_reserve_m=_env_float("RL_INSERT_SC_TERMINAL_SETTLE_RESERVE_M", 0.001),
+            terminal_speed_m_s=_env_float("RL_INSERT_SC_TERMINAL_SPEED_M_S", 0.0005),
+            terminal_max_lead_m=_env_float("RL_INSERT_SC_TERMINAL_MAX_LEAD_M", 0.0003),
             seat_stall_grace_s=_env_float("RL_INSERT_SC_SEAT_STALL_GRACE_S", 3.0),
             seat_overtravel_m=_env_float("RL_INSERT_SC_SEAT_OVERTRAVEL_M", 0.0015),
             seat_candidate_depth_m=_env_float("RL_INSERT_SC_SEAT_CANDIDATE_DEPTH_M", 0.0152),
@@ -951,6 +967,12 @@ class SCConfig:
             raise ValueError("sc alignment release decay must be within 0-1")
         if self.seat_mouth_zone_m < 0.0 or self.seat_mouth_speed_scale < 0.0:
             raise ValueError("sc mouth slowdown parameters must be non-negative")
+        if not (0.0 < self.terminal_brake_distance_m < SC_INSERT_DEPTH_M
+                and 0.0 <= self.terminal_settle_reserve_m < self.seat_candidate_depth_m
+                and 0.0 < self.terminal_speed_m_s
+                and (not self.terminal_brake_enable or self.terminal_speed_m_s <= self.free_speed_m_s)
+                and 0.0 < self.terminal_max_lead_m < SC_INSERT_DEPTH_M):
+            raise ValueError("sc terminal braking parameters must be positive and bounded")
         return self
 
 
@@ -1031,7 +1053,26 @@ def next_sc_depth(
     ``INSERT_DEPTH_M`` module constant, and the SFP build is mid-deploy.
     """
     current_depth = float(current_depth)
-    commanded_depth = max(float(commanded_depth), current_depth)
+    # A persistent trajectory must be allowed to lag an overshooting robot:
+    # snapping it forward to the observed tip removes the restoring spring
+    # force that is supposed to brake the motion.
+    commanded_depth = (float(commanded_depth) if config.terminal_brake_enable
+        else max(float(commanded_depth), current_depth))
+    lead = config.force_lead_m
+    speed_cap = float('inf')
+    endpoint = SC_INSERT_DEPTH_M + config.seat_overtravel_m
+    if config.terminal_brake_enable:
+        # Full slow speed by the candidate-dwell boundary, leaving a braking
+        # reserve for image depth uncertainty. Continuity matters: the dwell
+        # must use the same governor rather than jump to the final setpoint.
+        remaining = max(0.0, config.seat_candidate_depth_m
+            - config.terminal_settle_reserve_m - current_depth)
+        fraction = min(1.0, remaining / config.terminal_brake_distance_m)
+        speed_cap = config.terminal_speed_m_s + fraction * (
+            config.free_speed_m_s - config.terminal_speed_m_s)
+        terminal_lead = min(lead, config.terminal_max_lead_m)
+        lead = terminal_lead + fraction * (lead - terminal_lead)
+        endpoint = SC_INSERT_DEPTH_M
     if np.isfinite(force_n) and force_n >= config.seat_force_cap_n:
         candidate = commanded_depth
     else:
@@ -1040,11 +1081,11 @@ def next_sc_depth(
             if np.isfinite(force_n) and force_n >= config.contact_force_n
             else config.free_speed_m_s
         )
-        candidate = commanded_depth + speed * max(0.0, float(elapsed_wall_s))
+        candidate = commanded_depth + min(speed, speed_cap) * max(0.0, float(elapsed_wall_s))
     return min(
-        SC_INSERT_DEPTH_M + config.seat_overtravel_m,
+        endpoint,
         candidate,
-        current_depth + config.force_lead_m,
+        current_depth + lead,
     )
 
 
@@ -1304,7 +1345,7 @@ class ScInsertionController:
     # recovery -- unload, full retry, unload, full retry, ... -- for as long as
     # the remaining budget can afford the next rung, so the attempt count is a
     # consequence of ACTION_TIME_BUDGET_S rather than a separate cap.
-    MAX_SEAT_ATTEMPTS = 0
+    MAX_SEAT_ATTEMPTS = _env_int("RL_INSERT_SC_MAX_SEAT_ATTEMPTS", 0)
     # Relative back-off from the stalled depth, NOT a return to standoff: 1.5 mm
     # is enough to unload the wedge in place while keeping the plug in the mouth.
     # The full-retry rung is the one that goes all the way back to standoff.
@@ -1326,10 +1367,9 @@ class ScInsertionController:
     RETRY_ALIGN_BUDGET_S = 15.0
 
     # --- Spiral search ----------------------------------------------------
-    # The 22.407 x 8.10 mm mouth against a 20.0 x 6.4 mm plug leaves 1.20 mm of
-    # lateral and 0.85 mm of vertical half-clearance, so a 2 mm sweep covers
-    # every misalignment the handoff gate admits while staying far inside the
-    # 25.78 mm adapter pitch -- it cannot wander onto a neighbouring port.
+    # The 20.0 x 6.4 mm cuboid is a keypoint template, not a collision envelope.
+    # Source boxes/ridges are wider and deeper keying is tighter; research
+    # sweeps use the separately audited source geometry and bounded workspace.
     SPIRAL_MAX_RADIUS_M = _env_float("RL_INSERT_SC_SPIRAL_MAX_RADIUS_M", 0.0020)
     # Radial growth per revolution.  Must stay under twice the SMALLEST
     # half-clearance (0.85 mm) or consecutive turns step straight over the
@@ -1396,6 +1436,8 @@ class ScInsertionController:
         # behaviour and what the geometry tests construct.
         self.Rs = self.Rp.copy() if Rs is None else np.asarray(
             Rs, dtype=np.float64).reshape(3, 3)
+        self._initial_handoff_rotation=self.Rs.copy()
+        self._terminal_contact_registered=False
         # Constant in-plane rotation from Rp to Rs.  Corrections measured in the
         # Rp frame are re-expressed through this before being commanded on Rs.
         self.R_yaw = self.Rp.T @ self.Rs
@@ -1423,6 +1465,9 @@ class ScInsertionController:
         # lateral force at 90 N/m * 1.5 mm and made large handoff errors crawl
         # into the 15 s alignment timeout.
         self._align_segment_lateral_xy = None
+        if _env_bool('AIC_SC_LATERAL_TRACKING',False):
+            from .tracking_compensation import install
+            install(self)
 
     def _seating_stiffness(self) -> np.ndarray:
         """Return a base-frame matrix with 500 N/m along the port axis.
@@ -2082,9 +2127,19 @@ class ScInsertionController:
         wrench_wrist = (
             self.policy._wrench_vector(observation) - self.policy._wrench_baseline
         )
-        _, R_tip = self._tip_pose()
-        wrist_to_plug = self.Rp.T @ R_tip
-        return wrist_to_plug @ wrench_wrist[:3], wrist_to_plug @ wrench_wrist[3:]
+        tcp_pos,tcp_quat=self.policy._tcp()
+        R_tcp=quat_to_matrix(tcp_quat)
+        force_base=R_tcp@wrench_wrist[:3]
+        moment_base=R_tcp@wrench_wrist[3:]
+        header=getattr(getattr(observation,'wrist_wrench',None),'header',None)
+        frame=str(getattr(header,'frame_id','') or '').strip().lstrip('/')
+        if frame=='ati/tool_link':
+            tip_pos,_=self._tip_pose()
+            sensor_pos=tcp_pos-R_tcp@WRENCH_SENSOR_TO_TCP_POS_M
+            moment_base=shift_wrench_moment_to_point(force_base,moment_base,np.asarray(tip_pos)-sensor_pos)
+        else:
+            moment_base=np.full(3,np.nan)
+        return self.Rp.T@force_base,self.Rp.T@moment_base
 
     def _alignment_sample(self, observation, depth, force, acc_lat, acc_tilt):
         """Low-passed proportional wrench correction -- not an accumulator.
@@ -2095,18 +2150,21 @@ class ScInsertionController:
         """
         f_plug, m_plug = self._wrench_plug_frame(observation)
         contact = bool(np.isfinite(force) and force >= self.config.contact_force_n)
-        finite = bool(np.all(np.isfinite(f_plug[:2])) and np.all(np.isfinite(m_plug[:2])))
-        if contact and finite:
+        finite_force = bool(np.all(np.isfinite(f_plug[:2])))
+        finite_moment = bool(np.all(np.isfinite(m_plug[:2])))
+        if contact and finite_force:
             target_lat = clamp_vector_norm(
                 -self.config.seat_align_force_gain * f_plug[:2],
                 self.config.seat_align_max_lat_m,
             )
+        else:
+            target_lat = np.zeros(2, dtype=np.float64)
+        if contact and finite_moment:
             target_tilt = clamp_vector_norm(
                 -self.config.seat_align_moment_gain * m_plug[:2],
                 self.config.seat_align_max_tilt_rad,
             )
         else:
-            target_lat = np.zeros(2, dtype=np.float64)
             target_tilt = np.zeros(2, dtype=np.float64)
         decay = self.config.seat_align_release_decay
         acc_lat = clamp_vector_norm(
@@ -2152,6 +2210,8 @@ class ScInsertionController:
         ``seat_candidate_depth_m`` still separately governs when ``_seat()``
         stops driving (see ``SCConfig.seat_candidate_depth_m``).
         """
+        from .observable_terminal import enabled
+        if enabled():return None
 
         parent = self.policy._parent_node
         generation = int(getattr(parent, "_insertion_event_generation", 0))
@@ -2184,9 +2244,21 @@ class ScInsertionController:
         return SEATED
 
     def _wait_for_insertion_event(self, fixed_tip) -> str:
-        deadline = time.monotonic() + self.config.insertion_event_timeout_wall_s
+        from .observable_terminal import enabled,hold_candidate
+        if enabled():
+            if _env_bool('AIC_SC_TERMINAL_CONTACT_REGISTER',False) and not self._terminal_contact_registered:
+                # Calibrate only after deep, robot-observed entry. Early rim
+                # entrapment cannot be assumed to bracket the internal bore.
+                depth,_,_,_,_=self._errors()
+                if depth<self.config.seat_candidate_depth_m:
+                    self.log.warn('[sc] TERMINAL_CONTACT_REGISTER_REJECT reason=not_deep_candidate')
+                    return STALLED
+                if not self._contact_register_grasp(axial_preload_m=0.):return STALLED
+                self._terminal_contact_registered=True
+            return hold_candidate(self,fixed_tip,self.Rs,'sc')
+        deadline = control_time(self.policy,time.monotonic) + self.config.insertion_event_timeout_wall_s
         hard_force_since = None
-        while time.monotonic() < deadline:
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             observation = self.get_observation()
             force = self._force_magnitude(observation)
@@ -2196,8 +2268,8 @@ class ScInsertionController:
                 return status
             if np.isfinite(force) and force > self.config.force_abort_n:
                 self._hold_tip(tip_pos, self.Rs)
-                hard_force_since = hard_force_since or time.monotonic()
-                if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
+                hard_force_since = hard_force_since or control_time(self.policy,time.monotonic)
+                if control_time(self.policy,time.monotonic) - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
                         f"[sc] >{self.config.force_abort_n:.1f}N during event dwell"
                     )
@@ -2234,9 +2306,9 @@ class ScInsertionController:
             f"[sc] SC_STALL_EVENT_DWELL_START depth_mm={depth_text} "
             f"dwell_s={dwell_s:.2f}"
         )
-        deadline = time.monotonic() + dwell_s
+        deadline = control_time(self.policy,time.monotonic) + dwell_s
         hard_force_since = None
-        while time.monotonic() < deadline:
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             self._hold_tip(tip_pos, tip_rotation)
             observation = self.get_observation()
@@ -2246,8 +2318,8 @@ class ScInsertionController:
                 return status
             force = self._force_magnitude(observation)
             if np.isfinite(force) and force > self.config.force_abort_n:
-                hard_force_since = hard_force_since or time.monotonic()
-                if time.monotonic() - hard_force_since >= self.config.force_abort_wall_s:
+                hard_force_since = hard_force_since or control_time(self.policy,time.monotonic)
+                if control_time(self.policy,time.monotonic) - hard_force_since >= self.config.force_abort_wall_s:
                     self.log.error(
                         f"[sc] >{self.config.force_abort_n:.1f}N during stall-event dwell"
                     )
@@ -2283,14 +2355,14 @@ class ScInsertionController:
         self._prime_visual_target()
         if timing is not None:
             timing.mark("alignment_start")
-        start = time.monotonic()
+        start = control_time(self.policy,time.monotonic)
         depth, lateral_xy, rotation_error, _, _ = self._errors()
         align_depth = depth
         last_depth = depth
         last_lateral = float(np.linalg.norm(lateral_xy))
         last_rotation = float(np.linalg.norm(rotation_error))
         command_count = 0
-        while time.monotonic() - start < self.config.align_timeout_wall_s:
+        while control_time(self.policy,time.monotonic) - start < self.config.align_timeout_wall_s:
             self.policy._enforce_action_deadline(self.move_robot)
             depth, lateral_xy, rotation_error, tip_pos, _ = self._errors()
             lateral = float(np.linalg.norm(lateral_xy))
@@ -2435,7 +2507,7 @@ class ScInsertionController:
             f"{self.config.visual_recovery_force_n / seat_axial_stiffness * 1000.0:.3f} "
             f"recovery_nominal_force_N={self.config.visual_recovery_force_n:.3f}"
         )
-        now = time.monotonic()
+        now = control_time(self.policy,time.monotonic)
         last_command_time = now
         progress = WallProgressWatch.start(depth, now, self.config)
         hard_force_since = None
@@ -2459,7 +2531,7 @@ class ScInsertionController:
             lateral = float(np.linalg.norm(lateral_xy))
             rotation = float(np.linalg.norm(rotation_error))
             force = self._force_magnitude(observation)
-            now = time.monotonic()
+            now = control_time(self.policy,time.monotonic)
             status = self._event_status(depth)
             if status is not None:
                 return status
@@ -2668,6 +2740,14 @@ class ScInsertionController:
                     self._log_wrench(sample, acc_lat, acc_tilt)
                     last_wrench_log_time = now
 
+            if (self.config.terminal_brake_enable and depth >=
+                    self.config.seat_candidate_depth_m-self.config.terminal_settle_reserve_m
+                    -self.config.terminal_brake_distance_m):
+                # The planned 0.5 mm/s is at the old 0.5 mm/1 s stall
+                # boundary. Allow two planned progress intervals; keep the
+                # same distance criterion, force aborts and physical scoring.
+                progress.timeout_s=max(self.config.stall_timeout_wall_s,
+                    2*self.config.stall_progress_m/self.config.terminal_speed_m_s)
             stalled_now = progress.stalled(depth, now)
             if stall_grace_deadline is not None and not stalled_now:
                 self.log.info(
@@ -2804,6 +2884,7 @@ class ScInsertionController:
             command_depth = next_sc_depth(
                 depth, command_depth, now - last_command_time, force, depth_config
             )
+            self._last_seat_command_depth = command_depth
             last_command_time = now
 
             target_tip = (
@@ -2840,6 +2921,91 @@ class ScInsertionController:
         depth, _lateral_xy, _rotation_error, tip_pos, tip_rotation = self._errors()
         force = self._force_magnitude(observation)
         return depth, force, tip_pos, tip_rotation
+
+    def _contact_register_grasp(self,axial_preload_m=.0005):
+        from .contact_registration import register_lateral
+        initial=sc_grasp_transform(self.policy)
+        if initial is None:
+            return False
+        self.policy._contact_registration_trace=[]
+        started=control_time(self.policy,time.monotonic)
+        def read():
+            tip,rotation=self._tip_pose()
+            observation=self.get_observation()
+            force,_=self._wrench_plug_frame(observation)
+            header=getattr(getattr(observation,'wrist_wrench',None),'header',None)
+            stamp=getattr(header,'stamp',None)
+            seconds=(stamp.sec+stamp.nanosec*1e-9) if stamp is not None else control_time(self.policy,time.monotonic)
+            self.policy._contact_registration_trace.append({'sim_s':control_time(self.policy,time.monotonic),
+                'wrench_stamp_s':seconds,'estimated_tip':np.asarray(tip).tolist(),'force_axes_N':np.asarray(force).tolist()})
+            return tip,rotation,force,seconds
+        stiffness=self.PRECONTACT_ALIGN_STIFFNESS.copy()
+        stiffness[:3]=[400.,400.,500.]
+        def position_probe_motion(motion_update=None,joint_motion_update=None):
+            # Match the independently tested position-probe interface. Native
+            # feedback of the noisy wrist sensor is unnecessary for the
+            # guarded pose probe; the outer adapter still supplies calibrated
+            # load support and checks the independent force ceiling.
+            motion_update.wrench_feedback_gains_at_tip=[0.]*6
+            return self.move_robot(motion_update=motion_update,joint_motion_update=joint_motion_update)
+        def send(tip,rotation):
+            self.policy.set_pose_target(position_probe_motion,self._tcp_target(tip,rotation),
+                                        stiffness=stiffness,damping=self.DAMPING)
+        self.log.info('[sc] CONTACT_GRASP_REGISTER_START')
+        self._in_contact_probe=True
+        try:
+            center,records=register_lateral(read=read,send=send,sleep=self.policy.sleep_for,
+                clock=lambda:control_time(self.policy,time.monotonic),
+                check_deadline=lambda:self.policy._enforce_action_deadline(self.move_robot),
+                axes=self.Rp,command_dt=self.config.command_dt_sim_s,axial_preload_m=axial_preload_m)
+        except Exception:
+            send(*self._tip_pose())
+            raise
+        finally:
+            self._in_contact_probe=False
+        diagnostic={'observations':records,'accepted':center is not None,'start_sim_s':started,
+                    'end_sim_s':control_time(self.policy,time.monotonic),'native_wrench_feedback_gains':[0.]*6,
+                    'axial_preload_m':axial_preload_m,'max_tip_lead_m':.0005}
+        if center is not None:
+            # Contact centers the physical plug; compare its still-biased visual
+            # estimate to the independently image-refined mouth. Correct only
+            # observable lateral grasp translation, retaining visual rotation.
+            delta=self.Rp[:,:2]@(self.Rp[:,:2].T@(center-self.port_pos))
+            if np.linalg.norm(delta)>.003:
+                diagnostic.update(accepted=False,reason='grasp_correction_exceeds_3mm')
+            else:
+                _,tcp_quat=self.policy._tcp()
+                correction=quat_to_matrix(tcp_quat).T@delta
+                self.policy._sc_grasp_transform=(np.asarray(initial[0])-correction,np.asarray(initial[1]).copy())
+                diagnostic.update(correction_base_m=delta.tolist(),correction_tcp_m=correction.tolist())
+        self.policy._contact_grasp_registration=diagnostic
+        self.log.info(f'[sc] CONTACT_GRASP_REGISTER_RESULT {diagnostic}')
+        if not diagnostic['accepted']:send(*self._tip_pose())
+        return bool(diagnostic['accepted'])
+
+    def _contact_seek_entry(self):
+        from .contact_capture import seek_entry
+        def read():
+            observation=self.get_observation()
+            point,rotation=self._tip_pose()
+            force,_=self._wrench_plug_frame(observation)
+            stamp=observation.wrist_wrench.header.stamp
+            return point,rotation,force,stamp.sec+stamp.nanosec*1e-9
+        def motion(motion_update=None,joint_motion_update=None):
+            motion_update.wrench_feedback_gains_at_tip=[0.]*6
+            return self.move_robot(motion_update=motion_update,joint_motion_update=joint_motion_update)
+        stiffness=self.PRECONTACT_ALIGN_STIFFNESS.copy();stiffness[:3]=[400.,400.,500.]
+        def send(point,rotation):
+            self.policy.set_pose_target(motion,self._tcp_target(point,rotation),
+                                        stiffness=stiffness,damping=self.DAMPING)
+        self.log.info('[sc] CONTACT_ENTRY_SEARCH_START')
+        accepted,diagnostic=seek_entry(read=read,send=send,sleep=self.policy.sleep_for,
+            clock=lambda:control_time(self.policy,time.monotonic),
+            check_deadline=lambda:self.policy._enforce_action_deadline(self.move_robot),
+            axes=self.Rp,command_dt=self.config.command_dt_sim_s)
+        self.policy._contact_entry_search=diagnostic
+        self.log.info(f'[sc] CONTACT_ENTRY_SEARCH_RESULT {dict((k,v) for k,v in diagnostic.items() if k!="trace")}')
+        return accepted
 
     def _seat_attempt_budget_required_s(
         self, *, full_retry: bool, retry_prep: bool = False, spiral: bool = False
@@ -2882,8 +3048,8 @@ class ScInsertionController:
             f"[sc] SC_RETRY_UNLOAD from_mm={depth * 1000.0:.2f} "
             f"to_mm={target_depth * 1000.0:.2f}"
         )
-        deadline = time.monotonic() + max(0.0, float(hold_wall_s))
-        while time.monotonic() < deadline:
+        deadline = control_time(self.policy,time.monotonic) + max(0.0, float(hold_wall_s))
+        while control_time(self.policy,time.monotonic) < deadline:
             self.policy._enforce_action_deadline(self.move_robot)
             self.policy.set_pose_target(
                 self.move_robot,
@@ -2937,7 +3103,7 @@ class ScInsertionController:
             1.0, self.SPIRAL_MAX_RADIUS_M / max(self.SPIRAL_PITCH_M, 1e-9)
         )
         total_steps = max(1, int(round(revolutions * self.SPIRAL_STEPS_PER_REV)))
-        deadline = time.monotonic() + max(0.0, self.SPIRAL_MAX_WALL_S)
+        deadline = control_time(self.policy,time.monotonic) + max(0.0, self.SPIRAL_MAX_WALL_S)
         self.log.warn(
             f"[sc] SC_SPIRAL_START depth_mm={start_depth * 1000.0:.2f} "
             f"max_radius_mm={self.SPIRAL_MAX_RADIUS_M * 1000.0:.2f} "
@@ -2945,7 +3111,7 @@ class ScInsertionController:
         )
         radius = 0.0
         for step in range(1, total_steps + 1):
-            if time.monotonic() >= deadline:
+            if control_time(self.policy,time.monotonic) >= deadline:
                 self.log.warn(
                     f"[sc] SC_SPIRAL_TIMEOUT step={step}/{total_steps} "
                     f"radius_mm={radius * 1000.0:.2f}"
@@ -3067,6 +3233,9 @@ class ScInsertionController:
         self.Rs = (
             seat_frame(self.Rp, R_tip) if SC_PRESERVE_HANDOFF_YAW else self.Rp.copy()
         )
+        if _env_bool('AIC_SC_KEEP_HANDOFF_ORIENTATION',False):
+            # Preserve the original handoff orientation across port refreshes.
+            self.Rs=self._initial_handoff_rotation.copy()
         self.R_yaw = self.Rp.T @ self.Rs
         self.log.info(
             f"[sc] SC_REPERCEIVE_DELTA dx_mm={shift_mm[0]:.3f} "
@@ -3112,6 +3281,13 @@ class ScInsertionController:
             if timing is not None:
                 timing.mark("seating_start", attempt=attempt)
             outcome = self._seat()
+            if outcome==STALLED and attempt==1 and _env_bool('AIC_SC_CONTACT_REGISTER',False):
+                if _env_bool('AIC_SC_CONTACT_CAPTURE_SEARCH',False):
+                    if not self._contact_seek_entry():return False
+                if self._contact_register_grasp():
+                    attempt+=1
+                    continue
+                return False
             if timing is not None:
                 timing.mark("seating_end", attempt=attempt, outcome=outcome)
             if outcome == SEATED:
@@ -3712,6 +3888,7 @@ def sc_multiview_candidates(policy, per_cam):
             "fit_kp_3d": fit_kp_3d,
             "fit_X": fit_X,
             "fit_reproj_px": fit_reproj,
+            "geometry_picks": picks,
             "width": width, "height": height,
             "fit_width": expected_width, "fit_height": expected_height,
             "opening": SC_POSE_CONVENTION,
@@ -3745,6 +3922,41 @@ def _sc_candidate_lateral_distance(candidate, tip_pos):
     return float(np.linalg.norm(delta_port[:2]))
 
 
+def _rim_task_key(task):
+    return tuple(getattr(task,k,'') for k in ('id','target_module_name','port_name'))
+
+
+def _refine_sc_rim(policy,task,obs,views,position,rotation,seed_reproj,*,tracking=False):
+    from .sc_rim_refinement import refine_with_agreement,modeled_displacement
+    stamps=_sc_camera_frame_stamps(obs)
+    cache=getattr(policy,'_sc_rim_track',None)
+    if tracking and (len(stamps)!=3 or any(stamps.get(name,float('-inf'))<=cache['stamps'].get(name,float('inf')) for name in views)):
+        policy.get_logger().warn('[sc] SC_RIM_REFINE reason=duplicate_or_missing_exposure')
+        return None
+    rim_views=[{'camera':name,'image':bgr,'P':policy._pc.build_projection_matrix(K,T),
+                'K':K,'T_camera_from_base':T,'stamp_s':stamps.get(name)} for name,(bgr,K,T) in views.items()]
+    recorder=getattr(policy,'_rim_input_recorder',None)
+    if recorder is not None:recorder(rim_views,position,rotation)
+    refined,diagnostics=refine_with_agreement(rim_views,position,rotation,
+        raster_offset_px=_env_float('AIC_SC_RIM_RASTER_OFFSET_PX',0.))
+    diagnostics['stage']='tracking' if tracking else 'neural_association'
+    if refined is not None and tracking:
+        displacement=modeled_displacement((position,rotation),refined)
+        diagnostics['temporal_model_displacement_m']=displacement
+        if displacement>.00025:
+            refined=None;diagnostics['reason']='static_fixture_temporal_disagreement'
+    records=getattr(policy,'_sc_rim_diagnostics',[]);records.append(diagnostics);policy._sc_rim_diagnostics=records
+    policy.get_logger().info(f"[sc] SC_RIM_REFINE stage={diagnostics['stage']} reason={diagnostics['reason']} "
+        f"mean_edge_px={diagnostics.get('mean_edge_distance_px')} view_disagreement_m={diagnostics.get('disagreements_m')}")
+    if refined is None:return None
+    position,rotation=refined
+    policy._sc_rim_track={'position':position,'rotation':rotation,'stamps':stamps,'key':_rim_task_key(task),
+                          'seed_reproj_px':float(seed_reproj)}
+    # Retain the original neural seed's reprojection gate. Fresh rim evidence
+    # has its own stricter image/geometry gates; it is not a new NN detection.
+    return position,matrix_to_quat(rotation),float(seed_reproj)
+
+
 def perceive_sc_port_pose(policy, task, obs):
     """One-frame SC opening pose: ``(pos, quat_wxyz, centre_reproj_px)`` or ``None``.
 
@@ -3764,6 +3976,10 @@ def perceive_sc_port_pose(policy, task, obs):
     if len(views) < 2:
         log.warn(f"[sc] only {len(views)} camera views usable")
         return None
+
+    cache=getattr(policy,'_sc_rim_track',None)
+    if _env_bool('AIC_SC_RIM_REFINE',False) and cache is not None and cache['key']==_rim_task_key(task):
+        return _refine_sc_rim(policy,task,obs,views,cache['position'],cache['rotation'],cache['seed_reproj_px'],tracking=True)
 
     per_cam = {}
     for cam, (bgr, K, T) in views.items():
@@ -3815,6 +4031,22 @@ def perceive_sc_port_pose(policy, task, obs):
     _log_sc_best_candidate(log, best_by_centre)
 
     clean = [c for c in candidates if _centre_key(c) <= SC_MAX_SELECT_REPROJ_PX]
+    from .visual_reacquisition import enabled as quality_reacquisition_enabled
+    if quality_reacquisition_enabled():
+        # A center can reproject well while the surrounding mouth is sheared.
+        # Promote the existing dimension warning to abstention in this method;
+        # retain the original numerical gates and baseline implementation.
+        for candidate in clean:
+            if candidate.get('fit_reproj_px') is None:
+                fit=_joint_sc_rectangle_fit(candidate['geometry_picks'],SC_POSE_LOCAL_KPS_M[:4],candidate['raw_kp_3d'][:4])
+                if fit is not None:
+                    candidate['fit_kp_3d'],candidate['fit_X'],candidate['fit_reproj_px']=fit
+        clean=[c for c in clean if c['opening_residual_m']<=SC_OPENING_RESIDUAL_WARN_M
+               and c['reproj_px']<=SC_MAX_PORT_REPROJ_PX
+               and c.get('fit_reproj_px') is not None and c['fit_reproj_px']<=SC_MAX_PORT_REPROJ_PX]
+        if not clean:
+            log.warn('[sc] VISUAL_QUALITY_REJECT reason=mouth_geometry_or_reprojection')
+            return None
     if not clean:
         best_centre_px = _centre_key(best_by_centre)
         if SC_STRICT_PERCEPTION:
@@ -3883,11 +4115,11 @@ def perceive_sc_port_pose(policy, task, obs):
     # centre_reproj_px -- KP4 alone -- is the returned/ranking number; the
     # 5-keypoint mean stays visible above (SC_OPENING/SC_PERCEPT_BEST) purely
     # for corner-health monitoring, never as a gate.
-    return (
-        np.asarray(chosen["X"], dtype=np.float64),
-        np.asarray(chosen["q_wxyz"], dtype=np.float64),
-        float(chosen_centre_px),
-    )
+    position = np.asarray(chosen["X"], dtype=np.float64)
+    quaternion = np.asarray(chosen["q_wxyz"], dtype=np.float64)
+    if _env_bool('AIC_SC_RIM_REFINE', False):
+        return _refine_sc_rim(policy,task,obs,views,position,port_frame(quaternion),chosen_centre_px)
+    return position, quaternion, float(chosen_centre_px)
 
 
 def perceive_sc_port_pose_consensus(policy, task, get_observation, move_robot=None):
@@ -4194,7 +4426,12 @@ def prime_sc_plug_pose(policy, get_observation, move_robot) -> bool:
             "no_fixed_grasp_fallback=true"
         )
         return False
-    tcp_pos, tcp_quat = policy._tcp()
+    try:
+        at_stamp=getattr(policy,'_tcp_at_stamp',None)
+        tcp_pos,tcp_quat=at_stamp(estimate.stamp_s) if at_stamp is not None else policy._tcp()
+    except Exception as exc:
+        log.error(f'[sc] PLUG_POSE_REJECT reason=exposure_tcp_unavailable:{exc}')
+        return False
     policy._sc_grasp_transform = solve_tip_in_tcp(
         tcp_pos,
         tcp_quat,
@@ -4218,6 +4455,96 @@ def prime_sc_plug_pose(policy, get_observation, move_robot) -> bool:
 # --------------------------------------------------------------------------
 # Skill entry point.
 # --------------------------------------------------------------------------
+def refine_sc_handoff_translation(policy,observation,port_rotation):
+    """Retry transient visibility failures only, retaining every strict gate."""
+    import copy
+    if not _env_bool('AIC_SC_BODY_FRESH_RETRY',False):
+        return _refine_sc_handoff_translation_once(policy,observation,port_rotation)
+    original=sc_grasp_transform(policy)
+    original=(np.asarray(original[0]).copy(),np.asarray(original[1]).copy())
+    attempts=[];accepted=[];seen_exposures=set()
+    for index in range(4):
+        exposure=tuple(sorted(_sc_camera_frame_stamps(observation).items()))
+        if index and (not exposure or exposure in seen_exposures):break
+        seen_exposures.add(exposure)
+        policy._sc_grasp_transform=(original[0].copy(),original[1].copy())
+        result=_refine_sc_handoff_translation_once(policy,observation,port_rotation)
+        diagnostic=copy.deepcopy(getattr(policy,'_sc_body_diagnostic',{}))
+        attempts.append(diagnostic);policy._sc_body_attempts=attempts
+        if index==0 and result and diagnostic.get('accepted'):return True
+        if result:
+            candidate=sc_grasp_transform(policy)
+            accepted.append(np.asarray(candidate[0]).copy())
+            if len(accepted)>=2 and np.linalg.norm(accepted[-1]-accepted[-2])<=.0001:
+                policy._sc_grasp_transform=((accepted[-1]+accepted[-2])*.5,original[1].copy())
+                policy._sc_body_diagnostic.update(fresh_retry_confirmed=True,
+                    rigid_grasp_translation_agreement_m=float(np.linalg.norm(accepted[-1]-accepted[-2])))
+                return True
+        elif diagnostic.get('reason') not in ('leave_one_view_out_disagreement','body_support_residual',
+                'insufficient_white_pixels','insufficient_unoccluded_directions','insufficient_subpixel_boundary_support',
+                'missing_or_unsynchronized_views'):
+            break
+        policy.sleep_for(.25)
+        # The policy callback is installed by the insertion entry point; no
+        # simulator or object-frame query is used to reacquire camera evidence.
+        callback=getattr(policy,'_body_retry_observation',None)
+        observation=callback() if callback is not None else None
+        if observation is None:break
+    policy._sc_grasp_transform=original
+    if getattr(policy,'_sc_body_diagnostic',{}).get('accepted'):
+        policy._sc_body_diagnostic.update(accepted=False,reason='fresh_retry_not_confirmed')
+    return False
+
+
+def _refine_sc_handoff_translation_once(policy,observation,port_rotation):
+    from .sc_body_refinement import fit_translation,robot_tool_mask,aligned_orientation_prior
+    if not _env_bool('AIC_SC_KEEP_HANDOFF_ORIENTATION',False):
+        raise ValueError('SC body translation prior requires declared aligned upstream handoff')
+    views=policy._build_views(observation);stamps=_sc_camera_frame_stamps(observation)
+    times=[stamps.get(name) for name in views]
+    now=policy._parent_node.get_clock().now().nanoseconds*1e-9
+    diagnostic={'accepted':False,'reason':'missing_or_unsynchronized_views'}
+    if len(views)!=3 or any(t is None for t in times) or np.ptp(times)>.03 or now-max(times)>.35 or max(times)-now>.01:
+        policy._sc_body_diagnostic=diagnostic;return False
+    exposure=max(times);tcp_pos,tcp_quat=policy._tcp_at_stamp(exposure)
+    initial,measured_rotation=sc_tip_from_tcp(policy,tcp_pos,tcp_quat);prepared=[]
+    angular_ablation=_env_bool('AIC_SC_BODY_ANGULAR_SCREEN_ABLATION',False)
+    prior,prior_diagnostic=aligned_orientation_prior(port_rotation,measured_rotation,
+        skip_consistency_for_ablation=angular_ablation)
+    if angular_ablation:
+        policy.get_logger().warn('[sc] DIAGNOSTIC_ABLATION angular_screen=disabled aligned_handoff=assumed actual_angle_not_certified')
+    if prior is None:
+        policy._sc_body_diagnostic=dict(prior_diagnostic,accepted=False,reason='angular_prior_inconsistent')
+        policy.get_logger().warn(f'[sc] BODY_TRANSLATION_REFINE {policy._sc_body_diagnostic}')
+        return False
+    for name,(image,K,T) in views.items():
+        pos,quat=policy._tcp_at_stamp(stamps[name]);B=np.eye(4)
+        B[:3,:3]=quat_to_matrix(quat);B[:3,3]=pos
+        prepared.append({'camera':name,'image':image,'K':K,'P':K@np.asarray(T)[:3],
+                         'T_camera_from_base':T,'T_base_from_tcp':B,'stamp_s':stamps[name],
+                         'tool_mask':robot_tool_mask(K,T,B,image.shape)})
+    recorder=getattr(policy,'_rim_input_recorder',None)
+    if recorder is not None:recorder(prepared,initial,prior,kind='body_inputs')
+    diagnostic=fit_translation(prepared,initial,prior)
+    diagnostic.update(prior_diagnostic)
+    diagnostic['camera_stamp_s']=times;diagnostic['exposure_tcp_stamp_s']=exposure
+    policy._sc_body_diagnostic=diagnostic
+    policy.get_logger().info(f'[sc] BODY_TRANSLATION_REFINE {diagnostic}')
+    if not diagnostic['accepted']:
+        partial=diagnostic.get('partial_translation',{})
+        if not (_env_bool('AIC_SC_PARTIAL_BODY_CONTACT',False) and
+                _env_bool('AIC_SC_AXIAL_CONTACT_REGISTER',False) and partial.get('lateral_candidate_qualified')):
+            return False
+        diagnostic.update(lateral_control_candidate_used=True,axial_measurement_pending=True,
+                          perception_contract='lateral_image_candidate_with_mandatory_axial_contact')
+    old=sc_grasp_transform(policy)
+    translation=quat_to_matrix(tcp_quat).T@(np.asarray(diagnostic['position'])-tcp_pos)
+    # Preserve the learned rotation and the physical starting wrist. Only the
+    # image-measured attachment translation is updated under the angular prior.
+    policy._sc_grasp_transform=(translation,np.asarray(old[1]).copy())
+    return True
+
+
 def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -> bool:
     """Perceive the SC opening, sanity-check the handoff, align, and seat."""
     from .contract import port_frame
@@ -4261,6 +4588,14 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     perceived = perceive_sc_port_pose_consensus(
         policy, task, get_observation, move_robot
     )
+    from .visual_reacquisition import enabled as quality_reacquisition_enabled, bounded_retreat
+    if perceived is None and quality_reacquisition_enabled():
+        send_feedback('sc visual evidence insufficient; bounded retreat and reacquisition')
+        if not bounded_retreat(policy,get_observation,move_robot,'sc'):
+            return finish(False,'visual_reacquisition_motion_failed')
+        if not prime_sc_plug_pose(policy,get_observation,move_robot):
+            return finish(False,'visual_reacquisition_plug_failed')
+        perceived=perceive_sc_port_pose_consensus(policy,task,get_observation,move_robot)
     if perceived is None:
         log.error("[sc] perception failed to produce an SC port pose")
         return finish(False, "port_perception_failed")
@@ -4277,9 +4612,15 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
     if obs is None:
         log.error("[sc] no observation available for the wrench baseline")
         return finish(False, "wrench_baseline_missing")
-    policy._wrench_baseline = policy._wrench_vector(obs)
-
     Rp = port_frame(port_quat)
+    if _env_bool('AIC_SC_BODY_TRANSLATION',False):
+        policy._body_retry_observation=get_observation
+        if not refine_sc_handoff_translation(policy,obs,Rp):
+            return finish(False,'body_translation_unobservable')
+        timing.mark('body_translation_refined')
+        obs=get_observation()
+        if obs is None:return finish(False,'wrench_baseline_missing')
+    policy._wrench_baseline = policy._wrench_vector(obs)
     tcp_pos, tcp_quat = policy._tcp()
     tip_pos, R_tip = sc_tip_from_tcp(policy, tcp_pos, tcp_quat)
     dist = float(np.linalg.norm(tip_pos - port_pos))
@@ -4331,6 +4672,12 @@ def run_sc_insertion(policy, task, get_observation, move_robot, send_feedback) -
         return finish(False, "handoff_depth")
 
     Rs = seat_frame(Rp, R_tip) if SC_PRESERVE_HANDOFF_YAW else Rp
+    if _env_bool('AIC_SC_KEEP_HANDOFF_ORIENTATION',False):
+        # Explicit last-inch ablation: upstream supplies an aligned wrist.
+        # The grasp remains visually estimated; its uncertain rotation must
+        # not overwrite this declared handoff prior during initial alignment.
+        Rs=R_tip.copy()
+        log.info('[sc] ORIENTATION_PRIOR mode=preserve_upstream_handoff assumption=initial_alignment')
     # Rp.T @ Rs is a pure rotation about the insertion axis, so this is the
     # single number that says how far the perceived port yaw sits from the twist
     # the macro handed us.  Expect ~-90 deg until SC_TIP_IN_TCP is calibrated;

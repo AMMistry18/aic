@@ -106,6 +106,7 @@ class ScPlugPoseEstimator(SfpPlugPoseEstimator):
             raise TypeError(
                 "ScPlugPoseEstimator fixes local_keypoints_m to the SC plug geometry"
             )
+        kwargs.setdefault('max_refinement_disagreement_m', .00025)
         super().__init__(
             weights_path,
             max_reprojection_error_px=max_reprojection_error_px,

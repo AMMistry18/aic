@@ -1,0 +1,34 @@
+{
+  "scope": "Real learned inference through copied candidate modules; not physical insertion qualification",
+  "final_cases_read": 0,
+  "ground_truth_loaded": false,
+  "rows": [
+    {
+      "detector": "sc_plug",
+      "threads": 1,
+      "detections": 1,
+      "cold_wall_s": 9.175974475001567,
+      "weight_sha256": "acdae2c1896d0d8d262b6c07fba4da1af6a80d501d7c23dc38aef33dffd2b665"
+    },
+    {
+      "detector": "sc_port",
+      "threads": 1,
+      "detections": 5,
+      "cold_wall_s": 8.954154699997162
+    },
+    {
+      "detector": "sfp_plug",
+      "threads": 1,
+      "detections": 1,
+      "cold_wall_s": 2.615282669001317,
+      "weight_sha256": "3fbd45ff067bafa07098c7e2a300fbc71732d9422f81fdf6e126ead0b6d9b3fd"
+    },
+    {
+      "detector": "sfp_port",
+      "threads": 1,
+      "detections": 5,
+      "cold_wall_s": 3.1478588419995504
+    }
+  ],
+  "passed": true
+}

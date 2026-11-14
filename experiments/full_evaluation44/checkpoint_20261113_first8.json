@@ -1,0 +1,49 @@
+{
+  "scope": "Partial final study; all eight completed policy trials passed; setup failure retained",
+  "recorded_primary": 9,
+  "verified_primary": 8,
+  "summary": {
+    "sc": {
+      "attempted": 5,
+      "policy_eligible": 4,
+      "verified": 4,
+      "all_attempt_wilson95": [
+        0.37553462976252533,
+        0.9637758913675698
+      ],
+      "policy_eligible_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "median_success_sim_s": 28.338250000000006,
+      "median_success_wall_s": 293.17976485550025,
+      "maximum_raw_peak_N": 3.150219475292434,
+      "complete_force_audits": 4,
+      "failure_causes": {
+        "setup_interruption_before_policy": 1
+      }
+    },
+    "sfp": {
+      "attempted": 4,
+      "policy_eligible": 4,
+      "verified": 4,
+      "all_attempt_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "policy_eligible_wilson95": [
+        0.5101091635454027,
+        1.0
+      ],
+      "median_success_sim_s": 58.41375000000001,
+      "median_success_wall_s": 631.072274934002,
+      "maximum_raw_peak_N": 3.4042541431386972,
+      "complete_force_audits": 4,
+      "failure_causes": {}
+    }
+  },
+  "current_run": "final_sfp_710039_final44v1_full_original_perception_sfp_contact_datum_handoff",
+  "status": "primary_final_trials",
+  "source_freeze_unchanged": true,
+  "ablations_completed": 0
+}

@@ -1,0 +1,17 @@
+{
+  "installed": false,
+  "scope": "Image-local reuse across full and leave-one-view-out fits",
+  "baseline_source": "aic_model/aic_model/insertion/sc_rim_refinement.py",
+  "baseline_sha256": "0e0fc3ecf701e9fe900c600a0715275b8147c0a755627a7178003e5d766962b7",
+  "candidate_sha256": "b91e376e2b6ecc674a5a6f3fe60b8d32faa768bc30956b3daa1d595d6ae3ac52",
+  "unchanged": [
+    "weights",
+    "three synchronized views",
+    "exposure-time transforms",
+    "multistart optimizations",
+    "visibility recomputation",
+    "all quality thresholds",
+    "all motion and force settings"
+  ],
+  "physical_validation": "not run; offline development benchmark only"
+}

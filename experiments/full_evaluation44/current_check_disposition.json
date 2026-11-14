@@ -1,0 +1,10 @@
+{
+  "instruction": "forget the current checks, run the proper final test for the paper",
+  "coordinator_stopped": true,
+  "remaining_development_ablations_cancelled": 4,
+  "control_finished_before_interrupt": true,
+  "control_archive": ".artifacts\\lastinch_runs\\sfp_positive_control_supported_control44v1_initial_pose_guarded",
+  "existing_recording_analysed_without_new_simulation": true,
+  "contact_proof_qualified": true,
+  "time_unix": 1794545469.3756435
+}
