@@ -59,7 +59,7 @@ def pack_workspace():
                 digest=hashlib.file_digest(p.open('rb'),'sha256').hexdigest()
                 name=p.relative_to(ROOT).as_posix();info=archive.gettarinfo(str(p),arcname=name)
                 key=(info.size,digest)
-                records.append(dict(path=name,size=info.size,sha256=digest))
+                records.append(dict(path=name,size=p.stat().st_size,sha256=digest))
                 if key in known:
                     info.type=tarfile.LNKTYPE;info.linkname=known[key];info.size=0;archive.addfile(info)
                 else:
@@ -80,7 +80,9 @@ def pack_docker():
     for name,tag in [('research-aic-eval','aic-research-migration:baseline-20261114'),('research-aic-perception30','aic-research-migration:development-20261114')]:
         info=json.loads(subprocess.run(['docker','inspect',name],capture_output=True,text=True,check=True).stdout)[0]
         if info['State']['Running']:raise RuntimeError('Container still running')
-        subprocess.run(['docker','commit',name,tag],check=True,capture_output=True,timeout=180)
+        exists=subprocess.run(['docker','image','inspect',tag],capture_output=True).returncode==0
+        if not exists:
+            subprocess.run(['docker','commit',name,tag],check=True,capture_output=True,timeout=1200)
         # Deliberately save runtime config without host-specific bind paths.
         metadata.append(dict(container=name,tag=tag,config=info['Config'],host_config=info['HostConfig']))
         tags.append(tag)

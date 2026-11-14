@@ -45,12 +45,29 @@ def verify_workspace(index):
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--assets',type=Path,required=True)
     parser.add_argument('--load-docker',action='store_true');parser.add_argument('--create-containers',action='store_true')
+    parser.add_argument('--restore-legacy',action='store_true')
     args=parser.parse_args()
     index,paths=verified_parts(args.assets,'workspace-index.json')
     with io.BufferedReader(Joined(paths)) as joined:
         with tarfile.open(fileobj=joined,mode='r|gz') as archive:
             archive.extractall(ROOT,filter='data')
     verify_workspace(index)
+    if args.restore_legacy:
+        legacy,paths=verified_parts(args.assets,'legacy-index.json')
+        with io.BufferedReader(Joined(paths)) as joined:
+            with tarfile.open(fileobj=joined,mode='r|gz') as archive:
+                archive.extractall(ROOT,filter='data')
+        verify_workspace(legacy)
+    # Migration tooling may have been repaired after the scientific snapshot
+    # was packed. Restore only these committed bootstrap files after verifying
+    # the original archived bytes; never alter frozen scientific sources.
+    tools=['MIGRATION_HANDOFF.md','experiments/restore_migration58.py',
+           'experiments/migration_pack58.py','experiments/migration_legacy58.py',
+           'experiments/migration_upload58.py','experiments/migration_verify58.py',
+           'experiments/migration_cleanup58.ps1']
+    for path in tools:
+        found=subprocess.run(['git','cat-file','-e','HEAD:'+path],cwd=ROOT,capture_output=True).returncode==0
+        if found:subprocess.run(['git','restore','--source=HEAD','--',path],cwd=ROOT,check=True)
     if args.load_docker:
         _,paths=verified_parts(args.assets,'docker-index.json')
         process=subprocess.Popen(['docker','load'],stdin=subprocess.PIPE)

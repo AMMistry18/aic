@@ -33,6 +33,20 @@ bind paths are replaced by the new checkout path. Inspect GPU passthrough
 with `docker start research-aic-eval` and `docker exec research-aic-eval nvidia-smi`,
 then stop that container before starting any experiment executor.
 
+Optionally add `--restore-legacy` to recover older Flowstate sources and model
+checkpoints into `.migration_legacy58/flowstate-build/`. Obsolete generated
+Flowstate image tar bundles are omitted; their source/model files are preserved.
+The script verifies the archived snapshot, then restores the newest committed
+migration bootstrap tools from Git. The scientific source freeze is unchanged.
+All 65,737 workspace files and 1,262 legacy files passed a full streamed
+archive SHA256 check before any local evidence was eligible for cleanup.
+
+A faster GPU helps only GPU-enabled inference. The frozen baseline also uses
+software camera rendering and sequential contact measurements. Do not change
+its runtime/model selection halfway through the fixed cohort and call that
+the same experiment. Record the host migration as a resource change, preserve
+the method/physics contract, and evaluate optimized policies as a new cohort.
+
 Install host dependencies needed by the coordinator, for example:
 `python -m pip install numpy scipy psutil pyyaml opencv-python`.
 Inference runs in Docker; host PyTorch is unnecessary for the trial coordinator.
