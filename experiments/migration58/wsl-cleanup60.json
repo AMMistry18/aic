@@ -1,0 +1,24 @@
+{
+    "date":  "2026-11-14",
+    "wsl_distribution":  "Ubuntu",
+    "removed_image_tags":  [
+                               "flowstate:pose-kv-store-f54060f",
+                               "flowstate:aic_model-f54060f",
+                               "my-solution:f54060f"
+                           ],
+    "removed_export_files":  7,
+    "removed_export_bytes":  45394796544,
+    "removed_cache_records":  52,
+    "cache_reclaimed_reported":  "70.34GB",
+    "preserved_cache_records":  32,
+    "preserved_container":  "kind_kalam",
+    "preservation_reason":  "Historical writable layer not verified against migration archive",
+    "wsl_used_after":  "26GiB",
+    "wsl_vhd_bytes":  159633113088,
+    "docker_desktop_vhd_bytes":  18396217344,
+    "filesystem_trim_completed":  true,
+    "compaction_pending":  true,
+    "windows_tar_bundles_retained":  31,
+    "windows_tar_bundle_bytes":  13461971968,
+    "windows_archived_file_delete":  "automatic approval review rejected: blocked by policy"
+}
