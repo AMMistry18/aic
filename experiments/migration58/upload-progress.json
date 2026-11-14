@@ -1,0 +1,152 @@
+{
+  "status": "complete_remote_verified",
+  "verified_assets": [
+    {
+      "name": "research-workspace.tar.gz.part000",
+      "size": 1073741824,
+      "sha256": "41d28b66b3064eec35164139287f82a0829d2db7a9dbd96a08d13933768047c6",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part000"
+    },
+    {
+      "name": "research-workspace.tar.gz.part001",
+      "size": 1073741824,
+      "sha256": "3b7c10b8a173be4d6fd542b8c968b8ad6c32e23b356e732d9e8003675431f420",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part001"
+    },
+    {
+      "name": "research-workspace.tar.gz.part002",
+      "size": 1073741824,
+      "sha256": "73aeacbd83fc877b4d3065a2a094de08e05d8ac71dabfb799dd6e34d925ee291",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part002"
+    },
+    {
+      "name": "research-workspace.tar.gz.part003",
+      "size": 1073741824,
+      "sha256": "32b3ee1113d71fc940f6d8b677fefa3123b6e43d15c45f052142a2bedfa60639",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part003"
+    },
+    {
+      "name": "research-workspace.tar.gz.part004",
+      "size": 1073741824,
+      "sha256": "3246738cdd2618732645f2c0d6ff17ea89eefb30b2d1a710c29c1bee01ae8ccb",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part004"
+    },
+    {
+      "name": "research-workspace.tar.gz.part005",
+      "size": 1073741824,
+      "sha256": "149587145119c56157f601123aa009406ea7873e2d84b7f7dbd6a62e01cd171d",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part005"
+    },
+    {
+      "name": "research-workspace.tar.gz.part006",
+      "size": 680641249,
+      "sha256": "79818c56a9413ce59a7a75d9e9dcd8094d8c05790fbd775873b44e0bc8e63d91",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/research-workspace.tar.gz.part006"
+    },
+    {
+      "name": "workspace-index.json",
+      "size": 21850725,
+      "sha256": "044a9878fb1ecff94c995eae585abcba5b6911d66afbf8816252e882414763d7",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/workspace-index.json"
+    },
+    {
+      "name": "legacy-flowstate.tar.gz.part000",
+      "size": 914727864,
+      "sha256": "5759399d81ab1b73dc691887f14e1f6bd91323cb7e0b5f216ff4ecbdc8a3b44f",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/legacy-flowstate.tar.gz.part000"
+    },
+    {
+      "name": "legacy-index.json",
+      "size": 457286,
+      "sha256": "7b8fc92cd27c356844f760a99a89df13d2592d7bdd8972e21baec7d7f75041c4",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/untagged-3534ec62f3170d628573/legacy-index.json"
+    },
+    {
+      "name": "research-docker.tar.gz.part000",
+      "size": 1073741824,
+      "sha256": "17916c18f059daf4773b1487b02af4e00ea1034049de9decd6fb330d7c4eb871",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part000"
+    },
+    {
+      "name": "research-docker.tar.gz.part001",
+      "size": 1073741824,
+      "sha256": "a8c4c3ce0926e4db60940c57d468f5c7de5f510900dbcb0473aa510d9570d743",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part001"
+    },
+    {
+      "name": "research-docker.tar.gz.part002",
+      "size": 1073741824,
+      "sha256": "7d600bd3051aa45882a1a83dd6c0fb957d789cd33ae0fc956633a17f6bc3d351",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part002"
+    },
+    {
+      "name": "research-docker.tar.gz.part003",
+      "size": 1073741824,
+      "sha256": "3e2b1bafe5299174f7a5a17c232f0dc461c02efda80803cb913aa4e9b35770f7",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part003"
+    },
+    {
+      "name": "research-docker.tar.gz.part004",
+      "size": 1073741824,
+      "sha256": "9791b0b157c338e4aadd903ee40672107672f80f30436fa86091dd7ffa093209",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part004"
+    },
+    {
+      "name": "research-docker.tar.gz.part005",
+      "size": 1073741824,
+      "sha256": "cb7f857caa9befa471f73f66b123c04165a650b1a2ea1edb6f96acde69f09124",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part005"
+    },
+    {
+      "name": "research-docker.tar.gz.part006",
+      "size": 1073741824,
+      "sha256": "f1a34fa1e09f03f6b7acc6fbd959ba6977819dd30c2761ca6922d16f53ccaa7f",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part006"
+    },
+    {
+      "name": "research-docker.tar.gz.part007",
+      "size": 573721458,
+      "sha256": "1782e78e8884f4c96131f7a02915b42f679ed4e1d52a4618d8104aeb1806712a",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/research-docker.tar.gz.part007"
+    },
+    {
+      "name": "docker-index.json",
+      "size": 1570,
+      "sha256": "efa554b841a903b4b04bd95f727f5f87606a14ca953bf6c1c8c4f9e9857b0ff0",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/docker-index.json"
+    },
+    {
+      "name": "docker-runtime.json",
+      "size": 7216,
+      "sha256": "cfcb4971b4a62957c037b4cb3f1e03228e6eac7b1f32974931beb8c1060a388a",
+      "basis": "GitHub server-computed SHA256",
+      "url": "https://github.com/AMMistry18/aic/releases/download/research-migration-20261114/docker-runtime.json"
+    }
+  ],
+  "started_unix": 1794683867.0544977,
+  "updated_unix": 1794690806.882825,
+  "remote_branch": "b4d431610dd5b0f3fdc49e0ff8f32b609fef68e9\trefs/heads/research/gazebo-rap-evaluation",
+  "current_asset": null,
+  "current_bytes": 7216,
+  "release_url": "https://github.com/AMMistry18/aic/releases/tag/research-migration-20261114",
+  "ended_unix": 1794690806.8828194
+}
