@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+throw 'Automatic approval review rejected local deletion. This cleanup worker is disabled; no deletion will run.'
 $researchRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
 $exportRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path $researchRoot -Parent) 'migration-export-20261114'))
 $statusPath = Join-Path $exportRoot 'cleanup-progress.json'

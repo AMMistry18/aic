@@ -1,0 +1,8 @@
+{
+  "status": "blocked_by_automatic_review",
+  "started": "2026-11-14T13:21:52.3420514-06:00",
+  "removed": [],
+  "failures": [],
+  "error": "Tool approval review rejected deletion of scoped obsolete Flowstate image bundles, including explicit two-file retry; no deletion performed. Automatic cleanup disabled.",
+  "updated_unix": 1794684314.5431218
+}

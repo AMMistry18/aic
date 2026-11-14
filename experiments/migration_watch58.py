@@ -23,12 +23,14 @@ def main():
             path=ROOT/'experiments/migration58/live-status.json'
             temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(state,indent=2));temporary.replace(path)
             if upload.get('status')=='stopped_requires_inspection' or cleanup.get('status')=='stopped_requires_inspection':return
-            if cleanup.get('status')=='completed_verified_scoped_cleanup':
+            finished=(cleanup.get('status')=='completed_verified_scoped_cleanup' or
+                      upload.get('status')=='complete_remote_verified' and cleanup.get('status')=='blocked_by_automatic_review')
+            if finished:
                 # Preserve the remote verification and cleanup receipts in Git.
                 for name in ['upload-progress.json','cleanup-progress.json','archive-verification.json']:
                     (ROOT/'experiments/migration58'/name).write_bytes((EXPORT/name).read_bytes())
                 subprocess.run(['git','add','--','experiments/migration58'],cwd=ROOT,check=True)
-                subprocess.run(['git','commit','-qm','Record verified remote migration and completed scoped cleanup'],cwd=ROOT,check=True)
+                subprocess.run(['git','commit','-qm','Record verified remote migration and local cleanup status'],cwd=ROOT,check=True)
                 subprocess.run(['git','push','origin','research/gazebo-rap-evaluation'],cwd=ROOT,check=True,timeout=300)
                 return
             time.sleep(20)

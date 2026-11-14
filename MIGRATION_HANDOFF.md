@@ -72,6 +72,12 @@ Original manifests/source freezes remain intact. Primary study is 100 cases
 (50 SC, 50 SFP), followed by 80 paired ablations. Read its live ledger for exact
 counts; no unfinished tests are described as complete.
 
+Local cleanup was disabled after automatic approval review rejected deletion
+of obsolete Flowstate bundle files, including a second explicit two-file
+command. No data was removed by either rejected command. The backup/upload
+continues independently; `experiments/migration58/cleanup-progress.json`
+records the block. Do not treat backup completion as completed local cleanup.
+
 The fixed study uses recovered baseline policies. Optimized development results
 are separate and must never be pooled with it. `experiments/speed_reliability54.md`
 describes the speed work. The latest v6 and v7 SFP development trials both
