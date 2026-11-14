@@ -26,6 +26,9 @@ def main():
             finished=(cleanup.get('status')=='completed_verified_scoped_cleanup' or
                       upload.get('status')=='complete_remote_verified' and cleanup.get('status')=='blocked_by_automatic_review')
             if finished:
+                subprocess.run(['gh','release','edit','research-migration-20261114',
+                    '--repo','AMMistry18/aic','--title','Intrinsic insertion research — complete verified machine migration (2026-11-14)',
+                    '--notes-file',str(EXPORT/'release-notes.md')],cwd=ROOT,check=True,timeout=120)
                 # Preserve the remote verification and cleanup receipts in Git.
                 for name in ['upload-progress.json','cleanup-progress.json','archive-verification.json']:
                     (ROOT/'experiments/migration58'/name).write_bytes((EXPORT/name).read_bytes())

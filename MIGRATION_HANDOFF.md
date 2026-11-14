@@ -4,6 +4,13 @@ Repository: https://github.com/AMMistry18/aic
 Branch: `research/gazebo-rap-evaluation`
 Release: `research-migration-20261114`
 
+The verified workspace/legacy archives are publicly downloadable. Check release
+assets before using the Docker restore flags: `docker-index.json`,
+`docker-runtime.json` and every Docker part listed in that index must be present.
+Without those assets, restore the data workspace using only `--assets`; the
+installed runtime transfer is still incomplete. The final release title will
+say "complete verified machine migration" once runtime upload verification ends.
+
 The release is the complete evidence/weight/runtime backup. The Git branch
 contains the canonical research code, configs, paper and compact metadata.
 Download the release as well as cloning Git. Large raw evidence and the copied
