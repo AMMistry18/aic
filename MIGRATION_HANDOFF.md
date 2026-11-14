@@ -4,12 +4,12 @@ Repository: https://github.com/AMMistry18/aic
 Branch: `research/gazebo-rap-evaluation`
 Release: `research-migration-20261114`
 
-The verified workspace/legacy archives are publicly downloadable. Check release
-assets before using the Docker restore flags: `docker-index.json`,
-`docker-runtime.json` and every Docker part listed in that index must be present.
-Without those assets, restore the data workspace using only `--assets`; the
-installed runtime transfer is still incomplete. The final release title will
-say "complete verified machine migration" once runtime upload verification ends.
+The full transfer is complete: all 20 release assets, including both Docker
+environments, passed remote SHA256 verification. Total download is about
+15.04 GiB. The seven workspace parts, eight Docker parts, one legacy part,
+three indexes and runtime metadata are all available. Verification receipts
+are committed under `experiments/migration58/`. Download every asset before
+using the full restore command below.
 
 The release is the complete evidence/weight/runtime backup. The Git branch
 contains the canonical research code, configs, paper and compact metadata.
@@ -21,7 +21,7 @@ Only redundant caches, nested Git databases and credential files are omitted.
 
 Use Python 3.12+ and Docker with NVIDIA GPU support. A Windows host can use
 Docker Desktop/WSL2 as before. Linux can use Docker Engine/NVIDIA Container
-Toolkit. Keep at least 70 GB free for expanded evidence and Docker layers;
+Toolkit. Allow approximately 100 GB free for downloads, expanded evidence and Docker layers;
 more is useful for additional trials. Release parts are at most 1 GiB each.
 
 ```sh
@@ -82,7 +82,7 @@ counts; no unfinished tests are described as complete.
 Local cleanup was disabled after automatic approval review rejected deletion
 of obsolete Flowstate bundle files, including a second explicit two-file
 command. No data was removed by either rejected command. The backup/upload
-continues independently; `experiments/migration58/cleanup-progress.json`
+is complete; `experiments/migration58/cleanup-progress.json`
 records the block. Do not treat backup completion as completed local cleanup.
 
 The fixed study uses recovered baseline policies. Optimized development results
