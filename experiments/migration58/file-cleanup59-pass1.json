@@ -1,0 +1,10 @@
+﻿{
+    "files_removed":  27000,
+    "started":  "2026-11-14T16:05:39.3501675-06:00",
+    "logical_bytes_removed":  19582817197,
+    "skipped_changed":  [
+
+                        ],
+    "free_before":  30595207168,
+    "status":  "deleting_individually_verified_local_duplicates"
+}

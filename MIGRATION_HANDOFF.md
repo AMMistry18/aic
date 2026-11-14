@@ -28,8 +28,12 @@ more is useful for additional trials. Release parts are at most 1 GiB each.
 git clone --branch research/gazebo-rap-evaluation https://github.com/AMMistry18/aic.git
 cd aic
 gh release download research-migration-20261114 --repo AMMistry18/aic --dir ../migration-assets
-python experiments/restore_migration58.py --assets ../migration-assets --load-docker --create-containers
+python3 experiments/restore_migration58.py --assets ../migration-assets --load-docker --create-containers
 ```
+
+On Linux, use `python3 --version` to confirm Python 3.12 or newer. A missing
+`python` command means restoration never started; containers will not exist
+until `--create-containers` completes. Reuse the downloaded assets.
 
 The restore script verifies SHA256 and size of every archive part before
 extraction/loading, then checks each restored workspace file. Archive parts
@@ -146,3 +150,19 @@ User requested about four pages and provided a December 1, 2026 collection deadl
 
 After restoring, inspect source-freeze hashes and raw evidence before any trials.
 Read `experiments/migration58/` and release indexes for exact archive provenance.
+
+## Original laptop cleanup update (November 14)
+
+The three Intrinsic containers, five named research images, one identified
+research snapshot, and 111 Intrinsic build-cache records have been removed.
+All 31 unrelated build-cache records and unrelated images were preserved.
+Docker Desktop's WSL distribution is stopped; the separate Ubuntu distribution
+remains running. See `experiments/migration58/docker-cleanup59.json`.
+
+Sixteen verified local upload chunks were removed. Individual archived files
+were removed only after matching their SHA256 against the remote backup index;
+tracked source and weights were preserved. The second pass removed 38,501 files
+before stopping on a locked legacy source file. The two file-cleanup receipts
+record the partial cleanup accurately. The remaining old Flowstate tar bundles
+were retained because automatic review rejected their deletion as blocked by
+policy. Do not describe local cleanup as complete.

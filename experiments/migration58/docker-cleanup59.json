@@ -1,0 +1,15 @@
+{
+  "status": "complete",
+  "removed_cache_component_records": 111,
+  "intrinsic_cache_remaining": [],
+  "protected_records_retained": 31,
+  "protected_record_count": 31,
+  "remaining_images": [
+    "dronehacks-humble:latest",
+    "dronehacks-ros-smoke:latest",
+    "ubuntu:24.04"
+  ],
+  "remaining_containers": [],
+  "verified_unrelated_resources_preserved": true,
+  "completed_unix": 1794694388.6529694
+}

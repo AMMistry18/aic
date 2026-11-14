@@ -1,0 +1,11 @@
+﻿{
+    "files_removed":  38501,
+    "started":  "2026-11-14T16:11:45.9690461-06:00",
+    "logical_bytes_removed":  20902527946,
+    "skipped_changed":  [
+
+                        ],
+    "error":  "The process cannot access the file \u0027C:\\Users\\anshu\\College\\Intrinsic\\aic\\.flowstate-build\\src\\sdk-ros\\ortools_vendor\\patches\\fix_absl_linking.diff\u0027 because it is being used by another process.",
+    "free_before":  38344069120,
+    "status":  "stopped_requires_inspection"
+}
